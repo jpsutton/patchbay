@@ -1453,6 +1453,9 @@ impl Inner {
             "mesh.file" => {
                 let sha = params["sha"].as_str().unwrap_or_default();
                 let name = params["name"].as_str().unwrap_or_default();
+                if !is_sha256(sha) {
+                    bail!("bad file id");
+                }
                 let offset = params["offset"].as_u64().unwrap_or(0);
                 let path = crate::attachments::stored_path(&self.data_dir, sha, name);
                 read_chunk(path, offset).await
@@ -1465,6 +1468,9 @@ impl Inner {
     }
 
     async fn ensure_file(self: Arc<Self>, sha: &str, name: &str) -> Result<PathBuf> {
+        if !is_sha256(sha) {
+            bail!("bad file id");
+        }
         let path = crate::attachments::stored_path(&self.data_dir, sha, name);
         if path.exists() {
             return Ok(path);
@@ -1729,6 +1735,11 @@ impl Inner {
             }
         }
     }
+}
+
+/// Attachment files are named by their SHA-256; anything else could point outside the store.
+fn is_sha256(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 pub async fn read_chunk(path: PathBuf, offset: u64) -> Result<Value> {
