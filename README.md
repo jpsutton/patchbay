@@ -9,7 +9,7 @@ Patchbay is a desktop app in the style of Claude Desktop. Bring your own provide
   <img alt="Patchbay's Code tab: an agent finds a bug in a Windows installer script, shows its fix as a diff, and confirms the installer still builds" src="docs/images/code-tab-light.png">
 </picture>
 
-> **Early days.** Patchbay is young and still has rough edges. There are no packaged releases yet; see [Building from source](#building-from-source) to try it today.
+> **Early days.** Patchbay is young and still has rough edges. [Download the latest release](https://github.com/jpsutton/patchbay/releases/latest), and please report what breaks.
 
 ## What it does
 
@@ -47,7 +47,7 @@ API keys are kept in your system's keychain, never in a plain file.
 
 ## Installing
 
-Packaged releases will be published on the [Releases page](https://github.com/jpsutton/patchbay/releases) for:
+Download Patchbay from the [Releases page](https://github.com/jpsutton/patchbay/releases/latest). Packages are available for:
 
 | Platform | Packages |
 | --- | --- |
