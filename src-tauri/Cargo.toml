@@ -26,6 +26,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-global-shortcut = "2"
 
+patchbay-mesh = { path = "../crates/patchbay-mesh" }
 anyhow = "1"
 async-trait = "0.1"
 base64 = "0.22"
