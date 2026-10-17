@@ -130,6 +130,7 @@ Behind a Cloudflare Tunnel, every connection arrives from the tunnel's local add
 - **The join stays at "Connecting"**: the address isn't reachable. Check that the other computer runs Patchbay and is in a mesh, that the address and port are right, and that no firewall blocks TCP 41890.
 - **A computer stays "Offline"**: no other computer knows a working address for it. On that computer, add one under **Public addresses**, or add another computer's address under **Add an address**.
 - **"Can't listen on …"**: another program uses the port. Pick another port under **Listen on**.
+- **Windows asks about the firewall** the first time Patchbay listens: allow it on the networks your other computers use (for example, private networks or the Tailscale adapter).
 - **A move fails with "has uncommitted changes"**: the target folder has work of its own. Commit or stash it, or choose another folder.
 
 ## Limitations
