@@ -4,6 +4,7 @@ mod code;
 mod db;
 mod desktop;
 mod files;
+mod handoff;
 mod mesh;
 mod prefs;
 mod providers;
@@ -36,6 +37,8 @@ pub struct AppState {
     code: Arc<CodeManager>,
     terminals: TerminalManager,
     mesh: Mesh,
+    /// Sessions whose checkpoint is being fetched right now.
+    pulling: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 /// Errors cross the IPC boundary as plain strings.
@@ -470,12 +473,26 @@ fn ensure_local_host(state: &AppState, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Agent events go to this window and, live, to every other node.
+/// Agent events go to this window and, live, to every other node. A finished turn also tells
+/// the other nodes to fetch a checkpoint, so the session survives this node going away.
 fn code_sink(app: &tauri::AppHandle, mesh: &Mesh) -> code::acp::Sink {
+    use code::acp::CodeEvent;
     use tauri::Emitter;
     let app = app.clone();
     let mesh = mesh.clone();
     Arc::new(move |env| {
+        let turn_over = match &env.event {
+            CodeEvent::PromptDone { .. } => true,
+            CodeEvent::Status { state, .. } => state == "exited",
+            _ => false,
+        };
+        if turn_over {
+            app.state::<AppState>().code.set_busy(&env.code_session_id, false);
+        }
+        if matches!(env.event, CodeEvent::PromptDone { .. }) {
+            let p = serde_json::json!({ "id": env.code_session_id, "host": mesh.node_id() });
+            mesh.broadcast_event("mesh://checkpoint", p);
+        }
         mesh.broadcast_event(code::acp::EVENT, serde_json::to_value(&env).unwrap_or_default());
         let _ = app.emit(code::acp::EVENT, env);
     })
@@ -483,6 +500,9 @@ fn code_sink(app: &tauri::AppHandle, mesh: &Mesh) -> code::acp::Sink {
 
 async fn code_start_local(app: &tauri::AppHandle, state: &AppState, id: String) -> anyhow::Result<()> {
     ensure_local_host(state, &id)?;
+    if state.code.is_moving(&id) {
+        anyhow::bail!("this session is being moved to another computer");
+    }
     let sink = code_sink(app, &state.mesh);
     let (code, db, dir) = (state.code.clone(), state.db.clone(), state.data_dir.clone());
     // `start` may block briefly while a previous agent for this session shuts down.
@@ -556,9 +576,18 @@ async fn code_prompt_local(
     if !text.is_empty() {
         blocks.push(serde_json::json!({ "type": "text", "text": text }));
     }
+    // A session that moved without its agent state gets the earlier conversation once.
+    let note_key = format!("mesh.handoff.{id}");
+    if let Some(note) = state.db.get_setting(&note_key)? {
+        blocks.insert(0, serde_json::json!({ "type": "text", "text": note }));
+    }
     // Bumps updated_at so the session sorts to the top of the sidebar.
     state.db.update_code_session(&id, None, None, None)?;
     state.code.send(&id, AgentCmd::Prompt { blocks })?;
+    state.code.set_busy(&id, true);
+    if state.db.get_setting(&note_key)?.is_some() {
+        state.db.with_conn(|c| c.execute("DELETE FROM settings WHERE key = ?1", [&note_key]))?;
+    }
     // Every viewer shows the prompt; the window that sent it already has.
     code_sink(app, &state.mesh)(code::acp::Envelope {
         code_session_id: id,
@@ -662,6 +691,205 @@ async fn code_permission_respond(
     Ok(())
 }
 
+
+// ---------------- moving sessions between nodes ----------------
+
+fn grok_home(state: &AppState) -> PathBuf {
+    state.data_dir.join("grok")
+}
+
+/// Commits the target already has at `cwd`, so the bundle can leave them out.
+fn local_commits(cwd: &str) -> Vec<String> {
+    let out = std::process::Command::new("git")
+        .args(["-C", cwd, "for-each-ref", "--count=100", "--format=%(objectname)", "refs/heads", "refs/remotes"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).lines().map(str::to_owned).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Host side: package a session for another node (`kind` = handoff | checkpoint).
+async fn package_local(state: &AppState, id: &str, kind: &str, have: Vec<String>) -> anyhow::Result<serde_json::Value> {
+    ensure_local_host(state, id)?;
+    if kind == "handoff" {
+        if state.code.is_busy(id) {
+            anyhow::bail!("the agent is in the middle of a turn; move the session once it finishes");
+        }
+        state.code.set_moving(id, true);
+        // Let the agent flush its session files before they're copied.
+        let code = state.code.clone();
+        let sid = id.to_owned();
+        tokio::task::spawn_blocking(move || code.stop_and_wait(&sid, std::time::Duration::from_secs(5))).await?;
+    }
+    let s = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("no such session"))?;
+    let (dir, home, kind2) = (state.data_dir.clone(), grok_home(state), kind.to_owned());
+    let res = tokio::task::spawn_blocking(move || handoff::package(&dir, &home, &s, &kind2, &have)).await?;
+    match res {
+        Ok((out, meta)) => {
+            let token = out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            Ok(serde_json::json!({ "token": token, "meta": meta }))
+        }
+        Err(e) => {
+            state.code.set_moving(id, false);
+            Err(e)
+        }
+    }
+}
+
+/// Copy a package's files from `host` into a local inbox directory.
+async fn fetch_package(state: &AppState, host: &str, token: &str, meta: &handoff::Meta) -> anyhow::Result<PathBuf> {
+    use base64::Engine;
+    let dir = handoff::inbox(&state.data_dir).join(token);
+    tokio::fs::create_dir_all(&dir).await?;
+    for name in &meta.files {
+        let mut f = tokio::fs::File::create(dir.join(name)).await?;
+        let mut offset = 0u64;
+        loop {
+            let r = state
+                .mesh
+                .rpc(host, "code.fetch", serde_json::json!({ "token": token, "name": name, "offset": offset }))
+                .await?;
+            let chunk = base64::engine::general_purpose::STANDARD.decode(r["data"].as_str().unwrap_or_default())?;
+            tokio::io::AsyncWriteExt::write_all(&mut f, &chunk).await?;
+            offset += chunk.len() as u64;
+            if r["eof"].as_bool().unwrap_or(true) || chunk.is_empty() {
+                break;
+            }
+        }
+    }
+    Ok(dir)
+}
+
+/// Target side: pull session `id` from its host into `cwd` here and take over the lease.
+async fn import_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Result<Option<String>> {
+    let s = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("no such session"))?;
+    let me = state.mesh.node_id().to_owned();
+    let host = s.host_node.clone().filter(|h| h != &me).ok_or_else(|| anyhow::anyhow!("this session already runs here"))?;
+    let host_name = state.mesh.member_name(&host);
+    if !state.mesh.connected(&host) {
+        anyhow::bail!("{host_name} is offline; use Take over to continue from its last checkpoint");
+    }
+    let r = state
+        .mesh
+        .rpc_long(&host, "code.package", serde_json::json!({ "id": id, "kind": "handoff", "have": local_commits(cwd) }))
+        .await?;
+    let token = r["token"].as_str().unwrap_or_default().to_owned();
+    let meta: handoff::Meta = serde_json::from_value(r["meta"].clone())?;
+    let result: anyhow::Result<Option<String>> = async {
+        let dir = fetch_package(state, &host, &token, &meta).await?;
+        let (home, target, from) = (grok_home(state), PathBuf::from(cwd), host_name.clone());
+        let m = meta.clone();
+        let d = dir.clone();
+        let (restored, note) = tokio::task::spawn_blocking(move || handoff::unpack(&d, &m, &home, &target, &from)).await??;
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        finish_takeover(state, &s, cwd, restored, &host_name)?;
+        Ok(note)
+    }
+    .await;
+    let moved = result.is_ok();
+    let _ = state.mesh.rpc(&host, "code.package_done", serde_json::json!({ "id": id, "token": token, "moved": moved })).await;
+    result
+}
+
+/// Record that this node now hosts the session; without agent state, queue the hand-off note.
+fn finish_takeover(state: &AppState, s: &CodeSession, cwd: &str, agent_restored: bool, from_name: &str) -> anyhow::Result<()> {
+    if !agent_restored {
+        let transcript = state.db.code_transcript(&s.id)?;
+        state.db.set_setting(&format!("mesh.handoff.{}", s.id), &handoff::handoff_prompt(transcript.as_deref(), from_name))?;
+    }
+    let acp = if agent_restored { s.acp_session_id.as_deref() } else { None };
+    state.db.set_code_session_host(&s.id, state.mesh.node_id(), cwd, acp)?;
+    Ok(())
+}
+
+/// Move a session to `target` (any node, this one included), into folder `cwd` there.
+#[tauri::command]
+async fn code_move(state: State<'_, AppState>, id: String, target: String, cwd: String) -> CmdResult<Option<String>> {
+    let cwd = cwd.trim().to_owned();
+    if cwd.is_empty() {
+        return Err(CmdError("choose a folder on the target computer".into()));
+    }
+    if target == state.mesh.node_id() {
+        return Ok(import_local(&state, &id, &cwd).await?);
+    }
+    let r = state.mesh.rpc_long(&target, "code.import", serde_json::json!({ "id": id, "cwd": cwd })).await?;
+    Ok(r.as_str().map(str::to_owned))
+}
+
+/// Continue a session here from the last checkpoint this node holds, when its host is gone.
+#[tauri::command]
+async fn code_take_over(state: State<'_, AppState>, id: String, cwd: String) -> CmdResult<Option<String>> {
+    let s = state.db.get_code_session(&id)?.ok_or_else(|| CmdError("no such session".into()))?;
+    let me = state.mesh.node_id().to_owned();
+    let host = s.host_node.clone().filter(|h| h != &me).ok_or_else(|| CmdError("this session already runs here".into()))?;
+    let host_name = state.mesh.member_name(&host);
+    if state.mesh.connected(&host) {
+        return Err(CmdError(format!("{host_name} is online; move the session instead")));
+    }
+    let (dir, home, target) = (state.data_dir.clone(), grok_home(&state), PathBuf::from(cwd.trim()));
+    let (sid, from) = (id.clone(), host_name.clone());
+    let (restored, note) = if handoff::checkpoint(&state.data_dir, &id).is_some() {
+        tokio::task::spawn_blocking(move || handoff::restore_checkpoint(&dir, &home, &sid, &target, &from)).await??
+    } else if target.is_dir() {
+        (false, Some(format!("No checkpoint from {host_name} reached this computer, so only the conversation came along.")))
+    } else {
+        return Err(CmdError(format!("no checkpoint from {host_name} is here and {} doesn't exist", target.display())));
+    };
+    finish_takeover(&state, &s, cwd.trim(), restored, &host_name)?;
+    Ok(note)
+}
+
+/// Checkpoints of other nodes' sessions this node holds: session id -> taken at (ms).
+#[tauri::command]
+fn code_checkpoints(state: State<'_, AppState>) -> CmdResult<std::collections::HashMap<String, i64>> {
+    let mut out = std::collections::HashMap::new();
+    for s in state.db.list_code_sessions()? {
+        if let Some(m) = handoff::checkpoint(&state.data_dir, &s.id) {
+            out.insert(s.id, m.created_at);
+        }
+    }
+    Ok(out)
+}
+
+/// Fetch the latest checkpoint of a session hosted on `host`.
+async fn pull_checkpoint(app: tauri::AppHandle, id: String, host: String) {
+    let state = app.state::<AppState>();
+    if !state.pulling.lock().unwrap().insert(id.clone()) {
+        return;
+    }
+    let mut have = handoff::checkpoint_have(&state.data_dir, &id);
+    let mut result = Err(anyhow::anyhow!("not attempted"));
+    for _ in 0..2 {
+        result = async {
+            let r = state
+                .mesh
+                .rpc_long(&host, "code.package", serde_json::json!({ "id": id, "kind": "checkpoint", "have": have }))
+                .await?;
+            let token = r["token"].as_str().unwrap_or_default().to_owned();
+            let meta: handoff::Meta = serde_json::from_value(r["meta"].clone())?;
+            let dir = fetch_package(&state, &host, &token, &meta).await;
+            let _ = state.mesh.rpc(&host, "code.package_done", serde_json::json!({ "id": id, "token": token, "moved": false })).await;
+            let dir = dir?;
+            let data = state.data_dir.clone();
+            let d = dir.clone();
+            tokio::task::spawn_blocking(move || handoff::store_checkpoint(&data, &d, &meta)).await??;
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+            anyhow::Ok(())
+        }
+        .await;
+        // The host may have pruned what we had: retry once with a full copy.
+        if result.is_ok() || have.is_empty() {
+            break;
+        }
+        have.clear();
+    }
+    if let Err(e) = result {
+        tracing::warn!("mesh: checkpoint of {id}: {e:#}");
+    }
+    state.pulling.lock().unwrap().remove(&id);
+}
+
 // ---------------- mesh ----------------
 
 /// Serves other nodes' requests: remote control of sessions hosted here.
@@ -722,8 +950,42 @@ impl mesh::RpcHandler for MeshRpc {
                 state.chat.cancel(param(&p, "conversationId")?);
                 Ok(Value::Null)
             }
+            "code.package" => {
+                let have: Vec<String> = serde_json::from_value(p["have"].clone()).unwrap_or_default();
+                package_local(&state, &id()?, param(&p, "kind")?, have).await
+            }
+            "code.fetch" => {
+                let (token, name) = (param(&p, "token")?, param(&p, "name")?);
+                if [token, name].iter().any(|x| x.contains(['/', '\\']) || x.starts_with('.')) {
+                    anyhow::bail!("bad name");
+                }
+                let path = handoff::outbox(&state.data_dir).join(token).join(name);
+                mesh::node::read_chunk(path, p["offset"].as_u64().unwrap_or(0)).await
+            }
+            "code.package_done" => {
+                let token = param(&p, "token")?;
+                if !token.contains(['/', '\\']) && !token.starts_with('.') {
+                    let _ = tokio::fs::remove_dir_all(handoff::outbox(&state.data_dir).join(token)).await;
+                }
+                if p["moved"].as_bool() == Some(false) && token.starts_with("handoff-") {
+                    state.code.set_moving(&id()?, false);
+                }
+                Ok(Value::Null)
+            }
+            "code.import" => {
+                let note = import_local(&state, &id()?, param(&p, "cwd")?).await?;
+                Ok(json!(note))
+            }
             other => anyhow::bail!("unknown request {other}"),
         }
+    }
+
+    fn event(&self, name: &str, payload: &serde_json::Value) {
+        if name != "mesh://checkpoint" {
+            return;
+        }
+        let (Some(id), Some(host)) = (payload["id"].as_str(), payload["host"].as_str()) else { return };
+        tauri::async_runtime::spawn(pull_checkpoint(self.app.clone(), id.to_owned(), host.to_owned()));
     }
 
     fn synced(&self, applied: &mesh::sync::Applied) {
@@ -731,6 +993,30 @@ impl mesh::RpcHandler for MeshRpc {
             return;
         }
         let state = self.app.state::<AppState>();
+        let me = state.mesh.node_id().to_owned();
+        for (id, prev) in &applied.host_changes {
+            if prev.as_deref() != Some(me.as_str()) {
+                continue;
+            }
+            if state.code.is_moving(id) {
+                // We handed it over ourselves.
+                state.code.set_moving(id, false);
+                continue;
+            }
+            // Taken over elsewhere while we were away: keep whatever we did since.
+            let Ok(Some(s)) = state.db.get_code_session(id) else { continue };
+            let (app, id) = (self.app.clone(), id.clone());
+            tauri::async_runtime::spawn(async move {
+                let cwd = PathBuf::from(&s.cwd);
+                let kept = tokio::task::spawn_blocking(move || handoff::keep_orphaned_work(&cwd, &s.id)).await;
+                if let Ok(Ok(Some(r))) = kept {
+                    use tauri::Emitter;
+                    let msg = format!("This session continued on another computer. Work done here since is saved as git ref {r}.");
+                    let env = code::acp::Envelope { code_session_id: id, event: code::acp::CodeEvent::Notice { message: msg } };
+                    let _ = app.emit(code::acp::EVENT, env);
+                }
+            });
+        }
         // A session that moved away or was deleted elsewhere stops running here.
         for (t, pk) in &applied.rows {
             if t != "code_sessions" || !state.code.is_running(pk) {
@@ -1022,6 +1308,7 @@ pub fn run() {
                 code: Arc::default(),
                 terminals: TerminalManager::default(),
                 mesh: mesh.clone(),
+                pulling: Default::default(),
             });
             if mesh.is_member() {
                 tauri::async_runtime::spawn(async move { mesh.start() });
@@ -1118,6 +1405,9 @@ pub fn run() {
             mesh_set_config,
             mesh_add_address,
             mesh_chat_streams,
+            code_move,
+            code_take_over,
+            code_checkpoints,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Patchbay")

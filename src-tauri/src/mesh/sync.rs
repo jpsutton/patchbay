@@ -425,6 +425,8 @@ impl LocalDefaults for () {
 pub struct Applied {
     /// Rows written or deleted: (table, pk).
     pub rows: Vec<(String, String)>,
+    /// Code sessions whose host changed: (session id, previous host).
+    pub host_changes: Vec<(String, Option<String>)>,
     pub tables: HashSet<String>,
     pub parked: usize,
 }
@@ -464,9 +466,20 @@ fn apply_batch(conn: &mut Connection, ops: &[Op], defaults: &dyn LocalDefaults) 
         let group = &groups[&key];
         let Some(t) = table(&key.0) else { continue };
         tx.execute_batch("SAVEPOINT row")?;
+        let prev_host: Option<Option<String>> = (t.name == "code_sessions" && group.iter().any(|o| o.c == "host_node"))
+            .then(|| {
+                tx.query_row("SELECT host_node FROM code_sessions WHERE id = ?1", [&key.1], |r| r.get(0))
+                    .optional()
+                    .ok()
+                    .flatten()
+                    .flatten()
+            });
         match apply_row(&tx, t, &key.1, group, defaults) {
             Ok(RowOutcome::Changed) => {
                 tx.execute_batch("RELEASE row")?;
+                if let Some(prev) = prev_host {
+                    out.host_changes.push((key.1.clone(), prev));
+                }
                 out.tables.insert(key.0.clone());
                 out.rows.push(key);
             }
@@ -528,6 +541,7 @@ fn retry_parked(conn: &mut Connection, defaults: &dyn LocalDefaults, out: &mut A
         let progressed = !r.rows.is_empty();
         out.tables.extend(r.tables);
         out.rows.extend(r.rows);
+        out.host_changes.extend(r.host_changes);
         out.parked = r.parked;
         if !progressed {
             break;

@@ -994,6 +994,17 @@ impl Db {
         Ok(())
     }
 
+    /// Hand a session to `host`: bump the fencing epoch and record where its folder is there.
+    pub fn set_code_session_host(&self, id: &str, host: &str, cwd: &str, acp_session_id: Option<&str>) -> Result<i64> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE code_sessions SET host_node = ?2, epoch = epoch + 1, cwd = ?3, acp_session_id = ?4
+             WHERE id = ?1",
+            params![id, host, cwd, acp_session_id],
+        )?;
+        Ok(conn.query_row("SELECT epoch FROM code_sessions WHERE id = ?1", [id], |r| r.get(0))?)
+    }
+
     pub fn set_code_session_pinned(&self, id: &str, pinned: bool) -> Result<()> {
         self.conn().execute(
             "UPDATE code_sessions SET pinned = ?2 WHERE id = ?1",

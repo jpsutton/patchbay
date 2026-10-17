@@ -44,6 +44,8 @@ pub trait RpcHandler: Send + Sync {
     async fn call(&self, from: String, method: String, params: Value) -> Result<Value>;
     /// Remote changes were written to the database.
     fn synced(&self, _applied: &Applied) {}
+    /// A live event arrived from another node (before it goes to the UI).
+    fn event(&self, _name: &str, _payload: &Value) {}
 }
 
 #[derive(Clone)]
@@ -408,7 +410,12 @@ impl Mesh {
 
     /// Call `method` on another node.
     pub async fn rpc(&self, node: &str, method: &str, params: Value) -> Result<Value> {
-        self.0.rpc(node, method, params).await
+        self.0.rpc(node, method, params, RPC_TIMEOUT).await
+    }
+
+    /// An RPC that may take a while (moving a session).
+    pub async fn rpc_long(&self, node: &str, method: &str, params: Value) -> Result<Value> {
+        self.0.rpc(node, method, params, Duration::from_secs(30 * 60)).await
     }
 
     pub fn connected(&self, node: &str) -> bool {
@@ -1347,6 +1354,9 @@ impl Inner {
                 if name == "mesh://chat" {
                     self.track_stream(&payload);
                 }
+                if let Some(h) = self.handler.read().unwrap().clone() {
+                    h.event(&name, &payload);
+                }
                 self.ui(&name, payload);
             }
             Msg::Rpc { id, method, params } => {
@@ -1403,7 +1413,7 @@ impl Inner {
 
     // ---------------- RPC ----------------
 
-    async fn rpc(&self, node: &str, method: &str, params: Value) -> Result<Value> {
+    async fn rpc(&self, node: &str, method: &str, params: Value, timeout: Duration) -> Result<Value> {
         let tx = self
             .st
             .lock()
@@ -1417,7 +1427,7 @@ impl Inner {
         self.rpc_waiters.lock().unwrap().insert(id, wtx);
         tx.send(Msg::Rpc { id, method: method.to_owned(), params })
             .map_err(|_| anyhow!("{} disconnected", self.member_name(node)))?;
-        match tokio::time::timeout(RPC_TIMEOUT, wrx).await {
+        match tokio::time::timeout(timeout, wrx).await {
             Ok(Ok(Ok(v))) => Ok(v),
             Ok(Ok(Err(e))) => Err(anyhow!(e)),
             Ok(Err(_)) => Err(anyhow!("{} disconnected", self.member_name(node))),
@@ -1463,7 +1473,7 @@ impl Inner {
         use sha2::{Digest, Sha256};
         let mut data = Vec::new();
         loop {
-            let r = self.rpc(node, "mesh.file", json!({ "sha": sha, "name": name, "offset": data.len() })).await?;
+            let r = self.rpc(node, "mesh.file", json!({ "sha": sha, "name": name, "offset": data.len() }), RPC_TIMEOUT).await?;
             let chunk = B64.decode(r["data"].as_str().unwrap_or_default())?;
             data.extend_from_slice(&chunk);
             if r["eof"].as_bool().unwrap_or(true) || chunk.is_empty() {
@@ -1705,7 +1715,7 @@ impl Inner {
     }
 }
 
-async fn read_chunk(path: PathBuf, offset: u64) -> Result<Value> {
+pub async fn read_chunk(path: PathBuf, offset: u64) -> Result<Value> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     const CHUNK: usize = 4 * 1024 * 1024;
     let mut f = tokio::fs::File::open(&path).await.context("file not here")?;
