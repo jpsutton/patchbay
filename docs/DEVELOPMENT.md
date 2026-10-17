@@ -74,7 +74,9 @@ cargo test --lib agents_live -- --ignored --nocapture        # start, list model
 PATCHBAY_LIVE_PROMPT=opencode,claude-code cargo test --lib agents_live -- --ignored --nocapture   # also one tiny prompt each
 ```
 
-To try the UI alone in a browser, run `pnpm dev` and open http://localhost:1420. Outside Tauri, a dev-only in-memory fake backend (`src/dev/fakeBackend.ts`) stands in for Rust.
+To try the UI alone in a browser, run `pnpm dev` and open http://localhost:1420. Outside Tauri, a dev-only in-memory fake backend (`src/dev/fakeBackend.ts`) stands in for Rust. Add `?mesh=1` to the URL to start as a member of a fake four-computer mesh, with a pending join request, sessions running on other computers (one of them offline) and a chat reply streaming in from another computer.
+
+The mesh's end-to-end tests run real nodes over WebSocket on localhost: `cargo test --lib mesh`.
 
 ## Layout
 

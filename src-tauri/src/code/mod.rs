@@ -2,6 +2,7 @@
 //! ACP over stdio.
 
 pub mod acp;
+pub mod agent_state;
 pub mod agents;
 pub mod grok_config;
 pub mod mcp;
@@ -26,6 +27,10 @@ struct Agent {
 pub struct CodeManager {
     agents: Mutex<HashMap<String, Agent>>,
     pub pending: PendingPermissions,
+    /// Sessions whose agent is in the middle of a turn.
+    busy: Mutex<std::collections::HashSet<String>>,
+    /// Sessions being handed to another node: no restarts until the handover settles.
+    moving: Mutex<HashMap<String, std::time::Instant>>,
 }
 
 /// Locate the Grok Build binary: bundled sidecar next to our exe, `PATCHBAY_GROK_BIN`, or the
@@ -55,6 +60,40 @@ pub fn sidecar_path() -> Result<PathBuf> {
 }
 
 impl CodeManager {
+    pub fn set_busy(&self, code_session_id: &str, busy: bool) {
+        let mut b = self.busy.lock().unwrap();
+        if busy {
+            b.insert(code_session_id.to_owned());
+        } else {
+            b.remove(code_session_id);
+        }
+    }
+
+    /// Mid-turn, or waiting on a permission answer.
+    pub fn is_busy(&self, code_session_id: &str) -> bool {
+        self.is_running(code_session_id)
+            && (self.busy.lock().unwrap().contains(code_session_id)
+                || self.pending.lock().unwrap().values().any(|(s, _)| s == code_session_id))
+    }
+
+    pub fn set_moving(&self, code_session_id: &str, moving: bool) {
+        let mut m = self.moving.lock().unwrap();
+        if moving {
+            m.insert(code_session_id.to_owned(), std::time::Instant::now());
+        } else {
+            m.remove(code_session_id);
+        }
+    }
+
+    /// A handover that never completed stops blocking after a while.
+    pub fn is_moving(&self, code_session_id: &str) -> bool {
+        self.moving
+            .lock()
+            .unwrap()
+            .get(code_session_id)
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(15 * 60))
+    }
+
     pub fn is_running(&self, code_session_id: &str) -> bool {
         self.agents
             .lock()

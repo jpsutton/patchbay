@@ -145,6 +145,60 @@ ALTER TABLE code_sessions ADD COLUMN activity TEXT;
 -- that don't use Patchbay's models.
 ALTER TABLE code_sessions ADD COLUMN agent TEXT NOT NULL DEFAULT 'grok';
 ALTER TABLE code_sessions ADD COLUMN agent_model TEXT;
+"#, r#"
+-- Mesh sync (see src/mesh/sync.rs). `node_id` names this install; `seq` and `hlc` advance on every
+-- local change; `applying` is 1 while remote changes are written, so triggers don't re-log them.
+CREATE TABLE sync_meta (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    node_id TEXT NOT NULL,
+    seq INTEGER NOT NULL DEFAULT 0,
+    hlc INTEGER NOT NULL DEFAULT 0,
+    applying INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO sync_meta (id, node_id) VALUES (1, lower(hex(randomblob(16))));
+-- One clock per synced cell: who wrote it last, and when. `col` '-' is a row tombstone.
+CREATE TABLE sync_clock (
+    tbl TEXT NOT NULL,
+    pk TEXT NOT NULL,
+    col TEXT NOT NULL,
+    hlc INTEGER NOT NULL,
+    origin TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    PRIMARY KEY (tbl, pk, col)
+) WITHOUT ROWID;
+CREATE INDEX sync_clock_origin ON sync_clock(origin, seq);
+-- Highest change seq received from each origin.
+CREATE TABLE sync_vv (origin TEXT PRIMARY KEY, seq INTEGER NOT NULL);
+-- Remote changes that could not be applied yet (e.g. their parent row hasn't arrived).
+CREATE TABLE sync_parked (id INTEGER PRIMARY KEY, ops_json TEXT NOT NULL, created_at INTEGER NOT NULL);
+
+-- Which node runs a Code session's agent, and a fencing token bumped on every handover.
+ALTER TABLE code_sessions ADD COLUMN host_node TEXT;
+ALTER TABLE code_sessions ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0;
+UPDATE code_sessions SET host_node = (SELECT node_id FROM sync_meta);
+
+-- Mesh membership: signed admission (and removal) records.
+CREATE TABLE mesh_members (
+    node_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    sign_pub TEXT NOT NULL,
+    noise_pub TEXT NOT NULL,
+    mesh_id TEXT NOT NULL,
+    approver TEXT NOT NULL,
+    admitted_at INTEGER NOT NULL,
+    sig TEXT NOT NULL,
+    removed_by TEXT,
+    removed_at INTEGER,
+    removed_sig TEXT
+);
+-- Secrets (API keys, MCP secrets) sealed under the mesh data key; `account` is the keyring account.
+CREATE TABLE mesh_secrets (
+    account TEXT PRIMARY KEY,
+    gen INTEGER NOT NULL,
+    nonce TEXT NOT NULL,
+    ct TEXT NOT NULL,
+    digest TEXT NOT NULL
+);
 "#];
 
 pub fn now_ms() -> i64 {
@@ -407,6 +461,10 @@ pub struct CodeSession {
     pub agent: String,
     /// The agent's own model id, for agents that keep their own model list.
     pub agent_model: Option<String>,
+    /// Node running this session's agent.
+    pub host_node: Option<String>,
+    /// Bumped on every handover between nodes.
+    pub epoch: i64,
 }
 
 /// Values `code_sessions.activity` may hold.
@@ -422,11 +480,24 @@ impl Db {
             conn.execute_batch(sql)?;
             conn.pragma_update(None, "user_version", (i + 1) as i64)?;
         }
+        crate::mesh::sync::install(&conn)?;
         Ok(Self(Mutex::new(conn)))
     }
 
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Raw access for the mesh sync engine.
+    pub(crate) fn with_conn<R>(&self, f: impl FnOnce(&mut Connection) -> R) -> R {
+        f(&mut self.conn())
+    }
+
+    /// This install's mesh node id.
+    pub fn node_id(&self) -> String {
+        self.conn()
+            .query_row("SELECT node_id FROM sync_meta", [], |r| r.get(0))
+            .unwrap_or_default()
     }
 
     // ---- providers ----
@@ -844,7 +915,7 @@ impl Db {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT id, cwd, acp_session_id, title, model_ref, created_at, updated_at, pinned, activity,
-                    agent, agent_model
+                    agent, agent_model, host_node, epoch
              FROM code_sessions ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([], map_code_session)?;
@@ -856,7 +927,7 @@ impl Db {
             .conn()
             .query_row(
                 "SELECT id, cwd, acp_session_id, title, model_ref, created_at, updated_at, pinned, activity,
-                    agent, agent_model
+                        agent, agent_model, host_node, epoch
                  FROM code_sessions WHERE id = ?1",
                 [id],
                 map_code_session,
@@ -885,11 +956,14 @@ impl Db {
             activity: None,
             agent: agent.to_owned(),
             agent_model: None,
+            host_node: Some(self.node_id()),
+            epoch: 0,
         };
         self.conn().execute(
-            "INSERT INTO code_sessions (id, cwd, acp_session_id, title, model_ref, created_at, updated_at, agent)
-             VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?5, ?6)",
-            params![s.id, s.cwd, s.title, s.model_ref, now, s.agent],
+            "INSERT INTO code_sessions (id, cwd, acp_session_id, title, model_ref, created_at, updated_at,
+                                        agent, host_node, epoch)
+             VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?5, ?6, ?7, 0)",
+            params![s.id, s.cwd, s.title, s.model_ref, now, s.agent, s.host_node],
         )?;
         Ok(s)
     }
@@ -942,6 +1016,17 @@ impl Db {
             params![id, model],
         )?;
         Ok(())
+    }
+
+    /// Hand a session to `host`: bump the fencing epoch and record where its folder is there.
+    pub fn set_code_session_host(&self, id: &str, host: &str, cwd: &str, acp_session_id: Option<&str>) -> Result<i64> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE code_sessions SET host_node = ?2, epoch = epoch + 1, cwd = ?3, acp_session_id = ?4
+             WHERE id = ?1",
+            params![id, host, cwd, acp_session_id],
+        )?;
+        Ok(conn.query_row("SELECT epoch FROM code_sessions WHERE id = ?1", [id], |r| r.get(0))?)
     }
 
     pub fn set_code_session_pinned(&self, id: &str, pinned: bool) -> Result<()> {
@@ -1248,6 +1333,8 @@ fn map_code_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<CodeSession> {
         activity: r.get(8)?,
         agent: r.get(9)?,
         agent_model: r.get(10)?,
+        host_node: r.get(11)?,
+        epoch: r.get(12)?,
     })
 }
 

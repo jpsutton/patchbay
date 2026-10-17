@@ -8,16 +8,19 @@ use anyhow::{Result, anyhow};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
-use serde::Serialize;
-use tauri::ipc::Channel;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum TermEvent {
     /// Base64-encoded output bytes.
     Data { data: String },
     Exit { code: Option<u32> },
 }
+
+/// Where a terminal's output goes (this window, or another mesh node); false once nobody listens.
+pub type TermSink = Arc<dyn Fn(TermEvent) -> bool + Send + Sync>;
 
 struct Term {
     master: Box<dyn MasterPty + Send>,
@@ -38,7 +41,7 @@ impl TerminalManager {
         shell: Option<&str>,
         cols: u16,
         rows: u16,
-        channel: Channel<TermEvent>,
+        sink: TermSink,
     ) -> Result<()> {
         self.close(id);
         let pty = native_pty_system().openpty(PtySize {
@@ -66,19 +69,16 @@ impl TerminalManager {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        if channel
-                            .send(TermEvent::Data {
-                                data: B64.encode(&buf[..n]),
-                            })
-                            .is_err()
-                        {
+                        if !sink(TermEvent::Data {
+                            data: B64.encode(&buf[..n]),
+                        }) {
                             break;
                         }
                     }
                 }
             }
             let code = child.wait().ok().map(|s| s.exit_code());
-            let _ = channel.send(TermEvent::Exit { code });
+            sink(TermEvent::Exit { code });
         });
 
         self.terms.lock().unwrap().insert(

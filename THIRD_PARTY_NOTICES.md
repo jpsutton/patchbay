@@ -13,13 +13,15 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 
 ## Rust crates
 
-751 crates, built for every platform Patchbay supports. Each is used unmodified.
+785 crates, built for every platform Patchbay supports. Each is used unmodified.
 
 | Package | Version | License | Texts |
 |---|---|---|---|
 | adler2 | 2.0.1 | 0BSD OR MIT OR Apache-2.0 | [a21c914647d3](#text-a21c914647d3) [1bc86297d032](#text-1bc86297d032) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| aead | 0.5.2 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [b38f573d5bc8](#text-b38f573d5bc8) |
 | aes | 0.8.4 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [33e996382660](#text-33e996382660) |
 | aes | 0.9.3 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [fc794e17e5ea](#text-fc794e17e5ea) |
+| aes-gcm | 0.10.3 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [e90ad0f8f6fe](#text-e90ad0f8f6fe) |
 | agent-client-protocol | 0.10.4 | Apache-2.0 | standard text: [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html); copyright Zed <hi@zed.dev> |
 | agent-client-protocol-schema | 0.11.4 | Apache-2.0 | [e8e2fe35f5fd](#text-e8e2fe35f5fd) |
 | aho-corasick | 1.1.3 | Unlicense OR MIT | [65314a6c9668](#text-65314a6c9668) [154c1af2b38e](#text-154c1af2b38e) [ca2abdf69588](#text-ca2abdf69588) |
@@ -62,10 +64,12 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | base64 | 0.21.7 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [6a8da4c78c72](#text-6a8da4c78c72) |
 | base64 | 0.22.1 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [6a8da4c78c72](#text-6a8da4c78c72) |
 | base64 | 0.23.1 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [2ff8d9734312](#text-2ff8d9734312) |
+| base64ct | 1.8.3 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [79697635de72](#text-79697635de72) |
 | bit-set | 0.8.0 | Apache-2.0 OR MIT | [7e1b38c60796](#text-7e1b38c60796) [4c4e6eed8b86](#text-4c4e6eed8b86) |
 | bit-vec | 0.8.0 | Apache-2.0 OR MIT | [7e1b38c60796](#text-7e1b38c60796) [4c4e6eed8b86](#text-4c4e6eed8b86) |
 | bitflags | 1.3.2 | MIT/Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [14435fbcd271](#text-14435fbcd271) |
 | bitflags | 2.13.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [14435fbcd271](#text-14435fbcd271) |
+| blake2 | 0.10.6 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [fa3da53430ea](#text-fa3da53430ea) |
 | blake3 | 1.8.2 | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception | [fb348df332f3](#text-fb348df332f3) [75b396e36891](#text-75b396e36891) [6d489af62926](#text-6d489af62926) |
 | block-buffer | 0.10.4 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [5ff5253f2cb9](#text-5ff5253f2cb9) |
 | block-buffer | 0.12.0 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [775a3e20a9af](#text-775a3e20a9af) |
@@ -101,6 +105,9 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | cfg_aliases | 0.2.1 | MIT | [48513346d335](#text-48513346d335) |
 | cfg-expr | 0.15.8 | MIT OR Apache-2.0 | [7e1b38c60796](#text-7e1b38c60796) [6d182023b788](#text-6d182023b788) |
 | cfg-if | 1.0.4 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
+| chacha20 | 0.9.1 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [282b5e566e85](#text-282b5e566e85) |
+| chacha20 | 0.10.2 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [1038b7737a0a](#text-1038b7737a0a) |
+| chacha20poly1305 | 0.10.1 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [e90ad0f8f6fe](#text-e90ad0f8f6fe) |
 | chrono | 0.4.44 | MIT OR Apache-2.0 | [ce4a94c006fa](#text-ce4a94c006fa) |
 | cipher | 0.4.4 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [92f01fc7ca90](#text-92f01fc7ca90) |
 | cipher | 0.5.1 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [28afb21f14a0](#text-28afb21f14a0) |
@@ -109,6 +116,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | colorchoice | 1.0.4 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
 | combine | 4.6.7 | MIT | [a8d7d8157c71](#text-a8d7d8157c71) |
 | concurrent-queue | 2.5.0 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| const-oid | 0.9.6 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [045a1c4f9aa0](#text-045a1c4f9aa0) |
 | const-oid | 0.10.2 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [ea753cf1e3ec](#text-ea753cf1e3ec) |
 | constant_time_eq | 0.3.1 | CC0-1.0 OR MIT-0 OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [6d489af62926](#text-6d489af62926) [ee3c852dd133](#text-ee3c852dd133) |
 | convert_case | 0.10.0 | MIT | [aed7b1758e35](#text-aed7b1758e35) |
@@ -133,15 +141,20 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | cssparser | 0.37.0 | MPL-2.0 | [c76f740d1521](#text-c76f740d1521) |
 | cssparser-macros | 0.7.1 | MPL-2.0 | [c76f740d1521](#text-c76f740d1521) |
 | ctor | 1.0.13 | Apache-2.0 OR MIT | [6dc0e068dcf3](#text-6dc0e068dcf3) [bccaa8b6c09f](#text-bccaa8b6c09f) |
+| ctr | 0.9.2 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [f3bd9e2e7745](#text-f3bd9e2e7745) |
+| curve25519-dalek | 4.1.3 | BSD-3-Clause | [82771e440a23](#text-82771e440a23) |
+| curve25519-dalek-derive | 0.1.1 | MIT/Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | darling | 0.20.11 | MIT | [cc8f3c8ab396](#text-cc8f3c8ab396) |
 | darling | 0.23.0 | MIT | [cc8f3c8ab396](#text-cc8f3c8ab396) |
 | darling_core | 0.20.11 | MIT | [cc8f3c8ab396](#text-cc8f3c8ab396) |
 | darling_core | 0.23.0 | MIT | [cc8f3c8ab396](#text-cc8f3c8ab396) |
 | darling_macro | 0.20.11 | MIT | [cc8f3c8ab396](#text-cc8f3c8ab396) |
 | darling_macro | 0.23.0 | MIT | [cc8f3c8ab396](#text-cc8f3c8ab396) |
+| data-encoding | 2.11.1 | MIT | [9db9de9edfd0](#text-9db9de9edfd0) |
 | dbus | 0.9.12 | Apache-2.0/MIT | [8d2ca3a111ce](#text-8d2ca3a111ce) [de3911c2d98c](#text-de3911c2d98c) |
 | dbus-secret-service | 4.1.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [cef8c2ddacb4](#text-cef8c2ddacb4) |
 | debug_unsafe | 0.1.3 | MIT OR Apache-2.0 | standard text: [MIT](https://spdx.org/licenses/MIT.html), [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html); copyright Dmitry Rodionov <gh@rdmtr.com> |
+| der | 0.7.10 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [6b118915d98a](#text-6b118915d98a) |
 | deranged | 0.5.5 | MIT OR Apache-2.0 | [b4839ecf405b](#text-b4839ecf405b) [1b66e3be6894](#text-1b66e3be6894) |
 | derive_builder | 0.20.2 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [2d149f984363](#text-2d149f984363) |
 | derive_builder_core | 0.20.2 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [2d149f984363](#text-2d149f984363) |
@@ -165,6 +178,8 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | dtoa-short | 0.3.5 | MPL-2.0 | [4b89d4518bd1](#text-4b89d4518bd1) |
 | dunce | 1.0.5 | CC0-1.0 OR MIT-0 OR Apache-2.0 | [6d489af62926](#text-6d489af62926) |
 | dyn-clone | 1.0.20 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| ed25519 | 2.2.3 | Apache-2.0 OR MIT | [f330b45715b8](#text-f330b45715b8) [7d9f551458e8](#text-7d9f551458e8) |
+| ed25519-dalek | 2.2.0 | BSD-3-Clause | [d2778eb7f5d0](#text-d2778eb7f5d0) |
 | either | 1.15.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [fdd1c2117bcf](#text-fdd1c2117bcf) |
 | embed_plist | 1.2.2 | MIT OR Apache-2.0 | [283ea6cc2997](#text-283ea6cc2997) [a29c4d8a8e7c](#text-a29c4d8a8e7c) |
 | embed-resource | 3.0.12 | MIT | [c4be15bd543a](#text-c4be15bd543a) |
@@ -189,8 +204,10 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | fax | 0.2.6 | MIT | standard text: [MIT](https://spdx.org/licenses/MIT.html); copyright Sebastian K <s3bk@protonmail.com> |
 | fax_derive | 0.2.0 | MIT | standard text: [MIT](https://spdx.org/licenses/MIT.html); copyright Sebastian K <s3bk@protonmail.com> |
 | fdeflate | 0.3.7 | MIT OR Apache-2.0 | [4bf96504d6e8](#text-4bf96504d6e8) [77949ead506e](#text-77949ead506e) |
+| fiat-crypto | 0.2.9 | MIT OR Apache-2.0 OR BSD-1-Clause | [f1954d2b51ee](#text-f1954d2b51ee) [cb320ccefaa5](#text-cb320ccefaa5) [5abb4b606ff4](#text-5abb4b606ff4) |
 | field-offset | 0.3.6 | MIT OR Apache-2.0 | [4bf96504d6e8](#text-4bf96504d6e8) [f4bc3f3c5bfd](#text-f4bc3f3c5bfd) |
 | filedescriptor | 0.8.3 | MIT | [0f5e2ba844a4](#text-0f5e2ba844a4) |
+| filetime | 0.2.29 | MIT/Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | find-msvc-tools | 0.1.14 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | flate2 | 1.1.5 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [e8bac4ebed6c](#text-e8bac4ebed6c) |
 | fnv | 1.0.7 | Apache-2.0 / MIT | [954f335b8baf](#text-954f335b8baf) [c48b7333c00b](#text-c48b7333c00b) |
@@ -227,6 +244,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | getrandom | 0.2.16 | MIT OR Apache-2.0 | [e7330bf53074](#text-e7330bf53074) [478d530cbce7](#text-478d530cbce7) |
 | getrandom | 0.3.4 | MIT OR Apache-2.0 | [e7330bf53074](#text-e7330bf53074) [73af2019a565](#text-73af2019a565) |
 | getrandom | 0.4.1 | MIT OR Apache-2.0 | [e7330bf53074](#text-e7330bf53074) [94b1870d380c](#text-94b1870d380c) |
+| ghash | 0.5.1 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [fc15b628f1c4](#text-fc15b628f1c4) |
 | gif | 0.14.1 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [1b6f7ab81ae2](#text-1b6f7ab81ae2) |
 | gio | 0.18.4 | MIT | [21a2121221d2](#text-21a2121221d2) |
 | gio-sys | 0.18.1 | MIT | [21a2121221d2](#text-21a2121221d2) |
@@ -383,6 +401,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | office_oxide | 0.1.9 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [31f687dae58a](#text-31f687dae58a) [f631a782f00d](#text-f631a782f00d) |
 | once_cell | 1.21.3 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | once_cell_polyfill | 1.70.2 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
+| opaque-debug | 0.3.1 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [7873dbb4b866](#text-7873dbb4b866) |
 | open | 5.4.4 | MIT | [c3ca23514163](#text-c3ca23514163) |
 | openssl-probe | 0.1.6 | MIT/Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | option-ext | 0.2.0 | MPL-2.0 | [fb72181dd024](#text-fb72181dd024) |
@@ -406,12 +425,15 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | pin-project-lite | 0.2.16 | Apache-2.0 OR MIT | [4bf96504d6e8](#text-4bf96504d6e8) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | pin-utils | 0.1.0 | MIT OR Apache-2.0 | [8348c9fe2fb7](#text-8348c9fe2fb7) [e768d9875925](#text-e768d9875925) |
 | piper | 0.2.4 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| pkcs8 | 0.10.2 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [6b118915d98a](#text-6b118915d98a) |
 | pkg-config | 0.3.32 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | plist | 1.10.0 | MIT | [5b0ae40d1a35](#text-5b0ae40d1a35) |
 | png | 0.17.16 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [80cdd90699e4](#text-80cdd90699e4) |
 | png | 0.18.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [80cdd90699e4](#text-80cdd90699e4) |
 | polling | 3.11.0 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | pollster | 0.4.0 | Apache-2.0/MIT | [954f335b8baf](#text-954f335b8baf) [d495abbfe409](#text-d495abbfe409) |
+| poly1305 | 0.8.0 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [e827371937a1](#text-e827371937a1) |
+| polyval | 0.6.2 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [3dad7b797447](#text-3dad7b797447) |
 | portable-atomic | 1.11.1 | Apache-2.0 OR MIT | [4bf96504d6e8](#text-4bf96504d6e8) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | portable-atomic-util | 0.2.4 | Apache-2.0 OR MIT | [4bf96504d6e8](#text-4bf96504d6e8) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | portable-pty | 0.9.0 | MIT | [0f5e2ba844a4](#text-0f5e2ba844a4) |
@@ -437,10 +459,12 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | r-efi | 5.3.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later | standard text: [MIT](https://spdx.org/licenses/MIT.html), [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html), [LGPL-2.1-or-later](https://spdx.org/licenses/LGPL-2.1-or-later.html) |
 | rand | 0.8.5 | MIT OR Apache-2.0 | [fee4d7ce394c](#text-fee4d7ce394c) [cc367a7134c2](#text-cc367a7134c2) |
 | rand | 0.9.5 | MIT OR Apache-2.0 | [fee4d7ce394c](#text-fee4d7ce394c) [cc367a7134c2](#text-cc367a7134c2) |
+| rand | 0.10.3 | MIT OR Apache-2.0 | [fee4d7ce394c](#text-fee4d7ce394c) [cc367a7134c2](#text-cc367a7134c2) |
 | rand_chacha | 0.3.1 | MIT OR Apache-2.0 | [e7330bf53074](#text-e7330bf53074) [cc367a7134c2](#text-cc367a7134c2) |
 | rand_chacha | 0.9.0 | MIT OR Apache-2.0 | [fee4d7ce394c](#text-fee4d7ce394c) [cc367a7134c2](#text-cc367a7134c2) |
 | rand_core | 0.6.4 | MIT OR Apache-2.0 | [179c83ef07a5](#text-179c83ef07a5) [cc367a7134c2](#text-cc367a7134c2) |
 | rand_core | 0.9.3 | MIT OR Apache-2.0 | [179c83ef07a5](#text-179c83ef07a5) [cc367a7134c2](#text-cc367a7134c2) |
+| rand_core | 0.10.1 | MIT OR Apache-2.0 | [179c83ef07a5](#text-179c83ef07a5) [704f0e5f1c84](#text-704f0e5f1c84) |
 | raw-window-handle | 0.6.2 | MIT OR Apache-2.0 OR Zlib | [4bf96504d6e8](#text-4bf96504d6e8) [aa69fda6dd94](#text-aa69fda6dd94) [81976b4834c3](#text-81976b4834c3) |
 | rayon | 1.12.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [9e0027807b0c](#text-9e0027807b0c) |
 | rayon-core | 1.13.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [9e0027807b0c](#text-9e0027807b0c) |
@@ -502,6 +526,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | serialize-to-javascript-impl | 0.1.2 | MIT OR Apache-2.0 | [283ea6cc2997](#text-283ea6cc2997) [777eb7417541](#text-777eb7417541) |
 | servo_arc | 0.4.3 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | sha1 | 0.10.6 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [4031faf6212e](#text-4031faf6212e) |
+| sha1 | 0.11.0 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [535a6aa345e8](#text-535a6aa345e8) |
 | sha1_smol | 1.0.1 | BSD-3-Clause | [f7f7242d53eb](#text-f7f7242d53eb) |
 | sha2 | 0.10.9 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [4031faf6212e](#text-4031faf6212e) |
 | sha2 | 0.11.0 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [535a6aa345e8](#text-535a6aa345e8) |
@@ -510,16 +535,20 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | shell-words | 1.1.0 | MIT/Apache-2.0 | [c7f51f2c5828](#text-c7f51f2c5828) [104b7fa3c213](#text-104b7fa3c213) |
 | shlex | 1.3.0 | MIT OR Apache-2.0 | [a759ce38c686](#text-a759ce38c686) [cc5ba5589dfb](#text-cc5ba5589dfb) |
 | signal-hook-registry | 1.4.8 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [aaac889d0a4a](#text-aaac889d0a4a) |
+| signature | 2.2.0 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [7d9f551458e8](#text-7d9f551458e8) |
 | simd-adler32 | 0.3.7 | MIT | [627eff66d6c4](#text-627eff66d6c4) |
 | siphasher | 1.0.3 | MIT/Apache-2.0 | [24e26e8fb783](#text-24e26e8fb783) |
 | skrifa | 0.37.0 | MIT OR Apache-2.0 | [bfa7ed27d2b0](#text-bfa7ed27d2b0) [163aebd02543](#text-163aebd02543) |
 | slab | 0.4.11 | MIT | [12c7116c4425](#text-12c7116c4425) |
 | slotmap | 1.0.7 | Zlib | [0825a545d3d5](#text-0825a545d3d5) |
 | smallvec | 1.15.1 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [7f194ae45c25](#text-7f194ae45c25) |
+| snow | 0.10.0 | Apache-2.0 OR MIT | [fee4d7ce394c](#text-fee4d7ce394c) [32a5b6b5bbee](#text-32a5b6b5bbee) |
 | socket2 | 0.6.4 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | softbuffer | 0.4.8 | MIT OR Apache-2.0 | [1fc3bc7f4a1b](#text-1fc3bc7f4a1b) [f8babf2965a4](#text-f8babf2965a4) |
 | soup3 | 0.5.0 | MIT | [4603441e4a5a](#text-4603441e4a5a) |
 | soup3-sys | 0.5.0 | MIT | [4603441e4a5a](#text-4603441e4a5a) |
+| spake2 | 0.4.0 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [45d70a9a0114](#text-45d70a9a0114) |
+| spki | 0.7.3 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [07ce2f16212b](#text-07ce2f16212b) |
 | stable_deref_trait | 1.2.1 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [5e05b024f653](#text-5e05b024f653) |
 | static_assertions | 1.1.0 | MIT OR Apache-2.0 | [283ea6cc2997](#text-283ea6cc2997) [95a6a71a30f3](#text-95a6a71a30f3) |
 | static_vcruntime | 3.0.0 | MIT OR Apache-2.0 OR Zlib | [c0fb98161c4f](#text-c0fb98161c4f) [0e3cbff251c1](#text-0e3cbff251c1) [fdbaaf920cb3](#text-fdbaaf920cb3) [0eec7daefad9](#text-0eec7daefad9) |
@@ -544,6 +573,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | taffy | 0.12.2 | MIT | standard text: [MIT](https://spdx.org/licenses/MIT.html); copyright Alice Cecile <alice.i.cecile@gmail.com>, Johnathan Kelley <jkelleyrtp@gmail.com>, Nico Burns <nico@nicoburns.com> |
 | tao | 0.37.1 | Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [28694f36acab](#text-28694f36acab) |
 | tao-macros | 0.1.4 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [26e6f69cf1f6](#text-26e6f69cf1f6) [1d5680a70055](#text-1d5680a70055) |
+| tar | 0.4.46 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [e6e853531994](#text-e6e853531994) |
 | target-lexicon | 0.12.16 | Apache-2.0 WITH LLVM-exception | [2f213ec6b135](#text-2f213ec6b135) |
 | tauri | 2.12.4 | Apache-2.0 OR MIT | [4bf96504d6e8](#text-4bf96504d6e8) [89ff9689dcf9](#text-89ff9689dcf9) |
 | tauri-build | 2.7.3 | Apache-2.0 OR MIT | [4bf96504d6e8](#text-4bf96504d6e8) [89ff9689dcf9](#text-89ff9689dcf9) |
@@ -580,6 +610,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | tokio-macros | 2.7.0 | MIT | [c0fdcda1a4ff](#text-c0fdcda1a4ff) |
 | tokio-rustls | 0.26.4 | MIT OR Apache-2.0 | [acddfb05f07a](#text-acddfb05f07a) [1b0258c48739](#text-1b0258c48739) |
 | tokio-stream | 0.1.17 | MIT | [3e1bef82aa0d](#text-3e1bef82aa0d) |
+| tokio-tungstenite | 0.30.0 | MIT | [5c07409e7457](#text-5c07409e7457) |
 | tokio-util | 0.7.17 | MIT | [3e1bef82aa0d](#text-3e1bef82aa0d) |
 | toml | 0.8.2 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
 | toml | 0.9.12+spec-1.1.0 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
@@ -604,6 +635,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | tray-icon | 0.25.1 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [859a90323b68](#text-859a90323b68) [6c1e5d0ccf5e](#text-6c1e5d0ccf5e) |
 | try-lock | 0.2.5 | MIT | [381f992f70f7](#text-381f992f70f7) |
 | ttf-parser | 0.25.1 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [0b3a181cccee](#text-0b3a181cccee) |
+| tungstenite | 0.30.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [a69edb2155ca](#text-a69edb2155ca) |
 | typed-path | 0.12.3 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | typeid | 1.0.3 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | typenum | 1.19.0 | MIT OR Apache-2.0 | [db11fec99467](#text-db11fec99467) [65dc2a869ff7](#text-65dc2a869ff7) [87ebb37988ef](#text-87ebb37988ef) |
@@ -619,6 +651,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | unicode-script | 0.5.8 | MIT OR Apache-2.0 | [a570e450131b](#text-a570e450131b) [66a2ea9ed607](#text-66a2ea9ed607) |
 | unicode-segmentation | 1.12.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [033a9383ff21](#text-033a9383ff21) |
 | unicode-xid | 0.2.6 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [033a9383ff21](#text-033a9383ff21) |
+| universal-hash | 0.5.1 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [7cfd98aeed13](#text-7cfd98aeed13) |
 | untrusted | 0.9.0 | ISC | [a1fff3442978](#text-a1fff3442978) |
 | url | 2.5.8 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [7a8093fb4a93](#text-7a8093fb4a93) |
 | urlencoding | 2.1.3 | MIT | [5df9b8726f15](#text-5df9b8726f15) |
@@ -733,6 +766,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | x11-dl | 2.21.0 | MIT | [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | x11rb | 0.13.2 | MIT OR Apache-2.0 | [283ea6cc2997](#text-283ea6cc2997) [a0b5ebe9ffb2](#text-a0b5ebe9ffb2) |
 | x11rb-protocol | 0.13.2 | MIT OR Apache-2.0 | [283ea6cc2997](#text-283ea6cc2997) [a0b5ebe9ffb2](#text-a0b5ebe9ffb2) |
+| xattr | 1.6.1 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [7bdd5c5e8ad0](#text-7bdd5c5e8ad0) |
 | xdg-home | 1.3.0 | MIT | [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | xkeysym | 0.2.1 | MIT OR Apache-2.0 OR Zlib | [25b0aac9b4bf](#text-25b0aac9b4bf) [cfbf6a2ee585](#text-cfbf6a2ee585) [92cae7c2e9ac](#text-92cae7c2e9ac) |
 | yoke | 0.8.0 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
@@ -1278,7 +1312,7 @@ limitations under the License.
 
 ### <a id="text-30fefc3a7d6a"></a>30fefc3a7d6a
 
-Used by: adler2@2.0.1, anyhow@1.0.104, async-channel@2.5.0, async-executor@1.14.0, async-io@2.6.0, async-lock@3.4.1, async-process@2.5.0, async-recursion@1.1.1, async-signal@0.2.13, async-task@4.7.1, async-trait@0.1.89, atomic-waker@1.1.2, blocking@1.6.2, camino@1.2.1, cargo_metadata@0.19.2, cargo-platform@0.1.9, concurrent-queue@2.5.0, displaydoc@0.2.5, dtoa@1.0.10, dyn-clone@1.0.20, endi@1.1.1, erased-serde@0.4.10, event-listener@5.4.1, event-listener-strategy@0.5.4, fast-float2@0.2.3, fastrand@2.3.0, futures-lite@2.6.1, hermit-abi@0.5.2, itoa@1.0.17, leb128fmt@0.1.0, linux-raw-sys@0.12.1, minimal-lexical@0.2.1, num_enum@0.7.5, num_enum_derive@0.7.5, once_cell@1.21.3, ordered-stream@0.2.0, parking@2.2.1, pin-project-lite@0.2.16, piper@0.2.4, polling@3.11.0, portable-atomic@1.11.1, portable-atomic-util@0.2.4, prettyplease@0.2.37, proc-macro-crate@1.3.1, proc-macro-crate@2.0.2, proc-macro-crate@3.4.0, proc-macro2@1.0.106, quote@1.0.45, ref-cast@1.0.25, ref-cast-impl@1.0.25, rustc-hash@2.1.1, rustix@1.1.4, rustversion@1.0.22, semver@1.0.28, serde@1.0.228, serde_core@1.0.228, serde_derive@1.0.228, serde_derive_internals@0.29.1, serde_json@1.0.149, serde_repr@0.1.20, serde-untagged@0.1.9, servo_arc@0.4.3, syn@1.0.109, syn@2.0.117, syn@3.0.4, system-deps@6.2.2, thiserror@1.0.69, thiserror@2.0.18, thiserror-impl@1.0.69, thiserror-impl@2.0.18, typed-path@0.12.3, typeid@1.0.3, unicode-ident@1.0.24, utf-8@0.7.6, wasi@0.11.1+wasi-snapshot-preview1, wasm-streams@0.4.2, wasm-streams@0.5.0, wit-bindgen@0.46.0, wit-bindgen@0.51.0, wit-bindgen-core@0.51.0, wit-bindgen-rust@0.51.0, wit-bindgen-rust-macro@0.51.0, x11@2.21.0, x11-dl@2.21.0, xdg-home@1.3.0, zbus_names@3.0.0, zmij@1.0.19, zvariant_utils@2.1.0, zvariant_utils@4.2.0
+Used by: adler2@2.0.1, anyhow@1.0.104, async-channel@2.5.0, async-executor@1.14.0, async-io@2.6.0, async-lock@3.4.1, async-process@2.5.0, async-recursion@1.1.1, async-signal@0.2.13, async-task@4.7.1, async-trait@0.1.89, atomic-waker@1.1.2, blocking@1.6.2, camino@1.2.1, cargo_metadata@0.19.2, cargo-platform@0.1.9, concurrent-queue@2.5.0, curve25519-dalek-derive@0.1.1, displaydoc@0.2.5, dtoa@1.0.10, dyn-clone@1.0.20, endi@1.1.1, erased-serde@0.4.10, event-listener@5.4.1, event-listener-strategy@0.5.4, fast-float2@0.2.3, fastrand@2.3.0, futures-lite@2.6.1, hermit-abi@0.5.2, itoa@1.0.17, leb128fmt@0.1.0, linux-raw-sys@0.12.1, minimal-lexical@0.2.1, num_enum@0.7.5, num_enum_derive@0.7.5, once_cell@1.21.3, ordered-stream@0.2.0, parking@2.2.1, pin-project-lite@0.2.16, piper@0.2.4, polling@3.11.0, portable-atomic@1.11.1, portable-atomic-util@0.2.4, prettyplease@0.2.37, proc-macro-crate@1.3.1, proc-macro-crate@2.0.2, proc-macro-crate@3.4.0, proc-macro2@1.0.106, quote@1.0.45, ref-cast@1.0.25, ref-cast-impl@1.0.25, rustc-hash@2.1.1, rustix@1.1.4, rustversion@1.0.22, semver@1.0.28, serde@1.0.228, serde_core@1.0.228, serde_derive@1.0.228, serde_derive_internals@0.29.1, serde_json@1.0.149, serde_repr@0.1.20, serde-untagged@0.1.9, servo_arc@0.4.3, syn@1.0.109, syn@2.0.117, syn@3.0.4, system-deps@6.2.2, thiserror@1.0.69, thiserror@2.0.18, thiserror-impl@1.0.69, thiserror-impl@2.0.18, typed-path@0.12.3, typeid@1.0.3, unicode-ident@1.0.24, utf-8@0.7.6, wasi@0.11.1+wasi-snapshot-preview1, wasm-streams@0.4.2, wasm-streams@0.5.0, wit-bindgen@0.46.0, wit-bindgen@0.51.0, wit-bindgen-core@0.51.0, wit-bindgen-rust@0.51.0, wit-bindgen-rust-macro@0.51.0, x11@2.21.0, x11-dl@2.21.0, xdg-home@1.3.0, zbus_names@3.0.0, zmij@1.0.19, zvariant_utils@2.1.0, zvariant_utils@4.2.0
 
 ```text
 Permission is hereby granted, free of charge, to any
@@ -1308,7 +1342,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-e8541ea93f02"></a>e8541ea93f02
 
-Used by: aes@0.8.4, aes@0.9.3, block-buffer@0.10.4, block-buffer@0.12.0, block-padding@0.3.3, block-padding@0.4.2, cbc@0.1.2, cbc@0.2.0, cipher@0.4.4, cipher@0.5.1, const-oid@0.10.2, cpubits@0.1.1, cpufeatures@0.2.17, cpufeatures@0.3.0, crypto-common@0.1.6, crypto-common@0.2.1, digest@0.10.7, digest@0.11.2, hkdf@0.12.4, hmac@0.12.1, hybrid-array@0.4.10, inout@0.1.4, inout@0.2.2, md-5@0.11.0, sha1@0.10.6, sha2@0.10.9, sha2@0.11.0
+Used by: aead@0.5.2, aes@0.8.4, aes@0.9.3, aes-gcm@0.10.3, base64ct@1.8.3, blake2@0.10.6, block-buffer@0.10.4, block-buffer@0.12.0, block-padding@0.3.3, block-padding@0.4.2, cbc@0.1.2, cbc@0.2.0, chacha20@0.9.1, chacha20@0.10.2, chacha20poly1305@0.10.1, cipher@0.4.4, cipher@0.5.1, const-oid@0.9.6, const-oid@0.10.2, cpubits@0.1.1, cpufeatures@0.2.17, cpufeatures@0.3.0, crypto-common@0.1.6, crypto-common@0.2.1, ctr@0.9.2, der@0.7.10, digest@0.10.7, digest@0.11.2, ghash@0.5.1, hkdf@0.12.4, hmac@0.12.1, hybrid-array@0.4.10, inout@0.1.4, inout@0.2.2, md-5@0.11.0, opaque-debug@0.3.1, pkcs8@0.10.2, poly1305@0.8.0, polyval@0.6.2, sha1@0.10.6, sha1@0.11.0, sha2@0.10.9, sha2@0.11.0, signature@2.2.0, spake2@0.4.0, spki@0.7.3, universal-hash@0.5.1
 
 ```text
 Apache License
@@ -1514,6 +1548,39 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ```
 
+### <a id="text-b38f573d5bc8"></a>b38f573d5bc8
+
+Used by: aead@0.5.2
+
+```text
+Copyright (c) 2019 The RustCrypto Project Developers
+Copyright (c) 2019 MobileCoin, LLC
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
 ### <a id="text-33e996382660"></a>33e996382660
 
 Used by: aes@0.8.4
@@ -1553,6 +1620,38 @@ Used by: aes@0.9.3
 ```text
 Copyright (c) 2018-2024 The RustCrypto Project Developers
 Copyright (c) 2018 Artyom Pavlov
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+### <a id="text-e90ad0f8f6fe"></a>e90ad0f8f6fe
+
+Used by: aes-gcm@0.10.3, chacha20poly1305@0.10.1
+
+```text
+Copyright (c) 2019 The RustCrypto Project Developers
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -2363,7 +2462,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### <a id="text-954f335b8baf"></a>954f335b8baf
 
-Used by: arrayvec@0.7.6, async-channel@2.5.0, async-executor@1.14.0, async-io@2.6.0, async-lock@3.4.1, async-process@2.5.0, async-recursion@1.1.1, async-signal@0.2.13, async-task@4.7.1, atomic-waker@1.1.2, autocfg@1.5.0, backoff@0.4.0, base64@0.21.7, base64@0.22.1, base64@0.23.1, bitflags@1.3.2, bitflags@2.13.0, blocking@1.6.2, bs58@0.5.1, bstr@1.13.1, bumpalo@3.19.0, camino@1.2.1, cc@1.2.48, cfg-if@1.0.4, cmake@0.1.54, concurrent-queue@2.5.0, core-foundation@0.9.4, core-foundation@0.10.1, core-foundation-sys@0.8.7, core-graphics@0.25.0, core-graphics-types@0.2.0, crossbeam-channel@0.5.15, crossbeam-deque@0.8.6, crossbeam-epoch@0.9.20, crossbeam-utils@0.8.21, dbus-secret-service@4.1.0, displaydoc@0.2.5, either@1.15.0, equivalent@1.0.2, errno@0.3.14, euclid@0.22.14, event-listener@5.4.1, event-listener-strategy@0.5.4, fastrand@2.3.0, find-msvc-tools@0.1.14, flate2@1.1.5, fnv@1.0.7, form_urlencoded@1.2.2, futures-lite@2.6.1, futures-timer@3.0.3, gethostname@1.1.0, gif@0.14.1, glob@0.3.3, global-hotkey@0.8.0, hashbrown@0.12.3, hashbrown@0.15.5, hashbrown@0.17.1, heck@0.4.1, heck@0.5.0, hermit-abi@0.5.2, html5ever@0.39.0, httparse@1.10.1, hyper-rustls@0.27.7, id-arena@2.3.0, idna@1.1.0, idna_adapter@1.2.1, indexmap@1.9.3, indexmap@2.14.0, jni@0.21.1, jobserver@0.1.34, jpeg-decoder@0.3.2, js-sys@0.3.91, keyboard-types@0.7.0, keyboard-types@0.8.3, lazy_static@1.5.0, leb128fmt@0.1.0, libappindicator@0.9.0, linux-raw-sys@0.12.1, lock_api@0.4.14, log@0.4.32, markup5ever@0.39.0, mime@0.3.17, muda@0.20.0, num@0.4.3, num-bigint@0.4.6, num-complex@0.4.6, num-integer@0.1.46, num-iter@0.1.45, num-rational@0.4.2, num-traits@0.2.19, once_cell@1.21.3, openssl-probe@0.1.6, ordered-stream@0.2.0, parking@2.2.1, parking_lot@0.12.5, parking_lot_core@0.9.12, percent-encoding@2.3.2, piper@0.2.4, pkg-config@0.3.32, png@0.17.16, png@0.18.0, polling@3.11.0, pollster@0.4.0, rayon@1.12.0, rayon-core@1.13.0, regex@1.12.4, regex-automata@0.4.13, regex-syntax@0.8.11, roxmltree@0.20.0, rustc_version@0.4.1, rustix@1.1.4, rustls@0.23.37, rustls-native-certs@0.8.2, scoped-tls@1.0.1, scopeguard@1.2.0, secret-service@4.0.0, security-framework@2.11.1, security-framework@3.5.1, security-framework-sys@2.15.0, serde_with@3.22.0, serde_with_macros@3.22.0, servo_arc@0.4.3, signal-hook-registry@1.4.8, smallvec@1.15.1, socket2@0.6.4, stable_deref_trait@1.2.1, string_cache@0.9.0, string_cache_codegen@0.6.1, syn@1.0.109, system-deps@6.2.2, tao-macros@0.1.4, tempfile@3.27.0, tendril@0.5.0, thread_local@1.1.9, toml_datetime@0.6.3, tray-icon@0.25.1, ttf-parser@0.25.1, unicase@2.8.1, unicode-bidi@0.3.18, unicode-bidi-mirroring@0.4.0, unicode-ccc@0.4.0, unicode-normalization@0.1.25, unicode-properties@0.1.4, unicode-segmentation@1.12.0, unicode-xid@0.2.6, url@2.5.8, uuid@1.23.1, value-bag@1.12.0, vcpkg@0.2.15, version_check@0.9.5, wasi@0.11.1+wasi-snapshot-preview1, wasm-bindgen@0.2.114, wasm-bindgen-futures@0.4.64, wasm-bindgen-macro@0.2.114, wasm-bindgen-macro-support@0.2.114, wasm-bindgen-shared@0.2.114, web_atoms@0.2.3, web-sys@0.3.91, weezl@0.1.10, weezl@0.2.1, window-vibrancy@0.8.1, wit-bindgen@0.46.0, wit-bindgen@0.51.0, wit-bindgen-core@0.51.0, wit-bindgen-rust@0.51.0, wit-bindgen-rust-macro@0.51.0, wry@0.57.0
+Used by: arrayvec@0.7.6, async-channel@2.5.0, async-executor@1.14.0, async-io@2.6.0, async-lock@3.4.1, async-process@2.5.0, async-recursion@1.1.1, async-signal@0.2.13, async-task@4.7.1, atomic-waker@1.1.2, autocfg@1.5.0, backoff@0.4.0, base64@0.21.7, base64@0.22.1, base64@0.23.1, bitflags@1.3.2, bitflags@2.13.0, blocking@1.6.2, bs58@0.5.1, bstr@1.13.1, bumpalo@3.19.0, camino@1.2.1, cc@1.2.48, cfg-if@1.0.4, cmake@0.1.54, concurrent-queue@2.5.0, core-foundation@0.9.4, core-foundation@0.10.1, core-foundation-sys@0.8.7, core-graphics@0.25.0, core-graphics-types@0.2.0, crossbeam-channel@0.5.15, crossbeam-deque@0.8.6, crossbeam-epoch@0.9.20, crossbeam-utils@0.8.21, curve25519-dalek-derive@0.1.1, dbus-secret-service@4.1.0, displaydoc@0.2.5, either@1.15.0, equivalent@1.0.2, errno@0.3.14, euclid@0.22.14, event-listener@5.4.1, event-listener-strategy@0.5.4, fastrand@2.3.0, filetime@0.2.29, find-msvc-tools@0.1.14, flate2@1.1.5, fnv@1.0.7, form_urlencoded@1.2.2, futures-lite@2.6.1, futures-timer@3.0.3, gethostname@1.1.0, gif@0.14.1, glob@0.3.3, global-hotkey@0.8.0, hashbrown@0.12.3, hashbrown@0.15.5, hashbrown@0.17.1, heck@0.4.1, heck@0.5.0, hermit-abi@0.5.2, html5ever@0.39.0, httparse@1.10.1, hyper-rustls@0.27.7, id-arena@2.3.0, idna@1.1.0, idna_adapter@1.2.1, indexmap@1.9.3, indexmap@2.14.0, jni@0.21.1, jobserver@0.1.34, jpeg-decoder@0.3.2, js-sys@0.3.91, keyboard-types@0.7.0, keyboard-types@0.8.3, lazy_static@1.5.0, leb128fmt@0.1.0, libappindicator@0.9.0, linux-raw-sys@0.12.1, lock_api@0.4.14, log@0.4.32, markup5ever@0.39.0, mime@0.3.17, muda@0.20.0, num@0.4.3, num-bigint@0.4.6, num-complex@0.4.6, num-integer@0.1.46, num-iter@0.1.45, num-rational@0.4.2, num-traits@0.2.19, once_cell@1.21.3, openssl-probe@0.1.6, ordered-stream@0.2.0, parking@2.2.1, parking_lot@0.12.5, parking_lot_core@0.9.12, percent-encoding@2.3.2, piper@0.2.4, pkg-config@0.3.32, png@0.17.16, png@0.18.0, polling@3.11.0, pollster@0.4.0, rayon@1.12.0, rayon-core@1.13.0, regex@1.12.4, regex-automata@0.4.13, regex-syntax@0.8.11, roxmltree@0.20.0, rustc_version@0.4.1, rustix@1.1.4, rustls@0.23.37, rustls-native-certs@0.8.2, scoped-tls@1.0.1, scopeguard@1.2.0, secret-service@4.0.0, security-framework@2.11.1, security-framework@3.5.1, security-framework-sys@2.15.0, serde_with@3.22.0, serde_with_macros@3.22.0, servo_arc@0.4.3, signal-hook-registry@1.4.8, smallvec@1.15.1, socket2@0.6.4, stable_deref_trait@1.2.1, string_cache@0.9.0, string_cache_codegen@0.6.1, syn@1.0.109, system-deps@6.2.2, tao-macros@0.1.4, tar@0.4.46, tempfile@3.27.0, tendril@0.5.0, thread_local@1.1.9, toml_datetime@0.6.3, tray-icon@0.25.1, ttf-parser@0.25.1, tungstenite@0.30.0, unicase@2.8.1, unicode-bidi@0.3.18, unicode-bidi-mirroring@0.4.0, unicode-ccc@0.4.0, unicode-normalization@0.1.25, unicode-properties@0.1.4, unicode-segmentation@1.12.0, unicode-xid@0.2.6, url@2.5.8, uuid@1.23.1, value-bag@1.12.0, vcpkg@0.2.15, version_check@0.9.5, wasi@0.11.1+wasi-snapshot-preview1, wasm-bindgen@0.2.114, wasm-bindgen-futures@0.4.64, wasm-bindgen-macro@0.2.114, wasm-bindgen-macro-support@0.2.114, wasm-bindgen-shared@0.2.114, web_atoms@0.2.3, web-sys@0.3.91, weezl@0.1.10, weezl@0.2.1, window-vibrancy@0.8.1, wit-bindgen@0.46.0, wit-bindgen@0.51.0, wit-bindgen-core@0.51.0, wit-bindgen-rust@0.51.0, wit-bindgen-rust-macro@0.51.0, wry@0.57.0, xattr@1.6.1
 
 ```text
 Apache License
@@ -3880,6 +3979,39 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
+### <a id="text-79697635de72"></a>79697635de72
+
+Used by: base64ct@1.8.3
+
+```text
+Copyright (c) 2014 Steve "Sc00bz" Thomas (steve at tobtu dot com)
+Copyright (c) 2021-2025 The RustCrypto Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
 ### <a id="text-7e1b38c60796"></a>7e1b38c60796
 
 Used by: bit-set@0.8.0, bit-vec@0.8.0, cfg-expr@0.15.8, downcast-rs@1.2.1, hashlink@0.10.0, minimal-lexical@0.2.1, shared_library@0.1.9
@@ -4126,6 +4258,39 @@ Used by: bitflags@1.3.2, bitflags@2.13.0, glob@0.3.3, log@0.4.32, num@0.4.3, num
 
 ```text
 Copyright (c) 2014 The Rust Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+### <a id="text-fa3da53430ea"></a>fa3da53430ea
+
+Used by: blake2@0.10.6
+
+```text
+Copyright (c) 2015-2016 The blake2-rfc Developers, Cesar Barros
+Copyright (c) 2017 Artyom Pavlov
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -5250,7 +5415,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-f3bd9e2e7745"></a>f3bd9e2e7745
 
-Used by: cbc@0.1.2, cbc@0.2.0
+Used by: cbc@0.1.2, cbc@0.2.0, ctr@0.9.2
 
 ```text
 Copyright (c) 2018-2022 RustCrypto Developers
@@ -5283,7 +5448,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-84e1bbfebd74"></a>84e1bbfebd74
 
-Used by: cc@1.2.48, cfg-if@1.0.4, cmake@0.1.54, find-msvc-tools@0.1.14, futures-timer@3.0.3, id-arena@2.3.0, jobserver@0.1.34, js-sys@0.3.91, openssl-probe@0.1.6, pkg-config@0.3.32, scoped-tls@1.0.1, socket2@0.6.4, toml_datetime@0.6.3, wasm-bindgen@0.2.114, wasm-bindgen-futures@0.4.64, wasm-bindgen-macro@0.2.114, wasm-bindgen-macro-support@0.2.114, wasm-bindgen-shared@0.2.114, web-sys@0.3.91
+Used by: cc@1.2.48, cfg-if@1.0.4, cmake@0.1.54, filetime@0.2.29, find-msvc-tools@0.1.14, futures-timer@3.0.3, id-arena@2.3.0, jobserver@0.1.34, js-sys@0.3.91, openssl-probe@0.1.6, pkg-config@0.3.32, scoped-tls@1.0.1, socket2@0.6.4, toml_datetime@0.6.3, wasm-bindgen@0.2.114, wasm-bindgen-futures@0.4.64, wasm-bindgen-macro@0.2.114, wasm-bindgen-macro-support@0.2.114, wasm-bindgen-shared@0.2.114, web-sys@0.3.91
 
 ```text
 Copyright (c) 2014 Alex Crichton
@@ -5363,6 +5528,70 @@ Used by: cfg-expr@0.15.8
 
 ```text
 Copyright (c) 2019 Embark Studios
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+### <a id="text-282b5e566e85"></a>282b5e566e85
+
+Used by: chacha20@0.9.1
+
+```text
+Copyright (c) 2019-2023 The RustCrypto Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+### <a id="text-1038b7737a0a"></a>1038b7737a0a
+
+Used by: chacha20@0.10.2
+
+```text
+Copyright (c) 2019-2026 The RustCrypto Project Developers
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -5753,6 +5982,38 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+```
+
+### <a id="text-045a1c4f9aa0"></a>045a1c4f9aa0
+
+Used by: const-oid@0.9.6
+
+```text
+Copyright (c) 2020-2022 The RustCrypto Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ```
 
 ### <a id="text-ea753cf1e3ec"></a>ea753cf1e3ec
@@ -7348,6 +7609,78 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+### <a id="text-82771e440a23"></a>82771e440a23
+
+Used by: curve25519-dalek@4.1.3
+
+```text
+Copyright (c) 2016-2021 isis agora lovecruft. All rights reserved.
+Copyright (c) 2016-2021 Henry de Valence. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+1. Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright
+notice, this list of conditions and the following disclaimer in the
+documentation and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. 
+
+========================================================================
+
+Portions of curve25519-dalek were originally derived from Adam Langley's
+Go ed25519 implementation, found at <https://github.com/agl/ed25519/>,
+under the following licence:
+
+========================================================================
+
+Copyright (c) 2012 The Go Authors. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * Neither the name of Google Inc. nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
+OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
 ### <a id="text-cc8f3c8ab396"></a>cc8f3c8ab396
 
 Used by: darling@0.20.11, darling@0.23.0, darling_core@0.20.11, darling_core@0.23.0, darling_macro@0.20.11, darling_macro@0.23.0
@@ -7356,6 +7689,35 @@ Used by: darling@0.20.11, darling@0.23.0, darling_core@0.20.11, darling_core@0.2
 MIT License
 
 Copyright (c) 2017 Ted Driggs
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### <a id="text-9db9de9edfd0"></a>9db9de9edfd0
+
+Used by: data-encoding@2.11.1
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2015-2020 Julien Cretin
+Copyright (c) 2017-2020 Google Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -7616,6 +7978,38 @@ Used by: dbus-secret-service@4.1.0, secret-service@4.0.0
 
 ```text
 Copyright (c) 2016 secret-service Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+### <a id="text-6b118915d98a"></a>6b118915d98a
+
+Used by: der@0.7.10, pkcs8@0.10.2
+
+```text
+Copyright (c) 2020-2023 The RustCrypto Project Developers
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -8838,6 +9232,281 @@ Exhibit B - "Incompatible With Secondary Licenses" Notice
 
   This Source Code Form is "Incompatible With Secondary Licenses", as
   defined by the Mozilla Public License, v. 2.0.
+```
+
+### <a id="text-f330b45715b8"></a>f330b45715b8
+
+Used by: ed25519@2.2.3
+
+```text
+Apache License
+                        Version 2.0, January 2004
+                     http://www.apache.org/licenses/
+
+TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+1. Definitions.
+
+   "License" shall mean the terms and conditions for use, reproduction,
+   and distribution as defined by Sections 1 through 9 of this document.
+
+   "Licensor" shall mean the copyright owner or entity authorized by
+   the copyright owner that is granting the License.
+
+   "Legal Entity" shall mean the union of the acting entity and all
+   other entities that control, are controlled by, or are under common
+   control with that entity. For the purposes of this definition,
+   "control" means (i) the power, direct or indirect, to cause the
+   direction or management of such entity, whether by contract or
+   otherwise, or (ii) ownership of fifty percent (50%) or more of the
+   outstanding shares, or (iii) beneficial ownership of such entity.
+
+   "You" (or "Your") shall mean an individual or Legal Entity
+   exercising permissions granted by this License.
+
+   "Source" form shall mean the preferred form for making modifications,
+   including but not limited to software source code, documentation
+   source, and configuration files.
+
+   "Object" form shall mean any form resulting from mechanical
+   transformation or translation of a Source form, including but
+   not limited to compiled object code, generated documentation,
+   and conversions to other media types.
+
+   "Work" shall mean the work of authorship, whether in Source or
+   Object form, made available under the License, as indicated by a
+   copyright notice that is included in or attached to the work
+   (an example is provided in the Appendix below).
+
+   "Derivative Works" shall mean any work, whether in Source or Object
+   form, that is based on (or derived from) the Work and for which the
+   editorial revisions, annotations, elaborations, or other modifications
+   represent, as a whole, an original work of authorship. For the purposes
+   of this License, Derivative Works shall not include works that remain
+   separable from, or merely link (or bind by name) to the interfaces of,
+   the Work and Derivative Works thereof.
+
+   "Contribution" shall mean any work of authorship, including
+   the original version of the Work and any modifications or additions
+   to that Work or Derivative Works thereof, that is intentionally
+   submitted to Licensor for inclusion in the Work by the copyright owner
+   or by an individual or Legal Entity authorized to submit on behalf of
+   the copyright owner. For the purposes of this definition, "submitted"
+   means any form of electronic, verbal, or written communication sent
+   to the Licensor or its representatives, including but not limited to
+   communication on electronic mailing lists, source code control systems,
+   and issue tracking systems that are managed by, or on behalf of, the
+   Licensor for the purpose of discussing and improving the Work, but
+   excluding communication that is conspicuously marked or otherwise
+   designated in writing by the copyright owner as "Not a Contribution."
+
+   "Contributor" shall mean Licensor and any individual or Legal Entity
+   on behalf of whom a Contribution has been received by Licensor and
+   subsequently incorporated within the Work.
+
+2. Grant of Copyright License. Subject to the terms and conditions of
+   this License, each Contributor hereby grants to You a perpetual,
+   worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+   copyright license to reproduce, prepare Derivative Works of,
+   publicly display, publicly perform, sublicense, and distribute the
+   Work and such Derivative Works in Source or Object form.
+
+3. Grant of Patent License. Subject to the terms and conditions of
+   this License, each Contributor hereby grants to You a perpetual,
+   worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+   (except as stated in this section) patent license to make, have made,
+   use, offer to sell, sell, import, and otherwise transfer the Work,
+   where such license applies only to those patent claims licensable
+   by such Contributor that are necessarily infringed by their
+   Contribution(s) alone or by combination of their Contribution(s)
+   with the Work to which such Contribution(s) was submitted. If You
+   institute patent litigation against any entity (including a
+   cross-claim or counterclaim in a lawsuit) alleging that the Work
+   or a Contribution incorporated within the Work constitutes direct
+   or contributory patent infringement, then any patent licenses
+   granted to You under this License for that Work shall terminate
+   as of the date such litigation is filed.
+
+4. Redistribution. You may reproduce and distribute copies of the
+   Work or Derivative Works thereof in any medium, with or without
+   modifications, and in Source or Object form, provided that You
+   meet the following conditions:
+
+   (a) You must give any other recipients of the Work or
+       Derivative Works a copy of this License; and
+
+   (b) You must cause any modified files to carry prominent notices
+       stating that You changed the files; and
+
+   (c) You must retain, in the Source form of any Derivative Works
+       that You distribute, all copyright, patent, trademark, and
+       attribution notices from the Source form of the Work,
+       excluding those notices that do not pertain to any part of
+       the Derivative Works; and
+
+   (d) If the Work includes a "NOTICE" text file as part of its
+       distribution, then any Derivative Works that You distribute must
+       include a readable copy of the attribution notices contained
+       within such NOTICE file, excluding those notices that do not
+       pertain to any part of the Derivative Works, in at least one
+       of the following places: within a NOTICE text file distributed
+       as part of the Derivative Works; within the Source form or
+       documentation, if provided along with the Derivative Works; or,
+       within a display generated by the Derivative Works, if and
+       wherever such third-party notices normally appear. The contents
+       of the NOTICE file are for informational purposes only and
+       do not modify the License. You may add Your own attribution
+       notices within Derivative Works that You distribute, alongside
+       or as an addendum to the NOTICE text from the Work, provided
+       that such additional attribution notices cannot be construed
+       as modifying the License.
+
+   You may add Your own copyright statement to Your modifications and
+   may provide additional or different license terms and conditions
+   for use, reproduction, or distribution of Your modifications, or
+   for any such Derivative Works as a whole, provided Your use,
+   reproduction, and distribution of the Work otherwise complies with
+   the conditions stated in this License.
+
+5. Submission of Contributions. Unless You explicitly state otherwise,
+   any Contribution intentionally submitted for inclusion in the Work
+   by You to the Licensor shall be under the terms and conditions of
+   this License, without any additional terms or conditions.
+   Notwithstanding the above, nothing herein shall supersede or modify
+   the terms of any separate license agreement you may have executed
+   with Licensor regarding such Contributions.
+
+6. Trademarks. This License does not grant permission to use the trade
+   names, trademarks, service marks, or product names of the Licensor,
+   except as required for reasonable and customary use in describing the
+   origin of the Work and reproducing the content of the NOTICE file.
+
+7. Disclaimer of Warranty. Unless required by applicable law or
+   agreed to in writing, Licensor provides the Work (and each
+   Contributor provides its Contributions) on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+   implied, including, without limitation, any warranties or conditions
+   of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+   PARTICULAR PURPOSE. You are solely responsible for determining the
+   appropriateness of using or redistributing the Work and assume any
+   risks associated with Your exercise of permissions under this License.
+
+8. Limitation of Liability. In no event and under no legal theory,
+   whether in tort (including negligence), contract, or otherwise,
+   unless required by applicable law (such as deliberate and grossly
+   negligent acts) or agreed to in writing, shall any Contributor be
+   liable to You for damages, including any direct, indirect, special,
+   incidental, or consequential damages of any character arising as a
+   result of this License or out of the use or inability to use the
+   Work (including but not limited to damages for loss of goodwill,
+   work stoppage, computer failure or malfunction, or any and all
+   other commercial damages or losses), even if such Contributor
+   has been advised of the possibility of such damages.
+
+9. Accepting Warranty or Additional Liability. While redistributing
+   the Work or Derivative Works thereof, You may choose to offer,
+   and charge a fee for, acceptance of support, warranty, indemnity,
+   or other liability obligations and/or rights consistent with this
+   License. However, in accepting such obligations, You may act only
+   on Your own behalf and on Your sole responsibility, not on behalf
+   of any other Contributor, and only if You agree to indemnify,
+   defend, and hold each Contributor harmless for any liability
+   incurred by, or claims asserted against, such Contributor by reason
+   of your accepting any such warranty or additional liability.
+
+END OF TERMS AND CONDITIONS
+
+APPENDIX: How to apply the Apache License to your work.
+
+   To apply the Apache License to your work, attach the following
+   boilerplate notice, with the fields enclosed by brackets "[]"
+   replaced with your own identifying information. (Don't include
+   the brackets!)  The text should be enclosed in the appropriate
+   comment syntax for the file format. We also recommend that a
+   file or class name and description of purpose be included on the
+   same "printed page" as the copyright notice for easier
+   identification within third-party archives.
+
+Copyright 2018-2022 RustCrypto Developers
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+### <a id="text-7d9f551458e8"></a>7d9f551458e8
+
+Used by: ed25519@2.2.3, signature@2.2.0
+
+```text
+Copyright (c) 2018-2023 RustCrypto Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+### <a id="text-d2778eb7f5d0"></a>d2778eb7f5d0
+
+Used by: ed25519-dalek@2.2.0
+
+```text
+Copyright (c) 2017-2019 isis agora lovecruft. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+1. Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright
+notice, this list of conditions and the following disclaimer in the
+documentation and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 ### <a id="text-fdd1c2117bcf"></a>fdd1c2117bcf
@@ -10190,6 +10859,86 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
+### <a id="text-f1954d2b51ee"></a>f1954d2b51ee
+
+Used by: fiat-crypto@0.2.9
+
+```text
+The Apache License, Version 2.0 (Apache-2.0)
+
+Copyright 2015-2020 the fiat-crypto authors (see the AUTHORS file)
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+### <a id="text-cb320ccefaa5"></a>cb320ccefaa5
+
+Used by: fiat-crypto@0.2.9
+
+```text
+The BSD 1-Clause License (BSD-1-Clause)
+
+Copyright (c) 2015-2020 the fiat-crypto authors (see the AUTHORS file)
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+    1. Redistributions of source code must retain the above copyright
+       notice, this list of conditions and the following disclaimer.
+
+THIS SOFTWARE IS PROVIDED BY the fiat-crypto authors "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL Berkeley Software Design,
+Inc. BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### <a id="text-5abb4b606ff4"></a>5abb4b606ff4
+
+Used by: fiat-crypto@0.2.9
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2015-2020 the fiat-crypto authors (see the AUTHORS file).
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ### <a id="text-f4bc3f3c5bfd"></a>f4bc3f3c5bfd
 
 Used by: field-offset@0.3.6
@@ -11135,6 +11884,38 @@ Used by: getrandom@0.4.1
 ```text
 Copyright (c) 2018-2026 The rust-random Project Developers
 Copyright (c) 2014 The Rust Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+### <a id="text-fc15b628f1c4"></a>fc15b628f1c4
+
+Used by: ghash@0.5.1
+
+```text
+Copyright (c) 2019 RustCrypto Developers
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -14358,7 +15139,7 @@ SOFTWARE.
 
 ### <a id="text-535a6aa345e8"></a>535a6aa345e8
 
-Used by: md-5@0.11.0, sha2@0.11.0
+Used by: md-5@0.11.0, sha1@0.11.0, sha2@0.11.0
 
 ```text
 Copyright (c) 2016-2026 The RustCrypto Project Developers
@@ -15606,6 +16387,38 @@ respective licenses are listed in the dependency manifests (Cargo.toml /
 Cargo.lock and the per-binding package manifests).
 ```
 
+### <a id="text-7873dbb4b866"></a>7873dbb4b866
+
+Used by: opaque-debug@0.3.1
+
+```text
+Copyright (c) 2018-2024 The RustCrypto Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
 ### <a id="text-c3ca23514163"></a>c3ca23514163
 
 Used by: open@5.4.4
@@ -16397,6 +17210,70 @@ Used by: pollster@0.4.0
 
 ```text
 Copyright (c) 2020-2021 Joshua Barretto
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+### <a id="text-e827371937a1"></a>e827371937a1
+
+Used by: poly1305@0.8.0
+
+```text
+Copyright (c) 2015-2019 RustCrypto Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+### <a id="text-3dad7b797447"></a>3dad7b797447
+
+Used by: polyval@0.6.2
+
+```text
+Copyright (c) 2019-2023 RustCrypto Developers
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -17233,7 +18110,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### <a id="text-fee4d7ce394c"></a>fee4d7ce394c
 
-Used by: rand@0.8.5, rand@0.9.5, rand_chacha@0.9.0
+Used by: rand@0.8.5, rand@0.9.5, rand@0.10.3, rand_chacha@0.9.0, snow@0.10.0
 
 ```text
 Apache License
@@ -17416,7 +18293,7 @@ END OF TERMS AND CONDITIONS
 
 ### <a id="text-cc367a7134c2"></a>cc367a7134c2
 
-Used by: rand@0.8.5, rand@0.9.5, rand_chacha@0.3.1, rand_chacha@0.9.0, rand_core@0.6.4, rand_core@0.9.3
+Used by: rand@0.8.5, rand@0.9.5, rand@0.10.3, rand_chacha@0.3.1, rand_chacha@0.9.0, rand_core@0.6.4, rand_core@0.9.3
 
 ```text
 Copyright 2018 Developers of the Rand project
@@ -17449,7 +18326,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-179c83ef07a5"></a>179c83ef07a5
 
-Used by: rand_core@0.6.4, rand_core@0.9.3
+Used by: rand_core@0.6.4, rand_core@0.9.3, rand_core@0.10.1
 
 ```text
 Apache License
@@ -17639,6 +18516,38 @@ APPENDIX: How to apply the Apache License to your work.
    file or class name and description of purpose be included on the
    same "printed page" as the copyright notice for easier
    identification within third-party archives.
+```
+
+### <a id="text-704f0e5f1c84"></a>704f0e5f1c84
+
+Used by: rand_core@0.10.1
+
+```text
+Copyright (c) 2018-2026 The Rand Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ```
 
 ### <a id="text-aa69fda6dd94"></a>aa69fda6dd94
@@ -19594,6 +20503,34 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
+### <a id="text-32a5b6b5bbee"></a>32a5b6b5bbee
+
+Used by: snow@0.10.0
+
+```text
+MIT License
+
+Copyright (c) 2021 Jake McGinty
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ### <a id="text-1fc3bc7f4a1b"></a>1fc3bc7f4a1b
 
 Used by: softbuffer@0.4.8
@@ -19826,6 +20763,66 @@ THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+### <a id="text-45d70a9a0114"></a>45d70a9a0114
+
+Used by: spake2@0.4.0
+
+```text
+MIT License
+
+Copyright (c) 2017-2023 Brian Warner
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### <a id="text-07ce2f16212b"></a>07ce2f16212b
+
+Used by: spki@0.7.3
+
+```text
+Copyright (c) 2021-2023 The RustCrypto Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ```
 
 ### <a id="text-5e05b024f653"></a>5e05b024f653
@@ -20941,6 +21938,38 @@ PackageDownloadLocation: git+ssh://github.com/tauri-apps/tao.git
 Creator: Person: Daniel Thompson-Yvetot
 ```
 
+### <a id="text-e6e853531994"></a>e6e853531994
+
+Used by: tar@0.4.46
+
+```text
+Copyright (c) The tar-rs Project Contributors
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
 ### <a id="text-89ff9689dcf9"></a>89ff9689dcf9
 
 Used by: tauri@2.12.4, tauri-build@2.7.3, tauri-codegen@2.7.3, tauri-macros@2.7.3, tauri-plugin-dialog@2.8.3, tauri-plugin-fs@2.7.1, tauri-plugin-global-shortcut@2.4.1, tauri-plugin-notification@2.7.0, tauri-plugin-opener@2.7.2, tauri-runtime@2.12.2, tauri-runtime-wry@2.12.2, tauri-utils@2.10.2, tauri-winrt-notification@0.8.1, @tauri-apps/api@2.12.4
@@ -21059,7 +22088,7 @@ Creator: Person: Daniel Thompson-Yvetot
 
 ### <a id="text-7bdd5c5e8ad0"></a>7bdd5c5e8ad0
 
-Used by: tempfile@3.27.0
+Used by: tempfile@3.27.0, xattr@1.6.1
 
 ```text
 Copyright (c) 2015 Steven Allen
@@ -21771,6 +22800,33 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
+### <a id="text-5c07409e7457"></a>5c07409e7457
+
+Used by: tokio-tungstenite@0.30.0
+
+```text
+Copyright (c) 2017 Daniel Abramov
+Copyright (c) 2017 Alexey Galakhov
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
 ### <a id="text-9b689eac99cd"></a>9b689eac99cd
 
 Used by: toml_datetime@1.1.2+spec-1.1.0
@@ -22134,6 +23190,33 @@ Used by: ttf-parser@0.25.1
 
 ```text
 Copyright (c) 2018 Yevhenii Reizner
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
+### <a id="text-a69edb2155ca"></a>a69edb2155ca
+
+Used by: tungstenite@0.30.0
+
+```text
+Copyright (c) 2017 Alexey Galakhov
+Copyright (c) 2016 Jason Housley
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -22714,6 +23797,38 @@ Used by: unicode-script@0.5.8
 MIT License
 
 Copyright (c) 2019 Manish Goregaokar
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+### <a id="text-7cfd98aeed13"></a>7cfd98aeed13
+
+Used by: universal-hash@0.5.1
+
+```text
+Copyright (c) 2019-2020 RustCrypto Developers
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated

@@ -20,6 +20,8 @@ import {
   type Provider,
   type UsageView,
   type Preferences,
+  type MeshStatus,
+  type MeshChatEvent,
   defaultPreferences,
 } from "./ipc";
 
@@ -67,6 +69,8 @@ export interface ChatStream {
   status: string | null;
   error: string | null;
   running: boolean;
+  /** Name of the mesh node streaming it, when that isn't this one. */
+  remote?: string | null;
 }
 
 const emptyCode = (): CodeState => ({
@@ -226,6 +230,31 @@ interface Store {
   setCodeUsage: (id: string, usage: UsageView) => void;
   applyCodeEvent: (id: string, e: CodeEvent) => void;
   patchChatStream: (convId: string, patch: Partial<ChatStream> | ((s: ChatStream) => Partial<ChatStream>)) => void;
+  /** This node's mesh state (null until loaded). */
+  mesh: MeshStatus | null;
+  refreshMesh: () => Promise<void>;
+  /** Bumped when another node's changes land, so open views reload. */
+  syncRev: number;
+  onSynced: (tables: string[]) => void;
+  applyMeshChat: (p: MeshChatEvent) => void;
+  /** Show a session that is already running (here, or on another node) without restarting it. */
+  attachAgent: (id: string) => Promise<void>;
+}
+
+/** The node running a session's agent, when that isn't this one. */
+export function remoteHost(s: CodeSession | null | undefined, mesh: MeshStatus | null): string | null {
+  if (!s?.hostNode || !mesh || s.hostNode === mesh.nodeId) return null;
+  return s.hostNode;
+}
+
+export function memberName(mesh: MeshStatus | null, nodeId: string | null | undefined): string {
+  if (!nodeId) return "";
+  return mesh?.members.find((m) => m.nodeId === nodeId)?.name ?? nodeId.slice(0, 8);
+}
+
+export function memberOnline(mesh: MeshStatus | null, nodeId: string | null | undefined): boolean {
+  const st = mesh?.members.find((m) => m.nodeId === nodeId)?.state;
+  return st === "direct" || st === "relay" || st === "self";
 }
 
 const emptyStream = (): ChatStream => ({
@@ -552,6 +581,15 @@ export const useStore = create<Store>((set, get) => ({
       case "usage":
         next = { ...s, usage: e.usage };
         break;
+      case "userPrompt":
+        // The window that sent it already shows it.
+        if (e.origin === get().mesh?.nodeId) return;
+        next = {
+          ...s,
+          busy: true,
+          entries: [...s.entries, { kind: "user", text: e.text, attachments: e.attachments?.length ? e.attachments : undefined }],
+        };
+        break;
     }
     set((st) => ({ code: { ...st.code, [id]: next } }));
     if (e.type === "promptDone" || e.type === "permissionResolved") get().restartStaleAgents();
@@ -563,6 +601,90 @@ export const useStore = create<Store>((set, get) => ({
       const p = typeof patch === "function" ? patch(cur) : patch;
       return { chatStreams: { ...st.chatStreams, [convId]: { ...cur, ...p } } };
     }),
+
+  mesh: null,
+  refreshMesh: async () => {
+    try {
+      set({ mesh: await api.meshStatus() });
+    } catch {
+      /* older backend */
+    }
+  },
+  syncRev: 0,
+  onSynced: (tables) => {
+    set((st) => ({ syncRev: st.syncRev + 1 }));
+    const has = (...t: string[]) => t.some((x) => tables.includes(x));
+    if (has("conversations", "messages")) get().refreshConversations().catch(() => {});
+    if (has("code_sessions")) get().refreshCodeSessions().catch(() => {});
+    if (has("providers", "models", "mesh_secrets")) get().refreshCatalog().catch(() => {});
+    if (has("mesh_members")) get().refreshMesh();
+  },
+  applyMeshChat: (p) => {
+    if (p.streamer === get().mesh?.nodeId) return;
+    const e = p.event;
+    const conv = p.conversationId;
+    const patch = get().patchChatStream;
+    switch (e.type) {
+      case "started":
+      case "snapshot":
+        patch(conv, {
+          assistantId: e.assistantMessageId,
+          text: e.type === "snapshot" ? e.text : "",
+          reasoning: e.type === "snapshot" ? e.reasoning : "",
+          status: null,
+          error: null,
+          running: true,
+          remote: p.streamerName,
+        });
+        break;
+      case "text":
+        patch(conv, (s) => ({ text: s.text + e.text, status: null }));
+        break;
+      case "reasoning":
+        patch(conv, (s) => ({ reasoning: s.reasoning + e.text }));
+        break;
+      case "status":
+        patch(conv, { status: e.message });
+        break;
+      case "error":
+        patch(conv, { error: e.message, running: false });
+        break;
+      case "done":
+        patch(conv, { running: false });
+        // The finished reply arrives through sync a moment later.
+        setTimeout(() => get().onSynced(["messages"]), 400);
+        break;
+    }
+  },
+  attachAgent: async (id) => {
+    const history = await loadTranscript(id);
+    let info;
+    try {
+      info = await api.codeAttach(id);
+    } catch (e) {
+      set((st) => ({ code: { ...st.code, [id]: { ...emptyCode(), history, status: "exited" } } }));
+      get().applyCodeEvent(id, { type: "error", message: errorText(e) });
+      return;
+    }
+    if (!info.running) {
+      if (info.offline) {
+        set((st) => ({ code: { ...st.code, [id]: { ...emptyCode(), history, status: "exited" } } }));
+        return;
+      }
+      await get().startAgent(id);
+      return;
+    }
+    const rev = get().agentConfigRev;
+    set((st) => ({ code: { ...st.code, [id]: { ...emptyCode(), configRev: rev, history, status: "ready", busy: info.busy } } }));
+    for (const e of info.events) get().applyCodeEvent(id, e);
+    // A replayed "ready" counts as loaded, so the cached transcript becomes the session's.
+    const cur = get().code[id];
+    if (cur?.history && cur.entries.length === 0) {
+      set((st) => ({
+        code: { ...st.code, [id]: { ...cur, entries: cur.history!.entries, toolCalls: cur.history!.toolCalls, history: null } },
+      }));
+    }
+  },
 }));
 
 function notifyCode(id: string, what: string) {

@@ -37,6 +37,14 @@ Patchbay is a desktop app in the style of Claude Desktop. Bring your own provide
 - A tray icon, notifications when a reply finishes in the background, and an optional global shortcut for quick questions.
 - **Settings → Usage** shows what you've spent and how many tokens you've used, per day and per model.
 
+### Across your computers
+
+- Link your computers into a **mesh** (Settings → Mesh). Chats, Code sessions, prompts, providers and MCP servers sync between them live, API keys included, encrypted.
+- Drive a Code session running on another computer from this one, or move it over, uncommitted changes and all. If that computer goes offline, take the session over from its last checkpoint.
+- Computers connect directly over a network you already have, such as Tailscale, ZeroTier, a VPN or a Cloudflare Tunnel. No cloud service sits in the middle, and every new computer needs the mesh's passphrase plus your approval.
+
+See [docs/mesh.md](docs/mesh.md) for setup and details.
+
 ## Getting started
 
 1. Open **Settings** and add a provider. Presets cover OpenAI, Anthropic, OpenRouter, Ollama and LM Studio.

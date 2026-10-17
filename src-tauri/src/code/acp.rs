@@ -96,6 +96,13 @@ pub enum CodeEvent {
     Usage {
         usage: crate::usage::UsageView,
     },
+    /// A prompt was sent to the agent (from `origin`, a mesh node), so every viewer shows it.
+    #[serde(rename_all = "camelCase")]
+    UserPrompt {
+        text: String,
+        origin: String,
+        attachments: Value,
+    },
 }
 
 #[derive(Serialize, Clone, Debug)]
