@@ -2,7 +2,7 @@
 # submodule checked out):
 #   cd packaging/linux/arch && makepkg -si
 pkgname=patchbay
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Desktop LLM client with chat and a coding agent, for any provider"
 arch=(x86_64 aarch64)
