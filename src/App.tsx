@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, errorText, type CodeEnvelope, type Conversation, type MeshChatEvent } from "./lib/ipc";
-import { useStore, type Mode } from "./lib/store";
+import { codeEventArrived, useStore, type Mode } from "./lib/store";
 import { goBack, goForward, resetHistory, useHistory } from "./lib/history";
 import { initZoom, zoomIn, zoomOut, zoomReset } from "./lib/zoom";
 import { ChatView } from "./chat/ChatView";
@@ -17,7 +17,7 @@ import { ModelRing } from "./lib/cable";
 import { emitViewAction, focusComposer, focusSidebarSearch, isMac, isMod, keyLabel, ViewActive } from "./lib/shortcuts";
 import { ScrollFade } from "./lib/useStickyScroll";
 import { notifyInBackground } from "./lib/notify";
-import { useDragRegion } from "./components/WindowControls";
+import { useDragRegion, useRoundedWindow } from "./components/WindowControls";
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
@@ -564,6 +564,7 @@ export default function App() {
   } = st;
 
   useGlobalShortcuts();
+  useRoundedWindow();
   useEffect(() => initZoom(isMod), []);
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const drag = useDragRegion();
@@ -593,9 +594,7 @@ export default function App() {
       .catch((e) => setToast(errorText(e)));
     useStore.getState().refreshMesh();
     const unlisteners = [
-      listen<CodeEnvelope>("code://event", (ev) => {
-        useStore.getState().applyCodeEvent(ev.payload.codeSessionId, ev.payload.event);
-      }),
+      listen<CodeEnvelope>("code://event", (ev) => codeEventArrived(ev.payload)),
       // Mesh (see src-tauri/src/mesh): membership changes, other nodes' writes, live streams.
       listen("mesh://status", () => useStore.getState().refreshMesh()),
       listen<{ tables: string[] }>("mesh://changed", (ev) => useStore.getState().onSynced(ev.payload.tables)),

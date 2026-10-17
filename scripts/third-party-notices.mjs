@@ -1,12 +1,12 @@
 // Writes THIRD_PARTY_NOTICES.md: every Rust crate and production npm package
-// that Patchbay builds into the app, with their license texts. Crates in the
-// grok sidecar are listed by Grok Build itself (vendor/grok-build/THIRD-PARTY-NOTICES),
-// which release bundles ship next to this file.
+// that Patchbay builds into its apps (the desktop app and the phone app), with
+// their license texts. Crates in the grok sidecar are listed by Grok Build itself
+// (vendor/grok-build/THIRD-PARTY-NOTICES), which release bundles ship next to this file.
 //
 //   pnpm notices
 //
 // Rust crates come from Cargo.lock for every target platform, so one file
-// covers the Linux, Windows and macOS builds. Dev-dependencies are left out.
+// covers the Linux, Windows, macOS and Android builds. Dev-dependencies are left out.
 // Identical license texts are printed once, with the packages that use them.
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -27,27 +27,34 @@ function licenseFiles(dir) {
     .filter(Boolean);
 }
 
-// Rust: walk the resolve graph from patchbay through normal and build edges.
-const meta = JSON.parse(execFileSync('cargo', ['metadata', '--format-version', '1', '--locked'], {
-  cwd: join(root, 'src-tauri'),
-  encoding: 'utf8',
-  maxBuffer: 256 * 1024 * 1024,
-}));
-const byId = new Map(meta.packages.map((p) => [p.id, p]));
-const nodes = new Map(meta.resolve.nodes.map((n) => [n.id, n]));
-const rootId = meta.packages.find((p) => p.name === 'patchbay' && p.source === null).id;
-const seen = new Set([rootId]);
-const queue = [rootId];
-while (queue.length) {
-  for (const dep of nodes.get(queue.pop()).deps) {
-    if (seen.has(dep.pkg) || dep.dep_kinds.every((k) => k.kind === 'dev')) continue;
-    seen.add(dep.pkg);
-    queue.push(dep.pkg);
+// Rust: walk the resolve graph from each app (the desktop app, and the phone app in remote/)
+// through normal and build edges.
+function cratesOf(dir, rootName) {
+  const meta = JSON.parse(execFileSync('cargo', ['metadata', '--format-version', '1', '--locked'], {
+    cwd: join(root, dir),
+    encoding: 'utf8',
+    maxBuffer: 256 * 1024 * 1024,
+  }));
+  const byId = new Map(meta.packages.map((p) => [p.id, p]));
+  const nodes = new Map(meta.resolve.nodes.map((n) => [n.id, n]));
+  const rootId = meta.packages.find((p) => p.name === rootName && p.source === null).id;
+  const seen = new Set([rootId]);
+  const queue = [rootId];
+  while (queue.length) {
+    for (const dep of nodes.get(queue.pop()).deps) {
+      if (seen.has(dep.pkg) || dep.dep_kinds.every((k) => k.kind === 'dev')) continue;
+      seen.add(dep.pkg);
+      queue.push(dep.pkg);
+    }
   }
+  return [...seen].map((id) => byId.get(id));
 }
-const crates = [...seen]
-  .map((id) => byId.get(id))
-  // Path crates are patchbay itself and Grok Build's own crates (see NOTICE).
+const allCrates = new Map();
+for (const p of [...cratesOf('src-tauri', 'patchbay'), ...cratesOf('remote/src-tauri', 'patchbay-remote')]) {
+  allCrates.set(`${p.name}@${p.version}`, p);
+}
+const crates = [...allCrates.values()]
+  // Path crates are Patchbay's own and Grok Build's (see NOTICE).
   .filter((p) => p.source !== null)
   .map((p) => ({
     name: p.name,

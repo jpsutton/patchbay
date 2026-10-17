@@ -2,7 +2,9 @@
 # staging already ran the full build (build.yml), so this takes that run's
 # artifacts, signs every one (PATCHBAY_GPG_KEY), builds a signed pacman repo,
 # tags the release v<version> and creates a GitHub Release with the packages,
-# signatures and SHA256SUMS.
+# signatures and SHA256SUMS. The phone app's APK is signed with its own key
+# (PATCHBAY_APK_KEYSTORE) and published to the F-Droid repository on GitHub Pages
+# (PATCHBAY_FDROID_KEYSTORE); without those secrets the release goes out without it.
 #
 # Merge staging -> release pull requests with "Create a merge commit": the PR's
 # head is then the merge commit's second parent, which is what this looks up.
@@ -85,6 +87,34 @@ jobs:
           find dist -mindepth 1 -type d -empty -delete
           ls -la dist
 
+      # The phone app ships only signed, and always with the same key: Android refuses an
+      # update signed by another one. Best effort, like Windows and macOS.
+      - name: Sign the phone app
+        id: apk
+        env:
+          KEYSTORE: ${{ secrets.PATCHBAY_APK_KEYSTORE }}
+          KEYSTORE_PASS: ${{ secrets.PATCHBAY_APK_KEYSTORE_PASS }}
+        run: |
+          set -euo pipefail
+          if ! gh run download "${{ steps.build.outputs.run }}" -R "$GITHUB_REPOSITORY" -n patchbay-android -D android; then
+            echo "::warning::patchbay-android was not built; releasing without the phone app"
+            exit 0
+          fi
+          if [ -z "$KEYSTORE" ]; then
+            echo "::warning::PATCHBAY_APK_KEYSTORE is not set; releasing without the phone app"
+            exit 0
+          fi
+          unsigned=$(find android -name '*.apk' | head -n 1)
+          tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          printf '%s' "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/apk.p12"
+          out="dist/patchbay-remote-${{ steps.build.outputs.version }}-arm64.apk"
+          "$tools/zipalign" -p -f 4 "$unsigned" "$RUNNER_TEMP/aligned.apk"
+          "$tools/apksigner" sign --ks "$RUNNER_TEMP/apk.p12" --ks-type PKCS12 --ks-pass env:KEYSTORE_PASS \
+            --out "$out" "$RUNNER_TEMP/aligned.apk"
+          "$tools/apksigner" verify "$out"
+          rm -f "$RUNNER_TEMP/apk.p12" "$out.idsig"
+          echo "apk=$out" >> "$GITHUB_OUTPUT"
+
       - name: Sign (archlinux container)
         env:
           PATCHBAY_GPG_KEY: ${{ secrets.PATCHBAY_GPG_KEY }}
@@ -117,3 +147,19 @@ jobs:
           gh release create "v${{ steps.build.outputs.version }}" -R "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" --title "Patchbay ${{ steps.build.outputs.version }}" \
             --generate-notes "${assets[@]}"
+
+      # The self-hosted F-Droid repository on GitHub Pages (gh-pages branch, /fdroid).
+      - name: F-Droid repository
+        if: steps.apk.outputs.apk != ''
+        env:
+          PATCHBAY_FDROID_KEYSTORE: ${{ secrets.PATCHBAY_FDROID_KEYSTORE }}
+          PATCHBAY_FDROID_KEYSTORE_PASS: ${{ secrets.PATCHBAY_FDROID_KEYSTORE_PASS }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PATCHBAY_FDROID_KEYSTORE" ]; then
+            echo "::warning::PATCHBAY_FDROID_KEYSTORE is not set; the F-Droid repository was not updated"
+            exit 0
+          fi
+          # Ubuntu's fdroidserver (2.2) can't read current APKs.
+          pipx install fdroidserver==2.4.5
+          scripts/ci/fdroid-repo.sh "${{ steps.apk.outputs.apk }}"

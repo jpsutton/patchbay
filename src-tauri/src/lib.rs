@@ -4,6 +4,7 @@ mod code;
 mod db;
 mod desktop;
 mod files;
+mod gateway;
 mod handoff;
 mod mesh;
 mod prefs;
@@ -332,25 +333,26 @@ fn search_messages(state: State<'_, AppState>, query: String, limit: Option<usiz
     Ok(state.db.search_messages(&query, limit.unwrap_or(30).min(200))?)
 }
 
+/// Run one chat turn; `local` gets its progress (the asking window, or this window on a phone's
+/// behalf), and every other node gets it live through the mesh.
 fn spawn_chat(
-    state: &State<'_, AppState>,
+    state: &AppState,
     conversation_id: String,
     model_ref: String,
     turn: chat::Turn,
     reasoning_effort: Option<String>,
-    on_event: Channel<ChatEvent>,
+    local: chat::ChatSink,
 ) {
     let db = state.db.clone();
     let data_dir = state.data_dir.clone();
     let chat = state.chat.clone();
     let mesh = state.mesh.clone();
-    // Progress goes to the asking UI and, live, to every other node.
     let sink: chat::ChatSink = {
         let mesh = mesh.clone();
         let conv = conversation_id.clone();
         Arc::new(move |ev: ChatEvent| {
             mesh.chat_event(&conv, serde_json::to_value(&ev).unwrap_or_default());
-            let _ = on_event.send(ev);
+            local(ev);
         })
     };
     let emit = chat::Emit(sink);
@@ -383,8 +385,14 @@ fn send_chat_message(
 ) -> CmdResult<()> {
     let parent = parent_id.map(|p| Some(p).filter(|p| !p.is_empty()));
     let turn = chat::Turn::Message { text, attachment_ids, parent };
-    spawn_chat(&state, conversation_id, model_ref, turn, reasoning_effort, on_event);
+    spawn_chat(&state, conversation_id, model_ref, turn, reasoning_effort, channel_sink(on_event));
     Ok(())
+}
+
+fn channel_sink(ch: Channel<ChatEvent>) -> chat::ChatSink {
+    Arc::new(move |ev| {
+        let _ = ch.send(ev);
+    })
 }
 
 #[tauri::command]
@@ -397,7 +405,7 @@ fn regenerate_reply(
     on_event: Channel<ChatEvent>,
 ) -> CmdResult<()> {
     let turn = chat::Turn::Regenerate { user_message_id };
-    spawn_chat(&state, conversation_id, model_ref, turn, reasoning_effort, on_event);
+    spawn_chat(&state, conversation_id, model_ref, turn, reasoning_effort, channel_sink(on_event));
     Ok(())
 }
 
@@ -572,8 +580,8 @@ fn code_sink(state: &AppState) -> code::acp::Sink {
             let p = serde_json::json!({ "id": env.code_session_id, "host": mesh.node_id() });
             mesh.broadcast_event("mesh://checkpoint", p);
         }
-        let v = serde_json::to_value(&env).unwrap_or_default();
-        mesh.broadcast_event(code::acp::EVENT, v.clone());
+        // Stamped with its point, so phones and windows can resume from it.
+        let v = mesh.broadcast_event(code::acp::EVENT, serde_json::to_value(&env).unwrap_or_default());
         (state.emit)(code::acp::EVENT, v);
     })
 }
@@ -1050,7 +1058,9 @@ impl mesh::RpcHandler for MeshRpc {
                 let atts: Vec<String> = serde_json::from_value(p["attachmentIds"].clone()).unwrap_or_default();
                 let mentions: Vec<String> = serde_json::from_value(p["mentions"].clone()).unwrap_or_default();
                 let text = p["text"].as_str().unwrap_or_default().to_owned();
-                code_prompt_local(state, id()?, text, atts, mentions, from).await.map(|_| Value::Null)
+                // A gateway passing on a phone's prompt names the phone.
+                let origin = p["origin"].as_str().map(str::to_owned).unwrap_or(from);
+                code_prompt_local(state, id()?, text, atts, mentions, origin).await.map(|_| Value::Null)
             }
             "code.cancel" => {
                 ensure_local_host(state, &id()?)?;
@@ -1142,6 +1152,7 @@ impl mesh::RpcHandler for MeshRpc {
                 let note = import_local(state, &id()?, param(&p, "cwd")?).await?;
                 Ok(json!(note))
             }
+            m if m.starts_with("remote.") => gateway::call(state, &from, m, &p).await,
             other => anyhow::bail!("unknown request {other}"),
         }
     }

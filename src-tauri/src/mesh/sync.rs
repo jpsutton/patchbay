@@ -13,7 +13,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use anyhow::Result;
 use rusqlite::types::{Value as SqlValue, ValueRef};
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub struct Table {
@@ -90,6 +89,7 @@ pub const TABLES: &[Table] = &[
             "removed_by",
             "removed_at",
             "removed_sig",
+            "role",
         ],
     },
     Table { name: "mesh_secrets", pk: &["account"], cols: &["gen", "nonce", "ct", "digest"] },
@@ -105,25 +105,9 @@ pub const TOMBSTONE: &str = "-";
 /// Next local HLC: wall-clock milliseconds in the high bits, a counter in the low 16.
 const HLC_NEXT: &str = "max(hlc + 1, CAST(unixepoch('subsec') * 1000 AS INTEGER) * 65536)";
 
-/// One synced cell write (or a row delete when `c` is [`TOMBSTONE`]).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Op {
-    /// Table.
-    pub t: String,
-    /// Primary key: the value itself, or a JSON array for composite keys.
-    pub k: String,
-    /// Column.
-    pub c: String,
-    /// Value (null for tombstones).
-    #[serde(default)]
-    pub v: Value,
-    pub h: i64,
-    /// Origin node.
-    pub o: String,
-    pub s: i64,
-}
-
-pub type VersionVector = BTreeMap<String, i64>;
+/// One synced cell write (or a row delete when `c` is [`TOMBSTONE`]), and the highest change
+/// seq per origin.
+pub use patchbay_mesh::wire::{Op, VersionVector};
 
 fn pk_expr(t: &Table, row: &str) -> String {
     if t.pk.len() == 1 {

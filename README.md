@@ -42,6 +42,7 @@ Patchbay is a desktop app in the style of Claude Desktop. Bring your own provide
 - Link your computers into a **mesh** (Settings → Mesh). Chats, Code sessions, prompts, providers and MCP servers sync between them live, API keys included, encrypted.
 - Drive a Code session running on another computer from this one, or move it over, uncommitted changes and all. If that computer goes offline, take the session over from its last checkpoint.
 - Computers connect directly over a network you already have, such as Tailscale, ZeroTier, a VPN or a Cloudflare Tunnel. No cloud service sits in the middle, and every new computer needs the mesh's passphrase plus your approval.
+- **Patchbay Remote**, the Android app, follows and drives your computers' chats and Code sessions from your phone, without holding your API keys. Install it from Patchbay's own F-Droid repository.
 
 See [docs/mesh.md](docs/mesh.md) for setup and details.
 

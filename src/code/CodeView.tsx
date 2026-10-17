@@ -27,6 +27,7 @@ import { codeToJson, codeToMarkdown, saveExport } from "../lib/export";
 import { useViewAction } from "../lib/shortcuts";
 import { HeaderButton } from "../components/HeaderButton";
 import { useDragRegion, WindowControls } from "../components/WindowControls";
+import { isRemoteApp } from "../lib/platform";
 import {
   CheckIcon,
   ChevronRightIcon,
@@ -388,8 +389,10 @@ function ChangesPanel({ changes, cwd, onClose }: { changes: Diff[]; cwd: string;
   );
 }
 
-export function CodeView() {
+/** `leading`: something before the title (the phone app's back button). */
+export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const drag = useDragRegion();
+  const remote = isRemoteApp();
   const activeId = useStore((s) => s.activeCodeSessionId);
   const sessions = useStore((s) => s.codeSessions);
   const state = useStore((s) => (activeId ? s.code[activeId] : undefined));
@@ -591,13 +594,14 @@ export function CodeView() {
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
-      <header {...drag} className="flex h-12 shrink-0 items-center gap-1 border-b border-line pl-6 pr-3">
+      <header {...drag} className={`flex h-12 shrink-0 items-center gap-1 border-b border-line pr-3 ${leading ? "pl-1" : "pl-6"}`}>
+        {leading}
         <span className={`h-2 w-2 shrink-0 rounded-full ${dot}`} title={dotLabel} role="img" aria-label={`Agent ${dotLabel}`} />
         <div {...drag} className="mx-2.5 flex min-w-0 flex-1 items-baseline gap-2.5">
           <h1 {...drag} className="shrink truncate text-[15px] font-medium" style={{ minWidth: "4rem" }}>
             {session.title}
           </h1>
-          <span {...drag} className="min-w-0 flex-[1_1_0] truncate font-mono text-[12px] text-faint" title={session.cwd}>
+          <span {...drag} className={`min-w-0 flex-[1_1_0] truncate font-mono text-[12px] text-faint ${remote ? "hidden" : ""}`} title={session.cwd}>
             {session.cwd.replace(/^\/home\/[^/]+|^\/Users\/[^/]+/, "~")}
           </span>
           {session.agent !== "grok" && (
@@ -647,17 +651,19 @@ export function CodeView() {
           </ChipSelect>
         )}
         <div className="mx-1 h-5 w-px bg-line" />
-        <ExportMenu
-          disabled={!s || s.entries.length === 0}
-          onExport={(f) =>
-            s &&
-            saveExport(
-              session.title,
-              f,
-              f === "markdown" ? codeToMarkdown(session, s.entries, s.toolCalls) : codeToJson(session, s.entries, s.toolCalls),
-            )
-          }
-        />
+        {!remote && (
+          <ExportMenu
+            disabled={!s || s.entries.length === 0}
+            onExport={(f) =>
+              s &&
+              saveExport(
+                session.title,
+                f,
+                f === "markdown" ? codeToMarkdown(session, s.entries, s.toolCalls) : codeToJson(session, s.entries, s.toolCalls),
+              )
+            }
+          />
+        )}
         <HeaderButton
           label="Changes"
           active={showChanges}
@@ -666,22 +672,24 @@ export function CodeView() {
         >
           <FileDiffIcon />
         </HeaderButton>
-        {mesh?.member && mesh.members.filter((m) => m.state !== "removed").length > 1 && (
+        {!remote && mesh?.member && mesh.members.filter((m) => m.state !== "removed").length > 1 && (
           <HeaderButton label="Move to another computer" disabled={busy} onClick={() => setMoving("move")}>
             <MonitorUpIcon />
           </HeaderButton>
         )}
-        <HeaderButton
-          label={host ? `Terminal on ${memberName(mesh, host)}` : "Terminal"}
-          active={showTerm}
-          disabled={hostOffline}
-          onClick={() => {
-            setShowTerm(!showTerm);
-            setTermMounted((m) => ({ ...m, [session.id]: true }));
-          }}
-        >
-          <TerminalIcon />
-        </HeaderButton>
+        {!remote && (
+          <HeaderButton
+            label={host ? `Terminal on ${memberName(mesh, host)}` : "Terminal"}
+            active={showTerm}
+            disabled={hostOffline}
+            onClick={() => {
+              setShowTerm(!showTerm);
+              setTermMounted((m) => ({ ...m, [session.id]: true }));
+            }}
+          >
+            <TerminalIcon />
+          </HeaderButton>
+        )}
         <HeaderButton label="Restart the agent and reload this session" onClick={() => start(session.id)}>
           <RestartIcon />
         </HeaderButton>

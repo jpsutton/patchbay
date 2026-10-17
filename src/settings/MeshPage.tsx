@@ -40,6 +40,7 @@ function MemberRow({ m, onRemove }: { m: MeshMember; onRemove?: () => void }) {
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm">{m.name}</div>
         <div className="text-[12px] text-muted">
+          {m.role === "remote" && <span className="text-faint">Phone · </span>}
           {STATE_LABEL[m.state]}
           {detail && <span className="text-faint"> · {detail}</span>}
         </div>
@@ -221,9 +222,13 @@ function Member() {
           aria-label={`Join request from ${p.name}`}
         >
           <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium">{p.name} asks to join</div>
+            <div className="text-sm font-medium">
+              {p.name} asks to join{p.role === "remote" ? " as a phone" : ""}
+            </div>
             <div className="mt-0.5 text-[12px] leading-5 text-muted">
-              Approve only if {p.name} shows the same code. It will get all chats, sessions and API keys.
+              {p.role === "remote"
+                ? `Approve only if ${p.name} shows the same code. It can read every chat and session and run commands through their agents, but gets no API keys.`
+                : `Approve only if ${p.name} shows the same code. It will get all chats, sessions and API keys.`}
             </div>
           </div>
           <Code code={p.code} />
@@ -249,8 +254,10 @@ function Member() {
               const { ok } = await askConfirm({
                 title: `Remove ${m.name}?`,
                 body:
-                  `${m.name} is cut off from the mesh and gets no further changes. What it already synced stays on it, ` +
-                  "including API keys, so consider replacing those keys with your providers.",
+                  m.role === "remote"
+                    ? `${m.name} is cut off from the mesh. It never held API keys or a copy of your data.`
+                    : `${m.name} is cut off from the mesh and gets no further changes. What it already synced stays on it, ` +
+                      "including API keys, so consider replacing those keys with your providers.",
                 confirmLabel: "Remove",
                 danger: true,
               });

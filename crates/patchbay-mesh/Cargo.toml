@@ -1,0 +1,27 @@
+[package]
+name = "patchbay-mesh"
+version = "0.3.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Patchbay's mesh protocol: handshakes, wire messages, member records and the remote client"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+ed25519-dalek = "2"
+futures = "0.3"
+hex = "0.4.3"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+snow = "0.10.0"
+spake2 = "0.4.0"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "net"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

@@ -336,8 +336,43 @@ async function fakeRemoteStream() {
   ev({ type: "done", stopReason: "EndTurn", usage: null });
 }
 
+// ---- the phone app (remote.html): a phone connected through "studio"; `?join=1` starts unjoined ----
+
+const PHONE = "n-phone";
+const phoneApp = (window as { __PATCHBAY_REMOTE__?: boolean }).__PATCHBAY_REMOTE__ === true;
+const phone = {
+  nodeId: PHONE,
+  name: "pixel",
+  member: !new URLSearchParams(location.search).has("join"),
+  meshId: "demo-mesh" as string | null,
+  phase: "online",
+  error: null as string | null,
+  gateway: "n-studio",
+  gatewayName: "studio",
+  gatewayUrl: "ws://192.168.1.20:41890",
+  rttMs: 12,
+  resumed: true,
+  joining: null as { url: string; code: string | null; status: string; error: string | null } | null,
+  members: [] as MeshStatus["members"],
+};
+// A copy each time, as the real backend's JSON would be.
+const phoneChanged = () => emit("remote://status", structuredClone(phone));
+
+function phoneMesh() {
+  meshMember();
+  mesh.nodeId = PHONE;
+  mesh.name = phone.name;
+  mesh.members = [
+    { ...mesh.members[0], nodeId: PHONE, name: phone.name, state: "self", role: "remote" },
+    { ...mesh.members[0], nodeId: ME, name: "laptop", state: "relay" },
+    ...mesh.members.slice(1).map((m) => (m.nodeId === "n-studio" ? { ...m, state: "direct" as const } : m)),
+  ];
+  phone.members = mesh.members;
+}
+
 export function install() {
   mockWindows("main");
+  if (phoneApp) phoneMesh();
   // Seed one provider + model so the UI starts usable.
   const p: Provider = { id: "p1", name: "Demo provider", kind: "openai_chat", baseUrl: "http://localhost:8765/v1", hasKey: true };
   db.providers.push(p);
@@ -671,6 +706,27 @@ export function install() {
         }
         case "mesh_add_address": return null;
         case "mesh_chat_streams": return [];
+
+        case "remote_status": return structuredClone(phone);
+        case "remote_join": {
+          phone.joining = { url: `ws://${a.url as string}`, code: null, status: "connecting", error: null };
+          phone.name = (a.name as string) || phone.name;
+          phoneChanged();
+          setTimeout(() => { phone.joining = { ...phone.joining!, status: "waiting", code: "305 118" }; phoneChanged(); }, 900);
+          setTimeout(() => { phone.joining = null; phone.member = true; phoneChanged(); }, 4000);
+          return null;
+        }
+        case "remote_cancel_join": phone.joining = null; phoneChanged(); return null;
+        case "remote_leave": phone.member = false; phoneChanged(); return null;
+        case "remote_unlock": return true;
+        case "remote_live": {
+          const [working, waiting] = db.code;
+          return {
+            [working.id]: { status: "ready", busy: true, permissions: [], last: now() },
+            [waiting.id]: { status: "ready", busy: false, permissions: ["r-demo"], last: now() },
+          };
+        }
+        case "remote_kick": case "remote_set_foreground": case "remote_unwatch": case "remote_keep_alive": return null;
       }
       console.warn("fake backend: unhandled", cmd, a);
       return null;

@@ -13,7 +13,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 
 ## Rust crates
 
-785 crates, built for every platform Patchbay supports. Each is used unmodified.
+971 crates, built for every platform Patchbay supports. Each is used unmodified.
 
 | Package | Version | License | Texts |
 |---|---|---|---|
@@ -25,11 +25,13 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | agent-client-protocol | 0.10.4 | Apache-2.0 | standard text: [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html); copyright Zed <hi@zed.dev> |
 | agent-client-protocol-schema | 0.11.4 | Apache-2.0 | [e8e2fe35f5fd](#text-e8e2fe35f5fd) |
 | aho-corasick | 1.1.3 | Unlicense OR MIT | [65314a6c9668](#text-65314a6c9668) [154c1af2b38e](#text-154c1af2b38e) [ca2abdf69588](#text-ca2abdf69588) |
+| aho-corasick | 1.1.5 | Unlicense OR MIT | [65314a6c9668](#text-65314a6c9668) [154c1af2b38e](#text-154c1af2b38e) [ca2abdf69588](#text-ca2abdf69588) |
 | alloc-no-stdlib | 2.0.4 | BSD-3-Clause | [6c91ec82929f](#text-6c91ec82929f) |
 | alloc-no-stdlib | 3.0.0 | BSD-3-Clause | [6c91ec82929f](#text-6c91ec82929f) |
 | alloc-stdlib | 0.2.2 | BSD-3-Clause | standard text: [BSD-3-Clause](https://spdx.org/licenses/BSD-3-Clause.html); copyright Daniel Reiter Horn <danielrh@dropbox.com> |
 | alloc-stdlib | 0.3.0 | BSD-3-Clause | standard text: [BSD-3-Clause](https://spdx.org/licenses/BSD-3-Clause.html); copyright Daniel Reiter Horn <danielrh@dropbox.com> |
 | android_system_properties | 0.1.5 | MIT/Apache-2.0 | [dd0815108f8e](#text-dd0815108f8e) [af6e2a74133b](#text-af6e2a74133b) |
+| android_system_properties | 0.1.6 | MIT OR Apache-2.0 | [dd0815108f8e](#text-dd0815108f8e) [af6e2a74133b](#text-af6e2a74133b) |
 | anstream | 0.6.21 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
 | anstyle | 1.0.13 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
 | anstyle-parse | 0.2.7 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
@@ -44,20 +46,25 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | async-executor | 1.14.0 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | async-io | 2.6.0 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | async-lock | 3.4.1 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| async-lock | 3.4.2 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | async-openai | 0.33.1 | MIT | standard text: [MIT](https://spdx.org/licenses/MIT.html); copyright Himanshu Neema |
 | async-openai-macros | 0.1.1 | MIT | standard text: [MIT](https://spdx.org/licenses/MIT.html); copyright Himanshu Neema |
 | async-process | 2.5.0 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | async-recursion | 1.1.1 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| async-recursion | 1.2.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | async-signal | 0.2.13 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| async-signal | 0.2.14 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | async-stream | 0.3.6 | MIT | [557930f3a6b3](#text-557930f3a6b3) |
 | async-stream-impl | 0.3.6 | MIT | [557930f3a6b3](#text-557930f3a6b3) |
 | async-task | 4.7.1 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | async-trait | 0.1.89 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| async-trait | 0.1.92 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | atk | 0.18.2 | MIT | [21a2121221d2](#text-21a2121221d2) |
 | atk-sys | 0.18.2 | MIT | [21a2121221d2](#text-21a2121221d2) |
 | atoi_simd | 0.18.1 | MIT OR Apache-2.0 | [25bb7f1aff0a](#text-25bb7f1aff0a) [1c87e851cc7a](#text-1c87e851cc7a) |
 | atomic-waker | 1.1.2 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) [20746cc8a2fd](#text-20746cc8a2fd) |
 | autocfg | 1.5.0 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [99afaa30c178](#text-99afaa30c178) |
+| autocfg | 1.5.1 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [99afaa30c178](#text-99afaa30c178) |
 | aws-lc-rs | 1.16.2 | ISC AND (Apache-2.0 OR ISC) | [efbbbcefb4b8](#text-efbbbcefb4b8) |
 | aws-lc-sys | 0.39.1 | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) | [49f5cc2a2e4d](#text-49f5cc2a2e4d) |
 | backoff | 0.4.0 | MIT/Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [66b30e1623dd](#text-66b30e1623dd) |
@@ -69,14 +76,17 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | bit-vec | 0.8.0 | Apache-2.0 OR MIT | [7e1b38c60796](#text-7e1b38c60796) [4c4e6eed8b86](#text-4c4e6eed8b86) |
 | bitflags | 1.3.2 | MIT/Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [14435fbcd271](#text-14435fbcd271) |
 | bitflags | 2.13.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [14435fbcd271](#text-14435fbcd271) |
+| bitflags | 2.13.2 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [14435fbcd271](#text-14435fbcd271) |
 | blake2 | 0.10.6 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [fa3da53430ea](#text-fa3da53430ea) |
 | blake3 | 1.8.2 | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception | [fb348df332f3](#text-fb348df332f3) [75b396e36891](#text-75b396e36891) [6d489af62926](#text-6d489af62926) |
 | block-buffer | 0.10.4 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [5ff5253f2cb9](#text-5ff5253f2cb9) |
 | block-buffer | 0.12.0 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [775a3e20a9af](#text-775a3e20a9af) |
+| block-buffer | 0.12.1 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [775a3e20a9af](#text-775a3e20a9af) |
 | block-padding | 0.3.3 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [5ff5253f2cb9](#text-5ff5253f2cb9) |
 | block-padding | 0.4.2 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [775a3e20a9af](#text-775a3e20a9af) |
 | block2 | 0.6.2 | MIT | standard text: [MIT](https://spdx.org/licenses/MIT.html); copyright Mads Marquart <mads@marquart.dk> |
 | blocking | 1.6.2 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| blocking | 1.7.0 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | brotli | 8.0.2 | BSD-3-Clause AND MIT | [2a57418d6b10](#text-2a57418d6b10) |
 | brotli | 9.0.0 | BSD-3-Clause AND MIT | [6c91ec82929f](#text-6c91ec82929f) [2a57418d6b10](#text-2a57418d6b10) |
 | brotli-decompressor | 5.0.0 | BSD-3-Clause/MIT | [6c91ec82929f](#text-6c91ec82929f) |
@@ -84,20 +94,25 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | bs58 | 0.5.1 | MIT/Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [67047503c71f](#text-67047503c71f) |
 | bstr | 1.13.1 | MIT OR Apache-2.0 | [8649bf6c5eca](#text-8649bf6c5eca) [954f335b8baf](#text-954f335b8baf) [ffea24dba8d2](#text-ffea24dba8d2) |
 | bumpalo | 3.19.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [5662394bebb1](#text-5662394bebb1) |
+| bumpalo | 3.20.3 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [5662394bebb1](#text-5662394bebb1) |
 | bytemuck | 1.25.2 | Zlib OR Apache-2.0 OR MIT | [0e3cbff251c1](#text-0e3cbff251c1) [dfbd1c2a36dc](#text-dfbd1c2a36dc) [943f36fd309f](#text-943f36fd309f) |
 | bytemuck_derive | 1.10.2 | Zlib OR Apache-2.0 OR MIT | [0e3cbff251c1](#text-0e3cbff251c1) [dfbd1c2a36dc](#text-dfbd1c2a36dc) [943f36fd309f](#text-943f36fd309f) |
 | byteorder | 1.5.0 | Unlicense OR MIT | [65314a6c9668](#text-65314a6c9668) [154c1af2b38e](#text-154c1af2b38e) [ca2abdf69588](#text-ca2abdf69588) |
 | byteorder-lite | 0.1.0 | Unlicense OR MIT | [154c1af2b38e](#text-154c1af2b38e) [ca2abdf69588](#text-ca2abdf69588) |
 | bytes | 1.11.1 | MIT | [51f778ffff2c](#text-51f778ffff2c) |
+| bytes | 1.12.1 | MIT | [51f778ffff2c](#text-51f778ffff2c) |
 | cairo-rs | 0.18.5 | MIT | [21a2121221d2](#text-21a2121221d2) |
 | cairo-sys-rs | 0.18.2 | MIT | [21a2121221d2](#text-21a2121221d2) |
 | camino | 1.2.1 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| camino | 1.2.6 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | cargo_metadata | 0.19.2 | MIT | [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | cargo_toml | 1.0.0 | Apache-2.0 OR MIT | [fa4363848a0f](#text-fa4363848a0f) |
+| cargo_toml | 1.0.1 | Apache-2.0 OR MIT | [fa4363848a0f](#text-fa4363848a0f) |
 | cargo-platform | 0.1.9 | MIT OR Apache-2.0 | [1bc86297d032](#text-1bc86297d032) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | cbc | 0.1.2 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [f3bd9e2e7745](#text-f3bd9e2e7745) |
 | cbc | 0.2.0 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [f3bd9e2e7745](#text-f3bd9e2e7745) |
 | cc | 1.2.48 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
+| cc | 1.8.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | cesu8 | 1.1.0 | Apache-2.0/MIT | standard text: [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html), [MIT](https://spdx.org/licenses/MIT.html); copyright Eric Kidd <git@randomhacks.net> |
 | cfb | 0.7.3 | MIT | [3ce3e2561c6a](#text-3ce3e2561c6a) |
 | cfb | 0.14.0 | MIT | [3ce3e2561c6a](#text-3ce3e2561c6a) |
@@ -105,16 +120,19 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | cfg_aliases | 0.2.1 | MIT | [48513346d335](#text-48513346d335) |
 | cfg-expr | 0.15.8 | MIT OR Apache-2.0 | [7e1b38c60796](#text-7e1b38c60796) [6d182023b788](#text-6d182023b788) |
 | cfg-if | 1.0.4 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
+| cfg-if | 1.0.5 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | chacha20 | 0.9.1 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [282b5e566e85](#text-282b5e566e85) |
 | chacha20 | 0.10.2 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [1038b7737a0a](#text-1038b7737a0a) |
 | chacha20poly1305 | 0.10.1 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [e90ad0f8f6fe](#text-e90ad0f8f6fe) |
 | chrono | 0.4.44 | MIT OR Apache-2.0 | [ce4a94c006fa](#text-ce4a94c006fa) |
+| chrono | 0.4.45 | MIT OR Apache-2.0 | [ce4a94c006fa](#text-ce4a94c006fa) |
 | cipher | 0.4.4 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [92f01fc7ca90](#text-92f01fc7ca90) |
 | cipher | 0.5.1 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [28afb21f14a0](#text-28afb21f14a0) |
 | cmake | 0.1.54 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | color_quant | 1.1.0 | MIT | [a24abca538cd](#text-a24abca538cd) |
 | colorchoice | 1.0.4 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
 | combine | 4.6.7 | MIT | [a8d7d8157c71](#text-a8d7d8157c71) |
+| combine | 4.6.9 | MIT | [a8d7d8157c71](#text-a8d7d8157c71) |
 | concurrent-queue | 2.5.0 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | const-oid | 0.9.6 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [045a1c4f9aa0](#text-045a1c4f9aa0) |
 | const-oid | 0.10.2 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [ea753cf1e3ec](#text-ea753cf1e3ec) |
@@ -130,14 +148,20 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | cpubits | 0.1.1 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [34a493355890](#text-34a493355890) |
 | cpufeatures | 0.2.17 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [6334e52844d6](#text-6334e52844d6) |
 | cpufeatures | 0.3.0 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [6334e52844d6](#text-6334e52844d6) |
+| cpufeatures | 0.3.1 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [ea753cf1e3ec](#text-ea753cf1e3ec) |
 | crc32fast | 1.5.0 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [9599127e421e](#text-9599127e421e) |
+| crc32fast | 1.5.2 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [9599127e421e](#text-9599127e421e) |
 | crossbeam-channel | 0.5.15 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [5a7d13c6710c](#text-5a7d13c6710c) [d10fa7c720bc](#text-d10fa7c720bc) |
+| crossbeam-channel | 0.5.17 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [5a7d13c6710c](#text-5a7d13c6710c) [d10fa7c720bc](#text-d10fa7c720bc) |
 | crossbeam-deque | 0.8.6 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [5a7d13c6710c](#text-5a7d13c6710c) |
 | crossbeam-epoch | 0.9.20 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [5a7d13c6710c](#text-5a7d13c6710c) |
 | crossbeam-utils | 0.8.21 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [5a7d13c6710c](#text-5a7d13c6710c) |
+| crossbeam-utils | 0.8.23 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [5a7d13c6710c](#text-5a7d13c6710c) |
 | crunchy | 0.2.4 | MIT | [e35e8f8a37b5](#text-e35e8f8a37b5) |
 | crypto-common | 0.1.6 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [692b1604961d](#text-692b1604961d) |
+| crypto-common | 0.1.7 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [692b1604961d](#text-692b1604961d) |
 | crypto-common | 0.2.1 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [dec912e37f88](#text-dec912e37f88) |
+| crypto-common | 0.2.2 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [dec912e37f88](#text-dec912e37f88) |
 | cssparser | 0.37.0 | MPL-2.0 | [c76f740d1521](#text-c76f740d1521) |
 | cssparser-macros | 0.7.1 | MPL-2.0 | [c76f740d1521](#text-c76f740d1521) |
 | ctor | 1.0.13 | Apache-2.0 OR MIT | [6dc0e068dcf3](#text-6dc0e068dcf3) [bccaa8b6c09f](#text-bccaa8b6c09f) |
@@ -146,16 +170,23 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | curve25519-dalek-derive | 0.1.1 | MIT/Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | darling | 0.20.11 | MIT | [cc8f3c8ab396](#text-cc8f3c8ab396) |
 | darling | 0.23.0 | MIT | [cc8f3c8ab396](#text-cc8f3c8ab396) |
+| darling | 0.24.1 | MIT | [cc8f3c8ab396](#text-cc8f3c8ab396) |
 | darling_core | 0.20.11 | MIT | [cc8f3c8ab396](#text-cc8f3c8ab396) |
 | darling_core | 0.23.0 | MIT | [cc8f3c8ab396](#text-cc8f3c8ab396) |
+| darling_core | 0.24.1 | MIT | [cc8f3c8ab396](#text-cc8f3c8ab396) |
 | darling_macro | 0.20.11 | MIT | [cc8f3c8ab396](#text-cc8f3c8ab396) |
 | darling_macro | 0.23.0 | MIT | [cc8f3c8ab396](#text-cc8f3c8ab396) |
+| darling_macro | 0.24.1 | MIT | [cc8f3c8ab396](#text-cc8f3c8ab396) |
 | data-encoding | 2.11.1 | MIT | [9db9de9edfd0](#text-9db9de9edfd0) |
 | dbus | 0.9.12 | Apache-2.0/MIT | [8d2ca3a111ce](#text-8d2ca3a111ce) [de3911c2d98c](#text-de3911c2d98c) |
 | dbus-secret-service | 4.1.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [cef8c2ddacb4](#text-cef8c2ddacb4) |
 | debug_unsafe | 0.1.3 | MIT OR Apache-2.0 | standard text: [MIT](https://spdx.org/licenses/MIT.html), [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html); copyright Dmitry Rodionov <gh@rdmtr.com> |
+| defmt | 1.2.0 | MIT OR Apache-2.0 | [7e1b38c60796](#text-7e1b38c60796) [2710a622a896](#text-2710a622a896) |
+| defmt-macros | 1.2.0 | MIT OR Apache-2.0 | [7e1b38c60796](#text-7e1b38c60796) [2710a622a896](#text-2710a622a896) |
+| defmt-parser | 1.1.0 | MIT OR Apache-2.0 | [7e1b38c60796](#text-7e1b38c60796) [2710a622a896](#text-2710a622a896) |
 | der | 0.7.10 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [6b118915d98a](#text-6b118915d98a) |
 | deranged | 0.5.5 | MIT OR Apache-2.0 | [b4839ecf405b](#text-b4839ecf405b) [1b66e3be6894](#text-1b66e3be6894) |
+| deranged | 0.5.9 | MIT OR Apache-2.0 | [b4839ecf405b](#text-b4839ecf405b) [1b66e3be6894](#text-1b66e3be6894) |
 | derive_builder | 0.20.2 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [2d149f984363](#text-2d149f984363) |
 | derive_builder_core | 0.20.2 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [2d149f984363](#text-2d149f984363) |
 | derive_builder_macro | 0.20.2 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [2d149f984363](#text-2d149f984363) |
@@ -163,10 +194,13 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | derive_more-impl | 2.1.1 | MIT | [4a4d43f3f90d](#text-4a4d43f3f90d) |
 | digest | 0.10.7 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [9c5127ab88e8](#text-9c5127ab88e8) |
 | digest | 0.11.2 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [c8d7f4fd612a](#text-c8d7f4fd612a) |
+| digest | 0.11.3 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [c8d7f4fd612a](#text-c8d7f4fd612a) |
 | dirs | 7.0.0 | MIT OR Apache-2.0 | [74f1c9127a52](#text-74f1c9127a52) [f25a5b606859](#text-f25a5b606859) |
 | dirs-sys | 0.5.0 | MIT OR Apache-2.0 | [74f1c9127a52](#text-74f1c9127a52) [f25a5b606859](#text-f25a5b606859) |
 | dispatch2 | 0.3.0 | Zlib OR Apache-2.0 OR MIT | standard text: [Zlib](https://spdx.org/licenses/Zlib.html), [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html), [MIT](https://spdx.org/licenses/MIT.html); copyright Mads Marquart <mads@marquart.dk>, Mary <mary@mary.zone> |
+| dispatch2 | 0.3.1 | Zlib OR Apache-2.0 OR MIT | standard text: [Zlib](https://spdx.org/licenses/Zlib.html), [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html), [MIT](https://spdx.org/licenses/MIT.html); copyright Mads Marquart <mads@marquart.dk>, Mary <mary@mary.zone> |
 | displaydoc | 0.2.5 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| displaydoc | 0.2.7 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | dlib | 0.5.3 | MIT | [10e5daea68c3](#text-10e5daea68c3) |
 | dlopen2 | 0.8.2 | MIT | standard text: [MIT](https://spdx.org/licenses/MIT.html); copyright Szymon Wieloch <szymon.wieloch@gmail.com>, Ahmed Masud <ahmed.masud@saf.ai>, OpenByte <development.openbyte@gmail.com> |
 | dlopen2_derive | 0.4.3 | MIT | standard text: [MIT](https://spdx.org/licenses/MIT.html); copyright Szymon Wieloch <szymon.wieloch@gmail.com>, OpenByte <development.openbyte@gmail.com> |
@@ -175,6 +209,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | downcast-rs | 1.2.1 | MIT/Apache-2.0 | [7e1b38c60796](#text-7e1b38c60796) [32979a7dea17](#text-32979a7dea17) |
 | dpi | 0.1.2 | Apache-2.0 AND MIT | [6dc0e068dcf3](#text-6dc0e068dcf3) [e07664cb9e31](#text-e07664cb9e31) |
 | dtoa | 1.0.10 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| dtoa | 1.0.11 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | dtoa-short | 0.3.5 | MPL-2.0 | [4b89d4518bd1](#text-4b89d4518bd1) |
 | dunce | 1.0.5 | CC0-1.0 OR MIT-0 OR Apache-2.0 | [6d489af62926](#text-6d489af62926) |
 | dyn-clone | 1.0.20 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
@@ -190,10 +225,12 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | env_filter | 0.1.4 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
 | env_logger | 0.11.8 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
 | equivalent | 1.0.2 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [4428cd87371a](#text-4428cd87371a) |
+| equivalent | 1.0.3 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [4428cd87371a](#text-4428cd87371a) |
 | erased-serde | 0.4.10 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | errno | 0.3.14 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [7f91c2a4eddb](#text-7f91c2a4eddb) |
 | euclid | 0.22.14 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [3bfacc197ff2](#text-3bfacc197ff2) |
 | event-listener | 5.4.1 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| event-listener | 5.4.2 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | event-listener-strategy | 0.5.4 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | eventsource-stream | 0.2.3 | MIT OR Apache-2.0 | standard text: [MIT](https://spdx.org/licenses/MIT.html), [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html); copyright Julian Popescu <jpopesculian@gmail.com> |
 | fallible-iterator | 0.3.0 | MIT/Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [2ff0b8901359](#text-2ff0b8901359) |
@@ -201,6 +238,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | fast_image_resize | 6.1.0 | MIT OR Apache-2.0 | [d5046ab392c7](#text-d5046ab392c7) [9cd8714c216d](#text-9cd8714c216d) |
 | fast-float2 | 0.2.3 | MIT OR Apache-2.0 | [7a61eb3000da](#text-7a61eb3000da) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | fastrand | 2.3.0 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| fastrand | 2.5.0 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | fax | 0.2.6 | MIT | standard text: [MIT](https://spdx.org/licenses/MIT.html); copyright Sebastian K <s3bk@protonmail.com> |
 | fax_derive | 0.2.0 | MIT | standard text: [MIT](https://spdx.org/licenses/MIT.html); copyright Sebastian K <s3bk@protonmail.com> |
 | fdeflate | 0.3.7 | MIT OR Apache-2.0 | [4bf96504d6e8](#text-4bf96504d6e8) [77949ead506e](#text-77949ead506e) |
@@ -210,6 +248,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | filetime | 0.2.29 | MIT/Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | find-msvc-tools | 0.1.14 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | flate2 | 1.1.5 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [e8bac4ebed6c](#text-e8bac4ebed6c) |
+| flate2 | 1.1.10 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [1b7402ea003f](#text-1b7402ea003f) |
 | fnv | 1.0.7 | Apache-2.0 / MIT | [954f335b8baf](#text-954f335b8baf) [c48b7333c00b](#text-c48b7333c00b) |
 | foldhash | 0.1.5 | Zlib | [b1181a40b2a7](#text-b1181a40b2a7) |
 | foldhash | 0.2.0 | Zlib | [b1181a40b2a7](#text-b1181a40b2a7) |
@@ -222,16 +261,25 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | form_urlencoded | 1.2.2 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [33ed9a8ecf55](#text-33ed9a8ecf55) |
 | fs_extra | 1.3.0 | MIT | [30158cc81738](#text-30158cc81738) |
 | futures | 0.3.32 | MIT OR Apache-2.0 | [27480f391bd9](#text-27480f391bd9) [b420d8add23b](#text-b420d8add23b) |
+| futures | 0.3.34 | MIT OR Apache-2.0 | [27480f391bd9](#text-27480f391bd9) [b420d8add23b](#text-b420d8add23b) |
 | futures-channel | 0.3.32 | MIT OR Apache-2.0 | [27480f391bd9](#text-27480f391bd9) [b420d8add23b](#text-b420d8add23b) |
+| futures-channel | 0.3.34 | MIT OR Apache-2.0 | [27480f391bd9](#text-27480f391bd9) [b420d8add23b](#text-b420d8add23b) |
 | futures-core | 0.3.32 | MIT OR Apache-2.0 | [27480f391bd9](#text-27480f391bd9) [b420d8add23b](#text-b420d8add23b) |
+| futures-core | 0.3.34 | MIT OR Apache-2.0 | [27480f391bd9](#text-27480f391bd9) [b420d8add23b](#text-b420d8add23b) |
 | futures-executor | 0.3.32 | MIT OR Apache-2.0 | [27480f391bd9](#text-27480f391bd9) [b420d8add23b](#text-b420d8add23b) |
+| futures-executor | 0.3.34 | MIT OR Apache-2.0 | [27480f391bd9](#text-27480f391bd9) [b420d8add23b](#text-b420d8add23b) |
 | futures-io | 0.3.32 | MIT OR Apache-2.0 | [27480f391bd9](#text-27480f391bd9) [b420d8add23b](#text-b420d8add23b) |
+| futures-io | 0.3.34 | MIT OR Apache-2.0 | [27480f391bd9](#text-27480f391bd9) [b420d8add23b](#text-b420d8add23b) |
 | futures-lite | 2.6.1 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) [20746cc8a2fd](#text-20746cc8a2fd) |
 | futures-macro | 0.3.32 | MIT OR Apache-2.0 | [27480f391bd9](#text-27480f391bd9) [b420d8add23b](#text-b420d8add23b) |
+| futures-macro | 0.3.34 | MIT OR Apache-2.0 | [27480f391bd9](#text-27480f391bd9) [b420d8add23b](#text-b420d8add23b) |
 | futures-sink | 0.3.32 | MIT OR Apache-2.0 | [27480f391bd9](#text-27480f391bd9) [b420d8add23b](#text-b420d8add23b) |
+| futures-sink | 0.3.34 | MIT OR Apache-2.0 | [27480f391bd9](#text-27480f391bd9) [b420d8add23b](#text-b420d8add23b) |
 | futures-task | 0.3.32 | MIT OR Apache-2.0 | [27480f391bd9](#text-27480f391bd9) [b420d8add23b](#text-b420d8add23b) |
+| futures-task | 0.3.34 | MIT OR Apache-2.0 | [27480f391bd9](#text-27480f391bd9) [b420d8add23b](#text-b420d8add23b) |
 | futures-timer | 3.0.3 | MIT/Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | futures-util | 0.3.32 | MIT OR Apache-2.0 | [27480f391bd9](#text-27480f391bd9) [b420d8add23b](#text-b420d8add23b) |
+| futures-util | 0.3.34 | MIT OR Apache-2.0 | [27480f391bd9](#text-27480f391bd9) [b420d8add23b](#text-b420d8add23b) |
 | gdk | 0.18.2 | MIT | [21a2121221d2](#text-21a2121221d2) |
 | gdk-pixbuf | 0.18.5 | MIT | [21a2121221d2](#text-21a2121221d2) |
 | gdk-pixbuf-sys | 0.18.0 | MIT | [21a2121221d2](#text-21a2121221d2) |
@@ -242,8 +290,10 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | generic-array | 0.14.7 | MIT | [ad4fcfaf8d5b](#text-ad4fcfaf8d5b) |
 | gethostname | 1.1.0 | Apache-2.0 | [954f335b8baf](#text-954f335b8baf) |
 | getrandom | 0.2.16 | MIT OR Apache-2.0 | [e7330bf53074](#text-e7330bf53074) [478d530cbce7](#text-478d530cbce7) |
+| getrandom | 0.2.17 | MIT OR Apache-2.0 | [e7330bf53074](#text-e7330bf53074) [478d530cbce7](#text-478d530cbce7) |
 | getrandom | 0.3.4 | MIT OR Apache-2.0 | [e7330bf53074](#text-e7330bf53074) [73af2019a565](#text-73af2019a565) |
 | getrandom | 0.4.1 | MIT OR Apache-2.0 | [e7330bf53074](#text-e7330bf53074) [94b1870d380c](#text-94b1870d380c) |
+| getrandom | 0.4.3 | MIT OR Apache-2.0 | [e7330bf53074](#text-e7330bf53074) [94b1870d380c](#text-94b1870d380c) |
 | ghash | 0.5.1 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [fc15b628f1c4](#text-fc15b628f1c4) |
 | gif | 0.14.1 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [1b6f7ab81ae2](#text-1b6f7ab81ae2) |
 | gio | 0.18.4 | MIT | [21a2121221d2](#text-21a2121221d2) |
@@ -252,6 +302,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | glib-macros | 0.18.5 | MIT | [21a2121221d2](#text-21a2121221d2) |
 | glib-sys | 0.18.1 | MIT | [21a2121221d2](#text-21a2121221d2) |
 | glob | 0.3.3 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [14435fbcd271](#text-14435fbcd271) |
+| glob | 0.3.4 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [14435fbcd271](#text-14435fbcd271) |
 | global-hotkey | 0.8.0 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [859a90323b68](#text-859a90323b68) [3b3a242fa170](#text-3b3a242fa170) |
 | globset | 0.4.19 | Unlicense OR MIT | [65314a6c9668](#text-65314a6c9668) [154c1af2b38e](#text-154c1af2b38e) [ca2abdf69588](#text-ca2abdf69588) |
 | gobject-sys | 0.18.0 | MIT | [21a2121221d2](#text-21a2121221d2) |
@@ -271,59 +322,87 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | heck | 0.4.1 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [033a9383ff21](#text-033a9383ff21) |
 | heck | 0.5.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [033a9383ff21](#text-033a9383ff21) |
 | hermit-abi | 0.5.2 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| hermit-abi | 0.5.3 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | hex | 0.4.3 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [9dde4a6ad496](#text-9dde4a6ad496) |
 | hkdf | 0.12.4 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [2ab57d98da83](#text-2ab57d98da83) |
 | hmac | 0.12.1 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [9c5127ab88e8](#text-9c5127ab88e8) |
 | html5ever | 0.39.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [35af0fd88338](#text-35af0fd88338) |
 | http | 1.4.0 | MIT OR Apache-2.0 | [881c9fe2d29b](#text-881c9fe2d29b) [f47894ff9c86](#text-f47894ff9c86) |
+| http | 1.5.0 | MIT OR Apache-2.0 | [881c9fe2d29b](#text-881c9fe2d29b) [f47894ff9c86](#text-f47894ff9c86) |
 | http-body | 1.0.1 | MIT | [ae61683b7dd6](#text-ae61683b7dd6) |
+| http-body | 1.1.0 | MIT | [57f841bc9767](#text-57f841bc9767) |
 | http-body-util | 0.1.3 | MIT | [4bddfb319e32](#text-4bddfb319e32) |
+| http-body-util | 0.1.5 | MIT | [57f841bc9767](#text-57f841bc9767) |
 | httparse | 1.10.1 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [8502803cebb3](#text-8502803cebb3) |
 | hybrid-array | 0.4.10 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [a1aa15c3898d](#text-a1aa15c3898d) |
+| hybrid-array | 0.4.15 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [a1aa15c3898d](#text-a1aa15c3898d) |
 | hyper | 1.8.1 | MIT | [5f9689aff91a](#text-5f9689aff91a) |
+| hyper | 1.12.0 | MIT | [05f344491a7d](#text-05f344491a7d) |
 | hyper-rustls | 0.27.7 | Apache-2.0 OR ISC OR MIT | [ebadd391ec10](#text-ebadd391ec10) [954f335b8baf](#text-954f335b8baf) [af6da3f3f6b4](#text-af6da3f3f6b4) [a3320aa8d192](#text-a3320aa8d192) |
 | hyper-util | 0.1.20 | MIT | [e7d622e4783e](#text-e7d622e4783e) |
+| hyper-util | 0.1.21 | MIT | [e7d622e4783e](#text-e7d622e4783e) |
 | iana-time-zone | 0.1.64 | MIT OR Apache-2.0 | [793420c92f3c](#text-793420c92f3c) [3444712f3370](#text-3444712f3370) |
+| iana-time-zone | 0.1.65 | MIT OR Apache-2.0 | [793420c92f3c](#text-793420c92f3c) [3444712f3370](#text-3444712f3370) |
 | iana-time-zone-haiku | 0.1.2 | MIT OR Apache-2.0 | [793420c92f3c](#text-793420c92f3c) [3444712f3370](#text-3444712f3370) |
 | ico | 0.5.0 | MIT | [95573f040b56](#text-95573f040b56) |
 | icu_collections | 2.0.0 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
+| icu_collections | 2.3.0 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
 | icu_locale_core | 2.0.0 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
+| icu_locale_core | 2.3.0 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
 | icu_normalizer | 2.0.0 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
+| icu_normalizer | 2.3.0 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
 | icu_normalizer_data | 2.0.0 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
+| icu_normalizer_data | 2.3.0 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
 | icu_properties | 2.0.1 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
+| icu_properties | 2.3.0 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
 | icu_properties_data | 2.0.1 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
+| icu_properties_data | 2.3.0 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
 | icu_provider | 2.0.0 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
+| icu_provider | 2.3.1 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
 | id-arena | 2.3.0 | MIT/Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | ident_case | 1.0.1 | MIT/Apache-2.0 | [1847e0e06981](#text-1847e0e06981) |
 | idna | 1.1.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [7a8093fb4a93](#text-7a8093fb4a93) |
 | idna_adapter | 1.2.1 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [0d8a0aecbcba](#text-0d8a0aecbcba) |
+| idna_adapter | 1.2.2 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [0d8a0aecbcba](#text-0d8a0aecbcba) |
+| if-addrs | 0.13.4 | MIT OR BSD-3-Clause | [eb71eade89cd](#text-eb71eade89cd) [b8777f2b9ad6](#text-b8777f2b9ad6) |
 | ignore | 0.4.32 | Unlicense OR MIT | [65314a6c9668](#text-65314a6c9668) [154c1af2b38e](#text-154c1af2b38e) [ca2abdf69588](#text-ca2abdf69588) |
 | image | 0.25.10 | MIT OR Apache-2.0 | [4bf96504d6e8](#text-4bf96504d6e8) [77949ead506e](#text-77949ead506e) |
 | image-webp | 0.2.4 | MIT OR Apache-2.0 | [4bf96504d6e8](#text-4bf96504d6e8) [77949ead506e](#text-77949ead506e) |
 | indexmap | 1.9.3 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [4f2ac128e429](#text-4f2ac128e429) |
 | indexmap | 2.14.0 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [4f2ac128e429](#text-4f2ac128e429) |
+| indexmap | 2.14.2 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [4f2ac128e429](#text-4f2ac128e429) |
 | infer | 0.19.0 | MIT | [7804ded9273b](#text-7804ded9273b) |
 | infer | 0.22.0 | MIT | [7804ded9273b](#text-7804ded9273b) |
 | inout | 0.1.4 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [71366a4092ad](#text-71366a4092ad) |
 | inout | 0.2.2 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [13ec53eb1d4d](#text-13ec53eb1d4d) |
 | instant | 0.1.12 | BSD-3-Clause | [e98cbfde5298](#text-e98cbfde5298) |
 | ipnet | 2.11.0 | MIT OR Apache-2.0 | [9d8e882729a5](#text-9d8e882729a5) [c935506fff2e](#text-c935506fff2e) |
+| ipnet | 2.12.2 | MIT OR Apache-2.0 | [9d8e882729a5](#text-9d8e882729a5) [c935506fff2e](#text-c935506fff2e) |
 | iri-string | 0.7.9 | MIT OR Apache-2.0 | [283ea6cc2997](#text-283ea6cc2997) [2a842fc03a4d](#text-2a842fc03a4d) |
 | is_terminal_polyfill | 1.70.2 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
 | is-docker | 0.2.0 | MIT | [d9da1a97dd07](#text-d9da1a97dd07) |
 | is-wsl | 0.4.0 | MIT | [d9da1a97dd07](#text-d9da1a97dd07) |
 | itoa | 1.0.17 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| itoa | 1.0.18 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | javascriptcore-rs | 1.1.2 | MIT | [8a08757a7c38](#text-8a08757a7c38) |
 | javascriptcore-rs-sys | 1.1.1 | MIT | [4603441e4a5a](#text-4603441e4a5a) |
 | jiff | 0.2.28 | Unlicense OR MIT | [65314a6c9668](#text-65314a6c9668) [154c1af2b38e](#text-154c1af2b38e) [ca2abdf69588](#text-ca2abdf69588) |
+| jiff | 0.2.38 | Unlicense OR MIT | [65314a6c9668](#text-65314a6c9668) [154c1af2b38e](#text-154c1af2b38e) [ca2abdf69588](#text-ca2abdf69588) |
+| jiff-core | 0.1.1 | Unlicense OR MIT | [65314a6c9668](#text-65314a6c9668) [154c1af2b38e](#text-154c1af2b38e) [ca2abdf69588](#text-ca2abdf69588) |
 | jiff-static | 0.2.28 | Unlicense OR MIT | [65314a6c9668](#text-65314a6c9668) [154c1af2b38e](#text-154c1af2b38e) [ca2abdf69588](#text-ca2abdf69588) |
+| jiff-static | 0.2.38 | Unlicense OR MIT | [65314a6c9668](#text-65314a6c9668) [154c1af2b38e](#text-154c1af2b38e) [ca2abdf69588](#text-ca2abdf69588) |
 | jiff-tzdb | 0.1.4 | Unlicense OR MIT | [65314a6c9668](#text-65314a6c9668) [154c1af2b38e](#text-154c1af2b38e) [ca2abdf69588](#text-ca2abdf69588) |
+| jiff-tzdb | 0.1.9 | Unlicense OR MIT | [65314a6c9668](#text-65314a6c9668) [154c1af2b38e](#text-154c1af2b38e) [ca2abdf69588](#text-ca2abdf69588) |
 | jiff-tzdb-platform | 0.1.3 | Unlicense OR MIT | [65314a6c9668](#text-65314a6c9668) [154c1af2b38e](#text-154c1af2b38e) [ca2abdf69588](#text-ca2abdf69588) |
 | jni | 0.21.1 | MIT/Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [6c1dcd86d8ae](#text-6c1dcd86d8ae) |
 | jni-sys | 0.3.0 | MIT/Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [3a771adcf280](#text-3a771adcf280) |
+| jni-sys | 0.3.1 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [3a771adcf280](#text-3a771adcf280) |
+| jni-sys | 0.4.1 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [3a771adcf280](#text-3a771adcf280) |
+| jni-sys-macros | 0.4.1 | MIT OR Apache-2.0 | standard text: [MIT](https://spdx.org/licenses/MIT.html), [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html); copyright Robert Bragg <robert@sixbynine.org> |
 | jobserver | 0.1.34 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | jpeg-decoder | 0.3.2 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [497d42e498db](#text-497d42e498db) |
 | js-sys | 0.3.91 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
+| js-sys | 0.3.106 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | json-patch | 4.2.0 | MIT/Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [19328c46c44f](#text-19328c46c44f) |
 | jsonptr | 0.7.1 | MIT OR Apache-2.0 | [5f89ce4ac63b](#text-5f89ce4ac63b) [055a17110636](#text-055a17110636) |
 | keyboard-types | 0.7.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [31dbbab009f1](#text-31dbbab009f1) |
@@ -331,34 +410,42 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | keyring | 3.6.3 | MIT OR Apache-2.0 | [6205fe4502da](#text-6205fe4502da) [b5e6923cd7c0](#text-b5e6923cd7c0) |
 | kurbo | 0.12.0 | Apache-2.0 OR MIT | [283ea6cc2997](#text-283ea6cc2997) [0e297345cbd9](#text-0e297345cbd9) |
 | lazy_static | 1.5.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [9e0027807b0c](#text-9e0027807b0c) |
+| lazy_static | 1.5.1 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | leb128fmt | 0.1.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | libappindicator | 0.9.0 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [d2c4a2667e88](#text-d2c4a2667e88) |
 | libappindicator-sys | 0.9.0 | Apache-2.0 OR MIT | standard text: [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html), [MIT](https://spdx.org/licenses/MIT.html) |
 | libc | 0.2.186 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [c96302294382](#text-c96302294382) |
+| libc | 0.2.191 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [c96302294382](#text-c96302294382) |
 | libdbus-sys | 0.2.7 | Apache-2.0/MIT | [8d2ca3a111ce](#text-8d2ca3a111ce) [de3911c2d98c](#text-de3911c2d98c) |
 | libloading | 0.7.4 | ISC | [bbf1ea3140c4](#text-bbf1ea3140c4) |
 | libm | 0.2.15 | MIT | [5f5535fee8ec](#text-5f5535fee8ec) |
 | libredox | 0.1.10 | MIT | [7dbbefcddfaa](#text-7dbbefcddfaa) |
+| libredox | 0.1.25 | MIT | [7dbbefcddfaa](#text-7dbbefcddfaa) |
 | libsqlite3-sys | 0.35.0 | MIT | [6061b8ea5b16](#text-6061b8ea5b16) |
 | libz-rs-sys | 0.5.2 | Zlib | [1a7d409d5142](#text-1a7d409d5142) |
 | linux-raw-sys | 0.12.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [2f213ec6b135](#text-2f213ec6b135) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | litemap | 0.8.0 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
+| litemap | 0.8.3 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
 | litrs | 1.0.0 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [da6604db16c0](#text-da6604db16c0) |
 | lock_api | 0.4.14 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [8d1f81ea4e87](#text-8d1f81ea4e87) |
 | log | 0.4.32 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [14435fbcd271](#text-14435fbcd271) |
+| log | 0.4.34 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [14435fbcd271](#text-14435fbcd271) |
 | lru-slab | 0.1.2 | MIT OR Apache-2.0 OR Zlib | [283ea6cc2997](#text-283ea6cc2997) [c9cf4d18fd9d](#text-c9cf4d18fd9d) [cebce11166dc](#text-cebce11166dc) |
 | mac-notification-sys | 0.6.15 | MIT/Apache-2.0 | standard text: [MIT](https://spdx.org/licenses/MIT.html), [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html); copyright Felix Döring <development@felixdoering.com>, Hendrik Sollich <hendrik@hoodie.de> |
 | markup5ever | 0.39.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [35af0fd88338](#text-35af0fd88338) |
 | matchers | 0.2.0 | MIT | [2aca90f05dbb](#text-2aca90f05dbb) |
 | md-5 | 0.11.0 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [535a6aa345e8](#text-535a6aa345e8) |
 | memchr | 2.8.2 | Unlicense OR MIT | [65314a6c9668](#text-65314a6c9668) [154c1af2b38e](#text-154c1af2b38e) [ca2abdf69588](#text-ca2abdf69588) |
+| memchr | 2.8.3 | Unlicense OR MIT | [65314a6c9668](#text-65314a6c9668) [154c1af2b38e](#text-154c1af2b38e) [ca2abdf69588](#text-ca2abdf69588) |
 | memmap2 | 0.9.11 | MIT OR Apache-2.0 | [b733dbc79d3d](#text-b733dbc79d3d) [c18ee669bac9](#text-c18ee669bac9) |
 | memoffset | 0.9.1 | MIT | [3234ac558162](#text-3234ac558162) |
 | mime | 0.3.17 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [a302dc760d97](#text-a302dc760d97) |
 | mime_guess | 2.0.5 | MIT | [e3c1a4eb6fce](#text-e3c1a4eb6fce) |
 | minimal-lexical | 0.2.1 | MIT/Apache-2.0 | [7e1b38c60796](#text-7e1b38c60796) [30fefc3a7d6a](#text-30fefc3a7d6a) [7d4bef28325e](#text-7d4bef28325e) |
 | miniz_oxide | 0.8.9 | MIT OR Zlib OR Apache-2.0 | [7427abc63036](#text-7427abc63036) [4bf96504d6e8](#text-4bf96504d6e8) [ac9859ce4e9a](#text-ac9859ce4e9a) [eac3911cc3d4](#text-eac3911cc3d4) |
+| miniz_oxide | 0.9.1 | MIT OR Zlib OR Apache-2.0 | [7427abc63036](#text-7427abc63036) [4bf96504d6e8](#text-4bf96504d6e8) [ac9859ce4e9a](#text-ac9859ce4e9a) [eac3911cc3d4](#text-eac3911cc3d4) |
 | mio | 1.2.1 | MIT | [c804065b0956](#text-c804065b0956) |
+| mio | 1.2.4 | MIT | [c804065b0956](#text-c804065b0956) |
 | moxcms | 0.8.1 | BSD-3-Clause OR Apache-2.0 | [836a9c1227c6](#text-836a9c1227c6) [2aa92cada643](#text-2aa92cada643) |
 | muda | 0.20.0 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [859a90323b68](#text-859a90323b68) [b99f9d43803f](#text-b99f9d43803f) |
 | ndk | 0.9.0 | MIT OR Apache-2.0 | standard text: [MIT](https://spdx.org/licenses/MIT.html), [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html); copyright The Rust Mobile contributors |
@@ -373,10 +460,13 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | nu-ansi-term | 0.50.3 | MIT | [b03a9c03f816](#text-b03a9c03f816) |
 | num | 0.4.3 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [14435fbcd271](#text-14435fbcd271) |
 | num_enum | 0.7.5 | BSD-3-Clause OR MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [882b129495bc](#text-882b129495bc) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| num_enum | 0.7.6 | BSD-3-Clause OR MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [882b129495bc](#text-882b129495bc) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | num_enum_derive | 0.7.5 | BSD-3-Clause OR MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [882b129495bc](#text-882b129495bc) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| num_enum_derive | 0.7.6 | BSD-3-Clause OR MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [882b129495bc](#text-882b129495bc) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | num-bigint | 0.4.6 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [14435fbcd271](#text-14435fbcd271) |
 | num-complex | 0.4.6 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [14435fbcd271](#text-14435fbcd271) |
 | num-conv | 0.2.0 | MIT OR Apache-2.0 | [35660f0f1f5a](#text-35660f0f1f5a) [d79406a9ad24](#text-d79406a9ad24) |
+| num-conv | 0.2.2 | MIT OR Apache-2.0 | [4bf96504d6e8](#text-4bf96504d6e8) [4d83b119f786](#text-4d83b119f786) |
 | num-integer | 0.1.46 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [14435fbcd271](#text-14435fbcd271) |
 | num-iter | 0.1.45 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [14435fbcd271](#text-14435fbcd271) |
 | num-rational | 0.4.2 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [14435fbcd271](#text-14435fbcd271) |
@@ -394,12 +484,14 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | objc2-exception-helper | 0.1.1 | Zlib OR Apache-2.0 OR MIT | standard text: [Zlib](https://spdx.org/licenses/Zlib.html), [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html), [MIT](https://spdx.org/licenses/MIT.html); copyright Mads Marquart <mads@marquart.dk> |
 | objc2-foundation | 0.3.2 | MIT | standard text: [MIT](https://spdx.org/licenses/MIT.html) |
 | objc2-io-surface | 0.3.2 | Zlib OR Apache-2.0 OR MIT | standard text: [Zlib](https://spdx.org/licenses/Zlib.html), [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html), [MIT](https://spdx.org/licenses/MIT.html) |
+| objc2-local-authentication | 0.3.2 | Zlib OR Apache-2.0 OR MIT | standard text: [Zlib](https://spdx.org/licenses/Zlib.html), [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html), [MIT](https://spdx.org/licenses/MIT.html) |
 | objc2-quartz-core | 0.3.2 | Zlib OR Apache-2.0 OR MIT | standard text: [Zlib](https://spdx.org/licenses/Zlib.html), [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html), [MIT](https://spdx.org/licenses/MIT.html) |
 | objc2-ui-kit | 0.3.2 | Zlib OR Apache-2.0 OR MIT | standard text: [Zlib](https://spdx.org/licenses/Zlib.html), [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html), [MIT](https://spdx.org/licenses/MIT.html) |
 | objc2-user-notifications | 0.3.2 | Zlib OR Apache-2.0 OR MIT | standard text: [Zlib](https://spdx.org/licenses/Zlib.html), [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html), [MIT](https://spdx.org/licenses/MIT.html) |
 | objc2-web-kit | 0.3.2 | Zlib OR Apache-2.0 OR MIT | standard text: [Zlib](https://spdx.org/licenses/Zlib.html), [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html), [MIT](https://spdx.org/licenses/MIT.html) |
 | office_oxide | 0.1.9 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [31f687dae58a](#text-31f687dae58a) [f631a782f00d](#text-f631a782f00d) |
 | once_cell | 1.21.3 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| once_cell | 1.21.4 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | once_cell_polyfill | 1.70.2 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
 | opaque-debug | 0.3.1 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [7873dbb4b866](#text-7873dbb4b866) |
 | open | 5.4.4 | MIT | [c3ca23514163](#text-c3ca23514163) |
@@ -423,47 +515,63 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | phf_shared | 0.13.1 | MIT | [ec5d7c323662](#text-ec5d7c323662) |
 | phf_shared | 0.14.0 | MIT | [ec5d7c323662](#text-ec5d7c323662) |
 | pin-project-lite | 0.2.16 | Apache-2.0 OR MIT | [4bf96504d6e8](#text-4bf96504d6e8) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| pin-project-lite | 0.2.17 | Apache-2.0 OR MIT | [4bf96504d6e8](#text-4bf96504d6e8) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | pin-utils | 0.1.0 | MIT OR Apache-2.0 | [8348c9fe2fb7](#text-8348c9fe2fb7) [e768d9875925](#text-e768d9875925) |
 | piper | 0.2.4 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| piper | 0.2.5 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | pkcs8 | 0.10.2 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [6b118915d98a](#text-6b118915d98a) |
 | pkg-config | 0.3.32 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
+| pkg-config | 0.3.34 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | plist | 1.10.0 | MIT | [5b0ae40d1a35](#text-5b0ae40d1a35) |
+| plist | 1.10.1 | MIT | [5b0ae40d1a35](#text-5b0ae40d1a35) |
 | png | 0.17.16 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [80cdd90699e4](#text-80cdd90699e4) |
 | png | 0.18.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [80cdd90699e4](#text-80cdd90699e4) |
+| png | 0.18.1 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [80cdd90699e4](#text-80cdd90699e4) |
 | polling | 3.11.0 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | pollster | 0.4.0 | Apache-2.0/MIT | [954f335b8baf](#text-954f335b8baf) [d495abbfe409](#text-d495abbfe409) |
 | poly1305 | 0.8.0 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [e827371937a1](#text-e827371937a1) |
 | polyval | 0.6.2 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [3dad7b797447](#text-3dad7b797447) |
 | portable-atomic | 1.11.1 | Apache-2.0 OR MIT | [4bf96504d6e8](#text-4bf96504d6e8) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| portable-atomic | 1.15.0 | Apache-2.0 OR MIT | [4bf96504d6e8](#text-4bf96504d6e8) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | portable-atomic-util | 0.2.4 | Apache-2.0 OR MIT | [4bf96504d6e8](#text-4bf96504d6e8) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| portable-atomic-util | 0.2.8 | Apache-2.0 OR MIT | [4bf96504d6e8](#text-4bf96504d6e8) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | portable-pty | 0.9.0 | MIT | [0f5e2ba844a4](#text-0f5e2ba844a4) |
 | potential_utf | 0.1.3 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
+| potential_utf | 0.1.6 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
 | powerfmt | 0.2.0 | MIT OR Apache-2.0 | [4b05c4b43039](#text-4b05c4b43039) [6e972f314e81](#text-6e972f314e81) |
+| powerfmt | 0.2.1 | MIT OR Apache-2.0 | [4b05c4b43039](#text-4b05c4b43039) [6e972f314e81](#text-6e972f314e81) |
 | ppv-lite86 | 0.2.21 | MIT OR Apache-2.0 | [f0a559a11420](#text-f0a559a11420) [b2a541f10560](#text-b2a541f10560) |
 | precomputed-hash | 0.1.1 | MIT | [695de7436b47](#text-695de7436b47) |
 | prettyplease | 0.2.37 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | proc-macro-crate | 1.3.1 | MIT OR Apache-2.0 | [1bc86297d032](#text-1bc86297d032) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | proc-macro-crate | 2.0.2 | MIT OR Apache-2.0 | [1bc86297d032](#text-1bc86297d032) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | proc-macro-crate | 3.4.0 | MIT OR Apache-2.0 | [1bc86297d032](#text-1bc86297d032) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| proc-macro-crate | 3.5.0 | MIT OR Apache-2.0 | [1bc86297d032](#text-1bc86297d032) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | proc-macro-error | 1.0.4 | MIT OR Apache-2.0 | [2bbedf556bfd](#text-2bbedf556bfd) [c7495b7b3a52](#text-c7495b7b3a52) |
 | proc-macro-error-attr | 1.0.4 | MIT OR Apache-2.0 | [2bbedf556bfd](#text-2bbedf556bfd) [c7495b7b3a52](#text-c7495b7b3a52) |
 | proc-macro2 | 1.0.106 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| proc-macro2 | 1.0.107 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | pxfm | 0.1.25 | BSD-3-Clause OR Apache-2.0 | [836a9c1227c6](#text-836a9c1227c6) [2aa92cada643](#text-2aa92cada643) |
 | qcms | 0.3.0 | MIT | standard text: [MIT](https://spdx.org/licenses/MIT.html); copyright Jeff Muizelaar, Benoit Girard, Andrew Osmond |
 | quick-error | 2.0.1 | MIT/Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [cf798811e9a0](#text-cf798811e9a0) |
 | quick-xml | 0.41.0 | MIT | [12bfa73c9eac](#text-12bfa73c9eac) |
+| quick-xml | 0.42.0 | MIT | [12bfa73c9eac](#text-12bfa73c9eac) |
 | quinn | 0.11.9 | MIT OR Apache-2.0 | [283ea6cc2997](#text-283ea6cc2997) [05fa1ba3228a](#text-05fa1ba3228a) |
 | quinn-proto | 0.11.15 | MIT OR Apache-2.0 | [283ea6cc2997](#text-283ea6cc2997) [05fa1ba3228a](#text-05fa1ba3228a) |
 | quinn-udp | 0.5.14 | MIT OR Apache-2.0 | [283ea6cc2997](#text-283ea6cc2997) [05fa1ba3228a](#text-05fa1ba3228a) |
 | quote | 1.0.45 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| quote | 1.0.47 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | r-efi | 5.3.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later | standard text: [MIT](https://spdx.org/licenses/MIT.html), [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html), [LGPL-2.1-or-later](https://spdx.org/licenses/LGPL-2.1-or-later.html) |
+| r-efi | 6.0.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later | standard text: [MIT](https://spdx.org/licenses/MIT.html), [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html), [LGPL-2.1-or-later](https://spdx.org/licenses/LGPL-2.1-or-later.html) |
 | rand | 0.8.5 | MIT OR Apache-2.0 | [fee4d7ce394c](#text-fee4d7ce394c) [cc367a7134c2](#text-cc367a7134c2) |
+| rand | 0.8.8 | MIT OR Apache-2.0 | [fee4d7ce394c](#text-fee4d7ce394c) [cc367a7134c2](#text-cc367a7134c2) |
 | rand | 0.9.5 | MIT OR Apache-2.0 | [fee4d7ce394c](#text-fee4d7ce394c) [cc367a7134c2](#text-cc367a7134c2) |
 | rand | 0.10.3 | MIT OR Apache-2.0 | [fee4d7ce394c](#text-fee4d7ce394c) [cc367a7134c2](#text-cc367a7134c2) |
 | rand_chacha | 0.3.1 | MIT OR Apache-2.0 | [e7330bf53074](#text-e7330bf53074) [cc367a7134c2](#text-cc367a7134c2) |
 | rand_chacha | 0.9.0 | MIT OR Apache-2.0 | [fee4d7ce394c](#text-fee4d7ce394c) [cc367a7134c2](#text-cc367a7134c2) |
 | rand_core | 0.6.4 | MIT OR Apache-2.0 | [179c83ef07a5](#text-179c83ef07a5) [cc367a7134c2](#text-cc367a7134c2) |
 | rand_core | 0.9.3 | MIT OR Apache-2.0 | [179c83ef07a5](#text-179c83ef07a5) [cc367a7134c2](#text-cc367a7134c2) |
+| rand_core | 0.9.5 | MIT OR Apache-2.0 | [179c83ef07a5](#text-179c83ef07a5) [cc367a7134c2](#text-cc367a7134c2) |
 | rand_core | 0.10.1 | MIT OR Apache-2.0 | [179c83ef07a5](#text-179c83ef07a5) [704f0e5f1c84](#text-704f0e5f1c84) |
 | raw-window-handle | 0.6.2 | MIT OR Apache-2.0 OR Zlib | [4bf96504d6e8](#text-4bf96504d6e8) [aa69fda6dd94](#text-aa69fda6dd94) [81976b4834c3](#text-81976b4834c3) |
 | rayon | 1.12.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [9e0027807b0c](#text-9e0027807b0c) |
@@ -471,13 +579,19 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | read-fonts | 0.35.0 | MIT OR Apache-2.0 | [bfa7ed27d2b0](#text-bfa7ed27d2b0) [163aebd02543](#text-163aebd02543) |
 | redox_syscall | 0.5.18 | MIT | [fde59e25bf53](#text-fde59e25bf53) |
 | redox_users | 0.5.2 | MIT | [157e9bc5ce84](#text-157e9bc5ce84) |
+| redox_users | 0.5.3 | MIT | [157e9bc5ce84](#text-157e9bc5ce84) |
 | ref-cast | 1.0.25 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| ref-cast | 1.0.27 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | ref-cast-impl | 1.0.25 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| ref-cast-impl | 1.0.27 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | regex | 1.12.4 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [14435fbcd271](#text-14435fbcd271) |
+| regex | 1.13.1 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [14435fbcd271](#text-14435fbcd271) |
 | regex-automata | 0.4.13 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [14435fbcd271](#text-14435fbcd271) |
+| regex-automata | 0.4.18 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [14435fbcd271](#text-14435fbcd271) |
 | regex-syntax | 0.8.11 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [14435fbcd271](#text-14435fbcd271) |
 | reqwest | 0.12.24 | MIT OR Apache-2.0 | [5c3866f31ed2](#text-5c3866f31ed2) [54987d63f266](#text-54987d63f266) |
 | reqwest | 0.13.4 | MIT OR Apache-2.0 | [5c3866f31ed2](#text-5c3866f31ed2) [bde59a7e336f](#text-bde59a7e336f) |
+| reqwest | 0.13.5 | MIT OR Apache-2.0 | [5c3866f31ed2](#text-5c3866f31ed2) [bde59a7e336f](#text-bde59a7e336f) |
 | reqwest-eventsource | 0.6.0 | MIT OR Apache-2.0 | standard text: [MIT](https://spdx.org/licenses/MIT.html), [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html); copyright Julian Popescu <jpopesculian@gmail.com> |
 | rfd | 0.16.0 | MIT | [1a6dd9555214](#text-1a6dd9555214) |
 | ring | 0.17.14 | Apache-2.0 AND ISC | [edb9c6dbff46](#text-edb9c6dbff46) [473867fcf89f](#text-473867fcf89f) [07414b6c33f3](#text-07414b6c33f3) |
@@ -485,12 +599,18 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | rusqlite | 0.37.0 | MIT | [6061b8ea5b16](#text-6061b8ea5b16) |
 | rustc_version | 0.4.1 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [8d1f81ea4e87](#text-8d1f81ea4e87) |
 | rustc-hash | 2.1.1 | Apache-2.0 OR MIT | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| rustc-hash | 2.1.3 | Apache-2.0 OR MIT | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | rustix | 1.1.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [2f213ec6b135](#text-2f213ec6b135) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| rustix | 1.1.5 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [2f213ec6b135](#text-2f213ec6b135) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | rustls | 0.23.37 | Apache-2.0 OR ISC OR MIT | [954f335b8baf](#text-954f335b8baf) [af6da3f3f6b4](#text-af6da3f3f6b4) [a3320aa8d192](#text-a3320aa8d192) |
+| rustls | 0.23.46 | Apache-2.0 OR ISC OR MIT | [954f335b8baf](#text-954f335b8baf) [af6da3f3f6b4](#text-af6da3f3f6b4) [a3320aa8d192](#text-a3320aa8d192) |
 | rustls-native-certs | 0.8.2 | Apache-2.0 OR ISC OR MIT | [29fbc81a3f88](#text-29fbc81a3f88) [954f335b8baf](#text-954f335b8baf) [af6da3f3f6b4](#text-af6da3f3f6b4) [a3320aa8d192](#text-a3320aa8d192) |
 | rustls-pki-types | 1.14.0 | MIT OR Apache-2.0 | [430e912c26ce](#text-430e912c26ce) [c5e7f780f961](#text-c5e7f780f961) |
+| rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 | [430e912c26ce](#text-430e912c26ce) [c5e7f780f961](#text-c5e7f780f961) |
 | rustls-webpki | 0.103.13 | ISC | [3ac27594ed56](#text-3ac27594ed56) |
+| rustls-webpki | 0.103.15 | ISC | [3ac27594ed56](#text-3ac27594ed56) |
 | rustversion | 1.0.22 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| rustversion | 1.0.23 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | rustybuzz | 0.20.1 | MIT | [31b628c2f6d7](#text-31b628c2f6d7) |
 | ryu | 1.0.20 | Apache-2.0 OR BSL-1.0 | [85ad950cce87](#text-85ad950cce87) [8d8291caf1ce](#text-8d8291caf1ce) |
 | same-file | 1.0.6 | Unlicense/MIT | [65314a6c9668](#text-65314a6c9668) [739620ea44ad](#text-739620ea44ad) [ca2abdf69588](#text-ca2abdf69588) |
@@ -498,6 +618,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | schemars | 0.8.22 | MIT | [1ddb39b2b497](#text-1ddb39b2b497) |
 | schemars | 0.9.0 | MIT | [1ddb39b2b497](#text-1ddb39b2b497) |
 | schemars | 1.0.4 | MIT | [1ddb39b2b497](#text-1ddb39b2b497) |
+| schemars | 1.2.3 | MIT | [1ddb39b2b497](#text-1ddb39b2b497) |
 | schemars_derive | 0.8.22 | MIT | [1ddb39b2b497](#text-1ddb39b2b497) |
 | schemars_derive | 1.0.4 | MIT | [1ddb39b2b497](#text-1ddb39b2b497) |
 | scoped-tls | 1.0.1 | MIT/Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
@@ -510,16 +631,24 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | selectors | 0.38.0 | MPL-2.0 | standard text: [MPL-2.0](https://spdx.org/licenses/MPL-2.0.html); copyright The Servo Project Developers |
 | semver | 1.0.28 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | serde | 1.0.228 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| serde | 1.0.229 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | serde_core | 1.0.228 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| serde_core | 1.0.229 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | serde_derive | 1.0.228 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| serde_derive | 1.0.229 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | serde_derive_internals | 0.29.1 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | serde_json | 1.0.149 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| serde_json | 1.0.154 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | serde_repr | 0.1.20 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| serde_repr | 0.1.21 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | serde_spanned | 0.6.9 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
 | serde_spanned | 1.0.4 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
+| serde_spanned | 1.1.2 | MIT OR Apache-2.0 | [9b689eac99cd](#text-9b689eac99cd) [4498464c2864](#text-4498464c2864) |
 | serde_urlencoded | 0.7.1 | MIT/Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [b5dae9532426](#text-b5dae9532426) |
 | serde_with | 3.22.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [fdd1c2117bcf](#text-fdd1c2117bcf) |
+| serde_with | 3.24.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [fdd1c2117bcf](#text-fdd1c2117bcf) |
 | serde_with_macros | 3.22.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [fdd1c2117bcf](#text-fdd1c2117bcf) |
+| serde_with_macros | 3.24.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [fdd1c2117bcf](#text-fdd1c2117bcf) |
 | serde-untagged | 0.1.9 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | serial2 | 0.2.34 | BSD-2-Clause OR Apache-2.0 | [948aecf4f952](#text-948aecf4f952) [8b151c0d91e8](#text-8b151c0d91e8) |
 | serialize-to-javascript | 0.1.2 | MIT OR Apache-2.0 | [283ea6cc2997](#text-283ea6cc2997) [777eb7417541](#text-777eb7417541) |
@@ -534,16 +663,22 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | shared_library | 0.1.9 | Apache-2.0/MIT | [7e1b38c60796](#text-7e1b38c60796) [1c07d19ccbe2](#text-1c07d19ccbe2) |
 | shell-words | 1.1.0 | MIT/Apache-2.0 | [c7f51f2c5828](#text-c7f51f2c5828) [104b7fa3c213](#text-104b7fa3c213) |
 | shlex | 1.3.0 | MIT OR Apache-2.0 | [a759ce38c686](#text-a759ce38c686) [cc5ba5589dfb](#text-cc5ba5589dfb) |
+| shlex | 2.0.1 | MIT OR Apache-2.0 | [a759ce38c686](#text-a759ce38c686) [cc5ba5589dfb](#text-cc5ba5589dfb) |
 | signal-hook-registry | 1.4.8 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [aaac889d0a4a](#text-aaac889d0a4a) |
 | signature | 2.2.0 | Apache-2.0 OR MIT | [e8541ea93f02](#text-e8541ea93f02) [7d9f551458e8](#text-7d9f551458e8) |
 | simd-adler32 | 0.3.7 | MIT | [627eff66d6c4](#text-627eff66d6c4) |
+| simd-adler32 | 0.3.10 | MIT | [627eff66d6c4](#text-627eff66d6c4) |
 | siphasher | 1.0.3 | MIT/Apache-2.0 | [24e26e8fb783](#text-24e26e8fb783) |
+| siphasher | 1.0.4 | MIT OR Apache-2.0 | [24e26e8fb783](#text-24e26e8fb783) [283ea6cc2997](#text-283ea6cc2997) [21a2121221d2](#text-21a2121221d2) |
 | skrifa | 0.37.0 | MIT OR Apache-2.0 | [bfa7ed27d2b0](#text-bfa7ed27d2b0) [163aebd02543](#text-163aebd02543) |
 | slab | 0.4.11 | MIT | [12c7116c4425](#text-12c7116c4425) |
+| slab | 0.4.12 | MIT | [12c7116c4425](#text-12c7116c4425) |
 | slotmap | 1.0.7 | Zlib | [0825a545d3d5](#text-0825a545d3d5) |
 | smallvec | 1.15.1 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [7f194ae45c25](#text-7f194ae45c25) |
+| smallvec | 1.16.3 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [7f194ae45c25](#text-7f194ae45c25) |
 | snow | 0.10.0 | Apache-2.0 OR MIT | [fee4d7ce394c](#text-fee4d7ce394c) [32a5b6b5bbee](#text-32a5b6b5bbee) |
 | socket2 | 0.6.4 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
+| socket2 | 0.6.5 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | softbuffer | 0.4.8 | MIT OR Apache-2.0 | [1fc3bc7f4a1b](#text-1fc3bc7f4a1b) [f8babf2965a4](#text-f8babf2965a4) |
 | soup3 | 0.5.0 | MIT | [4603441e4a5a](#text-4603441e4a5a) |
 | soup3-sys | 0.5.0 | MIT | [4603441e4a5a](#text-4603441e4a5a) |
@@ -566,9 +701,12 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | swift-rs | 1.0.9 | MIT OR Apache-2.0 | [e88bc3fa7f78](#text-e88bc3fa7f78) [7593ea50d2d4](#text-7593ea50d2d4) |
 | syn | 1.0.109 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | syn | 2.0.117 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| syn | 2.0.119 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | syn | 3.0.4 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| syn | 3.0.9 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | sync_wrapper | 1.0.2 | Apache-2.0 | [4bf96504d6e8](#text-4bf96504d6e8) |
 | synstructure | 0.13.2 | MIT | [3a036676ec8c](#text-3a036676ec8c) |
+| synstructure | 0.14.0 | MIT | [3a036676ec8c](#text-3a036676ec8c) |
 | system-deps | 6.2.2 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | taffy | 0.12.2 | MIT | standard text: [MIT](https://spdx.org/licenses/MIT.html); copyright Alice Cecile <alice.i.cecile@gmail.com>, Johnathan Kelley <jkelleyrtp@gmail.com>, Nico Burns <nico@nicoburns.com> |
 | tao | 0.37.1 | Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [28694f36acab](#text-28694f36acab) |
@@ -580,6 +718,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | tauri-codegen | 2.7.3 | Apache-2.0 OR MIT | [4bf96504d6e8](#text-4bf96504d6e8) [89ff9689dcf9](#text-89ff9689dcf9) |
 | tauri-macros | 2.7.3 | Apache-2.0 OR MIT | [4bf96504d6e8](#text-4bf96504d6e8) [89ff9689dcf9](#text-89ff9689dcf9) |
 | tauri-plugin | 2.7.2 | Apache-2.0 OR MIT | standard text: [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html), [MIT](https://spdx.org/licenses/MIT.html); copyright Tauri Programme within The Commons Conservancy |
+| tauri-plugin-biometric | 2.5.0 | Apache-2.0 OR MIT | [eb8a6c846304](#text-eb8a6c846304) [4bf96504d6e8](#text-4bf96504d6e8) [89ff9689dcf9](#text-89ff9689dcf9) |
 | tauri-plugin-dialog | 2.8.3 | Apache-2.0 OR MIT | [eb8a6c846304](#text-eb8a6c846304) [4bf96504d6e8](#text-4bf96504d6e8) [89ff9689dcf9](#text-89ff9689dcf9) |
 | tauri-plugin-fs | 2.7.1 | Apache-2.0 OR MIT | [eb8a6c846304](#text-eb8a6c846304) [4bf96504d6e8](#text-4bf96504d6e8) [89ff9689dcf9](#text-89ff9689dcf9) |
 | tauri-plugin-global-shortcut | 2.4.1 | Apache-2.0 OR MIT | [eb8a6c846304](#text-eb8a6c846304) [4bf96504d6e8](#text-4bf96504d6e8) [89ff9689dcf9](#text-89ff9689dcf9) |
@@ -592,39 +731,58 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | tauri-winrt-notification | 0.8.1 | MIT OR Apache-2.0 | [c801c521ff39](#text-c801c521ff39) [4bf96504d6e8](#text-4bf96504d6e8) [89ff9689dcf9](#text-89ff9689dcf9) |
 | tempfile | 3.27.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [7bdd5c5e8ad0](#text-7bdd5c5e8ad0) |
 | tendril | 0.5.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [dfa7fbad0178](#text-dfa7fbad0178) |
+| tendril | 0.5.1 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [dfa7fbad0178](#text-dfa7fbad0178) |
 | thiserror | 1.0.69 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | thiserror | 2.0.18 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| thiserror | 2.0.21 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | thiserror-impl | 1.0.69 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | thiserror-impl | 2.0.18 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| thiserror-impl | 2.0.21 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | thread_local | 1.1.9 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [8d1f81ea4e87](#text-8d1f81ea4e87) |
+| thread_local | 1.1.10 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [8d1f81ea4e87](#text-8d1f81ea4e87) |
 | tiff | 0.11.3 | MIT | [8aaaf39c2b50](#text-8aaaf39c2b50) |
 | time | 0.3.47 | MIT OR Apache-2.0 | [4bf96504d6e8](#text-4bf96504d6e8) [7fdbca77dec6](#text-7fdbca77dec6) |
+| time | 0.3.55 | MIT OR Apache-2.0 | [4bf96504d6e8](#text-4bf96504d6e8) [7fdbca77dec6](#text-7fdbca77dec6) |
 | time-core | 0.1.8 | MIT OR Apache-2.0 | [4bf96504d6e8](#text-4bf96504d6e8) [7fdbca77dec6](#text-7fdbca77dec6) |
+| time-core | 0.1.9 | MIT OR Apache-2.0 | [4bf96504d6e8](#text-4bf96504d6e8) [7fdbca77dec6](#text-7fdbca77dec6) |
 | time-macros | 0.2.27 | MIT OR Apache-2.0 | [4bf96504d6e8](#text-4bf96504d6e8) [7fdbca77dec6](#text-7fdbca77dec6) |
+| time-macros | 0.2.32 | MIT OR Apache-2.0 | [4bf96504d6e8](#text-4bf96504d6e8) [7fdbca77dec6](#text-7fdbca77dec6) |
 | tiny-skia | 0.12.0 | BSD-3-Clause | [b6300e2c10f1](#text-b6300e2c10f1) |
 | tiny-skia-path | 0.12.0 | BSD-3-Clause | [b6300e2c10f1](#text-b6300e2c10f1) |
 | tinystr | 0.8.1 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
+| tinystr | 0.8.4 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
 | tinyvec | 1.10.0 | Zlib OR Apache-2.0 OR MIT | [283ea6cc2997](#text-283ea6cc2997) [bccaa8b6c09f](#text-bccaa8b6c09f) [943f36fd309f](#text-943f36fd309f) |
+| tinyvec | 1.13.3 | Zlib OR Apache-2.0 OR MIT | [283ea6cc2997](#text-283ea6cc2997) [bccaa8b6c09f](#text-bccaa8b6c09f) [943f36fd309f](#text-943f36fd309f) |
 | tinyvec_macros | 0.1.1 | MIT OR Apache-2.0 OR Zlib | [fe1c9e29858f](#text-fe1c9e29858f) [d9ec1d89801f](#text-d9ec1d89801f) [26d1e12fda78](#text-26d1e12fda78) |
 | tokio | 1.52.3 | MIT | [3e1bef82aa0d](#text-3e1bef82aa0d) |
+| tokio | 1.53.3 | MIT | [3e1bef82aa0d](#text-3e1bef82aa0d) |
 | tokio-macros | 2.7.0 | MIT | [c0fdcda1a4ff](#text-c0fdcda1a4ff) |
+| tokio-macros | 2.7.2 | MIT | [c0fdcda1a4ff](#text-c0fdcda1a4ff) |
 | tokio-rustls | 0.26.4 | MIT OR Apache-2.0 | [acddfb05f07a](#text-acddfb05f07a) [1b0258c48739](#text-1b0258c48739) |
+| tokio-rustls | 0.26.6 | MIT OR Apache-2.0 | [acddfb05f07a](#text-acddfb05f07a) [1b0258c48739](#text-1b0258c48739) |
 | tokio-stream | 0.1.17 | MIT | [3e1bef82aa0d](#text-3e1bef82aa0d) |
 | tokio-tungstenite | 0.30.0 | MIT | [5c07409e7457](#text-5c07409e7457) |
 | tokio-util | 0.7.17 | MIT | [3e1bef82aa0d](#text-3e1bef82aa0d) |
+| tokio-util | 0.7.20 | MIT | [3e1bef82aa0d](#text-3e1bef82aa0d) |
 | toml | 0.8.2 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
 | toml | 0.9.12+spec-1.1.0 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
 | toml | 1.0.6+spec-1.1.0 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
+| toml | 1.1.8+spec-1.1.0 | MIT OR Apache-2.0 | [9b689eac99cd](#text-9b689eac99cd) [4498464c2864](#text-4498464c2864) |
 | toml_datetime | 0.6.3 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | toml_datetime | 0.7.5+spec-1.1.0 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
 | toml_datetime | 1.1.2+spec-1.1.0 | MIT OR Apache-2.0 | [9b689eac99cd](#text-9b689eac99cd) [4498464c2864](#text-4498464c2864) |
 | toml_edit | 0.19.15 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
 | toml_edit | 0.20.2 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
 | toml_edit | 0.23.7 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
+| toml_edit | 0.25.17+spec-1.1.0 | MIT OR Apache-2.0 | [9b689eac99cd](#text-9b689eac99cd) [4498464c2864](#text-4498464c2864) |
 | toml_parser | 1.0.9+spec-1.1.0 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
+| toml_parser | 1.1.5+spec-1.1.0 | MIT OR Apache-2.0 | [9b689eac99cd](#text-9b689eac99cd) [4498464c2864](#text-4498464c2864) |
 | toml_writer | 1.0.6+spec-1.1.0 | MIT OR Apache-2.0 | [6dc0e068dcf3](#text-6dc0e068dcf3) [4498464c2864](#text-4498464c2864) |
+| toml_writer | 1.1.3+spec-1.1.0 | MIT OR Apache-2.0 | [9b689eac99cd](#text-9b689eac99cd) [4498464c2864](#text-4498464c2864) |
 | tower | 0.5.2 | MIT | [da6b30502bad](#text-da6b30502bad) |
+| tower | 0.5.3 | MIT | [da6b30502bad](#text-da6b30502bad) |
 | tower-http | 0.6.8 | MIT | [edd4b164997f](#text-edd4b164997f) |
+| tower-http | 0.6.11 | MIT | [edd4b164997f](#text-edd4b164997f) |
 | tower-layer | 0.3.3 | MIT | [da6b30502bad](#text-da6b30502bad) |
 | tower-service | 0.3.3 | MIT | [da6b30502bad](#text-da6b30502bad) |
 | tracing | 0.1.44 | MIT | [c1e08ee9a728](#text-c1e08ee9a728) |
@@ -639,17 +797,20 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | typed-path | 0.12.3 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | typeid | 1.0.3 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | typenum | 1.19.0 | MIT OR Apache-2.0 | [db11fec99467](#text-db11fec99467) [65dc2a869ff7](#text-65dc2a869ff7) [87ebb37988ef](#text-87ebb37988ef) |
+| typenum | 1.20.1 | MIT OR Apache-2.0 | [db11fec99467](#text-db11fec99467) [65dc2a869ff7](#text-65dc2a869ff7) [87ebb37988ef](#text-87ebb37988ef) |
 | uds_windows | 1.2.1 | MIT | [8e1c6bd583a7](#text-8e1c6bd583a7) |
 | unicase | 2.8.1 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [72eba65d4b79](#text-72eba65d4b79) |
 | unicode-bidi | 0.3.18 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [033a9383ff21](#text-033a9383ff21) |
 | unicode-bidi-mirroring | 0.4.0 | MIT/Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [c80c671db143](#text-c80c671db143) |
 | unicode-ccc | 0.4.0 | MIT/Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [c80c671db143](#text-c80c671db143) |
 | unicode-ident | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) [361d79129578](#text-361d79129578) |
+| unicode-ident | 1.0.27 | (MIT OR Apache-2.0) AND Unicode-3.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) [361d79129578](#text-361d79129578) |
 | unicode-linebreak | 0.1.5 | Apache-2.0 | [283ea6cc2997](#text-283ea6cc2997) |
 | unicode-normalization | 0.1.25 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [033a9383ff21](#text-033a9383ff21) |
 | unicode-properties | 0.1.4 | MIT/Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [033a9383ff21](#text-033a9383ff21) |
 | unicode-script | 0.5.8 | MIT OR Apache-2.0 | [a570e450131b](#text-a570e450131b) [66a2ea9ed607](#text-66a2ea9ed607) |
 | unicode-segmentation | 1.12.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [033a9383ff21](#text-033a9383ff21) |
+| unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [033a9383ff21](#text-033a9383ff21) |
 | unicode-xid | 0.2.6 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [033a9383ff21](#text-033a9383ff21) |
 | universal-hash | 0.5.1 | MIT OR Apache-2.0 | [e8541ea93f02](#text-e8541ea93f02) [7cfd98aeed13](#text-7cfd98aeed13) |
 | untrusted | 0.9.0 | ISC | [a1fff3442978](#text-a1fff3442978) |
@@ -660,6 +821,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | utf8_iter | 1.0.4 | Apache-2.0 OR MIT | [283ea6cc2997](#text-283ea6cc2997) [7dc2f6402447](#text-7dc2f6402447) |
 | utf8parse | 0.2.2 | Apache-2.0 OR MIT | [85ad950cce87](#text-85ad950cce87) [db2c904eb568](#text-db2c904eb568) |
 | uuid | 1.23.1 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [11cd7e6caed4](#text-11cd7e6caed4) |
+| uuid | 1.28.0 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [11cd7e6caed4](#text-11cd7e6caed4) |
 | valuable | 0.1.1 | MIT | standard text: [MIT](https://spdx.org/licenses/MIT.html) |
 | value-bag | 1.12.0 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [1fc927f40537](#text-1fc927f40537) |
 | vcpkg | 0.2.15 | MIT/Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [6196143cbaf5](#text-6196143cbaf5) |
@@ -669,14 +831,21 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | vswhom-sys | 0.1.3 | MIT | [b9720ca7a91f](#text-b9720ca7a91f) |
 | walkdir | 2.5.0 | Unlicense/MIT | [65314a6c9668](#text-65314a6c9668) [154c1af2b38e](#text-154c1af2b38e) [ca2abdf69588](#text-ca2abdf69588) |
 | want | 0.3.1 | MIT | [f7dfffe03f9f](#text-f7dfffe03f9f) |
+| want | 0.3.2 | MIT | [f7dfffe03f9f](#text-f7dfffe03f9f) |
 | wasi | 0.11.1+wasi-snapshot-preview1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [2f213ec6b135](#text-2f213ec6b135) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | wasip2 | 1.0.1+wasi-0.2.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | standard text: [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html), [LLVM-exception](https://spdx.org/licenses/LLVM-exception.html), [MIT](https://spdx.org/licenses/MIT.html) |
+| wasip2 | 1.0.4+wasi-0.2.12 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [2f213ec6b135](#text-2f213ec6b135) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | wasip3 | 0.4.0+wasi-0.3.0-rc-2026-01-06 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | standard text: [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html), [LLVM-exception](https://spdx.org/licenses/LLVM-exception.html), [MIT](https://spdx.org/licenses/MIT.html) |
 | wasm-bindgen | 0.2.114 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
+| wasm-bindgen | 0.2.129 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | wasm-bindgen-futures | 0.4.64 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
+| wasm-bindgen-futures | 0.4.79 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | wasm-bindgen-macro | 0.2.114 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
+| wasm-bindgen-macro | 0.2.129 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | wasm-bindgen-macro-support | 0.2.114 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
+| wasm-bindgen-macro-support | 0.2.129 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | wasm-bindgen-shared | 0.2.114 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
+| wasm-bindgen-shared | 0.2.129 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | wasm-encoder | 0.244.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | standard text: [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html), [LLVM-exception](https://spdx.org/licenses/LLVM-exception.html), [MIT](https://spdx.org/licenses/MIT.html); copyright Nick Fitzgerald <fitzgen@gmail.com> |
 | wasm-metadata | 0.244.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | standard text: [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html), [LLVM-exception](https://spdx.org/licenses/LLVM-exception.html), [MIT](https://spdx.org/licenses/MIT.html) |
 | wasm-streams | 0.4.2 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
@@ -688,12 +857,15 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | wayland-scanner | 0.31.11 | MIT | [b5c6626f6831](#text-b5c6626f6831) |
 | wayland-sys | 0.31.11 | MIT | [b5c6626f6831](#text-b5c6626f6831) |
 | web_atoms | 0.2.3 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [35af0fd88338](#text-35af0fd88338) |
+| web_atoms | 0.2.6 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [35af0fd88338](#text-35af0fd88338) |
 | web-sys | 0.3.91 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
+| web-sys | 0.3.106 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [84e1bbfebd74](#text-84e1bbfebd74) |
 | web-time | 1.1.0 | MIT OR Apache-2.0 | [b7bb0c98ad20](#text-b7bb0c98ad20) [32ae0b6c9e4c](#text-32ae0b6c9e4c) |
 | webkit2gtk | 2.0.2 | MIT | [2b446734be0c](#text-2b446734be0c) |
 | webkit2gtk-sys | 2.0.2 | MIT | [2d964b247876](#text-2d964b247876) |
 | webpki-roots | 0.26.11 | CDLA-Permissive-2.0 | [d30183ec6610](#text-d30183ec6610) |
 | webpki-roots | 1.0.3 | CDLA-Permissive-2.0 | [d30183ec6610](#text-d30183ec6610) |
+| webpki-roots | 1.0.9 | CDLA-Permissive-2.0 | [d30183ec6610](#text-d30183ec6610) |
 | webview2-com | 0.39.1 | MIT | standard text: [MIT](https://spdx.org/licenses/MIT.html) |
 | webview2-com-macros | 0.8.1 | MIT | standard text: [MIT](https://spdx.org/licenses/MIT.html) |
 | webview2-com-sys | 0.39.1 | MIT | standard text: [MIT](https://spdx.org/licenses/MIT.html) |
@@ -754,6 +926,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | winreg | 0.56.0 | MIT | [d9ba37d9bbdf](#text-d9ba37d9bbdf) |
 | wit-bindgen | 0.46.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [2f213ec6b135](#text-2f213ec6b135) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | wit-bindgen | 0.51.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [2f213ec6b135](#text-2f213ec6b135) [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| wit-bindgen | 0.57.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [2f213ec6b135](#text-2f213ec6b135) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | wit-bindgen-core | 0.51.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [2f213ec6b135](#text-2f213ec6b135) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | wit-bindgen-rust | 0.51.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [2f213ec6b135](#text-2f213ec6b135) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | wit-bindgen-rust-macro | 0.51.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [2f213ec6b135](#text-2f213ec6b135) [30fefc3a7d6a](#text-30fefc3a7d6a) |
@@ -761,6 +934,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | wit-parser | 0.244.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | standard text: [Apache-2.0](https://spdx.org/licenses/Apache-2.0.html), [LLVM-exception](https://spdx.org/licenses/LLVM-exception.html), [MIT](https://spdx.org/licenses/MIT.html); copyright Alex Crichton <alex@alexcrichton.com> |
 | write-fonts | 0.43.0 | MIT OR Apache-2.0 | [bfa7ed27d2b0](#text-bfa7ed27d2b0) [163aebd02543](#text-163aebd02543) |
 | writeable | 0.6.1 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
+| writeable | 0.6.4 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
 | wry | 0.57.0 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [86eb6a41ef64](#text-86eb6a41ef64) [26235c41e314](#text-26235c41e314) |
 | x11 | 2.21.0 | MIT | [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | x11-dl | 2.21.0 | MIT | [30fefc3a7d6a](#text-30fefc3a7d6a) |
@@ -770,7 +944,9 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | xdg-home | 1.3.0 | MIT | [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | xkeysym | 0.2.1 | MIT OR Apache-2.0 OR Zlib | [25b0aac9b4bf](#text-25b0aac9b4bf) [cfbf6a2ee585](#text-cfbf6a2ee585) [92cae7c2e9ac](#text-92cae7c2e9ac) |
 | yoke | 0.8.0 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
+| yoke | 0.8.3 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
 | yoke-derive | 0.8.0 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
+| yoke-derive | 0.8.4 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
 | zbus | 4.4.0 | MIT | [a0e7d0739e03](#text-a0e7d0739e03) |
 | zbus | 5.19.0 | MIT | [a0e7d0739e03](#text-a0e7d0739e03) |
 | zbus_macros | 4.4.0 | MIT | [a0e7d0739e03](#text-a0e7d0739e03) |
@@ -779,17 +955,27 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | zbus_names | 4.3.5 | MIT | [a0e7d0739e03](#text-a0e7d0739e03) |
 | zcheapstr | 1.1.0 | MIT | [36c68b249eb6](#text-36c68b249eb6) |
 | zerocopy | 0.8.48 | BSD-2-Clause OR Apache-2.0 OR MIT | [98ed0ad9db8a](#text-98ed0ad9db8a) [47248d1ec833](#text-47248d1ec833) [a03d4daa4f46](#text-a03d4daa4f46) |
+| zerocopy | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | [98ed0ad9db8a](#text-98ed0ad9db8a) [47248d1ec833](#text-47248d1ec833) [a03d4daa4f46](#text-a03d4daa4f46) |
 | zerocopy-derive | 0.8.48 | BSD-2-Clause OR Apache-2.0 OR MIT | [98ed0ad9db8a](#text-98ed0ad9db8a) [47248d1ec833](#text-47248d1ec833) [a03d4daa4f46](#text-a03d4daa4f46) |
+| zerocopy-derive | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | [98ed0ad9db8a](#text-98ed0ad9db8a) [47248d1ec833](#text-47248d1ec833) [a03d4daa4f46](#text-a03d4daa4f46) |
 | zerofrom | 0.1.6 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
+| zerofrom | 0.1.8 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
 | zerofrom-derive | 0.1.6 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
+| zerofrom-derive | 0.1.8 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
 | zeroize | 1.8.2 | Apache-2.0 OR MIT | [283ea6cc2997](#text-283ea6cc2997) [df24ec470ffa](#text-df24ec470ffa) |
+| zeroize | 1.9.1 | Apache-2.0 OR MIT | [283ea6cc2997](#text-283ea6cc2997) [836ed921bbad](#text-836ed921bbad) |
 | zeroize_derive | 1.4.2 | Apache-2.0 OR MIT | [283ea6cc2997](#text-283ea6cc2997) [4bb0af10042c](#text-4bb0af10042c) |
 | zerotrie | 0.2.2 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
+| zerotrie | 0.2.5 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
 | zerovec | 0.11.4 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
+| zerovec | 0.11.8 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
 | zerovec-derive | 0.11.1 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
+| zerovec-derive | 0.11.6 | Unicode-3.0 | [cde87abe221f](#text-cde87abe221f) |
 | zip | 8.6.0 | MIT | [6ac8711fb340](#text-6ac8711fb340) |
 | zlib-rs | 0.5.5 | Zlib | [1a7d409d5142](#text-1a7d409d5142) |
+| zlib-rs | 0.6.8 | Zlib | [1a7d409d5142](#text-1a7d409d5142) |
 | zmij | 1.0.19 | MIT | [30fefc3a7d6a](#text-30fefc3a7d6a) |
+| zmij | 1.0.23 | MIT | [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | zopfli | 0.8.3 | Apache-2.0 | [b969ab4be2f6](#text-b969ab4be2f6) |
 | zstd | 0.13.3 | MIT | [84b7e1b767be](#text-84b7e1b767be) |
 | zstd-safe | 7.2.4 | MIT OR Apache-2.0 | [10b6a2ae8a02](#text-10b6a2ae8a02) [4bf96504d6e8](#text-4bf96504d6e8) [84b7e1b767be](#text-84b7e1b767be) |
@@ -1104,7 +1290,7 @@ OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ### <a id="text-1bc86297d032"></a>1bc86297d032
 
-Used by: adler2@2.0.1, cargo-platform@0.1.9, proc-macro-crate@1.3.1, proc-macro-crate@2.0.2, proc-macro-crate@3.4.0
+Used by: adler2@2.0.1, cargo-platform@0.1.9, proc-macro-crate@1.3.1, proc-macro-crate@2.0.2, proc-macro-crate@3.4.0, proc-macro-crate@3.5.0
 
 ```text
 Apache License
@@ -1312,7 +1498,7 @@ limitations under the License.
 
 ### <a id="text-30fefc3a7d6a"></a>30fefc3a7d6a
 
-Used by: adler2@2.0.1, anyhow@1.0.104, async-channel@2.5.0, async-executor@1.14.0, async-io@2.6.0, async-lock@3.4.1, async-process@2.5.0, async-recursion@1.1.1, async-signal@0.2.13, async-task@4.7.1, async-trait@0.1.89, atomic-waker@1.1.2, blocking@1.6.2, camino@1.2.1, cargo_metadata@0.19.2, cargo-platform@0.1.9, concurrent-queue@2.5.0, curve25519-dalek-derive@0.1.1, displaydoc@0.2.5, dtoa@1.0.10, dyn-clone@1.0.20, endi@1.1.1, erased-serde@0.4.10, event-listener@5.4.1, event-listener-strategy@0.5.4, fast-float2@0.2.3, fastrand@2.3.0, futures-lite@2.6.1, hermit-abi@0.5.2, itoa@1.0.17, leb128fmt@0.1.0, linux-raw-sys@0.12.1, minimal-lexical@0.2.1, num_enum@0.7.5, num_enum_derive@0.7.5, once_cell@1.21.3, ordered-stream@0.2.0, parking@2.2.1, pin-project-lite@0.2.16, piper@0.2.4, polling@3.11.0, portable-atomic@1.11.1, portable-atomic-util@0.2.4, prettyplease@0.2.37, proc-macro-crate@1.3.1, proc-macro-crate@2.0.2, proc-macro-crate@3.4.0, proc-macro2@1.0.106, quote@1.0.45, ref-cast@1.0.25, ref-cast-impl@1.0.25, rustc-hash@2.1.1, rustix@1.1.4, rustversion@1.0.22, semver@1.0.28, serde@1.0.228, serde_core@1.0.228, serde_derive@1.0.228, serde_derive_internals@0.29.1, serde_json@1.0.149, serde_repr@0.1.20, serde-untagged@0.1.9, servo_arc@0.4.3, syn@1.0.109, syn@2.0.117, syn@3.0.4, system-deps@6.2.2, thiserror@1.0.69, thiserror@2.0.18, thiserror-impl@1.0.69, thiserror-impl@2.0.18, typed-path@0.12.3, typeid@1.0.3, unicode-ident@1.0.24, utf-8@0.7.6, wasi@0.11.1+wasi-snapshot-preview1, wasm-streams@0.4.2, wasm-streams@0.5.0, wit-bindgen@0.46.0, wit-bindgen@0.51.0, wit-bindgen-core@0.51.0, wit-bindgen-rust@0.51.0, wit-bindgen-rust-macro@0.51.0, x11@2.21.0, x11-dl@2.21.0, xdg-home@1.3.0, zbus_names@3.0.0, zmij@1.0.19, zvariant_utils@2.1.0, zvariant_utils@4.2.0
+Used by: adler2@2.0.1, anyhow@1.0.104, async-channel@2.5.0, async-executor@1.14.0, async-io@2.6.0, async-lock@3.4.1, async-lock@3.4.2, async-process@2.5.0, async-recursion@1.1.1, async-recursion@1.2.0, async-signal@0.2.13, async-signal@0.2.14, async-task@4.7.1, async-trait@0.1.89, async-trait@0.1.92, atomic-waker@1.1.2, blocking@1.6.2, blocking@1.7.0, camino@1.2.1, camino@1.2.6, cargo_metadata@0.19.2, cargo-platform@0.1.9, concurrent-queue@2.5.0, curve25519-dalek-derive@0.1.1, displaydoc@0.2.5, displaydoc@0.2.7, dtoa@1.0.10, dtoa@1.0.11, dyn-clone@1.0.20, endi@1.1.1, erased-serde@0.4.10, event-listener@5.4.1, event-listener@5.4.2, event-listener-strategy@0.5.4, fast-float2@0.2.3, fastrand@2.3.0, fastrand@2.5.0, futures-lite@2.6.1, hermit-abi@0.5.2, hermit-abi@0.5.3, itoa@1.0.17, itoa@1.0.18, lazy_static@1.5.1, leb128fmt@0.1.0, linux-raw-sys@0.12.1, minimal-lexical@0.2.1, num_enum@0.7.5, num_enum@0.7.6, num_enum_derive@0.7.5, num_enum_derive@0.7.6, once_cell@1.21.3, once_cell@1.21.4, ordered-stream@0.2.0, parking@2.2.1, pin-project-lite@0.2.16, pin-project-lite@0.2.17, piper@0.2.4, piper@0.2.5, polling@3.11.0, portable-atomic@1.11.1, portable-atomic@1.15.0, portable-atomic-util@0.2.4, portable-atomic-util@0.2.8, prettyplease@0.2.37, proc-macro-crate@1.3.1, proc-macro-crate@2.0.2, proc-macro-crate@3.4.0, proc-macro-crate@3.5.0, proc-macro2@1.0.106, proc-macro2@1.0.107, quote@1.0.45, quote@1.0.47, ref-cast@1.0.25, ref-cast@1.0.27, ref-cast-impl@1.0.25, ref-cast-impl@1.0.27, rustc-hash@2.1.1, rustc-hash@2.1.3, rustix@1.1.4, rustix@1.1.5, rustversion@1.0.22, rustversion@1.0.23, semver@1.0.28, serde@1.0.228, serde@1.0.229, serde_core@1.0.228, serde_core@1.0.229, serde_derive@1.0.228, serde_derive@1.0.229, serde_derive_internals@0.29.1, serde_json@1.0.149, serde_json@1.0.154, serde_repr@0.1.20, serde_repr@0.1.21, serde-untagged@0.1.9, servo_arc@0.4.3, syn@1.0.109, syn@2.0.117, syn@2.0.119, syn@3.0.4, syn@3.0.9, system-deps@6.2.2, thiserror@1.0.69, thiserror@2.0.18, thiserror@2.0.21, thiserror-impl@1.0.69, thiserror-impl@2.0.18, thiserror-impl@2.0.21, typed-path@0.12.3, typeid@1.0.3, unicode-ident@1.0.24, unicode-ident@1.0.27, utf-8@0.7.6, wasi@0.11.1+wasi-snapshot-preview1, wasip2@1.0.4+wasi-0.2.12, wasm-streams@0.4.2, wasm-streams@0.5.0, wit-bindgen@0.46.0, wit-bindgen@0.51.0, wit-bindgen@0.57.1, wit-bindgen-core@0.51.0, wit-bindgen-rust@0.51.0, wit-bindgen-rust-macro@0.51.0, x11@2.21.0, x11-dl@2.21.0, xdg-home@1.3.0, zbus_names@3.0.0, zmij@1.0.19, zmij@1.0.23, zvariant_utils@2.1.0, zvariant_utils@4.2.0
 
 ```text
 Permission is hereby granted, free of charge, to any
@@ -1342,7 +1528,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-e8541ea93f02"></a>e8541ea93f02
 
-Used by: aead@0.5.2, aes@0.8.4, aes@0.9.3, aes-gcm@0.10.3, base64ct@1.8.3, blake2@0.10.6, block-buffer@0.10.4, block-buffer@0.12.0, block-padding@0.3.3, block-padding@0.4.2, cbc@0.1.2, cbc@0.2.0, chacha20@0.9.1, chacha20@0.10.2, chacha20poly1305@0.10.1, cipher@0.4.4, cipher@0.5.1, const-oid@0.9.6, const-oid@0.10.2, cpubits@0.1.1, cpufeatures@0.2.17, cpufeatures@0.3.0, crypto-common@0.1.6, crypto-common@0.2.1, ctr@0.9.2, der@0.7.10, digest@0.10.7, digest@0.11.2, ghash@0.5.1, hkdf@0.12.4, hmac@0.12.1, hybrid-array@0.4.10, inout@0.1.4, inout@0.2.2, md-5@0.11.0, opaque-debug@0.3.1, pkcs8@0.10.2, poly1305@0.8.0, polyval@0.6.2, sha1@0.10.6, sha1@0.11.0, sha2@0.10.9, sha2@0.11.0, signature@2.2.0, spake2@0.4.0, spki@0.7.3, universal-hash@0.5.1
+Used by: aead@0.5.2, aes@0.8.4, aes@0.9.3, aes-gcm@0.10.3, base64ct@1.8.3, blake2@0.10.6, block-buffer@0.10.4, block-buffer@0.12.0, block-buffer@0.12.1, block-padding@0.3.3, block-padding@0.4.2, cbc@0.1.2, cbc@0.2.0, chacha20@0.9.1, chacha20@0.10.2, chacha20poly1305@0.10.1, cipher@0.4.4, cipher@0.5.1, const-oid@0.9.6, const-oid@0.10.2, cpubits@0.1.1, cpufeatures@0.2.17, cpufeatures@0.3.0, cpufeatures@0.3.1, crypto-common@0.1.6, crypto-common@0.1.7, crypto-common@0.2.1, crypto-common@0.2.2, ctr@0.9.2, der@0.7.10, digest@0.10.7, digest@0.11.2, digest@0.11.3, ghash@0.5.1, hkdf@0.12.4, hmac@0.12.1, hybrid-array@0.4.10, hybrid-array@0.4.15, inout@0.1.4, inout@0.2.2, md-5@0.11.0, opaque-debug@0.3.1, pkcs8@0.10.2, poly1305@0.8.0, polyval@0.6.2, sha1@0.10.6, sha1@0.11.0, sha2@0.10.9, sha2@0.11.0, signature@2.2.0, spake2@0.4.0, spki@0.7.3, universal-hash@0.5.1
 
 ```text
 Apache License
@@ -1877,7 +2063,7 @@ Apache License
 
 ### <a id="text-65314a6c9668"></a>65314a6c9668
 
-Used by: aho-corasick@1.1.3, byteorder@1.5.0, globset@0.4.19, ignore@0.4.32, jiff@0.2.28, jiff-static@0.2.28, jiff-tzdb@0.1.4, jiff-tzdb-platform@0.1.3, memchr@2.8.2, same-file@1.0.6, walkdir@2.5.0, winapi-util@0.1.11
+Used by: aho-corasick@1.1.3, aho-corasick@1.1.5, byteorder@1.5.0, globset@0.4.19, ignore@0.4.32, jiff@0.2.28, jiff@0.2.38, jiff-core@0.1.1, jiff-static@0.2.28, jiff-static@0.2.38, jiff-tzdb@0.1.4, jiff-tzdb@0.1.9, jiff-tzdb-platform@0.1.3, memchr@2.8.2, memchr@2.8.3, same-file@1.0.6, walkdir@2.5.0, winapi-util@0.1.11
 
 ```text
 This project is dual-licensed under the Unlicense and MIT licenses.
@@ -1887,7 +2073,7 @@ You may use this code under the terms of either license.
 
 ### <a id="text-154c1af2b38e"></a>154c1af2b38e
 
-Used by: aho-corasick@1.1.3, byteorder@1.5.0, byteorder-lite@0.1.0, globset@0.4.19, ignore@0.4.32, jiff@0.2.28, jiff-static@0.2.28, jiff-tzdb@0.1.4, jiff-tzdb-platform@0.1.3, memchr@2.8.2, walkdir@2.5.0
+Used by: aho-corasick@1.1.3, aho-corasick@1.1.5, byteorder@1.5.0, byteorder-lite@0.1.0, globset@0.4.19, ignore@0.4.32, jiff@0.2.28, jiff@0.2.38, jiff-core@0.1.1, jiff-static@0.2.28, jiff-static@0.2.38, jiff-tzdb@0.1.4, jiff-tzdb@0.1.9, jiff-tzdb-platform@0.1.3, memchr@2.8.2, memchr@2.8.3, walkdir@2.5.0
 
 ```text
 The MIT License (MIT)
@@ -1915,7 +2101,7 @@ THE SOFTWARE.
 
 ### <a id="text-ca2abdf69588"></a>ca2abdf69588
 
-Used by: aho-corasick@1.1.3, byteorder@1.5.0, byteorder-lite@0.1.0, globset@0.4.19, ignore@0.4.32, jiff@0.2.28, jiff-static@0.2.28, jiff-tzdb@0.1.4, jiff-tzdb-platform@0.1.3, memchr@2.8.2, same-file@1.0.6, walkdir@2.5.0, winapi-util@0.1.11
+Used by: aho-corasick@1.1.3, aho-corasick@1.1.5, byteorder@1.5.0, byteorder-lite@0.1.0, globset@0.4.19, ignore@0.4.32, jiff@0.2.28, jiff@0.2.38, jiff-core@0.1.1, jiff-static@0.2.28, jiff-static@0.2.38, jiff-tzdb@0.1.4, jiff-tzdb@0.1.9, jiff-tzdb-platform@0.1.3, memchr@2.8.2, memchr@2.8.3, same-file@1.0.6, walkdir@2.5.0, winapi-util@0.1.11
 
 ```text
 This is free and unencumbered software released into the public domain.
@@ -1965,7 +2151,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 
 ### <a id="text-dd0815108f8e"></a>dd0815108f8e
 
-Used by: android_system_properties@0.1.5
+Used by: android_system_properties@0.1.5, android_system_properties@0.1.6
 
 ```text
 Copyright 2016 Nicolas Silva
@@ -1985,7 +2171,7 @@ limitations under the License.
 
 ### <a id="text-af6e2a74133b"></a>af6e2a74133b
 
-Used by: android_system_properties@0.1.5
+Used by: android_system_properties@0.1.5, android_system_properties@0.1.6
 
 ```text
 The MIT License (MIT)
@@ -2012,7 +2198,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-6dc0e068dcf3"></a>6dc0e068dcf3
 
-Used by: anstream@0.6.21, anstyle@1.0.13, anstyle-parse@0.2.7, anstyle-query@1.1.4, anstyle-wincon@3.0.10, colorchoice@1.0.4, crc32fast@1.5.0, ctor@1.0.13, derive_builder@0.20.2, derive_builder_core@0.20.2, derive_builder_macro@0.20.2, dpi@0.1.2, env_filter@0.1.4, env_logger@0.11.8, fallible-iterator@0.3.0, fallible-streaming-iterator@0.1.9, foreign-types@0.5.0, foreign-types-macros@0.2.4, foreign-types-shared@0.3.1, hex@0.4.3, is_terminal_polyfill@1.70.2, jni-sys@0.3.0, json-patch@4.2.0, notify-rust@4.18.2, once_cell_polyfill@1.70.2, quick-error@2.0.1, serde_spanned@0.6.9, serde_spanned@1.0.4, stringprep@0.1.5, tao@0.37.1, toml@0.8.2, toml@0.9.12+spec-1.1.0, toml@1.0.6+spec-1.1.0, toml_datetime@0.7.5+spec-1.1.0, toml_edit@0.19.15, toml_edit@0.20.2, toml_edit@0.23.7, toml_parser@1.0.9+spec-1.1.0, toml_writer@1.0.6+spec-1.1.0, winapi@0.3.9
+Used by: anstream@0.6.21, anstyle@1.0.13, anstyle-parse@0.2.7, anstyle-query@1.1.4, anstyle-wincon@3.0.10, colorchoice@1.0.4, crc32fast@1.5.0, crc32fast@1.5.2, ctor@1.0.13, derive_builder@0.20.2, derive_builder_core@0.20.2, derive_builder_macro@0.20.2, dpi@0.1.2, env_filter@0.1.4, env_logger@0.11.8, fallible-iterator@0.3.0, fallible-streaming-iterator@0.1.9, foreign-types@0.5.0, foreign-types-macros@0.2.4, foreign-types-shared@0.3.1, hex@0.4.3, is_terminal_polyfill@1.70.2, jni-sys@0.3.0, jni-sys@0.3.1, jni-sys@0.4.1, json-patch@4.2.0, notify-rust@4.18.2, once_cell_polyfill@1.70.2, quick-error@2.0.1, serde_spanned@0.6.9, serde_spanned@1.0.4, stringprep@0.1.5, tao@0.37.1, toml@0.8.2, toml@0.9.12+spec-1.1.0, toml@1.0.6+spec-1.1.0, toml_datetime@0.7.5+spec-1.1.0, toml_edit@0.19.15, toml_edit@0.20.2, toml_edit@0.23.7, toml_parser@1.0.9+spec-1.1.0, toml_writer@1.0.6+spec-1.1.0, winapi@0.3.9
 
 ```text
 Apache License
@@ -2220,7 +2406,7 @@ Apache License
 
 ### <a id="text-4498464c2864"></a>4498464c2864
 
-Used by: anstream@0.6.21, anstyle@1.0.13, anstyle-parse@0.2.7, anstyle-query@1.1.4, anstyle-wincon@3.0.10, colorchoice@1.0.4, env_filter@0.1.4, env_logger@0.11.8, is_terminal_polyfill@1.70.2, once_cell_polyfill@1.70.2, serde_spanned@0.6.9, serde_spanned@1.0.4, toml@0.8.2, toml@0.9.12+spec-1.1.0, toml@1.0.6+spec-1.1.0, toml_datetime@0.7.5+spec-1.1.0, toml_datetime@1.1.2+spec-1.1.0, toml_edit@0.19.15, toml_edit@0.20.2, toml_edit@0.23.7, toml_parser@1.0.9+spec-1.1.0, toml_writer@1.0.6+spec-1.1.0
+Used by: anstream@0.6.21, anstyle@1.0.13, anstyle-parse@0.2.7, anstyle-query@1.1.4, anstyle-wincon@3.0.10, colorchoice@1.0.4, env_filter@0.1.4, env_logger@0.11.8, is_terminal_polyfill@1.70.2, once_cell_polyfill@1.70.2, serde_spanned@0.6.9, serde_spanned@1.0.4, serde_spanned@1.1.2, toml@0.8.2, toml@0.9.12+spec-1.1.0, toml@1.0.6+spec-1.1.0, toml@1.1.8+spec-1.1.0, toml_datetime@0.7.5+spec-1.1.0, toml_datetime@1.1.2+spec-1.1.0, toml_edit@0.19.15, toml_edit@0.20.2, toml_edit@0.23.7, toml_edit@0.25.17+spec-1.1.0, toml_parser@1.0.9+spec-1.1.0, toml_parser@1.1.5+spec-1.1.0, toml_writer@1.0.6+spec-1.1.0, toml_writer@1.1.3+spec-1.1.0
 
 ```text
 Copyright (c) Individual contributors
@@ -2246,7 +2432,7 @@ SOFTWARE.
 
 ### <a id="text-85ad950cce87"></a>85ad950cce87
 
-Used by: anyhow@1.0.104, async-trait@0.1.89, constant_time_eq@0.3.1, dtoa@1.0.10, dyn-clone@1.0.20, erased-serde@0.4.10, itoa@1.0.17, libc@0.2.186, litrs@1.0.0, num_enum@0.7.5, num_enum_derive@0.7.5, office_oxide@0.1.9, pdf_oxide@0.3.74, prettyplease@0.2.37, proc-macro2@1.0.106, quote@1.0.45, ref-cast@1.0.25, ref-cast-impl@1.0.25, rustc-hash@2.1.1, rustversion@1.0.22, ryu@1.0.20, semver@1.0.28, serde@1.0.228, serde_core@1.0.228, serde_derive@1.0.228, serde_derive_internals@0.29.1, serde_json@1.0.149, serde_repr@0.1.20, serde_urlencoded@0.7.1, serde-untagged@0.1.9, subsetter@0.2.3, syn@2.0.117, syn@3.0.4, thiserror@1.0.69, thiserror@2.0.18, thiserror-impl@1.0.69, thiserror-impl@2.0.18, typed-path@0.12.3, typeid@1.0.3, unicode-ident@1.0.24, utf-8@0.7.6, utf8parse@0.2.2, wasm-streams@0.4.2, wasm-streams@0.5.0
+Used by: anyhow@1.0.104, async-trait@0.1.89, async-trait@0.1.92, constant_time_eq@0.3.1, dtoa@1.0.10, dtoa@1.0.11, dyn-clone@1.0.20, erased-serde@0.4.10, itoa@1.0.17, itoa@1.0.18, libc@0.2.186, libc@0.2.191, litrs@1.0.0, num_enum@0.7.5, num_enum@0.7.6, num_enum_derive@0.7.5, num_enum_derive@0.7.6, office_oxide@0.1.9, pdf_oxide@0.3.74, prettyplease@0.2.37, proc-macro2@1.0.106, proc-macro2@1.0.107, quote@1.0.45, quote@1.0.47, ref-cast@1.0.25, ref-cast@1.0.27, ref-cast-impl@1.0.25, ref-cast-impl@1.0.27, rustc-hash@2.1.1, rustc-hash@2.1.3, rustversion@1.0.22, rustversion@1.0.23, ryu@1.0.20, semver@1.0.28, serde@1.0.228, serde@1.0.229, serde_core@1.0.228, serde_core@1.0.229, serde_derive@1.0.228, serde_derive@1.0.229, serde_derive_internals@0.29.1, serde_json@1.0.149, serde_json@1.0.154, serde_repr@0.1.20, serde_repr@0.1.21, serde_urlencoded@0.7.1, serde-untagged@0.1.9, subsetter@0.2.3, syn@2.0.117, syn@2.0.119, syn@3.0.4, syn@3.0.9, thiserror@1.0.69, thiserror@2.0.18, thiserror@2.0.21, thiserror-impl@1.0.69, thiserror-impl@2.0.18, thiserror-impl@2.0.21, typed-path@0.12.3, typeid@1.0.3, unicode-ident@1.0.24, unicode-ident@1.0.27, utf-8@0.7.6, utf8parse@0.2.2, wasm-streams@0.4.2, wasm-streams@0.5.0
 
 ```text
 Apache License
@@ -2462,7 +2648,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### <a id="text-954f335b8baf"></a>954f335b8baf
 
-Used by: arrayvec@0.7.6, async-channel@2.5.0, async-executor@1.14.0, async-io@2.6.0, async-lock@3.4.1, async-process@2.5.0, async-recursion@1.1.1, async-signal@0.2.13, async-task@4.7.1, atomic-waker@1.1.2, autocfg@1.5.0, backoff@0.4.0, base64@0.21.7, base64@0.22.1, base64@0.23.1, bitflags@1.3.2, bitflags@2.13.0, blocking@1.6.2, bs58@0.5.1, bstr@1.13.1, bumpalo@3.19.0, camino@1.2.1, cc@1.2.48, cfg-if@1.0.4, cmake@0.1.54, concurrent-queue@2.5.0, core-foundation@0.9.4, core-foundation@0.10.1, core-foundation-sys@0.8.7, core-graphics@0.25.0, core-graphics-types@0.2.0, crossbeam-channel@0.5.15, crossbeam-deque@0.8.6, crossbeam-epoch@0.9.20, crossbeam-utils@0.8.21, curve25519-dalek-derive@0.1.1, dbus-secret-service@4.1.0, displaydoc@0.2.5, either@1.15.0, equivalent@1.0.2, errno@0.3.14, euclid@0.22.14, event-listener@5.4.1, event-listener-strategy@0.5.4, fastrand@2.3.0, filetime@0.2.29, find-msvc-tools@0.1.14, flate2@1.1.5, fnv@1.0.7, form_urlencoded@1.2.2, futures-lite@2.6.1, futures-timer@3.0.3, gethostname@1.1.0, gif@0.14.1, glob@0.3.3, global-hotkey@0.8.0, hashbrown@0.12.3, hashbrown@0.15.5, hashbrown@0.17.1, heck@0.4.1, heck@0.5.0, hermit-abi@0.5.2, html5ever@0.39.0, httparse@1.10.1, hyper-rustls@0.27.7, id-arena@2.3.0, idna@1.1.0, idna_adapter@1.2.1, indexmap@1.9.3, indexmap@2.14.0, jni@0.21.1, jobserver@0.1.34, jpeg-decoder@0.3.2, js-sys@0.3.91, keyboard-types@0.7.0, keyboard-types@0.8.3, lazy_static@1.5.0, leb128fmt@0.1.0, libappindicator@0.9.0, linux-raw-sys@0.12.1, lock_api@0.4.14, log@0.4.32, markup5ever@0.39.0, mime@0.3.17, muda@0.20.0, num@0.4.3, num-bigint@0.4.6, num-complex@0.4.6, num-integer@0.1.46, num-iter@0.1.45, num-rational@0.4.2, num-traits@0.2.19, once_cell@1.21.3, openssl-probe@0.1.6, ordered-stream@0.2.0, parking@2.2.1, parking_lot@0.12.5, parking_lot_core@0.9.12, percent-encoding@2.3.2, piper@0.2.4, pkg-config@0.3.32, png@0.17.16, png@0.18.0, polling@3.11.0, pollster@0.4.0, rayon@1.12.0, rayon-core@1.13.0, regex@1.12.4, regex-automata@0.4.13, regex-syntax@0.8.11, roxmltree@0.20.0, rustc_version@0.4.1, rustix@1.1.4, rustls@0.23.37, rustls-native-certs@0.8.2, scoped-tls@1.0.1, scopeguard@1.2.0, secret-service@4.0.0, security-framework@2.11.1, security-framework@3.5.1, security-framework-sys@2.15.0, serde_with@3.22.0, serde_with_macros@3.22.0, servo_arc@0.4.3, signal-hook-registry@1.4.8, smallvec@1.15.1, socket2@0.6.4, stable_deref_trait@1.2.1, string_cache@0.9.0, string_cache_codegen@0.6.1, syn@1.0.109, system-deps@6.2.2, tao-macros@0.1.4, tar@0.4.46, tempfile@3.27.0, tendril@0.5.0, thread_local@1.1.9, toml_datetime@0.6.3, tray-icon@0.25.1, ttf-parser@0.25.1, tungstenite@0.30.0, unicase@2.8.1, unicode-bidi@0.3.18, unicode-bidi-mirroring@0.4.0, unicode-ccc@0.4.0, unicode-normalization@0.1.25, unicode-properties@0.1.4, unicode-segmentation@1.12.0, unicode-xid@0.2.6, url@2.5.8, uuid@1.23.1, value-bag@1.12.0, vcpkg@0.2.15, version_check@0.9.5, wasi@0.11.1+wasi-snapshot-preview1, wasm-bindgen@0.2.114, wasm-bindgen-futures@0.4.64, wasm-bindgen-macro@0.2.114, wasm-bindgen-macro-support@0.2.114, wasm-bindgen-shared@0.2.114, web_atoms@0.2.3, web-sys@0.3.91, weezl@0.1.10, weezl@0.2.1, window-vibrancy@0.8.1, wit-bindgen@0.46.0, wit-bindgen@0.51.0, wit-bindgen-core@0.51.0, wit-bindgen-rust@0.51.0, wit-bindgen-rust-macro@0.51.0, wry@0.57.0, xattr@1.6.1
+Used by: arrayvec@0.7.6, async-channel@2.5.0, async-executor@1.14.0, async-io@2.6.0, async-lock@3.4.1, async-lock@3.4.2, async-process@2.5.0, async-recursion@1.1.1, async-recursion@1.2.0, async-signal@0.2.13, async-signal@0.2.14, async-task@4.7.1, atomic-waker@1.1.2, autocfg@1.5.0, autocfg@1.5.1, backoff@0.4.0, base64@0.21.7, base64@0.22.1, base64@0.23.1, bitflags@1.3.2, bitflags@2.13.0, bitflags@2.13.2, blocking@1.6.2, blocking@1.7.0, bs58@0.5.1, bstr@1.13.1, bumpalo@3.19.0, bumpalo@3.20.3, camino@1.2.1, camino@1.2.6, cc@1.2.48, cc@1.8.0, cfg-if@1.0.4, cfg-if@1.0.5, cmake@0.1.54, concurrent-queue@2.5.0, core-foundation@0.9.4, core-foundation@0.10.1, core-foundation-sys@0.8.7, core-graphics@0.25.0, core-graphics-types@0.2.0, crossbeam-channel@0.5.15, crossbeam-channel@0.5.17, crossbeam-deque@0.8.6, crossbeam-epoch@0.9.20, crossbeam-utils@0.8.21, crossbeam-utils@0.8.23, curve25519-dalek-derive@0.1.1, dbus-secret-service@4.1.0, displaydoc@0.2.5, displaydoc@0.2.7, either@1.15.0, equivalent@1.0.2, equivalent@1.0.3, errno@0.3.14, euclid@0.22.14, event-listener@5.4.1, event-listener@5.4.2, event-listener-strategy@0.5.4, fastrand@2.3.0, fastrand@2.5.0, filetime@0.2.29, find-msvc-tools@0.1.14, flate2@1.1.5, flate2@1.1.10, fnv@1.0.7, form_urlencoded@1.2.2, futures-lite@2.6.1, futures-timer@3.0.3, gethostname@1.1.0, gif@0.14.1, glob@0.3.3, glob@0.3.4, global-hotkey@0.8.0, hashbrown@0.12.3, hashbrown@0.15.5, hashbrown@0.17.1, heck@0.4.1, heck@0.5.0, hermit-abi@0.5.2, hermit-abi@0.5.3, html5ever@0.39.0, httparse@1.10.1, hyper-rustls@0.27.7, id-arena@2.3.0, idna@1.1.0, idna_adapter@1.2.1, idna_adapter@1.2.2, indexmap@1.9.3, indexmap@2.14.0, indexmap@2.14.2, jni@0.21.1, jobserver@0.1.34, jpeg-decoder@0.3.2, js-sys@0.3.91, js-sys@0.3.106, keyboard-types@0.7.0, keyboard-types@0.8.3, lazy_static@1.5.0, lazy_static@1.5.1, leb128fmt@0.1.0, libappindicator@0.9.0, linux-raw-sys@0.12.1, lock_api@0.4.14, log@0.4.32, log@0.4.34, markup5ever@0.39.0, mime@0.3.17, muda@0.20.0, num@0.4.3, num-bigint@0.4.6, num-complex@0.4.6, num-integer@0.1.46, num-iter@0.1.45, num-rational@0.4.2, num-traits@0.2.19, once_cell@1.21.3, once_cell@1.21.4, openssl-probe@0.1.6, ordered-stream@0.2.0, parking@2.2.1, parking_lot@0.12.5, parking_lot_core@0.9.12, percent-encoding@2.3.2, piper@0.2.4, piper@0.2.5, pkg-config@0.3.32, pkg-config@0.3.34, png@0.17.16, png@0.18.0, png@0.18.1, polling@3.11.0, pollster@0.4.0, rayon@1.12.0, rayon-core@1.13.0, regex@1.12.4, regex@1.13.1, regex-automata@0.4.13, regex-automata@0.4.18, regex-syntax@0.8.11, roxmltree@0.20.0, rustc_version@0.4.1, rustix@1.1.4, rustix@1.1.5, rustls@0.23.37, rustls@0.23.46, rustls-native-certs@0.8.2, scoped-tls@1.0.1, scopeguard@1.2.0, secret-service@4.0.0, security-framework@2.11.1, security-framework@3.5.1, security-framework-sys@2.15.0, serde_with@3.22.0, serde_with@3.24.0, serde_with_macros@3.22.0, serde_with_macros@3.24.0, servo_arc@0.4.3, signal-hook-registry@1.4.8, smallvec@1.15.1, smallvec@1.16.3, socket2@0.6.4, socket2@0.6.5, stable_deref_trait@1.2.1, string_cache@0.9.0, string_cache_codegen@0.6.1, syn@1.0.109, system-deps@6.2.2, tao-macros@0.1.4, tar@0.4.46, tempfile@3.27.0, tendril@0.5.0, tendril@0.5.1, thread_local@1.1.9, thread_local@1.1.10, toml_datetime@0.6.3, tray-icon@0.25.1, ttf-parser@0.25.1, tungstenite@0.30.0, unicase@2.8.1, unicode-bidi@0.3.18, unicode-bidi-mirroring@0.4.0, unicode-ccc@0.4.0, unicode-normalization@0.1.25, unicode-properties@0.1.4, unicode-segmentation@1.12.0, unicode-segmentation@1.13.3, unicode-xid@0.2.6, url@2.5.8, uuid@1.23.1, uuid@1.28.0, value-bag@1.12.0, vcpkg@0.2.15, version_check@0.9.5, wasi@0.11.1+wasi-snapshot-preview1, wasip2@1.0.4+wasi-0.2.12, wasm-bindgen@0.2.114, wasm-bindgen@0.2.129, wasm-bindgen-futures@0.4.64, wasm-bindgen-futures@0.4.79, wasm-bindgen-macro@0.2.114, wasm-bindgen-macro@0.2.129, wasm-bindgen-macro-support@0.2.114, wasm-bindgen-macro-support@0.2.129, wasm-bindgen-shared@0.2.114, wasm-bindgen-shared@0.2.129, web_atoms@0.2.3, web_atoms@0.2.6, web-sys@0.3.91, web-sys@0.3.106, weezl@0.1.10, weezl@0.2.1, window-vibrancy@0.8.1, wit-bindgen@0.46.0, wit-bindgen@0.51.0, wit-bindgen@0.57.1, wit-bindgen-core@0.51.0, wit-bindgen-rust@0.51.0, wit-bindgen-rust-macro@0.51.0, wry@0.57.0, xattr@1.6.1
 
 ```text
 Apache License
@@ -3013,7 +3199,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-21a2121221d2"></a>21a2121221d2
 
-Used by: atk@0.18.2, atk-sys@0.18.2, cairo-rs@0.18.5, cairo-sys-rs@0.18.2, gdk@0.18.2, gdk-pixbuf@0.18.5, gdk-pixbuf-sys@0.18.0, gdk-sys@0.18.2, gdkwayland-sys@0.18.2, gdkx11@0.18.2, gdkx11-sys@0.18.2, gio@0.18.4, gio-sys@0.18.1, glib@0.18.5, glib-macros@0.18.5, glib-sys@0.18.1, gobject-sys@0.18.0, gtk@0.18.2, gtk-sys@0.18.2, gtk3-macros@0.18.2, pango@0.18.3, pango-sys@0.18.0
+Used by: atk@0.18.2, atk-sys@0.18.2, cairo-rs@0.18.5, cairo-sys-rs@0.18.2, gdk@0.18.2, gdk-pixbuf@0.18.5, gdk-pixbuf-sys@0.18.0, gdk-sys@0.18.2, gdkwayland-sys@0.18.2, gdkx11@0.18.2, gdkx11-sys@0.18.2, gio@0.18.4, gio-sys@0.18.1, glib@0.18.5, glib-macros@0.18.5, glib-sys@0.18.1, gobject-sys@0.18.0, gtk@0.18.2, gtk-sys@0.18.2, gtk3-macros@0.18.2, pango@0.18.3, pango-sys@0.18.0, siphasher@1.0.4
 
 ```text
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -3329,7 +3515,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-99afaa30c178"></a>99afaa30c178
 
-Used by: autocfg@1.5.0
+Used by: autocfg@1.5.0, autocfg@1.5.1
 
 ```text
 Copyright (c) 2018 Josh Stone
@@ -4014,7 +4200,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-7e1b38c60796"></a>7e1b38c60796
 
-Used by: bit-set@0.8.0, bit-vec@0.8.0, cfg-expr@0.15.8, downcast-rs@1.2.1, hashlink@0.10.0, minimal-lexical@0.2.1, shared_library@0.1.9
+Used by: bit-set@0.8.0, bit-vec@0.8.0, cfg-expr@0.15.8, defmt@1.2.0, defmt-macros@1.2.0, defmt-parser@1.1.0, downcast-rs@1.2.1, hashlink@0.10.0, minimal-lexical@0.2.1, shared_library@0.1.9
 
 ```text
 Apache License
@@ -4254,7 +4440,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-14435fbcd271"></a>14435fbcd271
 
-Used by: bitflags@1.3.2, bitflags@2.13.0, glob@0.3.3, log@0.4.32, num@0.4.3, num-bigint@0.4.6, num-complex@0.4.6, num-integer@0.1.46, num-iter@0.1.45, num-rational@0.4.2, num-traits@0.2.19, regex@1.12.4, regex-automata@0.4.13, regex-syntax@0.8.11
+Used by: bitflags@1.3.2, bitflags@2.13.0, bitflags@2.13.2, glob@0.3.3, glob@0.3.4, log@0.4.32, log@0.4.34, num@0.4.3, num-bigint@0.4.6, num-complex@0.4.6, num-integer@0.1.46, num-iter@0.1.45, num-rational@0.4.2, num-traits@0.2.19, regex@1.12.4, regex@1.13.1, regex-automata@0.4.13, regex-automata@0.4.18, regex-syntax@0.8.11
 
 ```text
 Copyright (c) 2014 The Rust Project Developers
@@ -4912,7 +5098,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-775a3e20a9af"></a>775a3e20a9af
 
-Used by: block-buffer@0.12.0, block-padding@0.4.2
+Used by: block-buffer@0.12.0, block-buffer@0.12.1, block-padding@0.4.2
 
 ```text
 Copyright (c) 2018-2025 The RustCrypto Project Developers
@@ -5040,7 +5226,7 @@ THE SOFTWARE.
 
 ### <a id="text-5662394bebb1"></a>5662394bebb1
 
-Used by: bumpalo@3.19.0
+Used by: bumpalo@3.19.0, bumpalo@3.20.3
 
 ```text
 Copyright (c) 2019 Nick Fitzgerald
@@ -5156,7 +5342,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### <a id="text-943f36fd309f"></a>943f36fd309f
 
-Used by: bytemuck@1.25.2, bytemuck_derive@1.10.2, tinyvec@1.10.0
+Used by: bytemuck@1.25.2, bytemuck_derive@1.10.2, tinyvec@1.10.0, tinyvec@1.13.3
 
 ```text
 Copyright (c) 2019 Daniel "Lokathor" Gee.
@@ -5174,7 +5360,7 @@ Permission is granted to anyone to use this software for any purpose, including 
 
 ### <a id="text-51f778ffff2c"></a>51f778ffff2c
 
-Used by: bytes@1.11.1
+Used by: bytes@1.11.1, bytes@1.12.1
 
 ```text
 Copyright (c) 2018 Carl Lerche
@@ -5206,7 +5392,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-fa4363848a0f"></a>fa4363848a0f
 
-Used by: cargo_toml@1.0.0
+Used by: cargo_toml@1.0.0, cargo_toml@1.0.1
 
 ```text
 © Kornel Lesiński
@@ -5448,7 +5634,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-84e1bbfebd74"></a>84e1bbfebd74
 
-Used by: cc@1.2.48, cfg-if@1.0.4, cmake@0.1.54, filetime@0.2.29, find-msvc-tools@0.1.14, futures-timer@3.0.3, id-arena@2.3.0, jobserver@0.1.34, js-sys@0.3.91, openssl-probe@0.1.6, pkg-config@0.3.32, scoped-tls@1.0.1, socket2@0.6.4, toml_datetime@0.6.3, wasm-bindgen@0.2.114, wasm-bindgen-futures@0.4.64, wasm-bindgen-macro@0.2.114, wasm-bindgen-macro-support@0.2.114, wasm-bindgen-shared@0.2.114, web-sys@0.3.91
+Used by: cc@1.2.48, cc@1.8.0, cfg-if@1.0.4, cfg-if@1.0.5, cmake@0.1.54, filetime@0.2.29, find-msvc-tools@0.1.14, futures-timer@3.0.3, id-arena@2.3.0, jobserver@0.1.34, js-sys@0.3.91, js-sys@0.3.106, openssl-probe@0.1.6, pkg-config@0.3.32, pkg-config@0.3.34, scoped-tls@1.0.1, socket2@0.6.4, socket2@0.6.5, toml_datetime@0.6.3, wasm-bindgen@0.2.114, wasm-bindgen@0.2.129, wasm-bindgen-futures@0.4.64, wasm-bindgen-futures@0.4.79, wasm-bindgen-macro@0.2.114, wasm-bindgen-macro@0.2.129, wasm-bindgen-macro-support@0.2.114, wasm-bindgen-macro-support@0.2.129, wasm-bindgen-shared@0.2.114, wasm-bindgen-shared@0.2.129, web-sys@0.3.91, web-sys@0.3.106
 
 ```text
 Copyright (c) 2014 Alex Crichton
@@ -5620,7 +5806,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-ce4a94c006fa"></a>ce4a94c006fa
 
-Used by: chrono@0.4.44
+Used by: chrono@0.4.44, chrono@0.4.45
 
 ```text
 Rust-chrono is dual-licensed under The MIT License [1] and
@@ -5958,7 +6144,7 @@ SOFTWARE.
 
 ### <a id="text-a8d7d8157c71"></a>a8d7d8157c71
 
-Used by: combine@4.6.7
+Used by: combine@4.6.7, combine@4.6.9
 
 ```text
 The MIT License (MIT)
@@ -6018,7 +6204,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-ea753cf1e3ec"></a>ea753cf1e3ec
 
-Used by: const-oid@0.10.2
+Used by: const-oid@0.10.2, cpufeatures@0.3.1
 
 ```text
 Copyright (c) 2020-2026 The RustCrypto Project Developers
@@ -6465,7 +6651,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-9599127e421e"></a>9599127e421e
 
-Used by: crc32fast@1.5.0
+Used by: crc32fast@1.5.0, crc32fast@1.5.2
 
 ```text
 MIT License
@@ -6493,7 +6679,7 @@ SOFTWARE.
 
 ### <a id="text-5a7d13c6710c"></a>5a7d13c6710c
 
-Used by: crossbeam-channel@0.5.15, crossbeam-deque@0.8.6, crossbeam-epoch@0.9.20, crossbeam-utils@0.8.21
+Used by: crossbeam-channel@0.5.15, crossbeam-channel@0.5.17, crossbeam-deque@0.8.6, crossbeam-epoch@0.9.20, crossbeam-utils@0.8.21, crossbeam-utils@0.8.23
 
 ```text
 The MIT License (MIT)
@@ -6527,7 +6713,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-d10fa7c720bc"></a>d10fa7c720bc
 
-Used by: crossbeam-channel@0.5.15
+Used by: crossbeam-channel@0.5.15, crossbeam-channel@0.5.17
 
 ```text
 ===============================================================================
@@ -7155,7 +7341,7 @@ SOFTWARE.
 
 ### <a id="text-692b1604961d"></a>692b1604961d
 
-Used by: crypto-common@0.1.6
+Used by: crypto-common@0.1.6, crypto-common@0.1.7
 
 ```text
 Copyright (c) 2021 RustCrypto Developers
@@ -7187,7 +7373,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-dec912e37f88"></a>dec912e37f88
 
-Used by: crypto-common@0.2.1
+Used by: crypto-common@0.2.1, crypto-common@0.2.2
 
 ```text
 Copyright (c) 2021-2026 RustCrypto Developers
@@ -7599,7 +7785,7 @@ Exhibit B - "Incompatible With Secondary Licenses" Notice
 
 ### <a id="text-bccaa8b6c09f"></a>bccaa8b6c09f
 
-Used by: ctor@1.0.13, tinyvec@1.10.0
+Used by: ctor@1.0.13, tinyvec@1.10.0, tinyvec@1.13.3
 
 ```text
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
@@ -7683,7 +7869,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### <a id="text-cc8f3c8ab396"></a>cc8f3c8ab396
 
-Used by: darling@0.20.11, darling@0.23.0, darling_core@0.20.11, darling_core@0.23.0, darling_macro@0.20.11, darling_macro@0.23.0
+Used by: darling@0.20.11, darling@0.23.0, darling@0.24.1, darling_core@0.20.11, darling_core@0.23.0, darling_core@0.24.1, darling_macro@0.20.11, darling_macro@0.23.0, darling_macro@0.24.1
 
 ```text
 MIT License
@@ -8004,6 +8190,38 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
+### <a id="text-2710a622a896"></a>2710a622a896
+
+Used by: defmt@1.2.0, defmt-macros@1.2.0, defmt-parser@1.1.0
+
+```text
+Copyright (c) Ferrous Systems
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
 ### <a id="text-6b118915d98a"></a>6b118915d98a
 
 Used by: der@0.7.10, pkcs8@0.10.2
@@ -8038,7 +8256,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-b4839ecf405b"></a>b4839ecf405b
 
-Used by: deranged@0.5.5
+Used by: deranged@0.5.5, deranged@0.5.9
 
 ```text
 Apache License
@@ -8246,7 +8464,7 @@ Apache License
 
 ### <a id="text-1b66e3be6894"></a>1b66e3be6894
 
-Used by: deranged@0.5.5
+Used by: deranged@0.5.5, deranged@0.5.9
 
 ```text
 Copyright (c) 2024 Jacob Pratt et al.
@@ -8360,7 +8578,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-c8d7f4fd612a"></a>c8d7f4fd612a
 
-Used by: digest@0.11.2
+Used by: digest@0.11.2, digest@0.11.3
 
 ```text
 Copyright (c) 2017-2025 RustCrypto Developers
@@ -9511,7 +9729,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### <a id="text-fdd1c2117bcf"></a>fdd1c2117bcf
 
-Used by: either@1.15.0, serde_with@3.22.0, serde_with_macros@3.22.0
+Used by: either@1.15.0, serde_with@3.22.0, serde_with@3.24.0, serde_with_macros@3.22.0, serde_with_macros@3.24.0
 
 ```text
 Copyright (c) 2015
@@ -9543,7 +9761,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-283ea6cc2997"></a>283ea6cc2997
 
-Used by: embed_plist@1.2.2, encoding_rs@0.8.35, iri-string@0.7.9, kurbo@0.12.0, lru-slab@0.1.2, quinn@0.11.9, quinn-proto@0.11.15, quinn-udp@0.5.14, secrecy@0.10.3, serialize-to-javascript@0.1.2, serialize-to-javascript-impl@0.1.2, static_assertions@1.1.0, tinyvec@1.10.0, unicode-linebreak@0.1.5, utf8_iter@1.0.4, x11rb@0.13.2, x11rb-protocol@0.13.2, zeroize@1.8.2, zeroize_derive@1.4.2, zune-core@0.5.1, zune-jpeg@0.5.15, @chevrotain/cst-dts-gen@13.2.0, @chevrotain/gast@13.2.0, @chevrotain/regexp-to-ast@13.2.0, @chevrotain/types@13.2.0, @chevrotain/utils@13.2.0, chevrotain@13.2.0, dompurify@3.4.17
+Used by: embed_plist@1.2.2, encoding_rs@0.8.35, iri-string@0.7.9, kurbo@0.12.0, lru-slab@0.1.2, quinn@0.11.9, quinn-proto@0.11.15, quinn-udp@0.5.14, secrecy@0.10.3, serialize-to-javascript@0.1.2, serialize-to-javascript-impl@0.1.2, siphasher@1.0.4, static_assertions@1.1.0, tinyvec@1.10.0, tinyvec@1.13.3, unicode-linebreak@0.1.5, utf8_iter@1.0.4, x11rb@0.13.2, x11rb-protocol@0.13.2, zeroize@1.8.2, zeroize@1.9.1, zeroize_derive@1.4.2, zune-core@0.5.1, zune-jpeg@0.5.15, @chevrotain/cst-dts-gen@13.2.0, @chevrotain/gast@13.2.0, @chevrotain/regexp-to-ast@13.2.0, @chevrotain/types@13.2.0, @chevrotain/utils@13.2.0, chevrotain@13.2.0, dompurify@3.4.17
 
 ```text
 Apache License
@@ -10086,7 +10304,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-4428cd87371a"></a>4428cd87371a
 
-Used by: equivalent@1.0.2
+Used by: equivalent@1.0.2, equivalent@1.0.3
 
 ```text
 Copyright (c) 2016--2023
@@ -10646,7 +10864,7 @@ limitations under the License.
 
 ### <a id="text-4bf96504d6e8"></a>4bf96504d6e8
 
-Used by: fdeflate@0.3.7, field-offset@0.3.6, half@2.7.1, hayro-ccitt@0.3.0, hayro-jbig2@0.3.0, hayro-jpeg2000@0.4.0, image@0.25.10, image-webp@0.2.4, miniz_oxide@0.8.9, pin-project-lite@0.2.16, portable-atomic@1.11.1, portable-atomic-util@0.2.4, raw-window-handle@0.6.2, sync_wrapper@1.0.2, tauri@2.12.4, tauri-build@2.7.3, tauri-codegen@2.7.3, tauri-macros@2.7.3, tauri-plugin-dialog@2.8.3, tauri-plugin-fs@2.7.1, tauri-plugin-global-shortcut@2.4.1, tauri-plugin-notification@2.7.0, tauri-plugin-opener@2.7.2, tauri-runtime@2.12.2, tauri-runtime-wry@2.12.2, tauri-utils@2.10.2, tauri-winrt-notification@0.8.1, time@0.3.47, time-core@0.1.8, time-macros@0.2.27, zstd-safe@7.2.4, @tauri-apps/api@2.12.4
+Used by: fdeflate@0.3.7, field-offset@0.3.6, half@2.7.1, hayro-ccitt@0.3.0, hayro-jbig2@0.3.0, hayro-jpeg2000@0.4.0, image@0.25.10, image-webp@0.2.4, miniz_oxide@0.8.9, miniz_oxide@0.9.1, num-conv@0.2.2, pin-project-lite@0.2.16, pin-project-lite@0.2.17, portable-atomic@1.11.1, portable-atomic@1.15.0, portable-atomic-util@0.2.4, portable-atomic-util@0.2.8, raw-window-handle@0.6.2, sync_wrapper@1.0.2, tauri@2.12.4, tauri-build@2.7.3, tauri-codegen@2.7.3, tauri-macros@2.7.3, tauri-plugin-biometric@2.5.0, tauri-plugin-dialog@2.8.3, tauri-plugin-fs@2.7.1, tauri-plugin-global-shortcut@2.4.1, tauri-plugin-notification@2.7.0, tauri-plugin-opener@2.7.2, tauri-runtime@2.12.2, tauri-runtime-wry@2.12.2, tauri-utils@2.10.2, tauri-winrt-notification@0.8.1, time@0.3.47, time@0.3.55, time-core@0.1.8, time-core@0.1.9, time-macros@0.2.27, time-macros@0.2.32, zstd-safe@7.2.4, @tauri-apps/api@2.12.4
 
 ```text
 Apache License
@@ -11027,6 +11245,38 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
+### <a id="text-1b7402ea003f"></a>1b7402ea003f
+
+Used by: flate2@1.1.10
+
+```text
+Copyright (c) 2014-2026 Alex Crichton
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
 ### <a id="text-c48b7333c00b"></a>c48b7333c00b
 
 Used by: fnv@1.0.7
@@ -11335,7 +11585,7 @@ SOFTWARE.
 
 ### <a id="text-27480f391bd9"></a>27480f391bd9
 
-Used by: futures@0.3.32, futures-channel@0.3.32, futures-core@0.3.32, futures-executor@0.3.32, futures-io@0.3.32, futures-macro@0.3.32, futures-sink@0.3.32, futures-task@0.3.32, futures-util@0.3.32
+Used by: futures@0.3.32, futures@0.3.34, futures-channel@0.3.32, futures-channel@0.3.34, futures-core@0.3.32, futures-core@0.3.34, futures-executor@0.3.32, futures-executor@0.3.34, futures-io@0.3.32, futures-io@0.3.34, futures-macro@0.3.32, futures-macro@0.3.34, futures-sink@0.3.32, futures-sink@0.3.34, futures-task@0.3.32, futures-task@0.3.34, futures-util@0.3.32, futures-util@0.3.34
 
 ```text
 Apache License
@@ -11544,7 +11794,7 @@ limitations under the License.
 
 ### <a id="text-b420d8add23b"></a>b420d8add23b
 
-Used by: futures@0.3.32, futures-channel@0.3.32, futures-core@0.3.32, futures-executor@0.3.32, futures-io@0.3.32, futures-macro@0.3.32, futures-sink@0.3.32, futures-task@0.3.32, futures-util@0.3.32
+Used by: futures@0.3.32, futures@0.3.34, futures-channel@0.3.32, futures-channel@0.3.34, futures-core@0.3.32, futures-core@0.3.34, futures-executor@0.3.32, futures-executor@0.3.34, futures-io@0.3.32, futures-io@0.3.34, futures-macro@0.3.32, futures-macro@0.3.34, futures-sink@0.3.32, futures-sink@0.3.34, futures-task@0.3.32, futures-task@0.3.34, futures-util@0.3.32, futures-util@0.3.34
 
 ```text
 Copyright (c) 2016 Alex Crichton
@@ -11605,7 +11855,7 @@ SOFTWARE.
 
 ### <a id="text-e7330bf53074"></a>e7330bf53074
 
-Used by: getrandom@0.2.16, getrandom@0.3.4, getrandom@0.4.1, rand_chacha@0.3.1
+Used by: getrandom@0.2.16, getrandom@0.2.17, getrandom@0.3.4, getrandom@0.4.1, getrandom@0.4.3, rand_chacha@0.3.1
 
 ```text
 Apache License
@@ -11813,7 +12063,7 @@ limitations under the License.
 
 ### <a id="text-478d530cbce7"></a>478d530cbce7
 
-Used by: getrandom@0.2.16
+Used by: getrandom@0.2.16, getrandom@0.2.17
 
 ```text
 Copyright (c) 2018-2024 The rust-random Project Developers
@@ -11879,7 +12129,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-94b1870d380c"></a>94b1870d380c
 
-Used by: getrandom@0.4.1
+Used by: getrandom@0.4.1, getrandom@0.4.3
 
 ```text
 Copyright (c) 2018-2026 The rust-random Project Developers
@@ -12191,7 +12441,7 @@ THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR I
 
 ### <a id="text-033a9383ff21"></a>033a9383ff21
 
-Used by: heck@0.4.1, heck@0.5.0, unicode-bidi@0.3.18, unicode-normalization@0.1.25, unicode-properties@0.1.4, unicode-segmentation@1.12.0, unicode-xid@0.2.6
+Used by: heck@0.4.1, heck@0.5.0, unicode-bidi@0.3.18, unicode-normalization@0.1.25, unicode-properties@0.1.4, unicode-segmentation@1.12.0, unicode-segmentation@1.13.3, unicode-xid@0.2.6
 
 ```text
 Copyright (c) 2015 The Rust Project Developers
@@ -12283,7 +12533,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-35af0fd88338"></a>35af0fd88338
 
-Used by: html5ever@0.39.0, markup5ever@0.39.0, web_atoms@0.2.3
+Used by: html5ever@0.39.0, markup5ever@0.39.0, web_atoms@0.2.3, web_atoms@0.2.6
 
 ```text
 Copyright (c) 2014 The html5ever Project Developers
@@ -12315,7 +12565,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-881c9fe2d29b"></a>881c9fe2d29b
 
-Used by: http@1.4.0
+Used by: http@1.4.0, http@1.5.0
 
 ```text
 Apache License
@@ -12523,7 +12773,7 @@ limitations under the License.
 
 ### <a id="text-f47894ff9c86"></a>f47894ff9c86
 
-Used by: http@1.4.0
+Used by: http@1.4.0, http@1.5.0
 
 ```text
 Copyright (c) 2017 http-rs authors
@@ -12559,6 +12809,38 @@ Used by: http-body@1.0.1
 
 ```text
 Copyright (c) 2019-2024 Sean McArthur & Hyper Contributors
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+### <a id="text-57f841bc9767"></a>57f841bc9767
+
+Used by: http-body@1.1.0, http-body-util@0.1.5
+
+```text
+Copyright (c) 2019-2026 Sean McArthur & Hyper Contributors
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -12645,7 +12927,7 @@ THE SOFTWARE.
 
 ### <a id="text-a1aa15c3898d"></a>a1aa15c3898d
 
-Used by: hybrid-array@0.4.10
+Used by: hybrid-array@0.4.10, hybrid-array@0.4.15
 
 ```text
 Copyright (c) 2022-2026 The RustCrypto Project Developers
@@ -12701,6 +12983,32 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
+### <a id="text-05f344491a7d"></a>05f344491a7d
+
+Used by: hyper@1.12.0
+
+```text
+Copyright (c) 2014-2026 Sean McArthur
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
 ### <a id="text-ebadd391ec10"></a>ebadd391ec10
 
 Used by: hyper-rustls@0.27.7
@@ -12719,7 +13027,7 @@ of these licenses, at your option.
 
 ### <a id="text-af6da3f3f6b4"></a>af6da3f3f6b4
 
-Used by: hyper-rustls@0.27.7, rustls@0.23.37, rustls-native-certs@0.8.2
+Used by: hyper-rustls@0.27.7, rustls@0.23.37, rustls@0.23.46, rustls-native-certs@0.8.2
 
 ```text
 ISC License (ISC)
@@ -12741,7 +13049,7 @@ THIS SOFTWARE.
 
 ### <a id="text-a3320aa8d192"></a>a3320aa8d192
 
-Used by: hyper-rustls@0.27.7, rustls@0.23.37, rustls-native-certs@0.8.2
+Used by: hyper-rustls@0.27.7, rustls@0.23.37, rustls@0.23.46, rustls-native-certs@0.8.2
 
 ```text
 Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>
@@ -12773,7 +13081,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-e7d622e4783e"></a>e7d622e4783e
 
-Used by: hyper-util@0.1.20
+Used by: hyper-util@0.1.20, hyper-util@0.1.21
 
 ```text
 Copyright (c) 2023-2025 Sean McArthur
@@ -12799,7 +13107,7 @@ THE SOFTWARE.
 
 ### <a id="text-793420c92f3c"></a>793420c92f3c
 
-Used by: iana-time-zone@0.1.64, iana-time-zone-haiku@0.1.2
+Used by: iana-time-zone@0.1.64, iana-time-zone@0.1.65, iana-time-zone-haiku@0.1.2
 
 ```text
 Apache License
@@ -13007,7 +13315,7 @@ limitations under the License.
 
 ### <a id="text-3444712f3370"></a>3444712f3370
 
-Used by: iana-time-zone@0.1.64, iana-time-zone-haiku@0.1.2
+Used by: iana-time-zone@0.1.64, iana-time-zone@0.1.65, iana-time-zone-haiku@0.1.2
 
 ```text
 Copyright (c) 2020 Andrew D. Straw
@@ -13067,7 +13375,7 @@ SOFTWARE.
 
 ### <a id="text-cde87abe221f"></a>cde87abe221f
 
-Used by: icu_collections@2.0.0, icu_locale_core@2.0.0, icu_normalizer@2.0.0, icu_normalizer_data@2.0.0, icu_properties@2.0.1, icu_properties_data@2.0.1, icu_provider@2.0.0, litemap@0.8.0, potential_utf@0.1.3, tinystr@0.8.1, writeable@0.6.1, yoke@0.8.0, yoke-derive@0.8.0, zerofrom@0.1.6, zerofrom-derive@0.1.6, zerotrie@0.2.2, zerovec@0.11.4, zerovec-derive@0.11.1
+Used by: icu_collections@2.0.0, icu_collections@2.3.0, icu_locale_core@2.0.0, icu_locale_core@2.3.0, icu_normalizer@2.0.0, icu_normalizer@2.3.0, icu_normalizer_data@2.0.0, icu_normalizer_data@2.3.0, icu_properties@2.0.1, icu_properties@2.3.0, icu_properties_data@2.0.1, icu_properties_data@2.3.0, icu_provider@2.0.0, icu_provider@2.3.1, litemap@0.8.0, litemap@0.8.3, potential_utf@0.1.3, potential_utf@0.1.6, tinystr@0.8.1, tinystr@0.8.4, writeable@0.6.1, writeable@0.6.4, yoke@0.8.0, yoke@0.8.3, yoke-derive@0.8.0, yoke-derive@0.8.4, zerofrom@0.1.6, zerofrom@0.1.8, zerofrom-derive@0.1.6, zerofrom-derive@0.1.8, zerotrie@0.2.2, zerotrie@0.2.5, zerovec@0.11.4, zerovec@0.11.8, zerovec-derive@0.11.1, zerovec-derive@0.11.6
 
 ```text
 UNICODE LICENSE V3
@@ -13152,7 +13460,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-0d8a0aecbcba"></a>0d8a0aecbcba
 
-Used by: idna_adapter@1.2.1
+Used by: idna_adapter@1.2.1, idna_adapter@1.2.2
 
 ```text
 Copyright (c) The rust-url developers
@@ -13182,9 +13490,43 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
+### <a id="text-eb71eade89cd"></a>eb71eade89cd
+
+Used by: if-addrs@0.13.4
+
+```text
+Copyright 2018 MaidSafe.net limited.
+Copyright 2020 messense
+
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### <a id="text-b8777f2b9ad6"></a>b8777f2b9ad6
+
+Used by: if-addrs@0.13.4
+
+```text
+Copyright 2018 MaidSafe.net limited.
+Copyright 2020 messense
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
 ### <a id="text-4f2ac128e429"></a>4f2ac128e429
 
-Used by: indexmap@1.9.3, indexmap@2.14.0
+Used by: indexmap@1.9.3, indexmap@2.14.0, indexmap@2.14.2
 
 ```text
 Copyright (c) 2016--2017
@@ -13344,7 +13686,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### <a id="text-9d8e882729a5"></a>9d8e882729a5
 
-Used by: ipnet@2.11.0
+Used by: ipnet@2.11.0, ipnet@2.12.2
 
 ```text
 Apache License
@@ -13552,7 +13894,7 @@ Apache License
 
 ### <a id="text-c935506fff2e"></a>c935506fff2e
 
-Used by: ipnet@2.11.0
+Used by: ipnet@2.11.0, ipnet@2.12.2
 
 ```text
 Copyright 2017 Juniper Networks, Inc.
@@ -13711,7 +14053,7 @@ SOFTWARE.
 
 ### <a id="text-3a771adcf280"></a>3a771adcf280
 
-Used by: jni-sys@0.3.0
+Used by: jni-sys@0.3.0, jni-sys@0.3.1, jni-sys@0.4.1
 
 ```text
 Copyright (c) 2015 The rust-jni-sys Developers
@@ -14388,7 +14730,7 @@ SOFTWARE.
 
 ### <a id="text-c96302294382"></a>c96302294382
 
-Used by: libc@0.2.186
+Used by: libc@0.2.186, libc@0.2.191
 
 ```text
 Copyright (c) The Rust Project Developers
@@ -14704,7 +15046,7 @@ Copyright notices are retained in src/* files where relevant.
 
 ### <a id="text-7dbbefcddfaa"></a>7dbbefcddfaa
 
-Used by: libredox@0.1.10
+Used by: libredox@0.1.10, libredox@0.1.25
 
 ```text
 MIT License
@@ -14758,7 +15100,7 @@ THE SOFTWARE.
 
 ### <a id="text-1a7d409d5142"></a>1a7d409d5142
 
-Used by: libz-rs-sys@0.5.2, zlib-rs@0.5.5
+Used by: libz-rs-sys@0.5.2, zlib-rs@0.5.5, zlib-rs@0.6.8
 
 ```text
 (C) 2024 Trifecta Tech Foundation 
@@ -14784,7 +15126,7 @@ freely, subject to the following restrictions:
 
 ### <a id="text-2f213ec6b135"></a>2f213ec6b135
 
-Used by: linux-raw-sys@0.12.1, rustix@1.1.4, target-lexicon@0.12.16, wasi@0.11.1+wasi-snapshot-preview1, wit-bindgen@0.46.0, wit-bindgen@0.51.0, wit-bindgen-core@0.51.0, wit-bindgen-rust@0.51.0, wit-bindgen-rust-macro@0.51.0
+Used by: linux-raw-sys@0.12.1, rustix@1.1.4, rustix@1.1.5, target-lexicon@0.12.16, wasi@0.11.1+wasi-snapshot-preview1, wasip2@1.0.4+wasi-0.2.12, wit-bindgen@0.46.0, wit-bindgen@0.51.0, wit-bindgen@0.57.1, wit-bindgen-core@0.51.0, wit-bindgen-rust@0.51.0, wit-bindgen-rust-macro@0.51.0
 
 ```text
 Apache License
@@ -15041,7 +15383,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-8d1f81ea4e87"></a>8d1f81ea4e87
 
-Used by: lock_api@0.4.14, parking_lot@0.12.5, parking_lot_core@0.9.12, rustc_version@0.4.1, thread_local@1.1.9
+Used by: lock_api@0.4.14, parking_lot@0.12.5, parking_lot_core@0.9.12, rustc_version@0.4.1, thread_local@1.1.9, thread_local@1.1.10
 
 ```text
 Copyright (c) 2016 The Rust Project Developers
@@ -15539,7 +15881,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### <a id="text-7427abc63036"></a>7427abc63036
 
-Used by: miniz_oxide@0.8.9
+Used by: miniz_oxide@0.8.9, miniz_oxide@0.9.1
 
 ```text
 MIT License
@@ -15571,7 +15913,7 @@ SOFTWARE.
 
 ### <a id="text-ac9859ce4e9a"></a>ac9859ce4e9a
 
-Used by: miniz_oxide@0.8.9
+Used by: miniz_oxide@0.8.9, miniz_oxide@0.9.1
 
 ```text
 MIT License
@@ -15602,7 +15944,7 @@ SOFTWARE.
 
 ### <a id="text-eac3911cc3d4"></a>eac3911cc3d4
 
-Used by: miniz_oxide@0.8.9
+Used by: miniz_oxide@0.8.9, miniz_oxide@0.9.1
 
 ```text
 Copyright 2013-2014 RAD Game Tools and Valve Software
@@ -15623,7 +15965,7 @@ Permission is granted to anyone to use this software for any purpose, including 
 
 ### <a id="text-c804065b0956"></a>c804065b0956
 
-Used by: mio@1.2.1
+Used by: mio@1.2.1, mio@1.2.4
 
 ```text
 Copyright (c) 2014 Carl Lerche and other MIO contributors
@@ -16060,7 +16402,7 @@ SOFTWARE.
 
 ### <a id="text-882b129495bc"></a>882b129495bc
 
-Used by: num_enum@0.7.5, num_enum_derive@0.7.5
+Used by: num_enum@0.7.5, num_enum@0.7.6, num_enum_derive@0.7.5, num_enum_derive@0.7.6
 
 ```text
 Copyright (c) 2018, Daniel Wagner-Hall
@@ -16306,6 +16648,32 @@ Used by: num-conv@0.2.0
 
 ```text
 Copyright (c) 2023 Jacob Pratt
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### <a id="text-4d83b119f786"></a>4d83b119f786
+
+Used by: num-conv@0.2.2
+
+```text
+Copyright (c) Jacob Pratt
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -17148,7 +17516,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-5b0ae40d1a35"></a>5b0ae40d1a35
 
-Used by: plist@1.10.0
+Used by: plist@1.10.0, plist@1.10.1
 
 ```text
 Copyright (c) 2015 Edward Barnard
@@ -17174,7 +17542,7 @@ SOFTWARE.
 
 ### <a id="text-80cdd90699e4"></a>80cdd90699e4
 
-Used by: png@0.17.16, png@0.18.0
+Used by: png@0.17.16, png@0.18.0, png@0.18.1
 
 ```text
 Copyright (c) 2015 nwin
@@ -17302,7 +17670,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-4b05c4b43039"></a>4b05c4b43039
 
-Used by: powerfmt@0.2.0
+Used by: powerfmt@0.2.0, powerfmt@0.2.1
 
 ```text
 Apache License
@@ -17510,7 +17878,7 @@ Apache License
 
 ### <a id="text-6e972f314e81"></a>6e972f314e81
 
-Used by: powerfmt@0.2.0
+Used by: powerfmt@0.2.0, powerfmt@0.2.1
 
 ```text
 Copyright (c) 2023 Jacob Pratt et al.
@@ -18066,7 +18434,7 @@ SOFTWARE.
 
 ### <a id="text-12bfa73c9eac"></a>12bfa73c9eac
 
-Used by: quick-xml@0.41.0
+Used by: quick-xml@0.41.0, quick-xml@0.42.0
 
 ```text
 The MIT License (MIT)
@@ -18110,7 +18478,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### <a id="text-fee4d7ce394c"></a>fee4d7ce394c
 
-Used by: rand@0.8.5, rand@0.9.5, rand@0.10.3, rand_chacha@0.9.0, snow@0.10.0
+Used by: rand@0.8.5, rand@0.8.8, rand@0.9.5, rand@0.10.3, rand_chacha@0.9.0, snow@0.10.0
 
 ```text
 Apache License
@@ -18293,7 +18661,7 @@ END OF TERMS AND CONDITIONS
 
 ### <a id="text-cc367a7134c2"></a>cc367a7134c2
 
-Used by: rand@0.8.5, rand@0.9.5, rand@0.10.3, rand_chacha@0.3.1, rand_chacha@0.9.0, rand_core@0.6.4, rand_core@0.9.3
+Used by: rand@0.8.5, rand@0.8.8, rand@0.9.5, rand@0.10.3, rand_chacha@0.3.1, rand_chacha@0.9.0, rand_core@0.6.4, rand_core@0.9.3, rand_core@0.9.5
 
 ```text
 Copyright 2018 Developers of the Rand project
@@ -18326,7 +18694,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-179c83ef07a5"></a>179c83ef07a5
 
-Used by: rand_core@0.6.4, rand_core@0.9.3, rand_core@0.10.1
+Used by: rand_core@0.6.4, rand_core@0.9.3, rand_core@0.9.5, rand_core@0.10.1
 
 ```text
 Apache License
@@ -18627,7 +18995,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-157e9bc5ce84"></a>157e9bc5ce84
 
-Used by: redox_users@0.5.2
+Used by: redox_users@0.5.2, redox_users@0.5.3
 
 ```text
 The MIT License (MIT)
@@ -18655,7 +19023,7 @@ SOFTWARE.
 
 ### <a id="text-5c3866f31ed2"></a>5c3866f31ed2
 
-Used by: reqwest@0.12.24, reqwest@0.13.4
+Used by: reqwest@0.12.24, reqwest@0.13.4, reqwest@0.13.5
 
 ```text
 Apache License
@@ -18889,7 +19257,7 @@ THE SOFTWARE.
 
 ### <a id="text-bde59a7e336f"></a>bde59a7e336f
 
-Used by: reqwest@0.13.4
+Used by: reqwest@0.13.4, reqwest@0.13.5
 
 ```text
 Copyright (c) 2016-2026 Sean McArthur
@@ -19301,7 +19669,7 @@ of these licenses, at your option.
 
 ### <a id="text-430e912c26ce"></a>430e912c26ce
 
-Used by: rustls-pki-types@1.14.0
+Used by: rustls-pki-types@1.14.0, rustls-pki-types@1.15.1
 
 ```text
 Apache License
@@ -19509,7 +19877,7 @@ limitations under the License.
 
 ### <a id="text-c5e7f780f961"></a>c5e7f780f961
 
-Used by: rustls-pki-types@1.14.0
+Used by: rustls-pki-types@1.14.0, rustls-pki-types@1.15.1
 
 ```text
 Copyright (c) 2023 Dirkjan Ochtman <dirkjan@ochtman.nl>
@@ -19541,7 +19909,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-3ac27594ed56"></a>3ac27594ed56
 
-Used by: rustls-webpki@0.103.13
+Used by: rustls-webpki@0.103.13, rustls-webpki@0.103.15
 
 ```text
 Except as otherwise noted, this project is licensed under the following
@@ -19668,7 +20036,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### <a id="text-1ddb39b2b497"></a>1ddb39b2b497
 
-Used by: schemars@0.8.22, schemars@0.9.0, schemars@1.0.4, schemars_derive@0.8.22, schemars_derive@1.0.4
+Used by: schemars@0.8.22, schemars@0.9.0, schemars@1.0.4, schemars@1.2.3, schemars_derive@0.8.22, schemars_derive@1.0.4
 
 ```text
 MIT License
@@ -19779,6 +20147,214 @@ FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
 COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
 IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### <a id="text-9b689eac99cd"></a>9b689eac99cd
+
+Used by: serde_spanned@1.1.2, toml@1.1.8+spec-1.1.0, toml_datetime@1.1.2+spec-1.1.0, toml_edit@0.25.17+spec-1.1.0, toml_parser@1.1.5+spec-1.1.0, toml_writer@1.1.3+spec-1.1.0
+
+```text
+Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
+
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+   APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "{}"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright Individual contributors
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
 ```
 
 ### <a id="text-b5dae9532426"></a>b5dae9532426
@@ -20293,7 +20869,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-a759ce38c686"></a>a759ce38c686
 
-Used by: shlex@1.3.0
+Used by: shlex@1.3.0, shlex@2.0.1
 
 ```text
 Copyright 2015 Nicholas Allegra (comex).
@@ -20313,7 +20889,7 @@ limitations under the License.
 
 ### <a id="text-cc5ba5589dfb"></a>cc5ba5589dfb
 
-Used by: shlex@1.3.0
+Used by: shlex@1.3.0, shlex@2.0.1
 
 ```text
 The MIT License (MIT)
@@ -20373,7 +20949,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-627eff66d6c4"></a>627eff66d6c4
 
-Used by: simd-adler32@0.3.7
+Used by: simd-adler32@0.3.7, simd-adler32@0.3.10
 
 ```text
 MIT License
@@ -20401,7 +20977,7 @@ SOFTWARE.
 
 ### <a id="text-24e26e8fb783"></a>24e26e8fb783
 
-Used by: siphasher@1.0.3
+Used by: siphasher@1.0.3, siphasher@1.0.4
 
 ```text
 Copyright 2012-2016 The Rust Project Developers.
@@ -20415,7 +20991,7 @@ option.
 
 ### <a id="text-12c7116c4425"></a>12c7116c4425
 
-Used by: slab@0.4.11
+Used by: slab@0.4.11, slab@0.4.12
 
 ```text
 Copyright (c) 2019 Carl Lerche
@@ -20473,7 +21049,7 @@ the following restrictions:
 
 ### <a id="text-7f194ae45c25"></a>7f194ae45c25
 
-Used by: smallvec@1.15.1
+Used by: smallvec@1.15.1, smallvec@1.16.3
 
 ```text
 Copyright (c) 2018 The Servo Project Developers
@@ -21847,7 +22423,7 @@ SOFTWARE.
 
 ### <a id="text-3a036676ec8c"></a>3a036676ec8c
 
-Used by: synstructure@0.13.2
+Used by: synstructure@0.13.2, synstructure@0.14.0
 
 ```text
 Copyright 2016 Nika Layzell
@@ -21972,7 +22548,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-89ff9689dcf9"></a>89ff9689dcf9
 
-Used by: tauri@2.12.4, tauri-build@2.7.3, tauri-codegen@2.7.3, tauri-macros@2.7.3, tauri-plugin-dialog@2.8.3, tauri-plugin-fs@2.7.1, tauri-plugin-global-shortcut@2.4.1, tauri-plugin-notification@2.7.0, tauri-plugin-opener@2.7.2, tauri-runtime@2.12.2, tauri-runtime-wry@2.12.2, tauri-utils@2.10.2, tauri-winrt-notification@0.8.1, @tauri-apps/api@2.12.4
+Used by: tauri@2.12.4, tauri-build@2.7.3, tauri-codegen@2.7.3, tauri-macros@2.7.3, tauri-plugin-biometric@2.5.0, tauri-plugin-dialog@2.8.3, tauri-plugin-fs@2.7.1, tauri-plugin-global-shortcut@2.4.1, tauri-plugin-notification@2.7.0, tauri-plugin-opener@2.7.2, tauri-runtime@2.12.2, tauri-runtime-wry@2.12.2, tauri-utils@2.10.2, tauri-winrt-notification@0.8.1, @tauri-apps/api@2.12.4
 
 ```text
 MIT License
@@ -22000,7 +22576,7 @@ SOFTWARE.
 
 ### <a id="text-eb8a6c846304"></a>eb8a6c846304
 
-Used by: tauri-plugin-dialog@2.8.3, tauri-plugin-fs@2.7.1, tauri-plugin-global-shortcut@2.4.1, tauri-plugin-notification@2.7.0, tauri-plugin-opener@2.7.2, @tauri-apps/plugin-dialog@2.8.3, @tauri-apps/plugin-notification@2.7.0, @tauri-apps/plugin-opener@2.7.2
+Used by: tauri-plugin-biometric@2.5.0, tauri-plugin-dialog@2.8.3, tauri-plugin-fs@2.7.1, tauri-plugin-global-shortcut@2.4.1, tauri-plugin-notification@2.7.0, tauri-plugin-opener@2.7.2, @tauri-apps/plugin-dialog@2.8.3, @tauri-apps/plugin-notification@2.7.0, @tauri-apps/plugin-opener@2.7.2
 
 ```text
 SPDXVersion: SPDX-2.1
@@ -22120,7 +22696,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-dfa7fbad0178"></a>dfa7fbad0178
 
-Used by: tendril@0.5.0
+Used by: tendril@0.5.0, tendril@0.5.1
 
 ```text
 Copyright (c) 2015 Keegan McAllister
@@ -22180,7 +22756,7 @@ SOFTWARE.
 
 ### <a id="text-7fdbca77dec6"></a>7fdbca77dec6
 
-Used by: time@0.3.47, time-core@0.1.8, time-macros@0.2.27
+Used by: time@0.3.47, time@0.3.55, time-core@0.1.8, time-core@0.1.9, time-macros@0.2.27, time-macros@0.2.32
 
 ```text
 Copyright (c) Jacob Pratt et al.
@@ -22505,7 +23081,7 @@ freely, subject to the following restrictions:
 
 ### <a id="text-3e1bef82aa0d"></a>3e1bef82aa0d
 
-Used by: tokio@1.52.3, tokio-stream@0.1.17, tokio-util@0.7.17
+Used by: tokio@1.52.3, tokio@1.53.3, tokio-stream@0.1.17, tokio-util@0.7.17, tokio-util@0.7.20
 
 ```text
 MIT License
@@ -22533,7 +23109,7 @@ SOFTWARE.
 
 ### <a id="text-c0fdcda1a4ff"></a>c0fdcda1a4ff
 
-Used by: tokio-macros@2.7.0
+Used by: tokio-macros@2.7.0, tokio-macros@2.7.2
 
 ```text
 MIT License
@@ -22562,7 +23138,7 @@ SOFTWARE.
 
 ### <a id="text-acddfb05f07a"></a>acddfb05f07a
 
-Used by: tokio-rustls@0.26.4
+Used by: tokio-rustls@0.26.4, tokio-rustls@0.26.6
 
 ```text
 Apache License
@@ -22770,7 +23346,7 @@ limitations under the License.
 
 ### <a id="text-1b0258c48739"></a>1b0258c48739
 
-Used by: tokio-rustls@0.26.4
+Used by: tokio-rustls@0.26.4, tokio-rustls@0.26.6
 
 ```text
 Copyright (c) 2017 quininer kel
@@ -22827,217 +23403,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### <a id="text-9b689eac99cd"></a>9b689eac99cd
-
-Used by: toml_datetime@1.1.2+spec-1.1.0
-
-```text
-Apache License
-                           Version 2.0, January 2004
-                        http://www.apache.org/licenses/
-
-   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
-
-   1. Definitions.
-
-      "License" shall mean the terms and conditions for use, reproduction,
-      and distribution as defined by Sections 1 through 9 of this document.
-
-      "Licensor" shall mean the copyright owner or entity authorized by
-      the copyright owner that is granting the License.
-
-      "Legal Entity" shall mean the union of the acting entity and all
-      other entities that control, are controlled by, or are under common
-      control with that entity. For the purposes of this definition,
-      "control" means (i) the power, direct or indirect, to cause the
-      direction or management of such entity, whether by contract or
-      otherwise, or (ii) ownership of fifty percent (50%) or more of the
-      outstanding shares, or (iii) beneficial ownership of such entity.
-
-      "You" (or "Your") shall mean an individual or Legal Entity
-      exercising permissions granted by this License.
-
-      "Source" form shall mean the preferred form for making modifications,
-      including but not limited to software source code, documentation
-      source, and configuration files.
-
-      "Object" form shall mean any form resulting from mechanical
-      transformation or translation of a Source form, including but
-      not limited to compiled object code, generated documentation,
-      and conversions to other media types.
-
-      "Work" shall mean the work of authorship, whether in Source or
-      Object form, made available under the License, as indicated by a
-      copyright notice that is included in or attached to the work
-      (an example is provided in the Appendix below).
-
-      "Derivative Works" shall mean any work, whether in Source or Object
-      form, that is based on (or derived from) the Work and for which the
-      editorial revisions, annotations, elaborations, or other modifications
-      represent, as a whole, an original work of authorship. For the purposes
-      of this License, Derivative Works shall not include works that remain
-      separable from, or merely link (or bind by name) to the interfaces of,
-      the Work and Derivative Works thereof.
-
-      "Contribution" shall mean any work of authorship, including
-      the original version of the Work and any modifications or additions
-      to that Work or Derivative Works thereof, that is intentionally
-      submitted to Licensor for inclusion in the Work by the copyright owner
-      or by an individual or Legal Entity authorized to submit on behalf of
-      the copyright owner. For the purposes of this definition, "submitted"
-      means any form of electronic, verbal, or written communication sent
-      to the Licensor or its representatives, including but not limited to
-      communication on electronic mailing lists, source code control systems,
-      and issue tracking systems that are managed by, or on behalf of, the
-      Licensor for the purpose of discussing and improving the Work, but
-      excluding communication that is conspicuously marked or otherwise
-      designated in writing by the copyright owner as "Not a Contribution."
-
-      "Contributor" shall mean Licensor and any individual or Legal Entity
-      on behalf of whom a Contribution has been received by Licensor and
-      subsequently incorporated within the Work.
-
-   2. Grant of Copyright License. Subject to the terms and conditions of
-      this License, each Contributor hereby grants to You a perpetual,
-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
-      copyright license to reproduce, prepare Derivative Works of,
-      publicly display, publicly perform, sublicense, and distribute the
-      Work and such Derivative Works in Source or Object form.
-
-   3. Grant of Patent License. Subject to the terms and conditions of
-      this License, each Contributor hereby grants to You a perpetual,
-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
-      (except as stated in this section) patent license to make, have made,
-      use, offer to sell, sell, import, and otherwise transfer the Work,
-      where such license applies only to those patent claims licensable
-      by such Contributor that are necessarily infringed by their
-      Contribution(s) alone or by combination of their Contribution(s)
-      with the Work to which such Contribution(s) was submitted. If You
-      institute patent litigation against any entity (including a
-      cross-claim or counterclaim in a lawsuit) alleging that the Work
-      or a Contribution incorporated within the Work constitutes direct
-      or contributory patent infringement, then any patent licenses
-      granted to You under this License for that Work shall terminate
-      as of the date such litigation is filed.
-
-   4. Redistribution. You may reproduce and distribute copies of the
-      Work or Derivative Works thereof in any medium, with or without
-      modifications, and in Source or Object form, provided that You
-      meet the following conditions:
-
-      (a) You must give any other recipients of the Work or
-          Derivative Works a copy of this License; and
-
-      (b) You must cause any modified files to carry prominent notices
-          stating that You changed the files; and
-
-      (c) You must retain, in the Source form of any Derivative Works
-          that You distribute, all copyright, patent, trademark, and
-          attribution notices from the Source form of the Work,
-          excluding those notices that do not pertain to any part of
-          the Derivative Works; and
-
-      (d) If the Work includes a "NOTICE" text file as part of its
-          distribution, then any Derivative Works that You distribute must
-          include a readable copy of the attribution notices contained
-          within such NOTICE file, excluding those notices that do not
-          pertain to any part of the Derivative Works, in at least one
-          of the following places: within a NOTICE text file distributed
-          as part of the Derivative Works; within the Source form or
-          documentation, if provided along with the Derivative Works; or,
-          within a display generated by the Derivative Works, if and
-          wherever such third-party notices normally appear. The contents
-          of the NOTICE file are for informational purposes only and
-          do not modify the License. You may add Your own attribution
-          notices within Derivative Works that You distribute, alongside
-          or as an addendum to the NOTICE text from the Work, provided
-          that such additional attribution notices cannot be construed
-          as modifying the License.
-
-      You may add Your own copyright statement to Your modifications and
-      may provide additional or different license terms and conditions
-      for use, reproduction, or distribution of Your modifications, or
-      for any such Derivative Works as a whole, provided Your use,
-      reproduction, and distribution of the Work otherwise complies with
-      the conditions stated in this License.
-
-   5. Submission of Contributions. Unless You explicitly state otherwise,
-      any Contribution intentionally submitted for inclusion in the Work
-      by You to the Licensor shall be under the terms and conditions of
-      this License, without any additional terms or conditions.
-      Notwithstanding the above, nothing herein shall supersede or modify
-      the terms of any separate license agreement you may have executed
-      with Licensor regarding such Contributions.
-
-   6. Trademarks. This License does not grant permission to use the trade
-      names, trademarks, service marks, or product names of the Licensor,
-      except as required for reasonable and customary use in describing the
-      origin of the Work and reproducing the content of the NOTICE file.
-
-   7. Disclaimer of Warranty. Unless required by applicable law or
-      agreed to in writing, Licensor provides the Work (and each
-      Contributor provides its Contributions) on an "AS IS" BASIS,
-      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-      implied, including, without limitation, any warranties or conditions
-      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
-      PARTICULAR PURPOSE. You are solely responsible for determining the
-      appropriateness of using or redistributing the Work and assume any
-      risks associated with Your exercise of permissions under this License.
-
-   8. Limitation of Liability. In no event and under no legal theory,
-      whether in tort (including negligence), contract, or otherwise,
-      unless required by applicable law (such as deliberate and grossly
-      negligent acts) or agreed to in writing, shall any Contributor be
-      liable to You for damages, including any direct, indirect, special,
-      incidental, or consequential damages of any character arising as a
-      result of this License or out of the use or inability to use the
-      Work (including but not limited to damages for loss of goodwill,
-      work stoppage, computer failure or malfunction, or any and all
-      other commercial damages or losses), even if such Contributor
-      has been advised of the possibility of such damages.
-
-   9. Accepting Warranty or Additional Liability. While redistributing
-      the Work or Derivative Works thereof, You may choose to offer,
-      and charge a fee for, acceptance of support, warranty, indemnity,
-      or other liability obligations and/or rights consistent with this
-      License. However, in accepting such obligations, You may act only
-      on Your own behalf and on Your sole responsibility, not on behalf
-      of any other Contributor, and only if You agree to indemnify,
-      defend, and hold each Contributor harmless for any liability
-      incurred by, or claims asserted against, such Contributor by reason
-      of your accepting any such warranty or additional liability.
-
-   END OF TERMS AND CONDITIONS
-
-   APPENDIX: How to apply the Apache License to your work.
-
-      To apply the Apache License to your work, attach the following
-      boilerplate notice, with the fields enclosed by brackets "{}"
-      replaced with your own identifying information. (Don't include
-      the brackets!)  The text should be enclosed in the appropriate
-      comment syntax for the file format. We also recommend that a
-      file or class name and description of purpose be included on the
-      same "printed page" as the copyright notice for easier
-      identification within third-party archives.
-
-   Copyright Individual contributors
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-```
-
 ### <a id="text-da6b30502bad"></a>da6b30502bad
 
-Used by: tower@0.5.2, tower-layer@0.3.3, tower-service@0.3.3
+Used by: tower@0.5.2, tower@0.5.3, tower-layer@0.3.3, tower-service@0.3.3
 
 ```text
 Copyright (c) 2019 Tower Contributors
@@ -23069,7 +23437,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-edd4b164997f"></a>edd4b164997f
 
-Used by: tower-http@0.6.8
+Used by: tower-http@0.6.8, tower-http@0.6.11
 
 ```text
 Copyright (c) 2019-2021 Tower Contributors
@@ -23239,7 +23607,7 @@ THE SOFTWARE.
 
 ### <a id="text-db11fec99467"></a>db11fec99467
 
-Used by: typenum@1.19.0
+Used by: typenum@1.19.0, typenum@1.20.1
 
 ```text
 MIT OR Apache-2.0
@@ -23247,7 +23615,7 @@ MIT OR Apache-2.0
 
 ### <a id="text-65dc2a869ff7"></a>65dc2a869ff7
 
-Used by: typenum@1.19.0
+Used by: typenum@1.19.0, typenum@1.20.1
 
 ```text
 Apache License
@@ -23455,7 +23823,7 @@ limitations under the License.
 
 ### <a id="text-87ebb37988ef"></a>87ebb37988ef
 
-Used by: typenum@1.19.0
+Used by: typenum@1.19.0, typenum@1.20.1
 
 ```text
 The MIT License (MIT)
@@ -23537,7 +23905,7 @@ THE SOFTWARE.
 
 ### <a id="text-361d79129578"></a>361d79129578
 
-Used by: unicode-ident@1.0.24
+Used by: unicode-ident@1.0.24, unicode-ident@1.0.27
 
 ```text
 UNICODE LICENSE V3
@@ -23964,7 +24332,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-11cd7e6caed4"></a>11cd7e6caed4
 
-Used by: uuid@1.23.1
+Used by: uuid@1.23.1, uuid@1.28.0
 
 ```text
 Copyright (c) 2014 The Rust Project Developers
@@ -24137,7 +24505,7 @@ SOFTWARE.
 
 ### <a id="text-f7dfffe03f9f"></a>f7dfffe03f9f
 
-Used by: want@0.3.1
+Used by: want@0.3.1, want@0.3.2
 
 ```text
 Copyright (c) 2018-2019 Sean McArthur
@@ -24477,7 +24845,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-d30183ec6610"></a>d30183ec6610
 
-Used by: webpki-roots@0.26.11, webpki-roots@1.0.3
+Used by: webpki-roots@0.26.11, webpki-roots@1.0.3, webpki-roots@1.0.9
 
 ```text
 # Community Data License Agreement - Permissive - Version 2.0
@@ -25343,7 +25711,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### <a id="text-98ed0ad9db8a"></a>98ed0ad9db8a
 
-Used by: zerocopy@0.8.48, zerocopy-derive@0.8.48
+Used by: zerocopy@0.8.48, zerocopy@0.8.63, zerocopy-derive@0.8.48, zerocopy-derive@0.8.63
 
 ```text
 Apache License
@@ -25551,7 +25919,7 @@ Apache License
 
 ### <a id="text-47248d1ec833"></a>47248d1ec833
 
-Used by: zerocopy@0.8.48, zerocopy-derive@0.8.48
+Used by: zerocopy@0.8.48, zerocopy@0.8.63, zerocopy-derive@0.8.48, zerocopy-derive@0.8.63
 
 ```text
 Copyright 2019 The Fuchsia Authors.
@@ -25582,7 +25950,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### <a id="text-a03d4daa4f46"></a>a03d4daa4f46
 
-Used by: zerocopy@0.8.48, zerocopy-derive@0.8.48
+Used by: zerocopy@0.8.48, zerocopy@0.8.63, zerocopy-derive@0.8.48, zerocopy-derive@0.8.63
 
 ```text
 Copyright 2023 The Fuchsia Authors
@@ -25638,6 +26006,38 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+### <a id="text-836ed921bbad"></a>836ed921bbad
+
+Used by: zeroize@1.9.1
+
+```text
+Copyright (c) 2018-2026 The RustCrypto Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ```
 
 ### <a id="text-4bb0af10042c"></a>4bb0af10042c
