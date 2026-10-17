@@ -295,20 +295,21 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
     return (
       <div className="flex max-w-xl flex-col">
         <p className="pb-2 text-xs text-muted">
-          Settings for Grok Build. Other coding agents keep their own configuration; custom instructions also reach
-          Claude Code. MCP servers and always-allow rules (under Coding agents) apply to every agent.
+          Default for new Code sessions. Each session can change Ask / Auto / Always in its header; Patchbay applies
+          that for every coding agent. Grok Build also gets this as its starting config. Custom instructions reach Claude
+          Code too. MCP servers and always-allow rules (under Coding agents) apply to every agent.
         </p>
         <Row
           label="Default permission mode"
           hint={
             prefs.permissionMode === "always-approve" ? (
               <span className="text-danger">
-                The agent edits files and runs commands without asking. Deny rules still apply.
+                New sessions approve edits and commands without asking. Deny rules still apply.
               </span>
             ) : prefs.permissionMode === "auto" ? (
-              "Routine local actions run without a prompt; anything riskier still asks."
+              "New sessions run routine local actions without a prompt; shell still asks."
             ) : (
-              "Ask before edits and non-read-only commands."
+              "New sessions ask before edits and non-read-only commands."
             )
           }
         >

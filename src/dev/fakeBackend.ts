@@ -379,7 +379,7 @@ export function install() {
   db.models.push({ id: "m1", providerId: "p1", modelId: "demo-model", displayName: "Demo model", vision: true, contextWindow: 128000, params: { ...emptyParams(), pricing: { input: 3, cachedInput: 0.3, cacheWrite: 3.75, output: 15 } } });
   db.models.push({ id: "m2", providerId: "p1", modelId: "demo-mini", displayName: "Demo mini", vision: false, contextWindow: 32000, params: emptyParams() });
   const seed = (cwd: string, title: string, ago: number, activity: CodeSession["activity"], hostNode = ME) =>
-    db.code.push({ id: id(), cwd, acpSessionId: null, title, modelRef: "m1", pinned: false, createdAt: now() - ago, updatedAt: now() - ago, activity, hostNode, epoch: 0, agent: "grok", agentModel: null });
+    db.code.push({ id: id(), cwd, acpSessionId: null, title, modelRef: "m1", pinned: false, createdAt: now() - ago, updatedAt: now() - ago, activity, hostNode, epoch: 0, agent: "grok", agentModel: null, permissionMode: "default" });
   seed("/home/demo/Projects/nulamp", "Windows installer testing", 1000, "edit");
   seed("/home/demo/Projects/nulamp", "Release to staging", 5000, "pr");
   seed("/home/demo/Projects/omnimark", "Interactive document controls", 3000, "branch", meshDemo ? "n-studio" : ME);
@@ -514,9 +514,31 @@ export function install() {
 
         case "list_code_sessions": return [...db.code].sort((x, y) => y.updatedAt - x.updatedAt);
         case "create_code_session": {
-          const s: CodeSession = { id: id(), cwd: a.cwd as string, acpSessionId: null, title: "New session", modelRef: (a.modelRef as string) ?? null, pinned: false, createdAt: now(), updatedAt: now(), activity: null, agent: ((a.agent as AgentId | null) ?? (JSON.parse(db.settings.preferences ?? "{}").defaultAgent as AgentId | undefined) ?? "grok"), agentModel: null, hostNode: ME, epoch: 0 };
+          const prefs = JSON.parse(db.settings.preferences ?? "{}") as { defaultAgent?: AgentId; permissionMode?: CodeSession["permissionMode"] };
+          const s: CodeSession = {
+            id: id(),
+            cwd: a.cwd as string,
+            acpSessionId: null,
+            title: "New session",
+            modelRef: (a.modelRef as string) ?? null,
+            pinned: false,
+            createdAt: now(),
+            updatedAt: now(),
+            activity: null,
+            agent: ((a.agent as AgentId | null) ?? prefs.defaultAgent ?? "grok"),
+            agentModel: null,
+            hostNode: ME,
+            epoch: 0,
+            permissionMode: prefs.permissionMode ?? "default",
+          };
           db.code.push(s);
           return s;
+        }
+        case "code_set_permission_mode": {
+          const s = db.code.find((x) => x.id === a.id)!;
+          s.permissionMode = a.mode as CodeSession["permissionMode"];
+          s.updatedAt = now();
+          return null;
         }
         case "update_code_session": {
           const s = db.code.find((x) => x.id === a.id)!;

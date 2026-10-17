@@ -209,6 +209,8 @@ export interface CodeSession {
   hostNode: string | null;
   /** Bumped on every move between nodes. */
   epoch: number;
+  /** Ask / auto / always-approve: Patchbay answers ACP permission prompts for this session. */
+  permissionMode: "default" | "auto" | "always-approve";
 }
 
 // ---- mesh ----
@@ -628,6 +630,8 @@ export const api = {
   codeCancel: (id: string) => invoke<void>("code_cancel", { id }),
   codeSetModel: (id: string, modelId: string) => invoke<void>("code_set_model", { id, modelId }),
   codeSetMode: (id: string, modeId: string) => invoke<void>("code_set_mode", { id, modeId }),
+  codeSetPermissionMode: (id: string, mode: "default" | "auto" | "always-approve") =>
+    invoke<void>("code_set_permission_mode", { id, mode }),
   codeSetConfigOption: (id: string, configId: string, value: string) =>
     invoke<void>("code_set_config_option", { id, configId, value }),
   codeRewind: (id: string, ordinal: number, preview: string, revertFiles: boolean) =>

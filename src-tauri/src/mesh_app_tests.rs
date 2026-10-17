@@ -78,7 +78,7 @@ async fn move_checkpoint_take_over_and_orphaned_work() {
     repo(&proj_a);
     std::fs::write(proj_a.join("app.txt"), "v2, not committed\n").unwrap();
     std::fs::write(proj_a.join("notes.txt"), "untracked\n").unwrap();
-    let s = a.state.db.create_code_session(&proj_a.to_string_lossy(), None, "grok").unwrap();
+    let s = a.state.db.create_code_session(&proj_a.to_string_lossy(), None, "grok", "default").unwrap();
     until("session reaches B", 10, || b.state.db.get_code_session(&s.id).unwrap().is_some()).await;
 
     // Move it to B.
@@ -131,7 +131,7 @@ async fn remote_session_commands_and_terminal() {
     let an = a.state.mesh.node_id().to_owned();
     let proj = a.dir.join("proj");
     repo(&proj);
-    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok").unwrap();
+    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok", "default").unwrap();
     until("session reaches B", 10, || b.state.db.get_code_session(&s.id).unwrap().is_some()).await;
 
     // B sees the session as remote and asks A about it.
@@ -211,7 +211,7 @@ async fn phone_joins_follows_resumes_and_switches_gateway() {
     link(&a, &b).await;
     let proj = a.dir.join("proj");
     repo(&proj);
-    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok").unwrap();
+    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok", "default").unwrap();
     until("session reaches B", 10, || b.state.db.get_code_session(&s.id).unwrap().is_some()).await;
 
     // The phone asks A to join; a person approves it there.
@@ -315,7 +315,7 @@ async fn manual_phone_gateway() {
     db.set_setting("default_model", "m-echo").unwrap();
     let proj = n.dir.join("proj");
     repo(&proj);
-    let s = db.create_code_session(&proj.to_string_lossy(), Some("m-agent"), "grok").unwrap();
+    let s = db.create_code_session(&proj.to_string_lossy(), Some("m-agent"), "grok", "default").unwrap();
     db.update_code_session(&s.id, None, Some("Try !edit from the phone"), None).unwrap();
     let c = db.create_conversation(Some("m-echo")).unwrap();
     db.update_conversation(&c.id, Some("Hello from studio"), None, None).unwrap();

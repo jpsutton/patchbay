@@ -11,6 +11,7 @@ import {
   type AgentId,
   type AgentInfo,
   type Attachment,
+  type CodeSession,
 } from "../lib/ipc";
 import { memberName, memberOnline, remoteHost, useStore, type CodeState, type Entry } from "../lib/store";
 import { HostBadge, MoveDialog, OfflineHostBanner } from "./HostControls";
@@ -576,7 +577,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             : "bg-faint";
   const dotLabel = needsYou ? "needs you" : busy ? "working" : status;
 
-  const setPermissionMode = async (id: string) => {
+  const setAcpMode = async (id: string) => {
     if (!s?.modes) return;
     try {
       await api.codeSetMode(session.id, id);
@@ -590,7 +591,23 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
       setToast(errorText(err));
     }
   };
+  const setApprovals = async (mode: CodeSession["permissionMode"]) => {
+    try {
+      await api.codeSetPermissionMode(session.id, mode);
+      useStore.setState((st) => ({
+        codeSessions: st.codeSessions.map((c) => (c.id === session.id ? { ...c, permissionMode: mode } : c)),
+      }));
+    } catch (err) {
+      setToast(errorText(err));
+    }
+  };
   const modes = s?.modes?.availableModes ?? [];
+  const approval = session.permissionMode || "default";
+  const approvalOpts: { id: CodeSession["permissionMode"]; name: string; title: string }[] = [
+    { id: "default", name: "Ask", title: "Ask before edits and commands" },
+    { id: "auto", name: "Auto", title: "Routine local actions run without a prompt; shell still asks" },
+    { id: "always-approve", name: "Always", title: "Approve every tool call without asking" },
+  ];
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
@@ -614,7 +631,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
         {modes.length > 0 && modes.length <= 3 && s?.modes && (
           <div
             role="radiogroup"
-            aria-label="Permission mode"
+            aria-label="Agent mode"
             className={`mr-1 flex gap-0.5 rounded-[9px] border border-line bg-panel p-0.5 text-[12px] ${ready ? "" : "pointer-events-none opacity-50"}`}
           >
             {modes.map((m) => {
@@ -626,7 +643,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                   aria-checked={on}
                   title={m.description ?? m.name}
                   className={`h-[26px] rounded-[7px] px-2.5 ${on ? "bg-panel-2 text-fg" : "text-muted hover:text-fg"}`}
-                  onClick={() => !on && setPermissionMode(m.id)}
+                  onClick={() => !on && setAcpMode(m.id)}
                 >
                   {m.name}
                 </button>
@@ -639,9 +656,9 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             className="mr-1 max-w-44"
             value={s.modes.currentModeId}
             disabled={!ready}
-            title="Permission mode"
-            aria-label="Permission mode"
-            onChange={(e) => setPermissionMode(e.target.value)}
+            title="Agent mode"
+            aria-label="Agent mode"
+            onChange={(e) => setAcpMode(e.target.value)}
           >
             {modes.map((m) => (
               <option key={m.id} value={m.id}>
@@ -650,6 +667,30 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             ))}
           </ChipSelect>
         )}
+        <div
+          role="radiogroup"
+          aria-label="Approvals"
+          title="How Patchbay answers tool permission prompts"
+          className="mr-1 flex gap-0.5 rounded-[9px] border border-line bg-panel p-0.5 text-[12px]"
+        >
+          {approvalOpts.map((m) => {
+            const on = m.id === approval;
+            return (
+              <button
+                key={m.id}
+                role="radio"
+                aria-checked={on}
+                title={m.title}
+                className={`h-[26px] rounded-[7px] px-2.5 ${on ? "bg-panel-2 text-fg" : "text-muted hover:text-fg"} ${
+                  m.id === "always-approve" && on ? "text-danger" : ""
+                }`}
+                onClick={() => !on && setApprovals(m.id)}
+              >
+                {m.name}
+              </button>
+            );
+          })}
+        </div>
         <div className="mx-1 h-5 w-px bg-line" />
         {!remote && (
           <ExportMenu

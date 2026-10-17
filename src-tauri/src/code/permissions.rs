@@ -49,10 +49,11 @@ pub fn find<'a>(rules: &'a [PermissionRule], cwd: &str, tool_call: &Value) -> Op
     rules.iter().find(|r| rule_matches(r, cwd, kind, command.as_deref()))
 }
 
-/// The option to pick when a rule approves: allow once, else allow always.
+/// The option to pick when a rule or policy approves: allow once, else allow always.
 pub fn allow_option(options: &Value) -> Option<String> {
     let opts = options.as_array()?;
-    ["allow_once", "allow_always"].iter().find_map(|k| {
+    // ACP uses snake_case kinds; some agents still send kebab-case option ids as kinds.
+    ["allow_once", "allow-once", "allow_always", "allow-always"].iter().find_map(|k| {
         opts.iter()
             .find(|o| o["kind"] == *k)
             .and_then(|o| o["optionId"].as_str().map(str::to_owned))
@@ -67,6 +68,40 @@ pub fn describe(rule: &PermissionRule) -> String {
     };
     let place = if rule.cwd == "*" { "everywhere".to_owned() } else { "in this folder".to_owned() };
     format!("Auto-approved: {what} {place}")
+}
+
+/// Whether the session's Ask / Auto / Always policy should approve this call without asking.
+/// Saved always-allow rules are checked separately and take precedence.
+pub fn policy_approves(mode: &str, tool_call: &Value) -> Option<&'static str> {
+    match mode {
+        "always-approve" => Some("Always approve"),
+        "auto" => {
+            let kind = tool_call["kind"].as_str().unwrap_or("");
+            // Shell stays gated; routine local work (read/edit/search/…) runs without a prompt.
+            if kind.is_empty() || kind == "execute" {
+                None
+            } else {
+                Some("Auto: routine action")
+            }
+        }
+        _ => None, // "default" / Ask
+    }
+}
+
+/// Resolve an auto-approval: a matching rule, else the session permission policy.
+pub fn decide(
+    mode: &str,
+    rules: &[PermissionRule],
+    cwd: &str,
+    tool_call: &Value,
+    options: &Value,
+) -> Option<(String, String)> {
+    let option_id = allow_option(options)?;
+    if let Some(rule) = find(rules, cwd, tool_call) {
+        return Some((option_id, describe(rule)));
+    }
+    let reason = policy_approves(mode, tool_call)?;
+    Some((option_id, reason.to_owned()))
 }
 
 #[cfg(test)]
@@ -121,5 +156,20 @@ mod tests {
         assert_eq!(allow_option(&opts).as_deref(), Some("o"));
         assert_eq!(allow_option(&json!([{ "optionId": "a", "kind": "allow_always" }])).as_deref(), Some("a"));
         assert_eq!(allow_option(&json!([{ "optionId": "n", "kind": "reject_once" }])), None);
+        assert_eq!(allow_option(&json!([{ "optionId": "k", "kind": "allow-once" }])).as_deref(), Some("k"));
+    }
+
+    #[test]
+    fn policy_ask_auto_always() {
+        let edit = json!({ "kind": "edit" });
+        let exec = exec("ls");
+        let opts = json!([{ "optionId": "o", "kind": "allow_once" }]);
+        assert!(decide("default", &[], "/p", &edit, &opts).is_none());
+        assert_eq!(decide("auto", &[], "/p", &edit, &opts).unwrap().1, "Auto: routine action");
+        assert!(decide("auto", &[], "/p", &exec, &opts).is_none());
+        assert_eq!(decide("always-approve", &[], "/p", &exec, &opts).unwrap().1, "Always approve");
+        // A saved rule wins over Ask.
+        let rules = [rule("/p", "edit", "")];
+        assert!(decide("default", &rules, "/p", &edit, &opts).unwrap().1.contains("edit"));
     }
 }
