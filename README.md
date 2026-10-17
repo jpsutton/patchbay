@@ -51,7 +51,7 @@ Packaged releases will be published on the [Releases page](https://github.com/jp
 
 | Platform | Packages |
 | --- | --- |
-| Linux | `.deb` (Debian, Ubuntu), `.rpm` (Fedora, openSUSE), AppImage, and an Arch Linux package repository |
+| Linux | `.deb` (Ubuntu 24.04 or newer, Debian 13), `.rpm` (Fedora, openSUSE), AppImage, and an Arch Linux package repository. Needs glibc 2.39 or newer. |
 | Windows | Installer (`.exe`) and `.msi` |
 | macOS | `.dmg` (Apple silicon) |
 

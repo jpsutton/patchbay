@@ -22,6 +22,8 @@ concurrency:
 
 jobs:
   publish:
+    # Creating the release branch is a push too; there is nothing to publish yet.
+    if: ${{ !github.event.created }}
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
@@ -50,7 +52,7 @@ jobs:
                   --status completed --json databaseId,event \
                   -q 'map(select(.event == "pull_request")) | .[0].databaseId')
           [ -n "$run" ] || { echo "::error::no completed pull-request build for $head"; exit 1; }
-          for job in linux arch; do
+          for job in linux-packages arch; do
             conclusion=$(gh run view "$run" -R "$GITHUB_REPOSITORY" --json jobs \
                            -q ".jobs[] | select(.name == \"$job\") | .conclusion")
             [ "$conclusion" = success ] || { echo "::error::build $run: $job is '$conclusion'"; exit 1; }

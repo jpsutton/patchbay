@@ -24,16 +24,21 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # .deb, .rpm and AppImage from Tauri's bundler. Built on the oldest
-  # supported Ubuntu so the packages run on distributions with older glibc.
-  linux:
-    runs-on: ubuntu-22.04
+  # .deb, .rpm and AppImage from Tauri's bundler. The oldest supported Ubuntu
+  # (24.04) sets the glibc the packages need (2.39).
+  linux-packages:
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
       - run: scripts/ci/deps-ubuntu.sh
+      # The protoc Grok Build pins (vendor/grok-build/bin/protoc), the same on every platform.
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '29.3'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -96,8 +101,11 @@ jobs:
           workspaces: |
             src-tauri -> target
             vendor/grok-build -> ../../target/grok
-      - name: Install protoc
-        run: choco install protoc --no-progress -y
+      # The protoc Grok Build pins (vendor/grok-build/bin/protoc), the same on every platform.
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '29.3'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -130,7 +138,11 @@ jobs:
           workspaces: |
             src-tauri -> target
             vendor/grok-build -> ../../target/grok
-      - run: brew install protobuf
+      # The protoc Grok Build pins (vendor/grok-build/bin/protoc), the same on every platform.
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '29.3'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:

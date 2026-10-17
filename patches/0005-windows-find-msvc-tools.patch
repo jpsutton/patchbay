@@ -1,0 +1,26 @@
+Patchbay modification to Grok Build (https://github.com/xai-org/grok-build),
+Apache License 2.0, Copyright 2023-2026 SpaceXAI. Modified by Patchbay
+from upstream commit 2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8.
+
+Bump find-msvc-tools 0.1.13 -> 0.1.14. With 0.1.13, cc 1.2.48 fails to compile on
+Windows (FILE_ATTRIBUTE_TEMPORARY is i32 where cc expects u32).
+
+Files changed:
+  Cargo.lock
+
+diff --git a/Cargo.lock b/Cargo.lock
+index d3aa3f76..d923f63b 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -3425,9 +3425,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "find-msvc-tools"
+-version = "0.1.13"
++version = "0.1.14"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "ef25905e51abafe4dcea6c15fec58c57b601cdbd0ee53d22ea1d3016c587d39b"
++checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
+ 
+ [[package]]
+ name = "findshlibs"
