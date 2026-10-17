@@ -24,18 +24,17 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # .deb, .rpm and AppImage from Tauri's bundler. Built on the oldest
-  # supported Ubuntu so the packages run on distributions with older glibc.
+  # .deb, .rpm and AppImage from Tauri's bundler. The oldest supported Ubuntu
+  # (24.04) sets the glibc the packages need (2.39).
   linux:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
       - run: scripts/ci/deps-ubuntu.sh
-      # Grok Build's proto files need protoc 3.15 or newer; Ubuntu 22.04 ships 3.12.
-      # 29.3 is the version Grok Build pins (vendor/grok-build/bin/protoc).
+      # The protoc Grok Build pins (vendor/grok-build/bin/protoc), the same on every platform.
       - uses: arduino/setup-protoc@v3
         with:
           version: '29.3'
@@ -102,8 +101,7 @@ jobs:
           workspaces: |
             src-tauri -> target
             vendor/grok-build -> ../../target/grok
-      # Grok Build's proto files need protoc 3.15 or newer; Ubuntu 22.04 ships 3.12.
-      # 29.3 is the version Grok Build pins (vendor/grok-build/bin/protoc).
+      # The protoc Grok Build pins (vendor/grok-build/bin/protoc), the same on every platform.
       - uses: arduino/setup-protoc@v3
         with:
           version: '29.3'
@@ -140,8 +138,7 @@ jobs:
           workspaces: |
             src-tauri -> target
             vendor/grok-build -> ../../target/grok
-      # Grok Build's proto files need protoc 3.15 or newer; Ubuntu 22.04 ships 3.12.
-      # 29.3 is the version Grok Build pins (vendor/grok-build/bin/protoc).
+      # The protoc Grok Build pins (vendor/grok-build/bin/protoc), the same on every platform.
       - uses: arduino/setup-protoc@v3
         with:
           version: '29.3'
