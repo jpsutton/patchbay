@@ -240,8 +240,8 @@ export function ProviderPage({
       <ProviderEditor provider={provider} onSaved={onSaved} />
       {provider && <AddModels provider={provider} onAdded={onOpenModel} />}
       <p className="text-xs text-muted">
-        Keys are stored in the OS keychain when available. Chat calls the provider directly; the Code agent
-        (Grok Build) runs locally and receives keys only through its process environment.
+        Keys are stored in the OS keychain when available. Chat calls the provider directly; Grok Build
+        runs locally and receives keys only through its process environment.
       </p>
     </div>
   );

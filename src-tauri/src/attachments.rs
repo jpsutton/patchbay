@@ -34,6 +34,16 @@ pub fn attachments_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("attachments")
 }
 
+/// Where an attachment's bytes live: content-addressed, so every node computes the same name.
+pub fn stored_path(data_dir: &Path, sha: &str, name: &str) -> PathBuf {
+    let ext = extension(name);
+    attachments_dir(data_dir).join(if ext.is_empty() || ext.contains('.') {
+        sha.to_owned()
+    } else {
+        format!("{sha}.{ext}")
+    })
+}
+
 fn extension(name: &str) -> String {
     let lower = name.to_ascii_lowercase();
     match Path::new(&lower).extension() {
@@ -94,14 +104,8 @@ pub fn ingest(db: &Db, data_dir: &Path, name: &str, bytes: &[u8]) -> Result<Atta
     }
     let (kind, mime) = classify(name, bytes)?;
     let sha = hex(&Sha256::digest(bytes));
-    let dir = attachments_dir(data_dir);
-    std::fs::create_dir_all(&dir)?;
-    let ext = extension(name);
-    let file = dir.join(if ext.is_empty() || ext.contains('.') {
-        sha.clone()
-    } else {
-        format!("{sha}.{ext}")
-    });
+    std::fs::create_dir_all(attachments_dir(data_dir))?;
+    let file = stored_path(data_dir, &sha, name);
     if !file.exists() {
         std::fs::write(&file, bytes).with_context(|| format!("write {}", file.display()))?;
     }

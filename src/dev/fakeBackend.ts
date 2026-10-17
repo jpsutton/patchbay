@@ -5,6 +5,8 @@ import { emit } from "@tauri-apps/api/event";
 import type { Channel } from "@tauri-apps/api/core";
 import { emptyParams } from "../lib/ipc";
 import type {
+  MeshChatEvent,
+  MeshStatus,
   McpServer,
   PermissionRule,
   Prompt,
@@ -18,9 +20,43 @@ import type {
   Model,
   Provider,
   TermEvent,
+  AcpConfigOption,
+  AgentId,
+  AgentInfo,
 } from "../lib/ipc";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const fakeAgent = (id: AgentId, label: string, program: string | null, extra: Partial<AgentInfo> = {}): AgentInfo => ({
+  id,
+  label,
+  available: program != null,
+  program,
+  source: program ? "path" : null,
+  version: program ? "1.0.0" : null,
+  error: program ? null : `${label} not found.`,
+  installHint: `Install ${label}, then sign in from a terminal.`,
+  usesPatchbayModels: id === "grok",
+  supportsInstructions: id === "grok" || id === "claude-code",
+  ...extra,
+});
+const FAKE_AGENTS: AgentInfo[] = [
+  fakeAgent("grok", "Grok Build", "/opt/patchbay/grok", { source: "bundled" }),
+  fakeAgent("claude-code", "Claude Code", "/usr/bin/npx", { source: "npx", version: null }),
+  fakeAgent("opencode", "OpenCode", "/usr/bin/opencode"),
+  fakeAgent("cursor", "Cursor CLI", "/usr/bin/cursor-agent"),
+  fakeAgent("kilo", "Kilo Code", null),
+];
+/** Reasoning effort per fake session, for agents that report it as a config option. */
+const fakeConfig: Record<string, string> = {};
+const fakeEffort = (value: string): AcpConfigOption => ({
+  id: "effort",
+  name: "Effort",
+  category: "thought_level",
+  type: "select",
+  currentValue: value,
+  options: ["low", "medium", "high"].map((v) => ({ value: v, name: v[0].toUpperCase() + v.slice(1) })),
+});
 const DEMO_FILES = ["README.md", "Cargo.toml", "src/main.rs", "src/lib.rs", "src/code/acp.rs", "src/code/mcp.rs", "docs/guide.md", "package.json"];
 const id = () => crypto.randomUUID();
 const now = () => Date.now();
@@ -238,6 +274,68 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
 }
 const fakeUsage = { input: 0, cachedRead: 0, cacheWrite: 0, output: 0, reasoning: 0, costUsd: null as number | null, apiMs: 0 };
 
+// ---- mesh: `?mesh=1` starts as a member of a four-computer mesh; otherwise not in one ----
+
+const ME = "n-laptop";
+const meshDemo = new URLSearchParams(location.search).has("mesh");
+const mesh: MeshStatus = {
+  nodeId: ME,
+  name: "laptop",
+  member: false,
+  meshId: null,
+  running: false,
+  listen: "0.0.0.0:41890",
+  port: null,
+  advertise: [],
+  joining: null,
+  members: [],
+  pending: [],
+};
+
+function meshMember() {
+  Object.assign(mesh, {
+    member: true,
+    meshId: "demo-mesh",
+    running: true,
+    port: 41890,
+    joining: null,
+    members: [
+      { nodeId: ME, name: mesh.name, state: "self", via: null, viaName: null, rttMs: null, url: null, admittedAt: now() - 9e8, approver: ME },
+      { nodeId: "n-studio", name: "studio", state: "direct", via: null, viaName: null, rttMs: 4, url: "ws://100.64.0.7:41890", admittedAt: now() - 8e8, approver: ME },
+      { nodeId: "n-nas", name: "nas", state: "relay", via: "n-studio", viaName: "studio", rttMs: null, url: null, admittedAt: now() - 7e8, approver: "n-studio" },
+      { nodeId: "n-old", name: "old-desktop", state: "offline", via: null, viaName: null, rttMs: null, url: null, admittedAt: now() - 6e8, approver: ME },
+    ],
+  } satisfies Partial<MeshStatus>);
+}
+
+const meshStatusChanged = () => emit("mesh://status", null);
+
+/** A reply streaming on "studio", shown live here. */
+async function fakeRemoteStream() {
+  const conv = db.conversations[0];
+  const user: StoredMessage = {
+    id: id(), conversationId: conv.id, role: "user", content: "What should I pack for three days in Lisbon?", reasoning: null,
+    modelRef: null, error: null, createdAt: tick(), attachments: [], usage: null, parentId: db.leaf[conv.id] ?? null,
+  };
+  const asst: StoredMessage = {
+    id: id(), conversationId: conv.id, role: "assistant", content: "", reasoning: null,
+    modelRef: "m1", error: null, createdAt: tick(), attachments: [], usage: null, parentId: user.id,
+  };
+  db.messages.push(user, asst);
+  db.leaf[conv.id] = asst.id;
+  const ev = (event: MeshChatEvent["event"]) =>
+    emit("mesh://chat", { conversationId: conv.id, streamer: "n-studio", streamerName: "studio", event } satisfies MeshChatEvent);
+  ev({ type: "started", userMessageId: user.id, assistantMessageId: asst.id });
+  emit("mesh://changed", { tables: ["messages"] });
+  const reply = "Light layers, comfortable shoes for the hills, a compact umbrella and a power adapter (type F).";
+  for (const w of reply.split(/(?<=\s)/)) {
+    await sleep(120);
+    asst.content += w;
+    ev({ type: "text", text: w });
+  }
+  ev({ type: "done", stopReason: "EndTurn", usage: null });
+}
+
 export function install() {
   mockWindows("main");
   // Seed one provider + model so the UI starts usable.
@@ -245,12 +343,17 @@ export function install() {
   db.providers.push(p);
   db.models.push({ id: "m1", providerId: "p1", modelId: "demo-model", displayName: "Demo model", vision: true, contextWindow: 128000, params: { ...emptyParams(), pricing: { input: 3, cachedInput: 0.3, cacheWrite: 3.75, output: 15 } } });
   db.models.push({ id: "m2", providerId: "p1", modelId: "demo-mini", displayName: "Demo mini", vision: false, contextWindow: 32000, params: emptyParams() });
-  const seed = (cwd: string, title: string, ago: number, activity: CodeSession["activity"]) =>
-    db.code.push({ id: id(), cwd, acpSessionId: null, title, modelRef: "m1", pinned: false, createdAt: now() - ago, updatedAt: now() - ago, activity });
+  const seed = (cwd: string, title: string, ago: number, activity: CodeSession["activity"], hostNode = ME) =>
+    db.code.push({ id: id(), cwd, acpSessionId: null, title, modelRef: "m1", pinned: false, createdAt: now() - ago, updatedAt: now() - ago, activity, hostNode, epoch: 0, agent: "grok", agentModel: null });
   seed("/home/demo/Projects/nulamp", "Windows installer testing", 1000, "edit");
   seed("/home/demo/Projects/nulamp", "Release to staging", 5000, "pr");
-  seed("/home/demo/Projects/omnimark", "Interactive document controls", 3000, "branch");
-  seed("/home/demo/Work/omnimark", "Session overview", 9000, null);
+  seed("/home/demo/Projects/omnimark", "Interactive document controls", 3000, "branch", meshDemo ? "n-studio" : ME);
+  seed("/home/demo/Work/omnimark", "Session overview", 9000, null, meshDemo ? "n-old" : ME);
+  if (meshDemo) {
+    meshMember();
+    mesh.pending = [{ nodeId: "n-new", name: "travel-pc", code: "482 913" }];
+    setTimeout(fakeRemoteStream, 2500);
+  }
   const conv = (title: string, agoDays: number, pinned = false) =>
     db.conversations.push({ id: id(), title, modelRef: "m1", systemPrompt: null, pinned, createdAt: now() - agoDays * 86_400_000, updatedAt: now() - agoDays * 86_400_000 });
   conv("Trip planning", 0.01);
@@ -376,7 +479,7 @@ export function install() {
 
         case "list_code_sessions": return [...db.code].sort((x, y) => y.updatedAt - x.updatedAt);
         case "create_code_session": {
-          const s: CodeSession = { id: id(), cwd: a.cwd as string, acpSessionId: null, title: "New session", modelRef: (a.modelRef as string) ?? null, pinned: false, createdAt: now(), updatedAt: now(), activity: null };
+          const s: CodeSession = { id: id(), cwd: a.cwd as string, acpSessionId: null, title: "New session", modelRef: (a.modelRef as string) ?? null, pinned: false, createdAt: now(), updatedAt: now(), activity: null, agent: ((a.agent as AgentId | null) ?? (JSON.parse(db.settings.preferences ?? "{}").defaultAgent as AgentId | undefined) ?? "grok"), agentModel: null, hostNode: ME, epoch: 0 };
           db.code.push(s);
           return s;
         }
@@ -394,12 +497,19 @@ export function install() {
           setTimeout(() => {
             codeEmit(csid, { type: "status", state: "starting", message: null });
             setTimeout(() => {
+              const grok = (db.code.find((c) => c.id === csid)?.agent ?? "grok") === "grok";
               codeEmit(csid, {
                 type: "sessionReady", acpSessionId: "acp-" + csid, loaded: false,
                 capabilities: { loadSession: true, promptCapabilities: { image: false, embeddedContext: true }, mcpCapabilities: { http: true, sse: true } },
                 agentInfo: { name: "fake-agent" },
-                models: { currentModelId: "pb-m1", availableModels: db.models.map((m) => ({ modelId: "pb-" + m.id, name: m.displayName })) },
-                modes: null,
+                models: grok
+                  ? { currentModelId: "pb-m1", availableModels: db.models.map((m) => ({ modelId: "pb-" + m.id, name: m.displayName })) }
+                  : { currentModelId: "sonnet", availableModels: [{ modelId: "sonnet", name: "Sonnet" }, { modelId: "opus", name: "Opus" }] },
+                modes: grok
+                  ? null
+                  : { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] },
+                configOptions: grok ? [] : [fakeEffort(fakeConfig[csid] ?? "medium")],
+                extensions: { statusLine: grok, rewind: grok },
               });
               codeEmit(csid, {
                 type: "update",
@@ -480,6 +590,12 @@ export function install() {
           for (const [k, r] of pending) { r(null); pending.delete(k); }
           return null;
         case "code_set_model": case "code_set_mode": return null;
+        case "code_set_config_option": {
+          fakeConfig[a.id as string] = a.value as string;
+          codeEmit(a.id as string, { type: "config", models: null, modes: null, configOptions: [fakeEffort(a.value as string)] });
+          return null;
+        }
+        case "list_agents": return FAKE_AGENTS;
         case "code_rewind": await sleep(150); return null;
         case "code_usage": return { totals: { ...fakeUsage }, contextTokens: null, contextWindow: 128000, autoCompactPercent: 85 };
         case "code_permission_respond": {
@@ -500,6 +616,61 @@ export function install() {
           return null;
         }
         case "term_resize": case "term_close": return null;
+
+        case "code_attach": {
+          const s = db.code.find((x) => x.id === a.id);
+          if (s?.hostNode === "n-old") return { running: false, busy: false, events: [], offline: true };
+          setTimeout(() => codeEmit(a.id as string, { type: "status", state: "ready", message: null }), 50);
+          return { running: false, busy: false, events: [] };
+        }
+        case "code_move": {
+          await sleep(1200);
+          const s = db.code.find((x) => x.id === a.id)!;
+          s.hostNode = a.target as string;
+          s.cwd = a.cwd as string;
+          s.epoch += 1;
+          return null;
+        }
+        case "code_take_over": {
+          await sleep(800);
+          const s = db.code.find((x) => x.id === a.id)!;
+          Object.assign(s, { hostNode: ME, cwd: a.cwd as string, epoch: s.epoch + 1 });
+          return null;
+        }
+        case "code_checkpoints": {
+          const s = db.code.find((x) => x.hostNode === "n-old");
+          return s ? { [s.id]: now() - 3_600_000 } : {};
+        }
+        case "mesh_status": return mesh;
+        case "mesh_create": meshMember(); mesh.name = (a.name as string) || mesh.name; mesh.members[0].name = mesh.name; mesh.members = mesh.members.slice(0, 1); meshStatusChanged(); return null;
+        case "mesh_join": {
+          mesh.joining = { url: a.url as string, code: null, status: "connecting", error: null };
+          setTimeout(() => { mesh.joining = { ...mesh.joining!, status: "waiting", code: "305 118" }; meshStatusChanged(); }, 900);
+          return null;
+        }
+        case "mesh_cancel_join": mesh.joining = null; return null;
+        case "mesh_approve": case "mesh_reject": {
+          const p = mesh.pending.find((x) => x.nodeId === a.nodeId);
+          mesh.pending = mesh.pending.filter((x) => x.nodeId !== a.nodeId);
+          if (p && cmd === "mesh_approve") {
+            mesh.members.push({ nodeId: p.nodeId, name: p.name, state: "direct", via: null, viaName: null, rttMs: 31, url: null, admittedAt: now(), approver: ME });
+          }
+          return null;
+        }
+        case "mesh_remove": {
+          const m = mesh.members.find((x) => x.nodeId === a.nodeId);
+          if (m) m.state = "removed";
+          return null;
+        }
+        case "mesh_leave": Object.assign(mesh, { member: false, meshId: null, running: false, members: [], pending: [] }); return null;
+        case "mesh_set_config": {
+          if (a.name != null) mesh.name = a.name as string;
+          if (a.listen != null) mesh.listen = (a.listen as string) || "0.0.0.0:41890";
+          if (a.advertise != null) mesh.advertise = a.advertise as string[];
+          return null;
+        }
+        case "mesh_add_address": return null;
+        case "mesh_chat_streams": return [];
       }
       console.warn("fake backend: unhandled", cmd, a);
       return null;

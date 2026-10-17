@@ -201,7 +201,126 @@ export interface CodeSession {
   updatedAt: number;
   /** What the session has done, for its sidebar icon; null until its transcript was checked. */
   activity: Activity | null;
+  /** Coding agent that runs the session. */
+  agent: AgentId;
+  /** The agent's own model id, for agents that keep their own model list. */
+  agentModel: string | null;
+  /** Mesh node running this session's agent. */
+  hostNode: string | null;
+  /** Bumped on every move between nodes. */
+  epoch: number;
 }
+
+// ---- mesh ----
+
+export type MeshMemberState = "self" | "direct" | "relay" | "offline" | "removed";
+
+export interface MeshMember {
+  nodeId: string;
+  name: string;
+  state: MeshMemberState;
+  /** For "relay": the member traffic goes through. */
+  via: string | null;
+  viaName: string | null;
+  rttMs: number | null;
+  url: string | null;
+  admittedAt: number;
+  approver: string;
+}
+
+export interface MeshStatus {
+  nodeId: string;
+  name: string;
+  member: boolean;
+  meshId: string | null;
+  running: boolean;
+  listen: string;
+  port: number | null;
+  advertise: string[];
+  joining: {
+    url: string;
+    code: string | null;
+    status: "connecting" | "waiting" | "failed" | "rejected";
+    error: string | null;
+  } | null;
+  members: MeshMember[];
+  pending: { nodeId: string; name: string; code: string }[];
+}
+
+/** A chat reply streaming on another node. */
+export interface RemoteStream {
+  conversationId: string;
+  streamer: string;
+  streamerName: string;
+  userMessageId: string | null;
+  assistantMessageId: string | null;
+  text: string;
+  reasoning: string;
+  status: string | null;
+}
+
+export interface MeshChatEvent {
+  conversationId: string;
+  streamer: string;
+  streamerName: string;
+  event:
+    | ChatEvent
+    | { type: "snapshot"; userMessageId: string | null; assistantMessageId: string | null; text: string; reasoning: string };
+}
+
+export interface CodeAttach {
+  running: boolean;
+  busy: boolean;
+  events: CodeEvent[];
+  /** The host isn't connected. */
+  offline?: boolean;
+}
+
+export type AgentId = "grok" | "claude-code" | "opencode" | "cursor" | "kilo";
+
+/** One coding agent backend, as the Agents settings page lists it. */
+export interface AgentInfo {
+  id: AgentId;
+  label: string;
+  available: boolean;
+  program: string | null;
+  source: "override" | "bundled" | "path" | "npx" | null;
+  version: string | null;
+  error: string | null;
+  installHint: string;
+  usesPatchbayModels: boolean;
+  supportsInstructions: boolean;
+}
+
+/** Labels for agent ids, for places that don't load the full list. */
+export const AGENT_LABELS: Record<AgentId, string> = {
+  grok: "Grok Build",
+  "claude-code": "Claude Code",
+  opencode: "OpenCode",
+  cursor: "Cursor CLI",
+  kilo: "Kilo Code",
+};
+
+/** Non-standard ACP extensions the session's agent understands. */
+export interface AgentExtensions {
+  statusLine: boolean;
+  rewind: boolean;
+}
+
+/** An ACP session config option (only `select` ones are shown). */
+export interface AcpConfigOption {
+  id: string;
+  name: string;
+  description?: string | null;
+  category?: string | null;
+  type: string;
+  currentValue: string;
+  options: AcpConfigChoice[];
+}
+
+export type AcpConfigChoice =
+  | { value: string; name: string; description?: string | null }
+  | { group: string; name: string; options: { value: string; name: string; description?: string | null }[] };
 
 export type ChatEvent =
   | { type: "started"; userMessageId: string; assistantMessageId: string }
@@ -222,7 +341,10 @@ export type CodeEvent =
       loaded: boolean;
       capabilities: AgentCapabilities | null;
       agentInfo: { name?: string; title?: string; version?: string } | null;
+      configOptions: AcpConfigOption[] | null;
+      extensions: AgentExtensions;
     }
+  | { type: "config"; models: AcpModels | null; modes: AcpModes | null; configOptions: AcpConfigOption[] | null }
   | { type: "autoApproved"; toolCallId: string; description: string }
   | { type: "notice"; message: string }
   | { type: "update"; update: AcpUpdate }
@@ -230,7 +352,9 @@ export type CodeEvent =
   | { type: "permissionResolved"; requestId: string }
   | { type: "promptDone"; stopReason: string }
   | { type: "error"; message: string }
-  | { type: "usage"; usage: UsageView };
+  | { type: "usage"; usage: UsageView }
+  /** A prompt sent to the agent from `origin` (a mesh node). */
+  | { type: "userPrompt"; text: string; origin: string; attachments: Attachment[] };
 
 export interface CodeEnvelope {
   codeSessionId: string;
@@ -328,6 +452,9 @@ export interface Preferences {
   defaultSystemPrompt: string;
   expandReasoning: boolean;
   generateTitles: boolean;
+  defaultAgent: AgentId;
+  /** Executable overrides: agent id -> path. */
+  agentPaths: Partial<Record<AgentId, string>>;
   permissionMode: "default" | "auto" | "always-approve";
   agentInstructions: string;
   webFetch: boolean;
@@ -349,6 +476,8 @@ export const defaultPreferences: Preferences = {
   defaultSystemPrompt: "",
   expandReasoning: false,
   generateTitles: true,
+  defaultAgent: "grok",
+  agentPaths: {},
   permissionMode: "default",
   agentInstructions: "",
   webFetch: false,
@@ -448,8 +577,9 @@ export const api = {
   attachmentThumbnail: (id: string) => invoke<string>("attachment_thumbnail", { id }),
 
   listCodeSessions: () => invoke<CodeSession[]>("list_code_sessions"),
-  createCodeSession: (cwd: string, modelRef: string | null) =>
-    invoke<CodeSession>("create_code_session", { cwd, modelRef }),
+  createCodeSession: (cwd: string, modelRef: string | null, agent?: AgentId) =>
+    invoke<CodeSession>("create_code_session", { cwd, modelRef, agent: agent ?? null }),
+  listAgents: () => invoke<AgentInfo[]>("list_agents"),
   updateCodeSession: (
     id: string,
     patch: { title?: string; modelRef?: string; pinned?: boolean; activity?: Activity },
@@ -464,7 +594,8 @@ export const api = {
     invoke<void>("code_prompt", { id, text, attachmentIds, mentions }),
   getCodeTranscript: (id: string) => invoke<string | null>("get_code_transcript", { id }),
   saveCodeTranscript: (id: string, json: string) => invoke<void>("save_code_transcript", { id, json }),
-  listProjectFiles: (cwd: string) => invoke<string[]>("list_project_files", { cwd }),
+  /** With `sessionId`, lists files on the node hosting that session. */
+  listProjectFiles: (cwd: string, sessionId?: string) => invoke<string[]>("list_project_files", { cwd, sessionId }),
 
   listMcpServers: () => invoke<McpServer[]>("list_mcp_servers"),
   saveMcpServer: (input: { id?: string; name: string; enabled: boolean; config: McpConfig }) =>
@@ -485,16 +616,37 @@ export const api = {
   codeCancel: (id: string) => invoke<void>("code_cancel", { id }),
   codeSetModel: (id: string, modelId: string) => invoke<void>("code_set_model", { id, modelId }),
   codeSetMode: (id: string, modeId: string) => invoke<void>("code_set_mode", { id, modeId }),
+  codeSetConfigOption: (id: string, configId: string, value: string) =>
+    invoke<void>("code_set_config_option", { id, configId, value }),
   codeRewind: (id: string, ordinal: number, preview: string, revertFiles: boolean) =>
     invoke<void>("code_rewind", { id, ordinal, preview, revertFiles }),
   codeUsage: (id: string) => invoke<UsageView>("code_usage", { id }),
-  codePermissionRespond: (requestId: string, optionId: string | null) =>
-    invoke<void>("code_permission_respond", { requestId, optionId }),
+  codePermissionRespond: (requestId: string, optionId: string | null, sessionId?: string) =>
+    invoke<void>("code_permission_respond", { requestId, optionId, id: sessionId }),
+  codeAttach: (id: string) => invoke<CodeAttach>("code_attach", { id }),
+  /** Move a session to `target` into folder `cwd` there; resolves to a note for the user, if any. */
+  codeMove: (id: string, target: string, cwd: string) => invoke<string | null>("code_move", { id, target, cwd }),
+  codeTakeOver: (id: string, cwd: string) => invoke<string | null>("code_take_over", { id, cwd }),
+  /** Session id -> when the checkpoint this node holds was taken. */
+  codeCheckpoints: () => invoke<Record<string, number>>("code_checkpoints"),
 
-  termOpen: (id: string, cwd: string, cols: number, rows: number, onEvent: (e: TermEvent) => void) => {
+  meshStatus: () => invoke<MeshStatus>("mesh_status"),
+  meshCreate: (passphrase: string, name: string) => invoke<void>("mesh_create", { passphrase, name }),
+  meshJoin: (url: string, passphrase: string, name: string) => invoke<void>("mesh_join", { url, passphrase, name }),
+  meshCancelJoin: () => invoke<void>("mesh_cancel_join"),
+  meshApprove: (nodeId: string) => invoke<void>("mesh_approve", { nodeId }),
+  meshReject: (nodeId: string) => invoke<void>("mesh_reject", { nodeId }),
+  meshRemove: (nodeId: string) => invoke<void>("mesh_remove", { nodeId }),
+  meshLeave: () => invoke<void>("mesh_leave"),
+  meshSetConfig: (cfg: { name?: string; listen?: string; advertise?: string[] }) => invoke<void>("mesh_set_config", cfg),
+  meshAddAddress: (url: string) => invoke<void>("mesh_add_address", { url }),
+  meshChatStreams: () => invoke<RemoteStream[]>("mesh_chat_streams"),
+
+  /** With `sessionId`, the shell runs on the computer hosting that session. */
+  termOpen: (id: string, cwd: string, cols: number, rows: number, onEvent: (e: TermEvent) => void, sessionId?: string) => {
     const ch = new Channel<TermEvent>();
     ch.onmessage = onEvent;
-    return invoke<void>("term_open", { id, cwd, cols, rows, onEvent: ch });
+    return invoke<void>("term_open", { id, cwd, cols, rows, onEvent: ch, sessionId });
   },
   termWrite: (id: string, data: string) => invoke<void>("term_write", { id, data }),
   termResize: (id: string, cols: number, rows: number) => invoke<void>("term_resize", { id, cols, rows }),

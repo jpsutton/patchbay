@@ -9,7 +9,7 @@ Patchbay is a desktop app in the style of Claude Desktop. Bring your own provide
   <img alt="Patchbay's Code tab: an agent finds a bug in a Windows installer script, shows its fix as a diff, and confirms the installer still builds" src="docs/images/code-tab-light.png">
 </picture>
 
-> **Early days.** Patchbay is young and still has rough edges. There are no packaged releases yet; see [Building from source](#building-from-source) to try it today.
+> **Early days.** Patchbay is young and still has rough edges. [Download the latest release](https://github.com/jpsutton/patchbay/releases/latest), and please report what breaks.
 
 ## What it does
 
@@ -37,6 +37,14 @@ Patchbay is a desktop app in the style of Claude Desktop. Bring your own provide
 - A tray icon, notifications when a reply finishes in the background, and an optional global shortcut for quick questions.
 - **Settings → Usage** shows what you've spent and how many tokens you've used, per day and per model.
 
+### Across your computers
+
+- Link your computers into a **mesh** (Settings → Mesh). Chats, Code sessions, prompts, providers and MCP servers sync between them live, API keys included, encrypted.
+- Drive a Code session running on another computer from this one, or move it over, uncommitted changes and all. If that computer goes offline, take the session over from its last checkpoint.
+- Computers connect directly over a network you already have, such as Tailscale, ZeroTier, a VPN or a Cloudflare Tunnel. No cloud service sits in the middle, and every new computer needs the mesh's passphrase plus your approval.
+
+See [docs/mesh.md](docs/mesh.md) for setup and details.
+
 ## Getting started
 
 1. Open **Settings** and add a provider. Presets cover OpenAI, Anthropic, OpenRouter, Ollama and LM Studio.
@@ -47,7 +55,7 @@ API keys are kept in your system's keychain, never in a plain file.
 
 ## Installing
 
-Packaged releases will be published on the [Releases page](https://github.com/jpsutton/patchbay/releases) for:
+Download Patchbay from the [Releases page](https://github.com/jpsutton/patchbay/releases/latest). Packages are available for:
 
 | Platform | Packages |
 | --- | --- |
@@ -110,7 +118,16 @@ To work on Patchbay itself, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## How it works
 
-Patchbay's coding agent is [Grok Build](https://github.com/xai-org/grok-build), the open-source agent from xAI, with a few small fixes so it works with any provider. Patchbay talks to it over the [Agent Client Protocol](https://agentclientprotocol.com), an open standard, so other agents could slot in later. Patchbay turns off the agent's telemetry and auto-updates.
+Patchbay's built-in coding agent is [Grok Build](https://github.com/xai-org/grok-build), the open-source agent from xAI, with a few small fixes so it works with any provider. Patchbay turns off its telemetry and auto-updates.
+
+Patchbay talks to coding agents over the [Agent Client Protocol](https://agentclientprotocol.com), an open standard. So a Code session can also run an agent you already have installed and signed in to:
+
+- [Claude Code](https://claude.com/claude-code), through the [Claude Agent ACP adapter](https://github.com/agentclientprotocol/claude-agent-acp). Patchbay runs the adapter with `npx` when it isn't installed.
+- [OpenCode](https://opencode.ai)
+- [Cursor CLI](https://cursor.com/cli)
+- [Kilo Code](https://kilo.ai) CLI
+
+These agents use their own sign-in and model list. Pick the default agent in Settings → Coding agents.
 
 ## Known limitations
 

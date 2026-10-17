@@ -203,7 +203,7 @@ fn smoke_code_agent_edit_with_permission() {
     })
     .unwrap();
     let session = db
-        .create_code_session(proj.to_str().unwrap(), Some("m"))
+        .create_code_session(proj.to_str().unwrap(), Some("m"), "grok")
         .unwrap();
     crate::prefs::save(
         &db,
@@ -392,7 +392,7 @@ fn smoke_code_rewind() {
     })
     .unwrap();
     let session = db
-        .create_code_session(proj.to_str().unwrap(), Some("m"))
+        .create_code_session(proj.to_str().unwrap(), Some("m"), "grok")
         .unwrap();
 
     let manager = Arc::new(CodeManager::default());
@@ -500,7 +500,7 @@ fn smoke_code_rules_and_mcp() {
         params: Default::default(),
     })
     .unwrap();
-    let session = db.create_code_session(proj.to_str().unwrap(), Some("m")).unwrap();
+    let session = db.create_code_session(proj.to_str().unwrap(), Some("m"), "grok").unwrap();
     db.add_permission_rule(proj.to_str().unwrap(), "edit", "").unwrap();
     let mock_mcp = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/mock-mcp.py");
     let mcp_log = root.join("mcp.log");
@@ -636,7 +636,7 @@ fn smoke_claude_config_toggle() {
         prefs.claude_config.skills = skills;
         prefs.claude_config.plugins = plugins;
         crate::prefs::save(&db, &prefs).unwrap();
-        let session = db.create_code_session(proj.to_str().unwrap(), Some("m")).unwrap();
+        let session = db.create_code_session(proj.to_str().unwrap(), Some("m"), "grok").unwrap();
         let manager = Arc::new(CodeManager::default());
         let events: Arc<Mutex<Vec<Envelope>>> = Arc::default();
         let sink: Sink = {

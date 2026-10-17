@@ -61,7 +61,7 @@ impl McpSupport {
     }
 }
 
-fn secret_account(server_id: &str, section: &str, name: &str) -> String {
+pub(crate) fn secret_account(server_id: &str, section: &str, name: &str) -> String {
     format!("mcp:{server_id}:{section}:{name}")
 }
 

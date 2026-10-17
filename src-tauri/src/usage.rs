@@ -57,6 +57,10 @@ pub struct CodeUsageState {
     pub context_tokens: Option<u64>,
     pub context_window: Option<u64>,
     pub auto_compact_percent: Option<u64>,
+    /// This process reports totals through Grok's status line, so per-turn usage would double
+    /// count.
+    #[serde(skip)]
+    pub status_line: bool,
 }
 
 /// What the UI renders below the composer.
@@ -83,10 +87,59 @@ impl CodeUsageState {
     pub fn roll_over(&mut self) {
         self.baseline = self.baseline.add(&self.current);
         self.current = Tokens::default();
+        self.status_line = false;
+    }
+
+    /// Fold in ACP's `usage_update`: context fill and the process's cumulative cost. Ignored
+    /// once Grok's status line reports the same numbers.
+    pub fn apply_context(&mut self, update: &Value) {
+        if self.status_line {
+            return;
+        }
+        if let Some(t) = update["used"].as_u64() {
+            self.context_tokens = Some(t);
+        }
+        if let Some(w) = update["size"].as_u64().filter(|w| *w > 0) {
+            self.context_window = Some(w);
+        }
+        if let Some(c) = update["cost"]["amount"].as_f64()
+            && update["cost"]["currency"].as_str().is_none_or(|c| c.eq_ignore_ascii_case("USD"))
+        {
+            self.current.cost_usd = Some(c);
+        }
+    }
+
+    /// Add one turn's ACP `PromptResponse.usage`.
+    pub fn apply_turn(&mut self, usage: &Value) {
+        if self.status_line {
+            return;
+        }
+        let n = |k: &str| usage[k].as_u64().unwrap_or(0);
+        let (input, output, thought) = (n("inputTokens"), n("outputTokens"), n("thoughtTokens"));
+        let (cached_read, cache_write) = (n("cachedReadTokens"), n("cachedWriteTokens"));
+        // `input` here includes the cache buckets. Agents differ on whether ACP's
+        // `inputTokens` already does; when the total only adds up with the buckets on top,
+        // it doesn't.
+        let cache = cached_read + cache_write;
+        let input = if cache > 0 && n("totalTokens") >= input + output + cache {
+            input + cache
+        } else {
+            input
+        };
+        self.current = self.current.add(&Tokens {
+            input,
+            cached_read,
+            cache_write,
+            output,
+            reasoning: thought,
+            cost_usd: None,
+            api_ms: 0,
+        });
     }
 
     /// Fold in Grok Build's `session_status` update (its status-line payload).
     pub fn apply_status(&mut self, status: &Value) {
+        self.status_line = true;
         let cw = &status["context_window"];
         let u = &cw["session_usage"];
         let n = |v: &Value| v.as_u64().unwrap_or(0);
@@ -132,6 +185,29 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[test]
+    fn acp_usage_folds_into_totals() {
+        let mut s = CodeUsageState::default();
+        let turn = serde_json::json!({
+            "totalTokens": 1150, "inputTokens": 100, "outputTokens": 50,
+            "cachedReadTokens": 900, "cachedWriteTokens": 100
+        });
+        s.apply_turn(&turn);
+        s.apply_turn(&serde_json::json!({ "totalTokens": 30, "inputTokens": 20, "outputTokens": 10 }));
+        s.apply_context(&serde_json::json!({ "used": 1200, "size": 200000, "cost": { "amount": 0.25, "currency": "USD" } }));
+        let v = s.view();
+        assert_eq!(v.totals.input, 1120);
+        assert_eq!(v.totals.cached_read, 900);
+        assert_eq!(v.totals.output, 60);
+        assert_eq!(v.totals.cost_usd, Some(0.25));
+        assert_eq!(v.context_tokens, Some(1200));
+        assert_eq!(v.context_window, Some(200000));
+        // Once the status line reports totals, per-turn usage is ignored.
+        s.apply_status(&status(10, 0, 5, 15));
+        s.apply_turn(&turn);
+        assert_eq!(s.view().totals.input, 10);
     }
 
     #[test]

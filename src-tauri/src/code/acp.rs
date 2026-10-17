@@ -1,4 +1,6 @@
-//! ACP client side: drives one Grok Build `agent stdio` child per Code session.
+//! ACP client side: drives one coding agent child (Grok Build, Claude Code, OpenCode, …) per
+//! Code session. `agents.rs` decides how to launch each one; everything here is plain ACP plus
+//! the optional extensions listed in [`Extensions`].
 //!
 //! The ACP crate is `?Send`, so each agent lives on its own OS thread with a current-thread
 //! runtime + `LocalSet`. Tauri talks to it through an mpsc command channel; agent output goes to
@@ -18,6 +20,8 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
+use super::agents::{Extensions, Launch};
+
 pub const EVENT: &str = "code://event";
 
 #[derive(Debug, Clone, Serialize)]
@@ -36,6 +40,16 @@ pub enum CodeEvent {
         /// `agentCapabilities` from `initialize`, so the UI can gate features per agent.
         capabilities: Value,
         agent_info: Value,
+        /// Session config options other than model and mode (e.g. reasoning effort).
+        config_options: Value,
+        extensions: Extensions,
+    },
+    /// The agent's session config changed (`config_option_update`, or after setting one).
+    #[serde(rename_all = "camelCase")]
+    Config {
+        models: Value,
+        modes: Value,
+        config_options: Value,
     },
     Update {
         update: Value,
@@ -70,9 +84,24 @@ pub enum CodeEvent {
     SessionStatus {
         status: Value,
     },
+    /// ACP `usage_update`: context fill and cumulative cost; folded into `Usage` by the manager.
+    ContextUsage {
+        update: Value,
+    },
+    /// ACP `PromptResponse.usage` for one turn; folded into `Usage` by the manager.
+    TurnUsage {
+        usage: Value,
+    },
     /// Cumulative token usage and context fill for the session.
     Usage {
         usage: crate::usage::UsageView,
+    },
+    /// A prompt was sent to the agent (from `origin`, a mesh node), so every viewer shows it.
+    #[serde(rename_all = "camelCase")]
+    UserPrompt {
+        text: String,
+        origin: String,
+        attachments: Value,
     },
 }
 
@@ -102,6 +131,7 @@ pub enum AgentCmd {
     Cancel,
     SetModel { model_id: String, reply: oneshot::Sender<Result<()>> },
     SetMode { mode_id: String, reply: oneshot::Sender<Result<()>> },
+    SetConfigOption { config_id: String, value: String, reply: oneshot::Sender<Result<()>> },
     /// Drop the `ordinal`-th user prompt (0-based, as shown in the transcript) and everything
     /// after it. `revert_files` also restores files the agent changed since then.
     Rewind {
@@ -124,15 +154,10 @@ pub type McpProvider = Box<dyn FnOnce(&Value) -> (Vec<Value>, Vec<String>) + Sen
 pub struct SpawnSpec {
     pub sink: Sink,
     pub code_session_id: String,
-    pub binary: PathBuf,
+    pub launch: Launch,
     pub cwd: PathBuf,
-    pub grok_home: PathBuf,
-    pub env: Vec<(String, String)>,
-    pub model_key: Option<String>,
     /// Existing ACP session to `session/load`; `None` creates a new one.
     pub resume: Option<String>,
-    /// Extra instructions appended to the agent's system prompt (`_meta.rules`).
-    pub rules: Option<String>,
     pub pending: PendingPermissions,
     /// Called with the ACP session id once known.
     pub on_session: Box<dyn Fn(String) + Send>,
@@ -147,6 +172,122 @@ struct UiClient {
     auto_approve: AutoApprove,
     /// Latest known fields per tool call; permission requests may carry only a partial update.
     tool_calls: RefCell<HashMap<String, Value>>,
+    /// Which config options stand for model and mode, shared with the command loop.
+    config_ids: Rc<RefCell<ConfigIds>>,
+}
+
+/// Config option ids that carry the model and mode, when the agent uses `configOptions`
+/// (`session/set_config_option`) instead of the older `session/set_model` / `set_mode`.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct ConfigIds {
+    model: Option<String>,
+    mode: Option<String>,
+}
+
+impl ConfigIds {
+    /// Take ids from a fresh option list, keeping known ones it leaves out.
+    fn update(&mut self, next: ConfigIds) {
+        if next.model.is_some() {
+            self.model = next.model;
+        }
+        if next.mode.is_some() {
+            self.mode = next.mode;
+        }
+    }
+}
+
+/// A session's models, modes and other config options in the shapes the UI reads. Agents that
+/// only send `configOptions` (OpenCode, Kilo) get `models`/`modes` derived from them, so the UI
+/// has one model picker and one mode switch whatever the agent.
+#[derive(Debug, Clone, PartialEq)]
+struct SessionConfig {
+    models: Value,
+    modes: Value,
+    /// Options other than model and mode.
+    extra: Value,
+    ids: ConfigIds,
+}
+
+impl SessionConfig {
+    /// From a `session/new` or `session/load` response.
+    fn from_response(resp: &Value) -> Self {
+        let mut cfg = Self::from_options(&resp["configOptions"]);
+        if cfg.ids.model.is_none() {
+            cfg.models = resp["models"].clone();
+        }
+        if cfg.ids.mode.is_none() {
+            cfg.modes = resp["modes"].clone();
+        }
+        cfg
+    }
+
+    fn from_options(options: &Value) -> Self {
+        let mut cfg = SessionConfig {
+            models: Value::Null,
+            modes: Value::Null,
+            extra: json!([]),
+            ids: ConfigIds::default(),
+        };
+        let Some(options) = options.as_array() else {
+            return cfg;
+        };
+        let mut extra = Vec::new();
+        for opt in options {
+            let category = opt["category"].as_str().or(opt["id"].as_str());
+            let id = opt["id"].as_str().map(str::to_owned);
+            let is_select = opt["type"] == "select";
+            match category {
+                Some("model") if is_select && cfg.ids.model.is_none() => {
+                    let available: Vec<Value> = select_values(&opt["options"])
+                        .into_iter()
+                        .map(|(value, name, description)| {
+                            json!({ "modelId": value, "name": name, "description": description })
+                        })
+                        .collect();
+                    cfg.models = json!({ "currentModelId": opt["currentValue"], "availableModels": available });
+                    cfg.ids.model = id;
+                }
+                Some("mode") if is_select && cfg.ids.mode.is_none() => {
+                    let available: Vec<Value> = select_values(&opt["options"])
+                        .into_iter()
+                        .map(|(value, name, description)| {
+                            json!({ "id": value, "name": name, "description": description })
+                        })
+                        .collect();
+                    cfg.modes = json!({ "currentModeId": opt["currentValue"], "availableModes": available });
+                    cfg.ids.mode = id;
+                }
+                _ => extra.push(opt.clone()),
+            }
+        }
+        cfg.extra = Value::Array(extra);
+        cfg
+    }
+
+    fn ids(&self) -> ConfigIds {
+        self.ids.clone()
+    }
+
+    fn event(&self) -> CodeEvent {
+        CodeEvent::Config {
+            models: self.models.clone(),
+            modes: self.modes.clone(),
+            config_options: self.extra.clone(),
+        }
+    }
+}
+
+/// (value, name, description) of a select option's choices, flattening option groups.
+fn select_values(options: &Value) -> Vec<(Value, Value, Value)> {
+    let mut out = Vec::new();
+    for o in options.as_array().into_iter().flatten() {
+        if let Some(group) = o["options"].as_array() {
+            out.extend(select_values(&Value::Array(group.clone())));
+        } else if !o["value"].is_null() {
+            out.push((o["value"].clone(), o["name"].clone(), o["description"].clone()));
+        }
+    }
+    out
 }
 
 impl UiClient {
@@ -228,7 +369,19 @@ impl acp::Client for UiClient {
             let entry = map.entry(id.to_owned()).or_insert_with(|| json!({}));
             merge_fields(entry, &update);
         }
-        emit(&self.sink, &self.code_session_id, CodeEvent::Update { update });
+        match update["sessionUpdate"].as_str() {
+            Some("config_option_update") => {
+                if update["configOptions"].is_array() {
+                    let cfg = SessionConfig::from_options(&update["configOptions"]);
+                    self.config_ids.borrow_mut().update(cfg.ids());
+                    emit(&self.sink, &self.code_session_id, cfg.event());
+                }
+            }
+            Some("usage_update") => {
+                emit(&self.sink, &self.code_session_id, CodeEvent::ContextUsage { update });
+            }
+            _ => emit(&self.sink, &self.code_session_id, CodeEvent::Update { update }),
+        }
         Ok(())
     }
 
@@ -288,48 +441,42 @@ async fn run(spec: SpawnSpec, mut rx: mpsc::UnboundedReceiver<AgentCmd>) -> Resu
     let SpawnSpec {
         sink,
         code_session_id: csid,
-        binary,
+        launch,
         cwd,
-        grok_home,
-        env,
-        model_key,
         resume,
-        rules,
         pending,
         on_session,
         auto_approve,
         mcp,
     } = spec;
-    let session_meta = match rules.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
-        Some(r) => json!({ "rules": r }),
-        None => json!({}),
-    };
+    let Launch {
+        program,
+        args,
+        env,
+        env_remove,
+        ext: extensions,
+        session_meta,
+        initial_model,
+        login_hint,
+    } = launch;
     emit(&sink, &csid, CodeEvent::Status { state: "starting".into(), message: None });
 
-    let mut cmd = tokio::process::Command::new(&binary);
-    cmd.arg("agent").arg("--no-leader");
-    if let Some(m) = &model_key {
-        cmd.arg("-m").arg(m);
-    }
-    cmd.arg("stdio")
+    let mut cmd = tokio::process::Command::new(&program);
+    cmd.args(&args)
         .current_dir(&cwd)
-        .env("GROK_HOME", &grok_home)
-        .env("GROK_TELEMETRY_ENABLED", "false")
-        .env("GROK_TELEMETRY_MIXPANEL_ENABLED", "false")
-        .env("GROK_TELEMETRY_TRACE_UPLOAD", "false")
-        .env("GROK_DISABLE_AUTOUPDATER", "1")
-        .env_remove("XAI_API_KEY")
-        .env_remove("GROK_CODE_XAI_API_KEY")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    for k in &env_remove {
+        cmd.env_remove(k);
+    }
     for (k, v) in &env {
         cmd.env(k, v);
     }
     let mut child = cmd
         .spawn()
-        .with_context(|| format!("start agent {}", binary.display()))?;
+        .with_context(|| format!("start agent {}", program.display()))?;
     let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
     let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
     let stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
@@ -341,7 +488,7 @@ async fn run(spec: SpawnSpec, mut rx: mpsc::UnboundedReceiver<AgentCmd>) -> Resu
         tokio::task::spawn_local(async move {
             let mut lines = tokio::io::BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(target: "grok_sidecar", "{line}");
+                tracing::debug!(target: "agent_stderr", "{line}");
                 let mut t = tail.borrow_mut();
                 t.push(line);
                 if t.len() > 40 {
@@ -351,12 +498,14 @@ async fn run(spec: SpawnSpec, mut rx: mpsc::UnboundedReceiver<AgentCmd>) -> Resu
         });
     }
 
+    let config_ids: Rc<RefCell<ConfigIds>> = Rc::default();
     let client = UiClient {
         sink: sink.clone(),
         code_session_id: csid.clone(),
         pending: pending.clone(),
         auto_approve,
         tool_calls: RefCell::default(),
+        config_ids: config_ids.clone(),
     };
     let (conn, io) = acp::ClientSideConnection::new(
         client,
@@ -369,20 +518,23 @@ async fn run(spec: SpawnSpec, mut rx: mpsc::UnboundedReceiver<AgentCmd>) -> Resu
     let conn = Rc::new(conn);
     let io_task = tokio::task::spawn_local(io);
 
+    let mut client_caps = json!({
+        "fs": { "readTextFile": false, "writeTextFile": false },
+        "terminal": false,
+    });
+    if extensions.status_line {
+        // Ask Grok Build for `session_status` updates (context fill, session token totals).
+        client_caps["_meta"] = json!({ "x.ai/statusLine": true });
+    }
     let init: acp::InitializeRequest = from_json(json!({
         "protocolVersion": 1,
-        "clientCapabilities": {
-            "fs": { "readTextFile": false, "writeTextFile": false },
-            "terminal": false,
-            // Ask for `session_status` updates (context fill, session token totals).
-            "_meta": { "x.ai/statusLine": true }
-        },
+        "clientCapabilities": client_caps,
         "clientInfo": { "name": "patchbay", "version": env!("CARGO_PKG_VERSION") }
     }))?;
-    let init_resp = conn
-        .initialize(init)
-        .await
-        .map_err(|e| anyhow!("initialize failed: {e}"))?;
+    let init_resp = tokio::select! {
+        r = conn.initialize(init) => r.map_err(|e| anyhow!("initialize failed: {e}"))?,
+        status = child.wait() => return Err(exited(status, &stderr_tail)),
+    };
     let init_v = serde_json::to_value(&init_resp).unwrap_or_default();
     // Grok advertises its builtin slash commands here; other agents only send updates.
     let init_commands = init_v["_meta"]["availableCommands"].clone();
@@ -403,41 +555,64 @@ async fn run(spec: SpawnSpec, mut rx: mpsc::UnboundedReceiver<AgentCmd>) -> Resu
     }
 
     let cwd_str = cwd.to_string_lossy().into_owned();
-    let (session_id, models, modes, loaded) = match resume.filter(|_| can_load) {
+    let auth_hint = |e: &acp::Error| auth_message(e, &init_v, login_hint);
+    let (session_id, resp, loaded) = match resume.filter(|_| can_load) {
         Some(sid) => {
             let req: acp::LoadSessionRequest = from_json(
                 json!({ "sessionId": sid, "cwd": cwd_str, "mcpServers": mcp_servers, "_meta": session_meta }),
             )?;
             match conn.load_session(req).await {
-                Ok(resp) => {
-                    let v = serde_json::to_value(&resp).unwrap_or_default();
-                    (sid, v["models"].clone(), v["modes"].clone(), true)
-                }
+                Ok(resp) => (sid, serde_json::to_value(&resp).unwrap_or_default(), true),
                 Err(e) => {
+                    if let Some(msg) = auth_hint(&e) {
+                        return Err(anyhow!(msg));
+                    }
+                    // Not an error: some agents (Cursor, Claude Code) can't load a session that
+                    // never got a prompt, and the transcript cache still shows earlier turns.
                     emit(
                         &sink,
                         &csid,
-                        CodeEvent::Error {
-                            message: format!("could not resume previous session ({e}); started a new one"),
+                        CodeEvent::Notice {
+                            message: format!("Couldn't resume the agent's previous session, so it started a new one ({e})."),
                         },
                     );
-                    new_session(&conn, &cwd_str, &mcp_servers, &session_meta).await?
+                    new_session(&conn, &cwd_str, &mcp_servers, &session_meta, &init_v, login_hint).await?
                 }
             }
         }
-        None => new_session(&conn, &cwd_str, &mcp_servers, &session_meta).await?,
+        None => new_session(&conn, &cwd_str, &mcp_servers, &session_meta, &init_v, login_hint).await?,
     };
     on_session(session_id.clone());
+    let mut cfg = SessionConfig::from_response(&resp);
+    *config_ids.borrow_mut() = cfg.ids();
+
+    // Agents that keep their own model list: reselect the model this session last used.
+    if let Some(want) = initial_model.filter(|m| {
+        cfg.models["currentModelId"].as_str() != Some(m.as_str())
+            && cfg.models["availableModels"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|x| x["modelId"].as_str() == Some(m.as_str())))
+    }) {
+        match set_model(&conn, &session_id, &cfg.ids(), &want).await {
+            Ok(Some(updated)) => cfg = merge_config(cfg, updated),
+            Ok(None) => cfg.models["currentModelId"] = json!(want),
+            Err(e) => tracing::warn!("could not restore model {want}: {e:#}"),
+        }
+        *config_ids.borrow_mut() = cfg.ids();
+    }
+
     emit(
         &sink,
         &csid,
         CodeEvent::SessionReady {
             acp_session_id: session_id.clone(),
-            models,
-            modes,
+            models: cfg.models.clone(),
+            modes: cfg.modes.clone(),
             loaded,
             capabilities,
             agent_info: init_v["agentInfo"].clone(),
+            config_options: cfg.extra.clone(),
+            extensions,
         },
     );
     if init_commands.is_array() {
@@ -464,13 +639,20 @@ async fn run(spec: SpawnSpec, mut rx: mpsc::UnboundedReceiver<AgentCmd>) -> Resu
             }
         }
     };
+    // After `set_config_option`, the agent returns every option; show the new state.
+    let apply_config = |options: Value| {
+        if !options.is_array() {
+            return;
+        }
+        let cfg = SessionConfig::from_options(&options);
+        config_ids.borrow_mut().update(cfg.ids());
+        emit(&sink, &csid, cfg.event());
+    };
 
     loop {
         tokio::select! {
             status = child.wait() => {
-                let tail = stderr_tail.borrow().join("\n");
-                let code = status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
-                return Err(anyhow!("agent process exited ({code})\n{tail}"));
+                return Err(exited(status, &stderr_tail));
             }
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else { break };
@@ -489,9 +671,13 @@ async fn run(spec: SpawnSpec, mut rx: mpsc::UnboundedReceiver<AgentCmd>) -> Resu
                         let csid = csid.clone();
                         tokio::task::spawn_local(async move {
                             match conn.prompt(req).await {
-                                Ok(resp) => emit(&sink, &csid, CodeEvent::PromptDone {
-                                    stop_reason: serde_json::to_value(resp.stop_reason).unwrap_or_default(),
-                                }),
+                                Ok(resp) => {
+                                    let v = serde_json::to_value(&resp).unwrap_or_default();
+                                    if v["usage"].is_object() {
+                                        emit(&sink, &csid, CodeEvent::TurnUsage { usage: v["usage"].clone() });
+                                    }
+                                    emit(&sink, &csid, CodeEvent::PromptDone { stop_reason: v["stopReason"].clone() });
+                                }
                                 Err(e) => {
                                     emit(&sink, &csid, CodeEvent::Error { message: e.to_string() });
                                     emit(&sink, &csid, CodeEvent::PromptDone { stop_reason: json!("error") });
@@ -506,25 +692,37 @@ async fn run(spec: SpawnSpec, mut rx: mpsc::UnboundedReceiver<AgentCmd>) -> Resu
                         }
                     }
                     AgentCmd::SetModel { model_id, reply } => {
-                        let r = match from_json::<acp::SetSessionModelRequest>(
-                            json!({ "sessionId": session_id, "modelId": model_id }),
-                        ) {
-                            Ok(req) => conn.set_session_model(req).await.map(|_| ()).map_err(|e| anyhow!("{e}")),
-                            Err(e) => Err(e),
+                        let ids = config_ids.borrow().clone();
+                        let r = set_model(&conn, &session_id, &ids, &model_id).await;
+                        let _ = reply.send(r.map(|updated| updated.map(apply_config).unwrap_or(())));
+                    }
+                    AgentCmd::SetMode { mode_id, reply } => {
+                        let mode_opt = config_ids.borrow().mode.clone();
+                        let r = match mode_opt {
+                            Some(config_id) => set_config_option(&conn, &session_id, &config_id, &mode_id)
+                                .await
+                                .map(apply_config),
+                            None => match from_json::<acp::SetSessionModeRequest>(
+                                json!({ "sessionId": session_id, "modeId": mode_id }),
+                            ) {
+                                Ok(req) => conn.set_session_mode(req).await.map(|_| ()).map_err(|e| anyhow!("{e}")),
+                                Err(e) => Err(e),
+                            },
                         };
                         let _ = reply.send(r);
                     }
-                    AgentCmd::SetMode { mode_id, reply } => {
-                        let r = match from_json::<acp::SetSessionModeRequest>(
-                            json!({ "sessionId": session_id, "modeId": mode_id }),
-                        ) {
-                            Ok(req) => conn.set_session_mode(req).await.map(|_| ()).map_err(|e| anyhow!("{e}")),
-                            Err(e) => Err(e),
-                        };
+                    AgentCmd::SetConfigOption { config_id, value, reply } => {
+                        let r = set_config_option(&conn, &session_id, &config_id, &value)
+                            .await
+                            .map(apply_config);
                         let _ = reply.send(r);
                     }
                     AgentCmd::Rewind { ordinal, preview, revert_files, reply } => {
-                        let r = rewind(&conn, &session_id, ordinal, &preview, revert_files).await;
+                        let r = if extensions.rewind {
+                            rewind(&conn, &session_id, ordinal, &preview, revert_files).await
+                        } else {
+                            Err(anyhow!("this agent can't rewind a session"))
+                        };
                         let _ = reply.send(r);
                     }
                     AgentCmd::Shutdown => break,
@@ -545,6 +743,87 @@ async fn run(spec: SpawnSpec, mut rx: mpsc::UnboundedReceiver<AgentCmd>) -> Resu
         let _ = child.wait().await;
     }
     Ok(())
+}
+
+fn exited(
+    status: std::io::Result<std::process::ExitStatus>,
+    stderr_tail: &Rc<RefCell<Vec<String>>>,
+) -> anyhow::Error {
+    let tail = stderr_tail.borrow().join("\n");
+    let code = status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
+    anyhow!("agent process exited ({code})\n{tail}")
+}
+
+/// For ACP's `auth_required` error: how to sign in. Patchbay's own hint for the agent comes
+/// first, then whatever auth methods the agent advertises.
+fn auth_message(e: &acp::Error, init: &Value, login_hint: &str) -> Option<String> {
+    if i32::from(e.code) != -32000 {
+        return None;
+    }
+    let how = if login_hint.is_empty() {
+        init["authMethods"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|m| m["description"].as_str().or(m["name"].as_str()))
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        login_hint.to_owned()
+    };
+    let name = init["agentInfo"]["title"]
+        .as_str()
+        .or(init["agentInfo"]["name"].as_str())
+        .unwrap_or("The agent");
+    Some(if how.is_empty() {
+        format!("{name} needs you to sign in first ({e}).")
+    } else {
+        format!("{name} needs you to sign in first. {how}")
+    })
+}
+
+/// Select a model through the config option when the agent has one, else `session/set_model`.
+/// Returns the agent's full option list when it sent one back.
+async fn set_model(
+    conn: &acp::ClientSideConnection,
+    session_id: &str,
+    ids: &ConfigIds,
+    model_id: &str,
+) -> Result<Option<Value>> {
+    if let Some(config_id) = &ids.model {
+        return set_config_option(conn, session_id, config_id, model_id).await.map(Some);
+    }
+    let req: acp::SetSessionModelRequest =
+        from_json(json!({ "sessionId": session_id, "modelId": model_id }))?;
+    conn.set_session_model(req).await.map_err(|e| anyhow!("{e}"))?;
+    Ok(None)
+}
+
+async fn set_config_option(
+    conn: &acp::ClientSideConnection,
+    session_id: &str,
+    config_id: &str,
+    value: &str,
+) -> Result<Value> {
+    let req: acp::SetSessionConfigOptionRequest =
+        from_json(json!({ "sessionId": session_id, "configId": config_id, "value": value }))?;
+    let resp = conn
+        .set_session_config_option(req)
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
+    Ok(serde_json::to_value(&resp).unwrap_or_default()["configOptions"].clone())
+}
+
+/// Fold a fresh option list into `cfg`, keeping legacy models/modes the options don't cover.
+fn merge_config(cfg: SessionConfig, options: Value) -> SessionConfig {
+    let mut next = SessionConfig::from_options(&options);
+    if next.ids.model.is_none() {
+        next.models = cfg.models;
+    }
+    if next.ids.mode.is_none() {
+        next.modes = cfg.modes;
+    }
+    next
 }
 
 async fn ext(conn: &acp::ClientSideConnection, method: &str, params: Value) -> Result<Value> {
@@ -623,25 +902,91 @@ async fn new_session(
     cwd: &str,
     mcp_servers: &[Value],
     meta: &Value,
-) -> Result<(String, Value, Value, bool)> {
+    init: &Value,
+    login_hint: &str,
+) -> Result<(String, Value, bool)> {
     let req: acp::NewSessionRequest =
         from_json(json!({ "cwd": cwd, "mcpServers": mcp_servers, "_meta": meta }))?;
-    let resp = conn
-        .new_session(req)
-        .await
-        .map_err(|e| anyhow!("session/new failed: {e}"))?;
+    let resp = conn.new_session(req).await.map_err(|e| match auth_message(&e, init, login_hint) {
+        Some(msg) => anyhow!(msg),
+        None => anyhow!("session/new failed: {e}"),
+    })?;
     let v = serde_json::to_value(&resp).unwrap_or_default();
-    Ok((
-        resp.session_id.to_string(),
-        v["models"].clone(),
-        v["modes"].clone(),
-        false,
-    ))
+    Ok((resp.session_id.to_string(), v, false))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{RewindPoint, pick_rewind_point};
+    use super::{ConfigIds, RewindPoint, SessionConfig, merge_config, pick_rewind_point};
+    use serde_json::json;
+
+    fn opencode_like() -> serde_json::Value {
+        json!({
+            "sessionId": "s",
+            "configOptions": [
+                { "id": "model", "name": "Model", "category": "model", "type": "select",
+                  "currentValue": "a/x",
+                  "options": [
+                    { "value": "a/x", "name": "X" },
+                    { "group": "b", "name": "B", "options": [{ "value": "b/y", "name": "Y", "description": "why" }] }
+                  ] },
+                { "id": "effort", "name": "Effort", "category": "thought_level", "type": "select",
+                  "currentValue": "default", "options": [{ "value": "low", "name": "Low" }, { "value": "default", "name": "Default" }] },
+                { "id": "mode", "name": "Mode", "category": "mode", "type": "select",
+                  "currentValue": "build", "options": [{ "value": "build", "name": "Build" }, { "value": "plan", "name": "Plan" }] }
+            ]
+        })
+    }
+
+    #[test]
+    fn config_options_become_models_and_modes() {
+        let cfg = SessionConfig::from_response(&opencode_like());
+        assert_eq!(cfg.ids, ConfigIds { model: Some("model".into()), mode: Some("mode".into()) });
+        assert_eq!(cfg.models["currentModelId"], "a/x");
+        let ids: Vec<&str> = cfg.models["availableModels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["modelId"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["a/x", "b/y"], "groups are flattened");
+        assert_eq!(cfg.modes["currentModeId"], "build");
+        assert_eq!(cfg.modes["availableModes"][1]["id"], "plan");
+        let extra = cfg.extra.as_array().unwrap();
+        assert_eq!(extra.len(), 1);
+        assert_eq!(extra[0]["id"], "effort");
+    }
+
+    #[test]
+    fn legacy_models_and_modes_pass_through() {
+        let resp = json!({
+            "models": { "currentModelId": "m1", "availableModels": [{ "modelId": "m1", "name": "M1" }] },
+            "modes": { "currentModeId": "agent", "availableModes": [{ "id": "agent", "name": "Agent" }] }
+        });
+        let cfg = SessionConfig::from_response(&resp);
+        assert_eq!(cfg.ids, ConfigIds::default());
+        assert_eq!(cfg.models, resp["models"]);
+        assert_eq!(cfg.modes, resp["modes"]);
+        assert_eq!(cfg.extra, json!([]));
+    }
+
+    #[test]
+    fn mixed_agents_prefer_config_options() {
+        // Claude's adapter sends legacy modes and a model config option.
+        let resp = json!({
+            "modes": { "currentModeId": "default", "availableModes": [{ "id": "default", "name": "Manual" }] },
+            "configOptions": [{ "id": "model", "name": "Model", "category": "model", "type": "select",
+                                "currentValue": "opus", "options": [{ "value": "opus", "name": "Opus" }] }]
+        });
+        let cfg = SessionConfig::from_response(&resp);
+        assert_eq!(cfg.ids.model.as_deref(), Some("model"));
+        assert_eq!(cfg.ids.mode, None);
+        assert_eq!(cfg.modes, resp["modes"]);
+        // A later option list without modes keeps the legacy ones.
+        let next = merge_config(cfg, resp["configOptions"].clone());
+        assert_eq!(next.modes, resp["modes"]);
+        assert_eq!(next.models["currentModelId"], "opus");
+    }
 
     fn pt(i: usize, pv: Option<&str>) -> RewindPoint {
         RewindPoint {

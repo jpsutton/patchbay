@@ -67,7 +67,16 @@ cargo test --lib smoke -- --ignored           # chat (both backends), title gene
 PATCHBAY_SMOKE_KIND=openai cargo test --lib smoke_code -- --ignored
 ```
 
-To try the UI alone in a browser, run `pnpm dev` and open http://localhost:1420. Outside Tauri, a dev-only in-memory fake backend (`src/dev/fakeBackend.ts`) stands in for Rust.
+The other coding agents (Claude Code, OpenCode, Cursor CLI, Kilo Code) have live tests that run against the copies installed on your machine, with your own sign-ins. Agents that aren't installed are skipped:
+
+```bash
+cargo test --lib agents_live -- --ignored --nocapture        # start, list models, switch model, resume
+PATCHBAY_LIVE_PROMPT=opencode,claude-code cargo test --lib agents_live -- --ignored --nocapture   # also one tiny prompt each
+```
+
+To try the UI alone in a browser, run `pnpm dev` and open http://localhost:1420. Outside Tauri, a dev-only in-memory fake backend (`src/dev/fakeBackend.ts`) stands in for Rust. Add `?mesh=1` to the URL to start as a member of a fake four-computer mesh, with a pending join request, sessions running on other computers (one of them offline) and a chat reply streaming in from another computer.
+
+The mesh's end-to-end tests run real nodes over WebSocket on localhost: `cargo test --lib mesh`.
 
 ## Layout
 
@@ -78,8 +87,9 @@ src-tauri/src/
   providers.rs      keyring secrets, /models discovery, SamplerConfig mapping
   chat.rs           Chat streaming over xai-grok-sampler
   attachments.rs    ingest/sniff/store; images downscaled, PDFs text-extracted (pdf_oxide) with page-render fallback
+  code/agents.rs    coding agent backends: finding, launching and configuring each one
   code/grok_config.rs  sidecar config.toml rendering (Grok-specific)
-  code/acp.rs       ACP client (one sidecar per code session, LocalSet thread)
+  code/acp.rs       ACP client (one agent process per code session, LocalSet thread)
   code/mcp.rs       MCP server settings -> ACP `mcpServers` (secrets in the keyring)
   code/permissions.rs  "always allow" rules matched against ACP tool calls
   desktop.rs        tray icon, quick-entry window and its global shortcut
