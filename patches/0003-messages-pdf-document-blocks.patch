@@ -1,0 +1,74 @@
+Patchbay modification to Grok Build (https://github.com/xai-org/grok-build),
+Apache License 2.0, Copyright 2023-2026 SpaceXAI. Modified by Patchbay
+from upstream commit 2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8.
+
+Encode data:application/pdf parts as Anthropic Messages document blocks, so PDFs are sent natively.
+
+Files changed:
+  crates/codegen/xai-grok-sampler/src/stream_classify.rs
+  crates/codegen/xai-grok-sampling-types/src/conversation/messages.rs
+  crates/codegen/xai-grok-sampling-types/src/messages.rs
+
+diff --git a/crates/codegen/xai-grok-sampler/src/stream_classify.rs b/crates/codegen/xai-grok-sampler/src/stream_classify.rs
+index 99c6167b..cc56b83c 100644
+--- a/crates/codegen/xai-grok-sampler/src/stream_classify.rs
++++ b/crates/codegen/xai-grok-sampler/src/stream_classify.rs
+@@ -126,6 +126,7 @@ fn message_event_has_content(event: &messages::MessageStreamEvent) -> bool {
+             ContentBlock::Text { text, .. } => !text.is_empty(),
+             ContentBlock::Thinking { thinking, .. } => !thinking.is_empty(),
+             ContentBlock::Image { .. }
++            | ContentBlock::Document { .. }
+             | ContentBlock::ToolResult { .. }
+             | ContentBlock::RedactedThinking { .. } => false,
+         },
+diff --git a/crates/codegen/xai-grok-sampling-types/src/conversation/messages.rs b/crates/codegen/xai-grok-sampling-types/src/conversation/messages.rs
+index 4e6bee84..f61d62f2 100644
+--- a/crates/codegen/xai-grok-sampling-types/src/conversation/messages.rs
++++ b/crates/codegen/xai-grok-sampling-types/src/conversation/messages.rs
+@@ -11,6 +11,7 @@ fn mark_message_cache_breakpoint(msg: &mut crate::messages::Message) -> bool {
+                     ContentBlock::Text { cache_control, .. }
+                     | ContentBlock::ToolResult { cache_control, .. }
+                     | ContentBlock::Image { cache_control, .. }
++                    | ContentBlock::Document { cache_control, .. }
+                     | ContentBlock::ToolUse { cache_control, .. } => cache_control,
+                     ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {
+                         continue;
+@@ -111,12 +112,15 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
+                                 .and_then(|h| h.strip_suffix(";base64"))
+                                 .unwrap_or("image/png")
+                                 .to_string();
+-                            ContentBlock::Image {
+-                                source: ImageSource::Base64 {
+-                                    media_type,
+-                                    data: data.to_string(),
+-                                },
+-                                cache_control: None,
++                            let source = ImageSource::Base64 {
++                                media_type: media_type.clone(),
++                                data: data.to_string(),
++                            };
++                            // PDFs travel as data URIs too; Messages takes them as document blocks.
++                            if media_type == "application/pdf" {
++                                ContentBlock::Document { source, cache_control: None }
++                            } else {
++                                ContentBlock::Image { source, cache_control: None }
+                             }
+                         } else {
+                             // Malformed data URI, treat as text
+diff --git a/crates/codegen/xai-grok-sampling-types/src/messages.rs b/crates/codegen/xai-grok-sampling-types/src/messages.rs
+index 4e6c7d24..165d16e9 100644
+--- a/crates/codegen/xai-grok-sampling-types/src/messages.rs
++++ b/crates/codegen/xai-grok-sampling-types/src/messages.rs
+@@ -114,6 +114,12 @@ pub enum ContentBlock {
+         #[serde(skip_serializing_if = "Option::is_none")]
+         cache_control: Option<CacheControl>,
+     },
++    /// A PDF; the source shape is the same as an image's.
++    Document {
++        source: ImageSource,
++        #[serde(skip_serializing_if = "Option::is_none")]
++        cache_control: Option<CacheControl>,
++    },
+     ToolUse {
+         id: String,
+         name: String,

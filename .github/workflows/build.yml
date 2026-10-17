@@ -1,0 +1,150 @@
+# Full build on pull requests into release: every package for every platform.
+# Linux packages are required for a release; Windows and macOS builds are best
+# effort (unsigned, not required checks): a release ships them if they built.
+# release.yml publishes the artifacts of the final PR head without rebuilding.
+# workflow_dispatch runs it on any branch, for testing the build itself.
+name: build
+
+on:
+  pull_request:
+    branches: [release]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# staging is the head of the staging -> release pull request, so every merge
+# into staging pushes to it and starts a new full build. Only the newest head
+# matters, so a push cancels the build still running for the previous one.
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # .deb, .rpm and AppImage from Tauri's bundler. Built on the oldest
+  # supported Ubuntu so the packages run on distributions with older glibc.
+  linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - run: scripts/ci/deps-ubuntu.sh
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+            vendor/grok-build -> ../../target/grok
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build the grok sidecar
+        run: PROFILE=release scripts/build-sidecar.sh
+      - name: Build and bundle
+        run: pnpm tauri build --bundles deb,rpm,appimage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: patchbay-linux
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/rpm/*.rpm
+            src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  arch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Build Arch package (archlinux container)
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/src" -w /src archlinux:latest scripts/ci/build-arch.sh
+          sudo chown -R "$(id -u):$(id -g)" out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: patchbay-arch
+          path: out/*.pkg.tar.zst
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+            vendor/grok-build -> ../../target/grok
+      - name: Install protoc
+        run: choco install protoc --no-progress -y
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build the grok sidecar
+        run: PROFILE=release scripts/build-sidecar.sh
+      - name: Build and bundle
+        run: pnpm tauri build --bundles nsis,msi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: patchbay-windows
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: error
+          retention-days: 14
+
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+            vendor/grok-build -> ../../target/grok
+      - run: brew install protobuf
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build the grok sidecar
+        run: PROFILE=release scripts/build-sidecar.sh
+      - name: Build and bundle
+        run: pnpm tauri build --bundles dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: patchbay-macos
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

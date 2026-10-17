@@ -1,0 +1,111 @@
+# Checks on every pull request (into staging and into release): static checks,
+# the frontend's typecheck, build and notices, and the Rust unit tests on Linux.
+# No packages; build.yml does those for release PRs.
+name: checks
+
+on:
+  pull_request:
+    branches: [staging, release]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # release only takes what staging has: changes go feature branch -> staging
+  # -> release.
+  source-branch:
+    if: github.event_name == 'pull_request' && github.base_ref == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull requests into release must come from staging
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          if [ "$HEAD_REF" != staging ] || [ "$HEAD_REPO" != "$GITHUB_REPOSITORY" ]; then
+            echo "::error::release takes pull requests from staging only (this one is from $HEAD_REPO:$HEAD_REF)"
+            exit 1
+          fi
+
+  # A release is tagged v<version>, so a release PR needs a version that has
+  # not been released yet.
+  version:
+    if: github.event_name == 'pull_request' && github.base_ref == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: The version is new
+        run: |
+          version=$(scripts/ci/version.sh)
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "::error::v$version is already released; bump the version (scripts/ci/version.sh lists where it lives)"
+            exit 1
+          fi
+          echo "Releases as v$version" >> "$GITHUB_STEP_SUMMARY"
+
+  static:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install tools
+        run: pacman -Syu --noconfirm --needed git shellcheck desktop-file-utils
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: scripts/ci/check.sh
+        run: |
+          git config --global --add safe.directory "*"
+          useradd -m builder
+          chown -R builder: "$GITHUB_WORKSPACE"
+          su builder -c 'git config --global --add safe.directory "*" && scripts/ci/check.sh'
+
+      - name: actionlint
+        uses: docker://rhysd/actionlint:latest
+        with:
+          args: -color
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Third-party notices are up to date
+        run: pnpm notices && git diff --exit-code -- THIRD_PARTY_NOTICES.md
+
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - run: scripts/ci/deps-ubuntu.sh
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Apply patches and stage a placeholder sidecar
+        run: scripts/apply-patches.sh && scripts/ci/stub-sidecar.sh
+      - name: Unit tests
+        working-directory: src-tauri
+        run: cargo test --lib --locked

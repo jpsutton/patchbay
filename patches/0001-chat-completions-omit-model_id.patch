@@ -1,0 +1,23 @@
+Patchbay modification to Grok Build (https://github.com/xai-org/grok-build),
+Apache License 2.0, Copyright 2023-2026 SpaceXAI. Modified by Patchbay
+from upstream commit 2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8.
+
+Never serialize the non-standard model_id field on Chat Completions messages; strict endpoints such as Fireworks reject it.
+
+Files changed:
+  crates/codegen/xai-grok-sampling-types/src/types.rs
+
+diff --git a/crates/codegen/xai-grok-sampling-types/src/types.rs b/crates/codegen/xai-grok-sampling-types/src/types.rs
+index aca15b31..b19650ea 100644
+--- a/crates/codegen/xai-grok-sampling-types/src/types.rs
++++ b/crates/codegen/xai-grok-sampling-types/src/types.rs
+@@ -240,7 +240,8 @@ pub struct ChatRequestMessage {
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub tool_call_id: Option<String>,
+     /// The model used for this message (typically set on assistant responses)
+-    #[serde(default, skip_serializing_if = "Option::is_none")]
++    /// Never sent: it is not part of the Chat Completions schema and strict endpoints reject it.
++    #[serde(default, skip_serializing)]
+     pub model_id: Option<String>,
+     /// The reasoning/thinking content from the model (for models that support extended thinking)
+     #[serde(default, skip_serializing_if = "Option::is_none")]

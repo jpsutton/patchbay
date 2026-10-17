@@ -1,0 +1,44 @@
+# Builds Patchbay from this source checkout (with the vendor/grok-build
+# submodule checked out):
+#   cd packaging/linux/arch && makepkg -si
+pkgname=patchbay
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Desktop LLM client with chat and a coding agent, for any provider"
+arch=(x86_64 aarch64)
+url="https://github.com/jpsutton/patchbay"
+license=(Apache-2.0)
+depends=(webkit2gtk-4.1 gtk3 libayatana-appindicator dbus xdotool hicolor-icon-theme)
+makedepends=(cargo git nodejs pnpm protobuf)
+options=(!debug !lto)
+
+_srcroot="$(realpath "${startdir}/../../..")"
+
+build() {
+  cd "${_srcroot}"
+  PROFILE=release scripts/build-sidecar.sh
+  pnpm install --frozen-lockfile
+  pnpm tauri build --no-bundle
+}
+
+package() {
+  cd "${_srcroot}"
+  # The app finds its grok sidecar next to its own executable.
+  install -Dm755 src-tauri/target/release/patchbay "${pkgdir}/usr/lib/patchbay/patchbay"
+  install -Dm755 target/grok/release/xai-grok-pager "${pkgdir}/usr/lib/patchbay/grok"
+  install -dm755 "${pkgdir}/usr/bin"
+  ln -s /usr/lib/patchbay/patchbay "${pkgdir}/usr/bin/patchbay"
+
+  install -Dm644 packaging/linux/patchbay.desktop "${pkgdir}/usr/share/applications/patchbay.desktop"
+  local size
+  for size in 32 64 128; do
+    install -Dm644 "src-tauri/icons/${size}x${size}.png" \
+      "${pkgdir}/usr/share/icons/hicolor/${size}x${size}/apps/patchbay.png"
+  done
+  install -Dm644 src-tauri/icons/128x128@2x.png "${pkgdir}/usr/share/icons/hicolor/256x256/apps/patchbay.png"
+
+  local licenses="${pkgdir}/usr/share/licenses/${pkgname}"
+  install -Dm644 LICENSE NOTICE THIRD_PARTY_NOTICES.md -t "${licenses}"
+  install -Dm644 vendor/grok-build/THIRD-PARTY-NOTICES "${licenses}/GROK_BUILD_THIRD_PARTY_NOTICES"
+  install -Dm644 vendor/grok-build/third_party/NOTICE "${licenses}/GROK_BUILD_VENDORED_NOTICE"
+}

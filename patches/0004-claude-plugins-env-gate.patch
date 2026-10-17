@@ -1,0 +1,36 @@
+Patchbay modification to Grok Build (https://github.com/xai-org/grok-build),
+Apache License 2.0, Copyright 2023-2026 SpaceXAI. Modified by Patchbay
+from upstream commit 2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8.
+
+GROK_CLAUDE_PLUGINS_ENABLED=false stops the agent from loading Claude Code plugins.
+
+Files changed:
+  crates/codegen/xai-grok-agent/src/plugins/discovery.rs
+
+diff --git a/crates/codegen/xai-grok-agent/src/plugins/discovery.rs b/crates/codegen/xai-grok-agent/src/plugins/discovery.rs
+index 96b8caae..b80894cd 100644
+--- a/crates/codegen/xai-grok-agent/src/plugins/discovery.rs
++++ b/crates/codegen/xai-grok-agent/src/plugins/discovery.rs
+@@ -419,6 +419,22 @@ pub fn discover_plugins(
+         }
+     }
+ 
++    // GROK_CLAUDE_PLUGINS_ENABLED=false drops every plugin that came from Claude Code's config
++    // (~/.claude/plugins, project .claude/plugins, Claude marketplaces and installs).
++    if std::env::var("GROK_CLAUDE_PLUGINS_ENABLED")
++        .is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
++    {
++        candidates.retain(|p| {
++            !matches!(
++                p.origin,
++                PluginOrigin::UserClaude
++                    | PluginOrigin::ProjectClaude
++                    | PluginOrigin::ClaudeMarketplace { .. }
++                    | PluginOrigin::ClaudeInstalled { .. }
++            )
++        });
++    }
++
+     // Within the same plugin_name, the highest-priority scope wins; within same scope, first-found (alphabetical by canonical path) wins
+     resolve_name_conflicts(&mut candidates);
+ 

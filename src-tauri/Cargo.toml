@@ -1,0 +1,65 @@
+[package]
+name = "patchbay"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Provider-agnostic desktop LLM client"
+
+[lib]
+name = "patchbay_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Grok Build plumbing (vendored submodule, pinned)
+xai-grok-sampler = { path = "../vendor/grok-build/crates/codegen/xai-grok-sampler" }
+xai-grok-sampling-types = { path = "../vendor/grok-build/crates/codegen/xai-grok-sampling-types" }
+agent-client-protocol = { version = "=0.10.4", features = ["unstable"] }
+
+tauri = { version = "2", features = ["tray-icon"] }
+# xdg-portal instead of the default gtk3 backend: file dialogs come from the desktop's own portal
+# (KDE dialogs on Plasma, GNOME ones on GNOME), with a zenity fallback when no portal runs.
+tauri-plugin-dialog = { version = "2", default-features = false, features = ["xdg-portal"] }
+tauri-plugin-opener = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-global-shortcut = "2"
+
+anyhow = "1"
+async-trait = "0.1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+ignore = "0.4"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+indexmap = { version = "2", features = ["serde"] }
+infer = "0.19.0"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+pdf_oxide = { version = "0.3.43", features = ["rendering"] }
+portable-pty = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat", "rt"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+
+# The app-drawn title bar on Wayland: KWin keeps its own title bar unless the window announces
+# client-side decorations, which only GDK can do (same 0.18 versions Tauri already links).
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+gdkwayland-sys = { version = "0.18", features = ["v3_24"] }
+
+[patch.crates-io]
+# Same fork/rev grok-build pins; xai-grok-sampling-types needs its types.
+async-openai = { git = "https://github.com/our-forks/async-openai.git", rev = "95b52ebdedf42143083cf3d6f0e0be7c84e9c808" }
+
+[profile.dev.package."*"]
+opt-level = 1

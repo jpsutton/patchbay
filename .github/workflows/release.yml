@@ -1,0 +1,117 @@
+# Publish on merge into release, without rebuilding: the pull request from
+# staging already ran the full build (build.yml), so this takes that run's
+# artifacts, signs every one (PATCHBAY_GPG_KEY), builds a signed pacman repo,
+# tags the release v<version> and creates a GitHub Release with the packages,
+# signatures and SHA256SUMS.
+#
+# Merge staging -> release pull requests with "Create a merge commit": the PR's
+# head is then the merge commit's second parent, which is what this looks up.
+name: release
+
+on:
+  push:
+    branches: [release]
+
+permissions:
+  contents: write   # tag and release
+  actions: read     # read the pull request's build run and its artifacts
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find the pull request's build
+        id: build
+        run: |
+          set -euo pipefail
+          # The Windows/macOS jobs may fail without blocking a release, so the
+          # run's overall conclusion can be "failure"; the Linux jobs must pass.
+          head=$(git rev-parse HEAD^2 2>/dev/null) || {
+            echo "::error::$GITHUB_SHA is not a merge commit; merge staging into release with 'Create a merge commit'"
+            exit 1
+          }
+          # The published artifacts were built from the PR head; they match
+          # release only if the merge changed nothing on top of it.
+          if ! git diff --quiet "$head" HEAD; then
+            echo "::error::release differs from the merged staging head $head; its build would not match"
+            exit 1
+          fi
+          run=$(gh run list -R "$GITHUB_REPOSITORY" --workflow build.yml --commit "$head" \
+                  --status completed --json databaseId,event \
+                  -q 'map(select(.event == "pull_request")) | .[0].databaseId')
+          [ -n "$run" ] || { echo "::error::no completed pull-request build for $head"; exit 1; }
+          for job in linux arch; do
+            conclusion=$(gh run view "$run" -R "$GITHUB_REPOSITORY" --json jobs \
+                           -q ".jobs[] | select(.name == \"$job\") | .conclusion")
+            [ "$conclusion" = success ] || { echo "::error::build $run: $job is '$conclusion'"; exit 1; }
+          done
+          version=$(scripts/ci/version.sh)
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "::error::v$version is already released"
+            exit 1
+          fi
+          {
+            echo "run=$run"
+            echo "head=$head"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+          echo "Build run $run for $head, releasing v$version" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Download its artifacts
+        run: |
+          set -euo pipefail
+          for name in patchbay-linux patchbay-arch; do
+            gh run download "${{ steps.build.outputs.run }}" -R "$GITHUB_REPOSITORY" -n "$name" -D dist
+          done
+          # Windows and macOS are best effort: ship them only if they built.
+          for name in patchbay-windows patchbay-macos; do
+            gh run download "${{ steps.build.outputs.run }}" -R "$GITHUB_REPOSITORY" -n "$name" -D dist \
+              || echo "::warning::$name was not built; releasing without it"
+          done
+          # Artifacts keep their bundle/<format>/ folders; release assets are flat.
+          find dist -mindepth 2 -type f -exec mv -t dist {} +
+          find dist -mindepth 1 -type d -empty -delete
+          ls -la dist
+
+      - name: Sign (archlinux container)
+        env:
+          PATCHBAY_GPG_KEY: ${{ secrets.PATCHBAY_GPG_KEY }}
+        run: |
+          docker run --rm -e PATCHBAY_GPG_KEY \
+            -v "$GITHUB_WORKSPACE:/src" -w /src archlinux:latest \
+            scripts/ci/sign-release.sh dist
+          sudo chown -R "$(id -u):$(id -g)" dist
+
+      - name: Tag
+        run: |
+          set -euo pipefail
+          tag="v${{ steps.build.outputs.version }}"
+          git tag "$tag" "$GITHUB_SHA"
+          git push origin "$tag"
+
+      - name: GitHub Release
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=()
+          for f in dist/*; do
+            [ -f "$f" ] || continue
+            if [ "$(stat -c %s "$f")" -lt 2147483648 ]; then
+              assets+=("$f")
+            else
+              echo "::warning::$(basename "$f") is over GitHub's 2 GiB asset limit; not attached"
+            fi
+          done
+          gh release create "v${{ steps.build.outputs.version }}" -R "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "Patchbay ${{ steps.build.outputs.version }}" \
+            --generate-notes "${assets[@]}"

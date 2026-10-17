@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Patchbay
+GenericName=AI Assistant
+Comment=Chat and code with any LLM provider
+Exec=patchbay
+Icon=patchbay
+Terminal=false
+Categories=Development;
+Keywords=AI;LLM;chat;agent;assistant;
