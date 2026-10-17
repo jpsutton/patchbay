@@ -35,10 +35,16 @@ pub struct Preferences {
     /// One extra model call after the first reply to name the conversation.
     pub generate_titles: bool,
 
-    // ---- Code agent (Grok Build) ----
+    // ---- Code agents ----
+    /// Agent for new Code sessions: an `AgentKind` id (grok, claude-code, opencode, cursor, kilo).
+    pub default_agent: String,
+    /// Executable overrides, agent id -> path; agents not listed are looked up on PATH.
+    pub agent_paths: crate::code::agents::AgentPaths,
+
+    // ---- Grok Build ----
     /// default | auto | always-approve
     pub permission_mode: String,
-    /// Appended to the agent's system prompt for every session.
+    /// Appended to the agent's system prompt for every session (agents that accept one).
     pub agent_instructions: String,
     pub web_fetch: bool,
     /// Default auto-compact threshold; a model's own setting wins.
@@ -91,6 +97,8 @@ impl Default for Preferences {
             default_system_prompt: String::new(),
             expand_reasoning: false,
             generate_titles: true,
+            default_agent: "grok".into(),
+            agent_paths: Default::default(),
             permission_mode: "default".into(),
             agent_instructions: String::new(),
             web_fetch: false,
@@ -123,6 +131,9 @@ impl Preferences {
             &self.permission_mode,
             &["default", "auto", "always-approve"],
         )?;
+        if crate::code::agents::AgentKind::parse(&self.default_agent).is_none() {
+            return Err(format!("unknown coding agent {}", self.default_agent));
+        }
         if let Some(p) = self.auto_compact_percent
             && !(10..=99).contains(&p)
         {

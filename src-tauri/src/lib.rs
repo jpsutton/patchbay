@@ -9,6 +9,8 @@ mod providers;
 mod terminal;
 mod usage;
 #[cfg(test)]
+mod agent_live_tests;
+#[cfg(test)]
 mod smoke_tests;
 
 use std::path::PathBuf;
@@ -389,11 +391,23 @@ fn create_code_session(
     state: State<'_, AppState>,
     cwd: String,
     model_ref: Option<String>,
+    agent: Option<String>,
 ) -> CmdResult<CodeSession> {
     if !std::path::Path::new(&cwd).is_dir() {
         return Err(CmdError(format!("{cwd} is not a directory")));
     }
-    Ok(state.db.create_code_session(&cwd, model_ref.as_deref())?)
+    let agent = agent.unwrap_or_else(|| prefs::load(&state.db).default_agent);
+    if code::agents::AgentKind::parse(&agent).is_none() {
+        return Err(CmdError(format!("unknown coding agent {agent}")));
+    }
+    Ok(state.db.create_code_session(&cwd, model_ref.as_deref(), &agent)?)
+}
+
+/// The coding agents Patchbay can drive, and whether each is installed.
+#[tauri::command]
+async fn list_agents(state: State<'_, AppState>) -> CmdResult<Vec<code::agents::AgentInfo>> {
+    let paths = prefs::load(&state.db).agent_paths;
+    Ok(tokio::task::spawn_blocking(move || code::agents::detect_all(&paths)).await?)
 }
 
 #[tauri::command]
@@ -499,10 +513,30 @@ async fn code_set_model(
     model_id: String,
 ) -> CmdResult<()> {
     state.code.set_model(&id, model_id.clone()).await?;
-    if let Some(r) = code::grok_config::model_ref_from_key(&model_id) {
-        state.db.update_code_session(&id, None, None, Some(r))?;
+    let session = state.db.get_code_session(&id)?;
+    let patchbay_models = session
+        .as_ref()
+        .and_then(|s| code::agents::AgentKind::parse(&s.agent))
+        .is_some_and(|k| k.uses_patchbay_models());
+    if patchbay_models {
+        if let Some(r) = code::grok_config::model_ref_from_key(&model_id) {
+            state.db.update_code_session(&id, None, None, Some(r))?;
+        }
+    } else {
+        // Remembered so the next agent process for this session reselects it.
+        state.db.set_code_session_agent_model(&id, &model_id)?;
     }
     Ok(())
+}
+
+#[tauri::command]
+async fn code_set_config_option(
+    state: State<'_, AppState>,
+    id: String,
+    config_id: String,
+    value: String,
+) -> CmdResult<()> {
+    Ok(state.code.set_config_option(&id, config_id, value).await?)
 }
 
 #[tauri::command]
@@ -783,6 +817,8 @@ pub fn run() {
             code_cancel,
             code_set_model,
             code_set_mode,
+            code_set_config_option,
+            list_agents,
             code_permission_respond,
             code_rewind,
             code_usage,

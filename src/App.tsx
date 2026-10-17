@@ -126,7 +126,7 @@ function newThing() {
     return;
   }
   const cur = st.codeSessions.find((s) => s.id === st.activeCodeSessionId);
-  if (cur) newSessionIn(cur.cwd);
+  if (cur) newSessionIn(cur.cwd, cur.agent);
   else openFolderAsSession();
 }
 
