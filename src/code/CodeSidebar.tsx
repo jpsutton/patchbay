@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { api, type CodeSession } from "../lib/ipc";
+import { AGENT_LABELS, api, type CodeSession } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { SectionLabel, SidebarItem } from "../components/SidebarItem";
 import { fmtShort, matchesQuery } from "../lib/format";
@@ -52,6 +52,7 @@ export function CodeSidebar() {
   const code = useStore((s) => s.code);
   const askConfirm = useStore((s) => s.askConfirm);
   const query = useStore((s) => s.sidebarQuery);
+  const prefs = useStore((s) => s.prefs);
   const [collapsed, setCollapsed] = useState(loadCollapsed);
 
   const hits = useMemo(() => sessions.filter((s) => matchesQuery(query, s.title, s.cwd)), [sessions, query]);
@@ -173,7 +174,7 @@ export function CodeSidebar() {
                   if (isCollapsed) toggle(g.cwd);
                   newSessionIn(g.cwd);
                 }}
-                title={`New session in ${g.cwd}`}
+                title={`New ${AGENT_LABELS[prefs.defaultAgent] ?? ""} session in ${g.cwd}`}
                 aria-label={`New session in ${g.label}`}
               >
                 <PlusIcon size={14} />

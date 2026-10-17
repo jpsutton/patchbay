@@ -2,18 +2,19 @@ import { useEffect, useState, type ReactNode } from "react";
 import type { Preferences } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { input } from "./ProviderPage";
+import { AgentsPage } from "./AgentsPage";
 import { McpPage } from "./McpPage";
-import { PermissionRulesList } from "./PermissionRules";
 import { PromptsPage } from "./PromptsPage";
 import { UsagePage } from "./UsagePage";
 
-export type PrefSection = "general" | "chat" | "prompts" | "code" | "mcp" | "terminal" | "usage";
+export type PrefSection = "general" | "chat" | "prompts" | "agents" | "code" | "mcp" | "terminal" | "usage";
 
 export const PREF_SECTIONS: { id: PrefSection; label: string }[] = [
   { id: "general", label: "General" },
   { id: "chat", label: "Chat" },
   { id: "prompts", label: "Prompts" },
-  { id: "code", label: "Code agent" },
+  { id: "agents", label: "Coding agents" },
+  { id: "code", label: "Grok Build" },
   { id: "mcp", label: "MCP servers" },
   { id: "terminal", label: "Terminal" },
   { id: "usage", label: "Usage" },
@@ -257,6 +258,7 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
 
   if (section === "prompts") return <PromptsPage />;
   if (section === "mcp") return <McpPage />;
+  if (section === "agents") return <AgentsPage />;
   if (section === "usage") return <UsagePage />;
 
   if (section === "chat") {
@@ -289,6 +291,10 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
   if (section === "code") {
     return (
       <div className="flex max-w-xl flex-col">
+        <p className="pb-2 text-xs text-muted">
+          Settings for Grok Build. Other coding agents keep their own configuration; custom instructions also reach
+          Claude Code. MCP servers and always-allow rules (under Coding agents) apply to every agent.
+        </p>
         <Row
           label="Default permission mode"
           hint={
@@ -376,7 +382,6 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
           </Row>
         ))}
         <p className="pt-2 text-xs text-muted">Idle sessions restart to pick up changes; busy ones restart when their turn ends.</p>
-        <PermissionRulesList />
       </div>
     );
   }

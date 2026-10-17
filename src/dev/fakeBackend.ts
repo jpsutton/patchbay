@@ -18,9 +18,43 @@ import type {
   Model,
   Provider,
   TermEvent,
+  AcpConfigOption,
+  AgentId,
+  AgentInfo,
 } from "../lib/ipc";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const fakeAgent = (id: AgentId, label: string, program: string | null, extra: Partial<AgentInfo> = {}): AgentInfo => ({
+  id,
+  label,
+  available: program != null,
+  program,
+  source: program ? "path" : null,
+  version: program ? "1.0.0" : null,
+  error: program ? null : `${label} not found.`,
+  installHint: `Install ${label}, then sign in from a terminal.`,
+  usesPatchbayModels: id === "grok",
+  supportsInstructions: id === "grok" || id === "claude-code",
+  ...extra,
+});
+const FAKE_AGENTS: AgentInfo[] = [
+  fakeAgent("grok", "Grok Build", "/opt/patchbay/grok", { source: "bundled" }),
+  fakeAgent("claude-code", "Claude Code", "/usr/bin/npx", { source: "npx", version: null }),
+  fakeAgent("opencode", "OpenCode", "/usr/bin/opencode"),
+  fakeAgent("cursor", "Cursor CLI", "/usr/bin/cursor-agent"),
+  fakeAgent("kilo", "Kilo Code", null),
+];
+/** Reasoning effort per fake session, for agents that report it as a config option. */
+const fakeConfig: Record<string, string> = {};
+const fakeEffort = (value: string): AcpConfigOption => ({
+  id: "effort",
+  name: "Effort",
+  category: "thought_level",
+  type: "select",
+  currentValue: value,
+  options: ["low", "medium", "high"].map((v) => ({ value: v, name: v[0].toUpperCase() + v.slice(1) })),
+});
 const DEMO_FILES = ["README.md", "Cargo.toml", "src/main.rs", "src/lib.rs", "src/code/acp.rs", "src/code/mcp.rs", "docs/guide.md", "package.json"];
 const id = () => crypto.randomUUID();
 const now = () => Date.now();
@@ -246,7 +280,7 @@ export function install() {
   db.models.push({ id: "m1", providerId: "p1", modelId: "demo-model", displayName: "Demo model", vision: true, contextWindow: 128000, params: { ...emptyParams(), pricing: { input: 3, cachedInput: 0.3, cacheWrite: 3.75, output: 15 } } });
   db.models.push({ id: "m2", providerId: "p1", modelId: "demo-mini", displayName: "Demo mini", vision: false, contextWindow: 32000, params: emptyParams() });
   const seed = (cwd: string, title: string, ago: number, activity: CodeSession["activity"]) =>
-    db.code.push({ id: id(), cwd, acpSessionId: null, title, modelRef: "m1", pinned: false, createdAt: now() - ago, updatedAt: now() - ago, activity });
+    db.code.push({ id: id(), cwd, acpSessionId: null, title, modelRef: "m1", pinned: false, createdAt: now() - ago, updatedAt: now() - ago, activity, agent: "grok", agentModel: null });
   seed("/home/demo/Projects/nulamp", "Windows installer testing", 1000, "edit");
   seed("/home/demo/Projects/nulamp", "Release to staging", 5000, "pr");
   seed("/home/demo/Projects/omnimark", "Interactive document controls", 3000, "branch");
@@ -376,7 +410,7 @@ export function install() {
 
         case "list_code_sessions": return [...db.code].sort((x, y) => y.updatedAt - x.updatedAt);
         case "create_code_session": {
-          const s: CodeSession = { id: id(), cwd: a.cwd as string, acpSessionId: null, title: "New session", modelRef: (a.modelRef as string) ?? null, pinned: false, createdAt: now(), updatedAt: now(), activity: null };
+          const s: CodeSession = { id: id(), cwd: a.cwd as string, acpSessionId: null, title: "New session", modelRef: (a.modelRef as string) ?? null, pinned: false, createdAt: now(), updatedAt: now(), activity: null, agent: ((a.agent as AgentId | null) ?? (JSON.parse(db.settings.preferences ?? "{}").defaultAgent as AgentId | undefined) ?? "grok"), agentModel: null };
           db.code.push(s);
           return s;
         }
@@ -394,12 +428,19 @@ export function install() {
           setTimeout(() => {
             codeEmit(csid, { type: "status", state: "starting", message: null });
             setTimeout(() => {
+              const grok = (db.code.find((c) => c.id === csid)?.agent ?? "grok") === "grok";
               codeEmit(csid, {
                 type: "sessionReady", acpSessionId: "acp-" + csid, loaded: false,
                 capabilities: { loadSession: true, promptCapabilities: { image: false, embeddedContext: true }, mcpCapabilities: { http: true, sse: true } },
                 agentInfo: { name: "fake-agent" },
-                models: { currentModelId: "pb-m1", availableModels: db.models.map((m) => ({ modelId: "pb-" + m.id, name: m.displayName })) },
-                modes: null,
+                models: grok
+                  ? { currentModelId: "pb-m1", availableModels: db.models.map((m) => ({ modelId: "pb-" + m.id, name: m.displayName })) }
+                  : { currentModelId: "sonnet", availableModels: [{ modelId: "sonnet", name: "Sonnet" }, { modelId: "opus", name: "Opus" }] },
+                modes: grok
+                  ? null
+                  : { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] },
+                configOptions: grok ? [] : [fakeEffort(fakeConfig[csid] ?? "medium")],
+                extensions: { statusLine: grok, rewind: grok },
               });
               codeEmit(csid, {
                 type: "update",
@@ -480,6 +521,12 @@ export function install() {
           for (const [k, r] of pending) { r(null); pending.delete(k); }
           return null;
         case "code_set_model": case "code_set_mode": return null;
+        case "code_set_config_option": {
+          fakeConfig[a.id as string] = a.value as string;
+          codeEmit(a.id as string, { type: "config", models: null, modes: null, configOptions: [fakeEffort(a.value as string)] });
+          return null;
+        }
+        case "list_agents": return FAKE_AGENTS;
         case "code_rewind": await sleep(150); return null;
         case "code_usage": return { totals: { ...fakeUsage }, contextTokens: null, contextWindow: 128000, autoCompactPercent: 85 };
         case "code_permission_respond": {
