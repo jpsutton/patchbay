@@ -4,6 +4,7 @@ mod code;
 mod db;
 mod desktop;
 mod files;
+mod mesh;
 mod prefs;
 mod providers;
 mod terminal;
@@ -25,6 +26,7 @@ use crate::db::{
     Attachment, ChatUsageRow, CodeSession, CodeUsageRow, Conversation, Db, McpServer, Message, Model,
     PermissionRule, Prompt, Provider, SearchHit, new_id,
 };
+use crate::mesh::Mesh;
 use crate::terminal::{TermEvent, TerminalManager};
 
 pub struct AppState {
@@ -33,6 +35,7 @@ pub struct AppState {
     chat: Arc<ChatManager>,
     code: Arc<CodeManager>,
     terminals: TerminalManager,
+    mesh: Mesh,
 }
 
 /// Errors cross the IPC boundary as plain strings.
@@ -92,6 +95,7 @@ fn save_provider(state: State<'_, AppState>, input: ProviderInput) -> CmdResult<
         Some(k) => providers::store_key(&state.db, &p, k.trim())?,
         None => {}
     }
+    state.mesh.secrets_changed();
     let saved = providers::list_with_key_flag(&state.db)?
         .into_iter()
         .find(|x| x.id == p.id)
@@ -103,6 +107,7 @@ fn save_provider(state: State<'_, AppState>, input: ProviderInput) -> CmdResult<
 fn delete_provider(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     providers::delete_key(&id);
     state.db.delete_provider(&id)?;
+    state.mesh.secrets_changed();
     Ok(())
 }
 
@@ -288,13 +293,24 @@ fn spawn_chat(
     let db = state.db.clone();
     let data_dir = state.data_dir.clone();
     let chat = state.chat.clone();
-    let ch = on_event.clone();
+    let mesh = state.mesh.clone();
+    // Progress goes to the asking UI and, live, to every other node.
+    let sink: chat::ChatSink = {
+        let mesh = mesh.clone();
+        let conv = conversation_id.clone();
+        Arc::new(move |ev: ChatEvent| {
+            mesh.chat_event(&conv, serde_json::to_value(&ev).unwrap_or_default());
+            let _ = on_event.send(ev);
+        })
+    };
+    let emit = chat::Emit(sink);
+    let err_emit = emit.clone();
     // Run detached so the invoke resolves immediately; progress flows over the channel.
     tauri::async_runtime::spawn(async move {
         if let Err(e) =
-            chat::send(db, data_dir, chat, conversation_id, model_ref, turn, reasoning_effort, on_event).await
+            chat::send(db, data_dir, chat, conversation_id, model_ref, turn, reasoning_effort, emit, mesh).await
         {
-            let _ = ch.send(ChatEvent::Error {
+            let _ = err_emit.send(ChatEvent::Error {
                 message: format!("{e:#}"),
             });
         }
@@ -335,9 +351,16 @@ fn regenerate_reply(
     Ok(())
 }
 
+/// Stop a reply, wherever in the mesh it is streaming.
 #[tauri::command]
-fn cancel_chat(state: State<'_, AppState>, conversation_id: String) {
-    state.chat.cancel(&conversation_id);
+async fn cancel_chat(state: State<'_, AppState>, conversation_id: String) -> CmdResult<()> {
+    match state.mesh.streamer_of(&conversation_id).filter(|n| n != state.mesh.node_id()) {
+        Some(node) => {
+            state.mesh.rpc(&node, "chat.cancel", serde_json::json!({ "conversationId": conversation_id })).await?;
+        }
+        None => state.chat.cancel(&conversation_id),
+    }
+    Ok(())
 }
 
 // ---------------- attachments ----------------
@@ -378,6 +401,9 @@ async fn attachment_thumbnail(state: State<'_, AppState>, id: String) -> CmdResu
 }
 
 // ---------------- code ----------------
+//
+// A Code session runs on one node, its host. Commands for a session hosted elsewhere in the mesh
+// go to that node as RPCs (`MeshRpc` serves them there); agent events come back as mesh events.
 
 #[tauri::command]
 fn list_code_sessions(state: State<'_, AppState>) -> CmdResult<Vec<CodeSession>> {
@@ -427,86 +453,172 @@ fn delete_code_session(state: State<'_, AppState>, id: String) -> CmdResult<()> 
     Ok(state.db.delete_code_session(&id)?)
 }
 
-/// Start (or restart) the agent for a code session. Output arrives as `code://event`.
-#[tauri::command]
-async fn code_start(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    id: String,
-) -> CmdResult<()> {
+/// The node hosting session `id`, when that isn't this one.
+fn remote_host(state: &AppState, id: &str) -> CmdResult<Option<String>> {
+    let s = state
+        .db
+        .get_code_session(id)?
+        .ok_or_else(|| CmdError("code session not found".into()))?;
+    Ok(s.host_node.filter(|h| h != state.mesh.node_id()))
+}
+
+/// Refuse to act on a session another node now hosts (a fencing check for remote commands).
+fn ensure_local_host(state: &AppState, id: &str) -> anyhow::Result<()> {
+    if let Some(h) = remote_host(state, id).map_err(|e| anyhow::anyhow!(e.0))? {
+        anyhow::bail!("this session now runs on {}", state.mesh.member_name(&h));
+    }
+    Ok(())
+}
+
+/// Agent events go to this window and, live, to every other node.
+fn code_sink(app: &tauri::AppHandle, mesh: &Mesh) -> code::acp::Sink {
     use tauri::Emitter;
-    let sink: code::acp::Sink = Arc::new(move |env| {
+    let app = app.clone();
+    let mesh = mesh.clone();
+    Arc::new(move |env| {
+        mesh.broadcast_event(code::acp::EVENT, serde_json::to_value(&env).unwrap_or_default());
         let _ = app.emit(code::acp::EVENT, env);
-    });
+    })
+}
+
+async fn code_start_local(app: &tauri::AppHandle, state: &AppState, id: String) -> anyhow::Result<()> {
+    ensure_local_host(state, &id)?;
+    let sink = code_sink(app, &state.mesh);
     let (code, db, dir) = (state.code.clone(), state.db.clone(), state.data_dir.clone());
     // `start` may block briefly while a previous agent for this session shuts down.
     tokio::task::spawn_blocking(move || code.start(sink, db, &dir, &id)).await??;
     Ok(())
 }
 
+/// Start (or restart) the agent for a code session. Output arrives as `code://event`.
 #[tauri::command]
-fn code_is_running(state: State<'_, AppState>, id: String) -> bool {
-    state.code.is_running(&id)
+async fn code_start(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    if let Some(host) = remote_host(&state, &id)? {
+        state.mesh.rpc(&host, "code.start", serde_json::json!({ "id": id })).await?;
+        return Ok(());
+    }
+    Ok(code_start_local(&app, &state, id).await?)
 }
 
 #[tauri::command]
-fn code_stop(state: State<'_, AppState>, id: String) {
+async fn code_is_running(state: State<'_, AppState>, id: String) -> CmdResult<bool> {
+    if let Some(host) = remote_host(&state, &id)? {
+        if !state.mesh.connected(&host) {
+            return Ok(false);
+        }
+        let v = state.mesh.rpc(&host, "code.is_running", serde_json::json!({ "id": id })).await?;
+        return Ok(v.as_bool().unwrap_or(false));
+    }
+    Ok(state.code.is_running(&id))
+}
+
+#[tauri::command]
+async fn code_stop(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    if let Some(host) = remote_host(&state, &id)? {
+        state.mesh.rpc(&host, "code.stop", serde_json::json!({ "id": id })).await?;
+        return Ok(());
+    }
     state.code.stop(&id);
+    Ok(())
 }
 
-#[tauri::command]
-async fn code_prompt(
-    state: State<'_, AppState>,
+async fn code_prompt_local(
+    app: &tauri::AppHandle,
+    state: &AppState,
     id: String,
     text: String,
     attachment_ids: Vec<String>,
-    mentions: Option<Vec<String>>,
-) -> CmdResult<()> {
+    mentions: Vec<String>,
+    origin: String,
+) -> anyhow::Result<()> {
+    ensure_local_host(state, &id)?;
     let mut blocks = Vec::new();
     // @-mentioned project files go as standard ACP resource links; the agent reads them itself.
-    for path in mentions.unwrap_or_default() {
+    for path in mentions {
         let p = std::path::Path::new(&path);
         let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.clone());
         blocks.push(serde_json::json!({ "type": "resource_link", "name": name, "uri": attachments::file_uri(p) }));
     }
+    let mut atts = Vec::new();
     for aid in &attachment_ids {
         let att = state
             .db
             .get_attachment(aid)?
-            .ok_or_else(|| CmdError("attachment not found".into()))?;
+            .ok_or_else(|| anyhow::anyhow!("attachment not found"))?;
+        if !std::path::Path::new(&att.path).exists() {
+            state.mesh.ensure_file(&att.sha256, &att.name).await?;
+        }
         let dir = state.data_dir.clone();
-        blocks.extend(
-            tokio::task::spawn_blocking(move || attachments::to_acp_blocks(&dir, &att)).await??,
-        );
+        let a = att.clone();
+        blocks.extend(tokio::task::spawn_blocking(move || attachments::to_acp_blocks(&dir, &a)).await??);
+        atts.push(att);
     }
     if !text.is_empty() {
         blocks.push(serde_json::json!({ "type": "text", "text": text }));
     }
     // Bumps updated_at so the session sorts to the top of the sidebar.
     state.db.update_code_session(&id, None, None, None)?;
-    Ok(state.code.send(&id, AgentCmd::Prompt { blocks })?)
+    state.code.send(&id, AgentCmd::Prompt { blocks })?;
+    // Every viewer shows the prompt; the window that sent it already has.
+    code_sink(app, &state.mesh)(code::acp::Envelope {
+        code_session_id: id,
+        event: code::acp::CodeEvent::UserPrompt { text, origin, attachments: serde_json::to_value(&atts)? },
+    });
+    Ok(())
 }
 
 #[tauri::command]
-fn code_cancel(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+async fn code_prompt(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    text: String,
+    attachment_ids: Vec<String>,
+    mentions: Option<Vec<String>>,
+) -> CmdResult<()> {
+    let mentions = mentions.unwrap_or_default();
+    if let Some(host) = remote_host(&state, &id)? {
+        let params = serde_json::json!({ "id": id, "text": text, "attachmentIds": attachment_ids, "mentions": mentions });
+        state.mesh.rpc(&host, "code.prompt", params).await?;
+        return Ok(());
+    }
+    let me = state.mesh.node_id().to_owned();
+    Ok(code_prompt_local(&app, &state, id, text, attachment_ids, mentions, me).await?)
+}
+
+#[tauri::command]
+async fn code_cancel(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    if let Some(host) = remote_host(&state, &id)? {
+        state.mesh.rpc(&host, "code.cancel", serde_json::json!({ "id": id })).await?;
+        return Ok(());
+    }
     Ok(state.code.send(&id, AgentCmd::Cancel)?)
 }
 
-#[tauri::command]
-async fn code_set_model(
-    state: State<'_, AppState>,
-    id: String,
-    model_id: String,
-) -> CmdResult<()> {
-    state.code.set_model(&id, model_id.clone()).await?;
+async fn code_set_model_local(state: &AppState, id: &str, model_id: String) -> anyhow::Result<()> {
+    ensure_local_host(state, id)?;
+    state.code.set_model(id, model_id.clone()).await?;
     if let Some(r) = code::grok_config::model_ref_from_key(&model_id) {
-        state.db.update_code_session(&id, None, None, Some(r))?;
+        state.db.update_code_session(id, None, None, Some(r))?;
     }
     Ok(())
 }
 
 #[tauri::command]
+async fn code_set_model(state: State<'_, AppState>, id: String, model_id: String) -> CmdResult<()> {
+    if let Some(host) = remote_host(&state, &id)? {
+        state.mesh.rpc(&host, "code.set_model", serde_json::json!({ "id": id, "modelId": model_id })).await?;
+        return Ok(());
+    }
+    Ok(code_set_model_local(&state, &id, model_id).await?)
+}
+
+#[tauri::command]
 async fn code_set_mode(state: State<'_, AppState>, id: String, mode_id: String) -> CmdResult<()> {
+    if let Some(host) = remote_host(&state, &id)? {
+        state.mesh.rpc(&host, "code.set_mode", serde_json::json!({ "id": id, "modeId": mode_id })).await?;
+        return Ok(());
+    }
     Ok(state.code.set_mode(&id, mode_id).await?)
 }
 
@@ -518,6 +630,11 @@ async fn code_rewind(
     preview: String,
     revert_files: bool,
 ) -> CmdResult<()> {
+    if let Some(host) = remote_host(&state, &id)? {
+        let params = serde_json::json!({ "id": id, "ordinal": ordinal, "preview": preview, "revertFiles": revert_files });
+        state.mesh.rpc(&host, "code.rewind", params).await?;
+        return Ok(());
+    }
     Ok(state.code.rewind(&id, ordinal, preview, revert_files).await?)
 }
 
@@ -526,13 +643,172 @@ fn code_usage(state: State<'_, AppState>, id: String) -> CmdResult<usage::UsageV
     Ok(state.db.code_usage(&id)?.view())
 }
 
+/// Answer a permission request; `id` (the session) routes it to the node running the agent.
 #[tauri::command]
-fn code_permission_respond(
+async fn code_permission_respond(
     state: State<'_, AppState>,
     request_id: String,
     option_id: Option<String>,
-) {
+    id: Option<String>,
+) -> CmdResult<()> {
+    if let Some(id) = id
+        && let Some(host) = remote_host(&state, &id)?
+    {
+        let params = serde_json::json!({ "requestId": request_id, "optionId": option_id });
+        state.mesh.rpc(&host, "code.permission", params).await?;
+        return Ok(());
+    }
     state.code.respond_permission(&request_id, option_id);
+    Ok(())
+}
+
+// ---------------- mesh ----------------
+
+/// Serves other nodes' requests: remote control of sessions hosted here.
+struct MeshRpc {
+    app: tauri::AppHandle,
+}
+
+fn param<'a>(p: &'a serde_json::Value, k: &str) -> anyhow::Result<&'a str> {
+    p[k].as_str().ok_or_else(|| anyhow::anyhow!("missing {k}"))
+}
+
+#[async_trait::async_trait]
+impl mesh::RpcHandler for MeshRpc {
+    async fn call(&self, from: String, method: String, p: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        use serde_json::{Value, json};
+        let state = self.app.state::<AppState>();
+        let id = || param(&p, "id").map(str::to_owned);
+        match method.as_str() {
+            "code.start" => code_start_local(&self.app, &state, id()?).await.map(|_| Value::Null),
+            "code.is_running" => Ok(json!(state.code.is_running(&id()?))),
+            "code.stop" => {
+                state.code.stop(&id()?);
+                Ok(Value::Null)
+            }
+            "code.prompt" => {
+                let atts: Vec<String> = serde_json::from_value(p["attachmentIds"].clone()).unwrap_or_default();
+                let mentions: Vec<String> = serde_json::from_value(p["mentions"].clone()).unwrap_or_default();
+                let text = p["text"].as_str().unwrap_or_default().to_owned();
+                code_prompt_local(&self.app, &state, id()?, text, atts, mentions, from).await.map(|_| Value::Null)
+            }
+            "code.cancel" => {
+                ensure_local_host(&state, &id()?)?;
+                state.code.send(&id()?, AgentCmd::Cancel).map(|_| Value::Null)
+            }
+            "code.set_model" => code_set_model_local(&state, &id()?, param(&p, "modelId")?.to_owned()).await.map(|_| Value::Null),
+            "code.set_mode" => {
+                ensure_local_host(&state, &id()?)?;
+                state.code.set_mode(&id()?, param(&p, "modeId")?.to_owned()).await.map(|_| Value::Null)
+            }
+            "code.rewind" => {
+                ensure_local_host(&state, &id()?)?;
+                let ordinal = p["ordinal"].as_u64().unwrap_or(0) as usize;
+                let preview = p["preview"].as_str().unwrap_or_default().to_owned();
+                let revert = p["revertFiles"].as_bool().unwrap_or(false);
+                state.code.rewind(&id()?, ordinal, preview, revert).await.map(|_| Value::Null)
+            }
+            "code.permission" => {
+                let opt = p["optionId"].as_str().map(str::to_owned);
+                state.code.respond_permission(param(&p, "requestId")?, opt);
+                Ok(Value::Null)
+            }
+            "code.files" => {
+                let s = state.db.get_code_session(&id()?)?.ok_or_else(|| anyhow::anyhow!("no such session"))?;
+                let files = tokio::task::spawn_blocking(move || files::list(std::path::Path::new(&s.cwd))).await??;
+                Ok(json!(files))
+            }
+            "chat.cancel" => {
+                state.chat.cancel(param(&p, "conversationId")?);
+                Ok(Value::Null)
+            }
+            other => anyhow::bail!("unknown request {other}"),
+        }
+    }
+
+    fn synced(&self, applied: &mesh::sync::Applied) {
+        if !applied.tables.contains("code_sessions") {
+            return;
+        }
+        let state = self.app.state::<AppState>();
+        // A session that moved away or was deleted elsewhere stops running here.
+        for (t, pk) in &applied.rows {
+            if t != "code_sessions" || !state.code.is_running(pk) {
+                continue;
+            }
+            let here = state
+                .db
+                .get_code_session(pk)
+                .ok()
+                .flatten()
+                .is_some_and(|s| s.host_node.as_deref().is_none_or(|h| h == state.mesh.node_id()));
+            if !here {
+                state.code.stop(pk);
+            }
+        }
+    }
+}
+
+#[tauri::command]
+fn mesh_status(state: State<'_, AppState>) -> serde_json::Value {
+    state.mesh.status()
+}
+
+#[tauri::command]
+async fn mesh_create(state: State<'_, AppState>, passphrase: String, name: String) -> CmdResult<()> {
+    Ok(state.mesh.create(&passphrase, &name)?)
+}
+
+#[tauri::command]
+async fn mesh_join(state: State<'_, AppState>, url: String, passphrase: String, name: String) -> CmdResult<()> {
+    Ok(state.mesh.join(&url, &passphrase, &name)?)
+}
+
+#[tauri::command]
+async fn mesh_cancel_join(state: State<'_, AppState>) -> CmdResult<()> {
+    state.mesh.cancel_join();
+    Ok(())
+}
+
+#[tauri::command]
+async fn mesh_approve(state: State<'_, AppState>, node_id: String) -> CmdResult<()> {
+    Ok(state.mesh.approve(&node_id)?)
+}
+
+#[tauri::command]
+async fn mesh_reject(state: State<'_, AppState>, node_id: String) -> CmdResult<()> {
+    state.mesh.reject(&node_id);
+    Ok(())
+}
+
+#[tauri::command]
+async fn mesh_remove(state: State<'_, AppState>, node_id: String) -> CmdResult<()> {
+    Ok(state.mesh.remove(&node_id)?)
+}
+
+#[tauri::command]
+async fn mesh_leave(state: State<'_, AppState>) -> CmdResult<()> {
+    Ok(state.mesh.leave().await?)
+}
+
+#[tauri::command]
+async fn mesh_set_config(
+    state: State<'_, AppState>,
+    name: Option<String>,
+    listen: Option<String>,
+    advertise: Option<Vec<String>>,
+) -> CmdResult<()> {
+    Ok(state.mesh.set_config(name.as_deref(), listen.as_deref(), advertise)?)
+}
+
+#[tauri::command]
+fn mesh_add_address(state: State<'_, AppState>, url: String) -> CmdResult<()> {
+    Ok(state.mesh.add_address(&url)?)
+}
+
+#[tauri::command]
+fn mesh_chat_streams(state: State<'_, AppState>) -> Vec<mesh::node::Stream> {
+    state.mesh.remote_streams()
 }
 
 // ---------------- terminal ----------------
@@ -585,8 +861,15 @@ fn save_code_transcript(state: State<'_, AppState>, id: String, json: String) ->
     Ok(state.db.set_code_transcript(&id, &json)?)
 }
 
+/// Files under `cwd` for @-mentions; with `session_id`, on whichever node hosts that session.
 #[tauri::command]
-async fn list_project_files(cwd: String) -> CmdResult<Vec<String>> {
+async fn list_project_files(state: State<'_, AppState>, cwd: String, session_id: Option<String>) -> CmdResult<Vec<String>> {
+    if let Some(id) = session_id
+        && let Some(host) = remote_host(&state, &id)?
+    {
+        let v = state.mesh.rpc(&host, "code.files", serde_json::json!({ "id": id })).await?;
+        return Ok(serde_json::from_value(v)?);
+    }
     Ok(tokio::task::spawn_blocking(move || files::list(std::path::Path::new(&cwd))).await??)
 }
 
@@ -606,12 +889,16 @@ struct McpServerInput {
 
 #[tauri::command]
 fn save_mcp_server(state: State<'_, AppState>, input: McpServerInput) -> CmdResult<McpServer> {
-    Ok(code::mcp::save(&state.db, input.id, &input.name, input.enabled, input.config)?)
+    let saved = code::mcp::save(&state.db, input.id, &input.name, input.enabled, input.config)?;
+    state.mesh.secrets_changed();
+    Ok(saved)
 }
 
 #[tauri::command]
 fn delete_mcp_server(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    Ok(code::mcp::delete(&state.db, &id)?)
+    code::mcp::delete(&state.db, &id)?;
+    state.mesh.secrets_changed();
+    Ok(())
 }
 
 #[tauri::command]
@@ -718,13 +1005,27 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let db = Arc::new(Db::open(&data_dir.join("patchbay.sqlite"))?);
+            let keys = Arc::new(mesh::keys::OsKeyStore::new(&data_dir));
+            let mesh = Mesh::new(db.clone(), data_dir.clone(), keys)?;
+            {
+                use tauri::Emitter;
+                let h = app.handle().clone();
+                mesh.set_ui(Arc::new(move |name: &str, payload: serde_json::Value| {
+                    let _ = h.emit(name, payload);
+                }));
+            }
+            mesh.set_handler(Arc::new(MeshRpc { app: app.handle().clone() }));
             app.manage(AppState {
                 db,
                 data_dir,
                 chat: Arc::default(),
                 code: Arc::default(),
                 terminals: TerminalManager::default(),
+                mesh: mesh.clone(),
             });
+            if mesh.is_member() {
+                tauri::async_runtime::spawn(async move { mesh.start() });
+            }
             let handle = app.handle().clone();
             // A tray needs a StatusNotifier host on Linux; never let its absence stop the app.
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| desktop::build_tray(&handle))) {
@@ -806,6 +1107,17 @@ pub fn run() {
             usage_report,
             quick_submit,
             quick_dismiss,
+            mesh_status,
+            mesh_create,
+            mesh_join,
+            mesh_cancel_join,
+            mesh_approve,
+            mesh_reject,
+            mesh_remove,
+            mesh_leave,
+            mesh_set_config,
+            mesh_add_address,
+            mesh_chat_streams,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Patchbay")
@@ -815,6 +1127,7 @@ pub fn run() {
             {
                 state.code.stop_all();
                 state.terminals.close_all();
+                state.mesh.stop();
             }
         });
 }

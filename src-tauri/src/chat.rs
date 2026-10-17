@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
 use serde::Serialize;
-use tauri::ipc::Channel;
 use tokio_util::sync::CancellationToken;
 use xai_grok_sampler::{RequestId, RetryPolicy, SamplerActor, SamplingChannel, SamplingEvent};
 use xai_grok_sampling_types::{ContentPart, ConversationItem, ConversationRequest};
@@ -44,6 +43,25 @@ pub enum ChatEvent {
     Title {
         title: String,
     },
+}
+
+/// Where a reply's progress goes: the UI that asked, plus every other mesh node.
+pub type ChatSink = Arc<dyn Fn(ChatEvent) + Send + Sync>;
+
+/// Lets `send` call `channel.send(ev)` on the sink like on a Tauri channel.
+pub struct Emit(pub ChatSink);
+
+impl Emit {
+    pub fn send(&self, ev: ChatEvent) -> Result<()> {
+        (self.0)(ev);
+        Ok(())
+    }
+}
+
+impl Clone for Emit {
+    fn clone(&self) -> Self {
+        Emit(self.0.clone())
+    }
 }
 
 #[derive(Default)]
@@ -144,7 +162,8 @@ pub async fn send(
     model_ref: String,
     turn: Turn,
     reasoning_effort: Option<String>,
-    channel: Channel<ChatEvent>,
+    channel: Emit,
+    mesh: crate::mesh::Mesh,
 ) -> Result<()> {
     let conv = db
         .get_conversation(&conversation_id)?
@@ -202,6 +221,15 @@ pub async fn send(
         db.update_conversation(&conversation_id, Some(&title), None, None)?;
         let _ = channel.send(ChatEvent::Title { title: title.clone() });
         derived_title = Some(title);
+    }
+
+    // Attachments added on another node are fetched from a peer before they're read.
+    for m in db.path_to(&conversation_id, &user_id)? {
+        for a in &m.attachments {
+            if !std::path::Path::new(&a.path).exists() {
+                mesh.ensure_file(&a.sha256, &a.name).await?;
+            }
+        }
     }
 
     let history = {
