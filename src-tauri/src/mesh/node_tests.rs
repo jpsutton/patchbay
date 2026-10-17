@@ -107,7 +107,9 @@ async fn join_sync_relay_and_rpc() {
     until("key on bravo", 10, || b.keys.get("prov-a").as_deref() == Some("sk-alpha")).await;
     assert_eq!(b.db.list_providers().unwrap().len(), 1);
 
-    // C joins through B. A never learns an address for C, so it has to go through B.
+    // C joins through B. A and C can't reach each other, so they talk through B.
+    a.mesh.block_direct(c.mesh.node_id());
+    c.mesh.block_direct(a.mesh.node_id());
     admit(&b, &c).await;
     let cid = c.mesh.node_id().to_owned();
     until("chat on charlie", 10, || c.db.get_conversation(&conv.id).unwrap().is_some()).await;
@@ -184,4 +186,15 @@ async fn chat_streams_show_live_and_survive_a_lost_streamer() {
     })
     .await;
     assert!(b.mesh.remote_streams().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn members_find_each_other_through_gossip() {
+    let (a, b, c) = (node("alpha4"), node("bravo4"), node("charlie4"));
+    a.mesh.create(PASS, "alpha4").unwrap();
+    admit(&a, &b).await;
+    // C only ever learns B's address; B tells everyone where it reached C.
+    admit(&b, &c).await;
+    let cid = c.mesh.node_id().to_owned();
+    until("alpha connects to charlie directly", 20, || member_state(&a, &cid) == "direct").await;
 }

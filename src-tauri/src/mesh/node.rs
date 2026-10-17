@@ -83,6 +83,8 @@ struct State {
     backoff: HashMap<String, (u32, Instant)>,
     dialing: HashSet<String>,
     relaying_to: HashSet<String>,
+    /// Nodes never dialed directly (tests use it to force relaying).
+    no_direct: HashSet<String>,
     /// Known URLs per node.
     addrs: HashMap<String, BTreeSet<String>>,
     streams: HashMap<String, Stream>,
@@ -418,6 +420,12 @@ impl Mesh {
         self.0.rpc(node, method, params, Duration::from_secs(30 * 60)).await
     }
 
+    /// Never dial `node` directly (tests).
+    #[cfg(test)]
+    pub fn block_direct(&self, node: &str) {
+        self.0.st.lock().unwrap().no_direct.insert(node.to_owned());
+    }
+
     pub fn connected(&self, node: &str) -> bool {
         self.0.st.lock().unwrap().sessions.contains_key(node)
     }
@@ -719,7 +727,8 @@ impl Inner {
                 if sess.is_some_and(|s| s.via.is_none()) {
                     continue;
                 }
-                for u in st.addrs.get(&m.node_id).into_iter().flatten() {
+                let direct = if st.no_direct.contains(&m.node_id) { None } else { st.addrs.get(&m.node_id) };
+                for u in direct.into_iter().flatten() {
                     urls.push((u.clone(), Some(m.node_id.clone())));
                 }
                 if sess.is_none() {
@@ -902,15 +911,13 @@ impl Inner {
             bail!("peer speaks mesh protocol {}", theirs.version);
         }
         let mut addrs = theirs.addrs.clone();
-        if let (Some(ip), Some(port)) = (ip, theirs.listen_port) {
-            addrs.push(match ip {
-                IpAddr::V6(v6) => format!("ws://[{v6}]:{port}"),
-                IpAddr::V4(v4) => format!("ws://{v4}:{port}"),
-            });
-        }
-        if let Some(u) = &url {
-            addrs.push(u.clone());
-        }
+        // Where this peer can be reached: the URL we dialed, or its address as seen here.
+        let reach = url.clone().or_else(|| match (ip, theirs.listen_port) {
+            (Some(IpAddr::V6(v6)), Some(port)) => Some(format!("ws://[{v6}]:{port}")),
+            (Some(IpAddr::V4(v4)), Some(port)) => Some(format!("ws://{v4}:{port}")),
+            _ => None,
+        });
+        addrs.extend(reach.clone());
         let noise_pub = hex::encode(sec.remote_static);
         let my_mesh = self.mesh_id();
 
@@ -948,7 +955,7 @@ impl Inner {
             {
                 send(&mut sec, &link, &Msg::DataKey { key: dk.encode() })?;
             }
-            return self.session(sec, link, theirs.node_id, theirs.name, opener, via, url, token).await;
+            return self.session(sec, link, theirs.node_id, theirs.name, opener, via, reach, token).await;
         }
 
         // We are joining: wait for a member to admit us.
@@ -999,7 +1006,7 @@ impl Inner {
                     self.learn_addrs(&theirs.node_id, addrs);
                     self.emit_status();
                     let opener = self.me.clone();
-                    return self.session(sec, link, theirs.node_id, theirs.name, opener, via, url, token).await;
+                    return self.session(sec, link, theirs.node_id, theirs.name, opener, via, reach, token).await;
                 }
                 Some(_) => {}
             }
@@ -1390,6 +1397,9 @@ impl Inner {
                 };
                 if newer {
                     self.learn_addrs(&r.origin, r.addrs.clone());
+                    for (n, u) in r.peers.iter().filter(|(n, _)| *n != self.me) {
+                        self.learn_addrs(n, [u.clone()]);
+                    }
                     // Flood onwards.
                     let st = self.st.lock().unwrap();
                     for (n, s) in &st.sessions {
@@ -1513,6 +1523,12 @@ impl Inner {
                     .map(|(n, s)| (n.clone(), s.rtt.unwrap_or(50)))
                     .collect(),
                 addrs: self.advertise(),
+                peers: st
+                    .sessions
+                    .iter()
+                    .filter(|(_, s)| s.via.is_none())
+                    .filter_map(|(n, s)| s.url.clone().map(|u| (n.clone(), u)))
+                    .collect(),
             }
         };
         self.broadcast(Msg::Links(report));

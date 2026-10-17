@@ -67,7 +67,9 @@ cargo test --lib smoke -- --ignored           # chat (both backends), title gene
 PATCHBAY_SMOKE_KIND=openai cargo test --lib smoke_code -- --ignored
 ```
 
-To try the UI alone in a browser, run `pnpm dev` and open http://localhost:1420. Outside Tauri, a dev-only in-memory fake backend (`src/dev/fakeBackend.ts`) stands in for Rust.
+To try the UI alone in a browser, run `pnpm dev` and open http://localhost:1420. Outside Tauri, a dev-only in-memory fake backend (`src/dev/fakeBackend.ts`) stands in for Rust. Add `?mesh=1` to the URL to start as a member of a fake four-computer mesh, with a pending join request, sessions running on other computers (one of them offline) and a chat reply streaming in from another computer.
+
+The mesh's end-to-end tests run real nodes over WebSocket on localhost: `cargo test --lib mesh`.
 
 ## Layout
 

@@ -81,8 +81,8 @@ function Setup() {
   return (
     <div className="flex max-w-2xl flex-col gap-4 pb-4">
       <p className="text-xs leading-5 text-muted">
-        Link your computers into a mesh. Chats, Code sessions and settings (API keys included, encrypted) sync between
-        them, live. From any of them you can drive a Code session running on another, or move the session over.
+        Link your computers into a mesh. Chats, Code sessions, prompts, providers and MCP servers (API keys included,
+        encrypted) sync between them, live. From any of them you can drive a Code session running on another, or move the session over.
         Computers connect directly over a network you already have, such as Tailscale, ZeroTier, a VPN or a Cloudflare
         Tunnel. Nothing goes through a cloud service.
       </p>

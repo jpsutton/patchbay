@@ -37,6 +37,9 @@ pub struct LinkReport {
     /// (peer node, round-trip ms)
     pub links: Vec<(String, u32)>,
     pub addrs: Vec<String>,
+    /// (peer node, URL it was reached at), so others can try the same address directly.
+    #[serde(default)]
+    pub peers: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

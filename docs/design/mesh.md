@@ -1,177 +1,174 @@
-# Patchbay Mesh: remote control and session migration (design sketch)
+# Patchbay Mesh: design
 
-Status: idea stage. This describes the desired end state and a plausible route there, not settled implementation.
+How Patchbay links one person's computers: membership, data sync, remote control of Code sessions, and moving sessions between computers. For using it, see [../mesh.md](../mesh.md). The code lives in `src-tauri/src/mesh/` (network and sync), `src-tauri/src/handoff.rs` (moving workspaces) and `src-tauri/src/code/agent_state.rs` (moving agent state).
 
 ## Goals
 
 1. **Peer-to-peer, no cloud broker.** Nodes reach each other over L3 the user already provides: Tailscale, ZeroTier, a VPN, or a Cloudflare Tunnel. Patchbay never phones home, and no service reaches into a machine.
 2. **Shared-secret membership.** A node proves it knows the mesh passphrase without sending it, and the user approves it before it joins. All data syncs across all members.
 3. **Location-independent sessions.** Any node can drive a Code session hosted on another node. The user can also move a session to a different node, on purpose or after its host dies.
+4. **As live as possible.** Agent output and chat replies show on every node while they happen, not once they finish.
 
 ## Non-goals
 
-- NAT traversal, third-party relays and discovery across the internet. The L3 layer handles reachability. Members can relay for each other (§1), but nothing outside the mesh does.
-- Multi-user collaboration. One person owns the mesh. Every member trusts every other member fully.
-- Live migration of running processes. Terminals, dev servers and in-flight tool calls do not move. Sessions move only at a turn boundary.
+- NAT traversal, third-party relays and discovery across the internet. The L3 layer handles reachability. Members relay for each other, but nothing outside the mesh does.
+- Multi-user collaboration. One person owns the mesh, and every member trusts every other member fully.
+- Live migration of running processes. Terminals, dev servers and in-flight tool calls don't move. Sessions move only between turns.
 
 ## Vocabulary
 
-- **Node**: one Patchbay install. Each has a long-lived ed25519 identity key (`node_id` = hash of the public key) and a display name.
-- **Mesh**: the set of approved nodes that share one mesh passphrase.
-- **Host**: the node that runs a Code session's agent process and owns its working tree. Every Code session has exactly one host at a time.
-- **Controller**: any node whose UI is driving a session. The host is usually also a controller.
+- **Node**: one Patchbay install. It has a random `node_id` (in `sync_meta`), an X25519 key for Noise and an Ed25519 key for signing records (both in `mesh/identity.json`, mode 0600), and a display name.
+- **Mesh**: the set of approved nodes that share one passphrase and one `mesh_id`.
+- **Host**: the node that runs a Code session's agent and owns its working tree. Each session has exactly one host, recorded in `code_sessions.host_node`.
 
 ## 1. Transport and membership
 
 ### Wire
 
-One listener per node: **WebSocket over TCP**, default port 41890 (any port the user picks). WebSocket is chosen so a plain Cloudflare Tunnel HTTP hostname works with no `cloudflared` on the client side. Tailscale and ZeroTier carry it unchanged.
+Each node runs one listener: **WebSocket over TCP**, `0.0.0.0:41890` by default. WebSocket lets a plain Cloudflare Tunnel hostname work with no `cloudflared` on the dialing side, and overlays carry it unchanged.
 
-Every connection runs two steps inside the WebSocket:
+Every connection runs two steps inside the WebSocket (`mesh/handshake.rs`):
 
-1. **PAKE on the mesh passphrase.** Symmetric SPAKE2 (RustCrypto `spake2`, `start_symmetric`) or CPace. Both suit a shared secret with no client/server roles. The output is a 256-bit key `K`. The passphrase never crosses the wire, and a recorded handshake gives an attacker nothing to brute-force offline. Each failed attempt tests one guess, so the passphrase can be memorable as long as failures are rate-limited per source address.
-2. **Noise `XXpsk3`** (Rust: `snow`) with `K` as the PSK. That adds:
-   - mutual exchange of node static keys, so each peer learns the other's `node_id`;
-   - encryption and forward secrecy for everything after the handshake. model-inmate's handshake is proof-of-knowledge only and leaves later traffic in the clear. That is acceptable on an isolated VLAN, but not over a tunnel whose edge terminates TLS;
-   - binding of every field to the handshake transcript. model-inmate had to add a separate HMAC over its SSH key offer because the HS2 proof did not cover added fields. Noise closes that gap by construction.
+1. **Symmetric SPAKE2** (RustCrypto `spake2`) on the passphrase, giving a 32-byte key `K`. The passphrase never crosses the wire, and a recorded handshake gives an attacker nothing to test guesses against offline. Each guess costs a live attempt, and the listener doubles a source's wait after every failure (up to 5 minutes). That makes a memorable passphrase acceptable.
+2. **Noise `XXpsk0`** (`snow`) with `K` as the pre-shared key and both SPAKE2 messages in the prologue. That adds mutual exchange of static keys, encryption with forward secrecy, and binding of every later field to the handshake.
 
-The SPAKE2 transcript is fed into the Noise prologue, so the two steps cannot be spliced from different connections.
+`psk0` mixes `K` in from the first message, so a wrong passphrase fails on message 1 and no static key is revealed to a non-member. The responder then sends a short plaintext marker, so the dialer can tell "wrong passphrase" from a network failure.
 
-This is the same idea as model-inmate's `SHA256(secret || salt_a || salt_b || role)`, upgraded from "prove you know it" to "derive keys from it, and resist guessing."
+After the handshake, each JSON message (`mesh/wire.rs`) is split into Noise transport frames of up to 64 KiB.
+
+This is model-inmate's `SHA256(secret || salt_a || salt_b || role)` idea, upgraded from "prove you know it" to "derive keys from it, and resist guessing". It also closes model-inmate's gap where fields added to HS2 weren't covered by its proof.
 
 ### Admission
 
-The passphrase alone does not make a node a member. Joining has two gates:
+Knowing the passphrase doesn't make a node a member:
 
-1. The new node completes the handshake with any member, which proves it knows the passphrase. It is now **pending**: it can see the member list and nothing else.
-2. A user approves it on any existing member. The approval dialog shows the new node's name and a short code derived from both static keys. The same code is shown on the new node, so the user can confirm they match (as in Bluetooth pairing).
+1. The joining node completes the handshake with any member and says it is joining. It becomes **pending** on that member and receives nothing but a `JoinPending` message.
+2. Both screens show a six-digit code derived from both nodes' static keys. The user compares them and approves on the member.
+3. The member signs an **admission record** (`mesh_id`, `node_id`, both public keys, approver, time) into the synced `mesh_members` table. It sends the joiner every member record and the mesh data key.
 
-The approving node signs an **admission record** (`node_id`, ed25519 signing key, X25519 Noise static key, name, approver, time) and publishes it through sync. Every node checks that each admission record is signed by a node that was already a member. The member list is the source of truth for who is trusted. A non-member's connection is limited to the pending state, even if it knows the passphrase.
+Records are checked against the members a node already trusts (`members::verify_record`). Only a mesh's founder signs its own record. A member admitted elsewhere whose record hasn't synced yet presents it in its `Hello`, signed by an approver the other side already knows.
 
-Because admission is an explicit act by the user, every member is fully trusted. Remote control (§3) is on by default for every member, with no per-node opt-out.
+### Pinning and removal
 
-### Peer pinning and removal
+A member's `node_id` is bound to the keys in its record. A connection that presents other keys under that id is refused, so knowing the passphrase doesn't let a node impersonate a member. A joining node with a known id but new keys (a reinstall) goes back through approval.
 
-A member's `node_id` is bound to the static key in its admission record. A different key under a known `node_id` is rejected, so a node that knows the passphrase cannot impersonate a member.
-
-Removing a node publishes a signed **removal record**. Members then refuse that node's key, and they rotate the mesh data key (§2) so it cannot read later changes. Changing the passphrase is optional because the removal record already locks the node out, though it is good hygiene.
+Removal signs `removed_by`/`removed_at` into the record. The remover rotates the data key. Connections to the removed node close two seconds later, so the removal record reaches it first and it stops itself.
 
 ### Discovery
 
-There is no broadcast across L3. Each node keeps a **peer address book** (`node_id`, last-known addresses). To join, the user enters one reachable address and the passphrase. After that, peers gossip addresses, so one seed is enough. On a LAN, mDNS can optionally fill in addresses.
+There is no broadcast across L3. A node learns peer addresses from:
+
+- the address the user entered to join, and any extra seeds (`mesh.seeds`);
+- each `Hello`: the peer's configured public addresses, plus its address as seen on an inbound connection with its listen port;
+- **link reports**, flooded through the mesh, which carry each node's public addresses and the URL it reached each direct peer at.
+
+Known addresses persist in `settings` (`mesh.addrs`). A connector loop dials every member without a direct connection every 3 seconds, with exponential backoff per URL.
 
 ### Relaying through a third node
 
-Overlays are not always a full mesh. For example, a laptop on Tailscale and a desktop on ZeroTier might both reach a home server that is on both. Patchbay detects this and routes through the server.
+If A can't reach B but both reach C:
 
-- **Link state:** each node gossips its live links: which members it has an open session with, and the round-trip time of each. Every node builds the same small graph from these reports.
-- **Detection:** when A cannot open a direct session to B, but the graph shows both have a live link to C, A has a relay path. With several candidates, A picks the shortest path by summed RTT. Paths with more than one hop work the same way.
-- **End-to-end:** A runs its PAKE and Noise handshake with B *through* C. C forwards opaque frames. B's pinned key is still verified end to end, and C cannot read or alter the traffic.
-- **Back to direct:** A keeps retrying the direct link in the background, with backoff, and switches to it when it comes up. The UI shows a relayed peer as "via C".
+- Each link report lists the reporter's direct sessions and their round-trip times. Every node holds the same small graph.
+- With no session to B, A picks the first hop on the lowest-latency path (Dijkstra) and opens a **circuit**: frames go as `Relay { circuit, from, to, ttl }` messages that each hop forwards toward `to`.
+- A runs the full SPAKE2 and Noise handshake with B through the circuit, so B's keys are verified end to end and C only sees ciphertext.
+- A keeps dialing B directly. When a direct session comes up, it replaces the relayed one.
 
-Sync does not need relaying at all. Anti-entropy is transitive: a change made on A reaches B through C as an ordinary sync between neighbors. Relaying matters for traffic addressed to one specific node: remote control, file reads on a host, and migration transfers.
+When two sessions to the same node exist at once (both sides dialed), both ends keep the one opened by the lower `node_id`.
+
+Sync doesn't need relaying: a change from A reaches B through C as ordinary sync. Circuits matter for traffic addressed to one node: remote control, file fetches and moves.
 
 ## 2. Data sync
 
 ### What syncs
 
-| Data | Sync | Notes |
-| --- | --- | --- |
-| Conversations, messages | yes | Messages already form an immutable tree keyed by UUID, so merging is a set union. |
-| Code session metadata and transcript | yes | Includes `host_node` and the lease epoch (see §3). |
-| Prompts library, MCP server configs, permission rules | yes | Permission rules are scoped by project identity, not absolute path (see §4). |
-| Providers and models | yes, keys included | API keys sync sealed under the mesh data key. Each node decrypts them into its own OS keychain. |
-| Attachments | on demand | Already content-addressed by `sha256`; fetch from any peer that has the blob. |
-| Usage ledger | yes, per node | Append-only rows tagged with the node that spent the tokens. |
-| Agent working state (`$GROK_HOME/sessions`, worktrees) | no | Moved explicitly during migration and checkpointing (§4, §5). |
+| Data | Notes |
+| --- | --- |
+| Conversations, messages, message attachments | Messages form an immutable tree keyed by UUID, so concurrent sends become siblings. |
+| Attachment records | The bytes are fetched on demand from any connected peer (`mesh.file` RPC) and checked against their SHA-256. `attachments.path` stays local. |
+| Code sessions | Including the cached transcript, usage, `host_node` and `epoch`. |
+| Prompts, MCP servers, permission rules | Permission rules keep their absolute folder, so they apply only where paths match. |
+| Providers and models | `providers.inline_key` stays local. Keys travel sealed in `mesh_secrets`. |
+| `mesh_members`, `mesh_secrets` | Membership and sealed secrets. |
+| Not synced | The `settings` table: preferences, default model, mesh configuration. Agent state, which moves only with a session. |
 
-### Mechanism
+### Mechanism (`mesh/sync.rs`)
 
-Use a small op-log CRDT on top of the existing SQLite database. This is the model cr-sqlite uses, but without depending on that extension.
-
-- Each write through `db.rs` also appends `(node_id, seq, hlc, table, row_id, column, value)` to a local `changes` table. `hlc` is a hybrid logical clock.
-- Immutable rows (messages, attachments, usage) are insert-only. Mutable columns (title, pinned, `active_leaf_id`, system prompt) are last-writer-wins by `hlc`. A delete writes a tombstone.
-- Anti-entropy runs on connect and on every change: peers swap version vectors (`node_id → max seq`) and stream the missing ops. The UI receives the same events it gets for local writes, so remote changes appear live.
-
-The schema is small and the data has a single owner, so this stays a few hundred lines rather than a general CRDT library.
+- Every synced cell has a clock in `sync_clock`: `(hlc, origin, seq)`. SQLite triggers on each synced table maintain them, so the rest of the app writes its tables as before. The triggers compute the hybrid logical clock in SQL and skip writes made while `sync_meta.applying` is set.
+- A delete replaces the row's clocks with a tombstone (`col = '-'`). A delete beats concurrent edits of the same row, so a deleted conversation stays deleted even if another node added to it meanwhile.
+- Peers exchange version vectors (highest `seq` per origin). The sender reads the clocks newer than the peer's vector, orders them by HLC (so parents come before children), and reads the current cell values from the tables. Batches never split one change, and each carries the range it covers (`upto`), so stale clocks can't stall progress.
+- The receiver applies each cell only if its `(hlc, origin)` is newer than the local clock: last writer wins, per column. A row that can't be inserted yet, such as a message whose conversation hasn't arrived, is parked in `sync_parked` and retried after later batches.
+- Changes go out as they happen: a watcher notices local writes within 150 ms, and received changes are forwarded to the other peers.
+- Rows written before sync existed get clocks when the database opens.
 
 Every change goes to every member. There is no partial replication.
 
 ### Mesh data key
 
-Noise protects data on the wire. Secrets also need protection at rest in each node's op log. For that, the mesh has a random 256-bit **data key**:
+Secrets also need protection at rest in each node's database. The mesh has a random 256-bit **data key** with a generation number, kept in each member's keychain:
 
-- The approving node hands it to a new member over Noise right after admission.
-- Secret values (provider API keys, `inline_key`) are written to the op log as ciphertext under this key (XChaCha20-Poly1305). A node decrypts a key only to store it in its own keychain.
-- On removal, a member generates a new data key, sends it to the remaining members, and re-seals the current secrets under it. The removed node keeps whatever keys it already had. The UI should therefore list the provider keys that were synced to it and suggest revoking them at each provider.
+- `mesh_secrets` holds each secret as XChaCha20-Poly1305 ciphertext, with the keyring account as associated data, plus a keyed digest so unchanged secrets aren't rewritten. A member writes it after any key change in Settings (`secrets::reseal`). A receiving node installs it into its own keychain.
+- The approver sends the key to a new member. On connect, the side with the newer generation sends it to the other. Removal rotates it and re-seals every secret.
+- If two members rotate at once, the higher (generation, key) wins everywhere, and each node re-seals under the winner.
+- MCP secrets stored inline (on machines without a keyring) are blanked in the synced config and travel only sealed.
+
+A removed node keeps what it already had, so the Remove dialog tells the user to replace those keys with their providers.
 
 ## 3. Remote control
 
-### Ownership lease
+### Driving a session
 
-Every Code session row carries `host_node` and `epoch`. Only the host runs the agent. The epoch is a fencing token: every command and event carries it, and a node that sees a higher epoch for a session it thinks it hosts stops its agent at once.
+Code commands (`code_start`, `code_prompt`, `code_cancel`, `code_set_model`, `code_set_mode`, `code_rewind`, `code_permission_respond`, `list_project_files`) check the session's host. For a session hosted elsewhere they become RPCs to that node, which runs the local implementation (`MeshRpc` in `lib.rs`).
 
-### Driving a session from another node
+On the host, every agent event goes to the local window and to every member as a mesh event. A prompt also emits a `UserPrompt` event, so windows other than the sender's show it. Permission requests appear everywhere, and the first answer wins.
 
-The existing backend already has the seams this needs:
+A window that opens a session already running, here or elsewhere, calls `code_attach` instead of restarting the agent. The host keeps each running session's last `sessionReady`, open permission requests and latest usage, and replays them. The window shows the synced transcript cache until live events extend it.
 
-- **Events out:** `acp::spawn` emits every `CodeEvent` through a `Sink` closure (`src-tauri/src/code/mod.rs`). The host wraps that sink to push events to every connected member over the mesh, in addition to `app.emit`. Every node's sidebar therefore shows live status (working, waiting on permission, idle) for every session, not just the open one.
-- **Commands in:** `AgentManager::send`, `set_model`, `set_mode`, `rewind` and `respond_permission` become RPCs. A controller's UI calls the same Tauri commands. When the session's host is another node, the backend forwards the call there instead of to a local `AgentCmd` channel.
+The terminal panel stays local to the host.
 
-So the frontend barely changes: a session shows which node hosts it, and everything else behaves as it does locally. Permission prompts appear on every attached controller. The first answer wins, and the others are dismissed.
+### Fencing
 
-The terminal panel and the diff and file views read the host's filesystem through the same RPC path.
+Only the host runs a session's agent. A node refuses session commands for a session its database says another node hosts. When sync moves a session's host away from a node, that node stops the session's agent. `epoch` increments on every handover and records the order of hosts.
 
 ### Trust
 
-Remote control is on for every member, with no per-node switch. The agent runs shell commands on its host, so remote control amounts to remote code execution. The trust boundary is admission (§1): a node is a member only because the user approved it. Agent permission prompts still apply to remote controllers exactly as they do locally.
+Remote control is on for every member. The agent runs shell commands on its host, so remote control amounts to remote code execution, and admission is the trust boundary. Agent permission prompts apply to remote windows exactly as to local ones.
 
 ### Live chat streams
 
-Rule for the whole mesh: **everything is as live as possible.** A reply streaming on one node streams on every node, not just once it finishes.
+The node making a reply's LLM call is that reply's **streamer** while it generates. It sends each chat event to every member as it arrives, and every node keeps a buffer per streaming conversation. Only the finished message is committed, through sync.
 
-Plain chats have no host. The node that makes the LLM call for a reply is that reply's **streamer**, only while the reply is generating.
+- A node that connects mid-reply receives the streamer's buffer as a snapshot. A window opened mid-reply asks its own node for the streams it knows.
+- Stop on any node is forwarded to the streamer.
+- If the streamer's connection drops and it doesn't reconnect within 15 seconds, the other nodes save the partial reply with an "Interrupted" error. They all write the same message id, so their writes merge.
 
-- **Deltas are ephemeral.** The streamer pushes each `ChatEvent` (text, reasoning, usage, done) to every connected member as it arrives, tagged with the conversation and message ids. These events skip the op log. Only the finished message is committed, through sync, as one insert.
-- **Late joiners catch up.** A node that connects, or opens the chat, mid-stream asks the streamer for its buffer so far, then follows the live deltas.
-- **Stop works anywhere.** Stop on any node is forwarded to the streamer's `cancel`. That covers both the stop button in another node's UI and a node reached only through a relay.
-- **Concurrent sends are safe.** If two nodes send in the same chat at once, both messages become siblings in the existing message tree. Neither is lost.
-- **Streamer dies mid-reply.** The other nodes still hold the partial text from the deltas. When the streamer's link drops and no `done` has arrived, the first node to notice commits the partial reply with an "interrupted on <node>" error. The commit reuses the reply's message id, so if several nodes notice at once, their inserts merge into one row. Regenerate works as usual.
+## 4. Moving a session
 
-## 4. Planned migration
+`code_move(id, target, cwd)` runs on the target (as an RPC when the target is another node). The target pulls from the host:
 
-Moving a session from host A to node B, at a turn boundary:
+1. **Package** (`handoff::package`, on the host). The host refuses mid-turn. It marks the session as moving, which blocks restarts, and stops the agent so it flushes its files. It then commits the working tree on top of `HEAD` using a private index: tracked changes plus untracked, non-ignored files, without touching the user's branch or index. The commit goes to `refs/patchbay/handoff/<session>`. A `git bundle` carries that ref, leaving out commits the target already has (the target sends its branch and remote heads). A non-git folder is a tar of up to 512 MB. The agent's state goes alongside: for Grok Build, its `$GROK_HOME/sessions/<url-encoded cwd>/<id>/` directory without lock files.
+2. **Fetch.** The target copies the package files in 4 MB chunks (`code.fetch`).
+3. **Unpack** (`handoff::unpack`). An existing checkout must be clean. A missing folder gets `git init`. The target fetches the snapshot ref, checks out the branch at the host's `HEAD`, fast-forwarding it, or creating `<branch>-from-<node>` if the local branch has diverged. It then lays the snapshot tree on the worktree (`read-tree -u --reset`) and unstages it, so the changes appear uncommitted as they were on the host. Grok's session directory is restored under the new path, with the old path rewritten in its files.
+4. **Lease.** The target writes `host_node`, `epoch + 1`, the new `cwd`, and the ACP session id when the agent state came along. Without agent state, the session starts fresh, and the first prompt carries a hand-off note built from the transcript (`handoff::handoff_prompt`). That fallback works with any ACP agent.
+5. The host deletes its package. Its moving mark clears when the lease change arrives.
 
-1. **Quiesce.** A waits for the agent to go idle, with no pending permission request, then stops it with `stop_and_wait`.
-2. **Snapshot the workspace.** A records the uncommitted state without touching the user's branch: `git stash create` plus the untracked files, written to a ref such as `refs/patchbay/handoff/<session>`. A then sends a `git bundle` of that ref and the commits B lacks. A non-git folder falls back to a tarball.
-3. **Map the path.** Project identity is the git remote URL plus the path inside the repo, not the absolute path. B resolves that identity to its own checkout, or asks the user where to clone it. Per-node path mappings are remembered.
-4. **Move the agent state.** This depends on the harness, so it lives behind the harness adapter:
-   - *Grok Build adapter:* copy the session's directory from `$GROK_HOME/sessions/<url-encoded cwd>/<id>`, rewrite embedded paths, then `session/load` on B.
-   - *Generic ACP fallback:* `session/new` on B, seeded with a hand-off prompt built from the synced transcript (a summary plus the last few turns). This is lossy, but it works with any ACP agent, which keeps the Code tab harness-agnostic.
-5. **Hand over the lease.** A writes `host_node = B, epoch + 1` and syncs it. B starts the agent and resumes the session. A keeps the handoff ref until B confirms.
-
-The user sees a "Move to…" action on the session, a progress step per stage, and the session continuing on B.
+The target folder is chosen by the user and defaults to the host's path.
 
 ## 5. Surviving a dead host
 
-A dead host cannot run step 1 or step 2, so recovery has to rely on data that was already copied out.
+- **Transcript:** synced continuously.
+- **Checkpoints:** when a turn ends, the host announces it (`mesh://checkpoint`). Every member then pulls a fresh package of kind `checkpoint`, sending the snapshot commit it already holds, so the bundle carries only what changed. Members keep the git objects in a per-session bare mirror (`mesh/mirrors/<id>.git`) and the agent state and metadata in `mesh/checkpoints/<id>/`.
+- **Take over:** `code_take_over(id, cwd)` works only while the host is offline. It restores the latest local checkpoint from the mirror the same way as a move, then takes the lease at `epoch + 1`. At most the turn that was running is lost.
 
-- **Continuous transcript:** already covered by sync. The conversation is never lost.
-- **Checkpoint replication:** after each completed turn, the host pushes a workspace snapshot (step 2) and an agent-state blob (step 4) to every member, like all other changes. This uses the same code as migration and runs in the background. Bundles are incremental (only objects a peer lacks), so the steady-state cost is the size of each turn's edits.
-- **Adopt:** on another node, "Take over session" claims the lease at `epoch + 1` from the latest checkpoint. Only the in-flight turn is lost.
+Take-over is manual, because the mesh can't tell a dead host from a network partition. When the old host reconnects, sync shows that it lost the lease without a move it started. It stops the agent and commits whatever is in the working tree to `refs/patchbay/orphaned/<session>-<ms>`, then tells the user.
 
-Takeover is **manual, not automatic**. The mesh cannot tell a dead host from a network partition. If the old host comes back, it sees the higher epoch and stops its agent. It also keeps any work it did after the checkpoint on a `refs/patchbay/orphaned/<session>` ref, so nothing is silently discarded.
+## Known gaps
 
-## Phasing
-
-1. **Identity and transport:** node keys, SPAKE2 then Noise over WebSocket, admission with a confirmation code, member list in Settings.
-2. **Sync:** op log, anti-entropy, mesh data key, read-only view of sessions hosted elsewhere.
-3. **Remote control:** event fan-out, RPC forwarding, link-state gossip and relaying, a host badge in the UI.
-4. **Planned migration:** git bundle handoff, path mapping, both harness adapters.
-5. **Checkpoints and adopt:** background replication, fencing, orphaned refs.
-
-Each phase is useful by itself: phase 2 alone gives "my chats on every machine."
+- The terminal doesn't work remotely. Running it over the mesh means streaming PTY data to one window instead of broadcasting.
+- Folder mapping between nodes is manual: the move dialog defaults to the same path. Remembering a mapping per repository (by remote URL) would save typing.
+- Permission rules match absolute folders, so a rule saved on one node doesn't apply to the same project at a different path elsewhere.
+- Grok session directories whose encoded path exceeds 255 bytes use a hashed name Patchbay doesn't reproduce. Those sessions use the hand-off note.
+- Tombstones and parked rows are never compacted beyond a weekly expiry of parked rows.
 
 ## Later
 
-- **Phone and browser access.** Deferred. A node could serve the frontend (which already runs outside Tauri against `fakeBackend.ts`) to a browser on the overlay. That browser would need a SPAKE2 and Noise client in JS, or a per-node pairing token over HTTPS.
+- **Phone and browser access.** A node could serve the frontend, which already runs outside Tauri against `fakeBackend.ts`, to a browser on the overlay. That browser would need a SPAKE2 and Noise client in JavaScript, or a per-node pairing token over HTTPS.
