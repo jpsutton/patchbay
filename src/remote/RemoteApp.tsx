@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
 import { errorText, type CodeEnvelope, type CodeSession, type MeshChatEvent, type MeshMember } from "../lib/ipc";
 import { codeEventArrived, memberName, memberOnline, useStore } from "../lib/store";
 import { ChatView } from "../chat/ChatView";
@@ -230,6 +231,12 @@ function Main({ status, onLock }: { status: RemoteStatus; onLock: () => void }) 
     const st = useStore.getState();
     st.loadPrefs().catch(() => {});
     st.refreshMesh();
+    // Android 13 and later ask before an app may notify; the backend notifies when out of sight.
+    isPermissionGranted()
+      .then(async (ok) => {
+        if (!ok) await requestPermission();
+      })
+      .catch(() => {});
     const refresh = () => {
       const s = useStore.getState();
       Promise.all([s.refreshCatalog(), s.refreshConversations(), s.refreshCodeSessions()]).catch((e) => s.setToast(errorText(e)));
