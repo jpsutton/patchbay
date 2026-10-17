@@ -247,9 +247,10 @@ fn remote_unwatch(r: Shared<'_>, topic: String) {
     }
 }
 
-/// Keep the connection open in the background (Android's foreground service).
+/// Keep the connection open in the background (Android's foreground service). Async, so it runs
+/// off the main thread, which the plugin call waits on.
 #[tauri::command]
-fn remote_keep_alive(r: Shared<'_>, on: bool) -> CmdResult<()> {
+async fn remote_keep_alive(r: Shared<'_>, on: bool) -> CmdResult<()> {
     let st = r.client.status();
     let text = match st["gatewayName"].as_str() {
         Some(g) => format!("Connected through {g}"),

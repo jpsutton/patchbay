@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -122,7 +122,9 @@ pub struct RemoteClient(Arc<Inner>);
 struct Inner {
     dir: PathBuf,
     keys: Arc<dyn KeyStore>,
-    ident: Identity,
+    /// Loaded when the connection manager starts, not in `new`: on Android the key store calls
+    /// into the main thread, where `new` may be running.
+    ident: OnceLock<Identity>,
     sink: Sink,
     saved: Mutex<Saved>,
     tickets: Mutex<HashMap<String, Ticket>>,
@@ -135,19 +137,9 @@ struct Inner {
 }
 
 impl RemoteClient {
-    /// Load (or create) this client's identity and saved state under `dir`.
+    /// Load this client's saved state under `dir`. Its keys load when [`start`](Self::start)ed.
     pub fn new(dir: PathBuf, keys: Arc<dyn KeyStore>, sink: Sink) -> Result<Self> {
         std::fs::create_dir_all(&dir)?;
-        let ident = match keys.get(IDENTITY) {
-            Some(raw) => Identity::from_json(&raw).context("stored identity is corrupt")?,
-            None => {
-                let id = Identity::generate()?;
-                if !keys.set(IDENTITY, &id.to_json()) {
-                    bail!("could not store this device's keys");
-                }
-                id
-            }
-        };
         let mut saved: Saved = std::fs::read_to_string(dir.join("remote.json"))
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
@@ -155,15 +147,14 @@ impl RemoteClient {
         if saved.node_id.is_empty() {
             saved.node_id = hex::encode(rand::random::<[u8; 16]>());
         }
-        let tickets = keys.get(TICKETS).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let (connected, _) = watch::channel(false);
         let inner = Inner {
             dir,
             keys,
-            ident,
+            ident: OnceLock::new(),
             sink,
             saved: Mutex::new(saved),
-            tickets: Mutex::new(tickets),
+            tickets: Mutex::default(),
             st: Mutex::new(State { phase: "offline".into(), foreground: true, ..State::default() }),
             kick: Notify::new(),
             connected,
@@ -310,6 +301,31 @@ impl RemoteClient {
 }
 
 impl Inner {
+    /// This device's identity (created on first start) and resume tickets, from the key store.
+    fn load_keys(&self) -> Result<()> {
+        if self.ident.get().is_some() {
+            return Ok(());
+        }
+        let ident = match self.keys.get(IDENTITY) {
+            Some(raw) => Identity::from_json(&raw).context("stored identity is corrupt")?,
+            None => {
+                let id = Identity::generate()?;
+                if !self.keys.set(IDENTITY, &id.to_json()) {
+                    bail!("could not store this device's keys");
+                }
+                id
+            }
+        };
+        let tickets = self.keys.get(TICKETS).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        *self.tickets.lock().unwrap() = tickets;
+        let _ = self.ident.set(ident);
+        Ok(())
+    }
+
+    fn ident(&self) -> &Identity {
+        self.ident.get().expect("keys load before any connection")
+    }
+
     fn save(&self) {
         let s = serde_json::to_string_pretty(&*self.saved.lock().unwrap()).unwrap_or_default();
         if let Err(e) = write_private(&self.dir.join("remote.json"), s.as_bytes()) {
@@ -489,6 +505,12 @@ impl Inner {
             if self.stop.is_cancelled() {
                 return;
             }
+            if let Err(e) = self.load_keys() {
+                tracing::warn!("remote: keys: {e:#}");
+                self.set_phase("offline", Some(format!("{e:#}")));
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
             let joining = self.st.lock().unwrap().joining.as_ref().filter(|j| j.status == "connecting").map(|j| j.url.clone());
             let est = if let Some(url) = joining {
                 match self.clone().run_join(&url).await {
@@ -545,7 +567,7 @@ impl Inner {
         Hello {
             node_id: s.node_id.clone(),
             name: s.name.clone(),
-            sign_pub: self.ident.sign_pub_hex(),
+            sign_pub: self.ident().sign_pub_hex(),
             version: PROTOCOL_VERSION,
             mesh_id: if joining { None } else { s.mesh_id.clone() },
             record: if joining { None } else { record },
@@ -578,7 +600,7 @@ impl Inner {
     async fn run_join(self: Arc<Self>, url: &str) -> Result<Established> {
         let pass = self.st.lock().unwrap().joining.as_ref().map(|j| j.passphrase.clone()).unwrap_or_default();
         let mut link = ws::dial(url, DIAL_TIMEOUT).await?;
-        let mut sec = match handshake::initiate(&mut link, &pass, &self.ident.noise_private).await {
+        let mut sec = match handshake::initiate(&mut link, &pass, &self.ident().noise_private).await {
             Ok(s) => s,
             Err(HandshakeError::WrongPassphrase) => bail!("The passphrase doesn't match this mesh's"),
             Err(e) => return Err(e.into()),
@@ -586,7 +608,7 @@ impl Inner {
         let theirs = Self::their_hello(&mut sec, &mut link).await?;
         let Some(mesh_id) = theirs.mesh_id.clone() else { bail!("{} isn't in a mesh", theirs.name) };
         send(&mut sec, &link, &Msg::Hello(Box::new(self.hello(true))))?;
-        let code = handshake::confirmation_code(&self.ident.noise_public, &sec.remote_static);
+        let code = handshake::confirmation_code(&self.ident().noise_public, &sec.remote_static);
         self.update_join(|j| {
             j.code = Some(code.clone());
             j.status = "waiting".into();
@@ -611,8 +633,8 @@ impl Inner {
                     let me = self.saved.lock().unwrap().node_id.clone();
                     let mine = members.iter().find(|m| m.node_id == me);
                     let ok = mine.is_some_and(|m| {
-                        m.noise_pub == self.ident.noise_pub_hex()
-                            && m.sign_pub == self.ident.sign_pub_hex()
+                        m.noise_pub == self.ident().noise_pub_hex()
+                            && m.sign_pub == self.ident().sign_pub_hex()
                             && m.is_remote()
                             && m.mesh_id == mesh_id
                     });
@@ -733,7 +755,7 @@ impl Inner {
         let mut sec = None;
         if let Some(t) = ticket {
             let id: [u8; TICKET_ID_LEN] = hex::decode(&t.id)?.try_into().map_err(|_| anyhow!("bad ticket"))?;
-            match handshake::initiate_resume(&mut link, &self.ident.noise_private, &gw_static, &id, &hex32(&t.key)?).await {
+            match handshake::initiate_resume(&mut link, &self.ident().noise_private, &gw_static, &id, &hex32(&t.key)?).await {
                 Ok(s) => {
                     sec = Some(s);
                     resumed = true;
@@ -750,7 +772,7 @@ impl Inner {
             Some(s) => s,
             None => {
                 let pass = self.keys.get(PASSPHRASE).ok_or_else(|| anyhow!("the mesh passphrase is missing"))?;
-                match handshake::initiate(&mut link, &pass, &self.ident.noise_private).await {
+                match handshake::initiate(&mut link, &pass, &self.ident().noise_private).await {
                     Ok(s) => s,
                     Err(HandshakeError::WrongPassphrase) => bail!("the mesh passphrase changed; join again"),
                     Err(e) => return Err(e.into()),
