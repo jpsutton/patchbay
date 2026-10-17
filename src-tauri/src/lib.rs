@@ -39,6 +39,16 @@ pub struct AppState {
     mesh: Mesh,
     /// Sessions whose checkpoint is being fetched right now.
     pulling: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Per running session: the events a newly attached viewer needs to catch up.
+    live: std::sync::Mutex<std::collections::HashMap<String, LiveAgent>>,
+}
+
+/// What a window opening an already-running session (here or on another node) must replay.
+#[derive(Default)]
+struct LiveAgent {
+    ready: Option<serde_json::Value>,
+    permissions: Vec<(String, serde_json::Value)>,
+    usage: Option<serde_json::Value>,
 }
 
 /// Errors cross the IPC boundary as plain strings.
@@ -486,8 +496,30 @@ fn code_sink(app: &tauri::AppHandle, mesh: &Mesh) -> code::acp::Sink {
             CodeEvent::Status { state, .. } => state == "exited",
             _ => false,
         };
+        let state = app.state::<AppState>();
         if turn_over {
-            app.state::<AppState>().code.set_busy(&env.code_session_id, false);
+            state.code.set_busy(&env.code_session_id, false);
+        }
+        {
+            let mut live = state.live.lock().unwrap();
+            let id = env.code_session_id.clone();
+            let ev = serde_json::to_value(&env.event).unwrap_or_default();
+            match &env.event {
+                CodeEvent::SessionReady { .. } => live.entry(id).or_default().ready = Some(ev),
+                CodeEvent::Usage { .. } => live.entry(id).or_default().usage = Some(ev),
+                CodeEvent::Permission { request_id, .. } => {
+                    live.entry(id).or_default().permissions.push((request_id.clone(), ev))
+                }
+                CodeEvent::PermissionResolved { request_id } => {
+                    if let Some(l) = live.get_mut(&id) {
+                        l.permissions.retain(|(r, _)| r != request_id);
+                    }
+                }
+                CodeEvent::Status { state, .. } if state == "exited" => {
+                    live.remove(&id);
+                }
+                _ => {}
+            }
         }
         if matches!(env.event, CodeEvent::PromptDone { .. }) {
             let p = serde_json::json!({ "id": env.code_session_id, "host": mesh.node_id() });
@@ -518,6 +550,31 @@ async fn code_start(app: tauri::AppHandle, state: State<'_, AppState>, id: Strin
         return Ok(());
     }
     Ok(code_start_local(&app, &state, id).await?)
+}
+
+/// Catch-up for a window opening a running session: whether it runs and is mid-turn, plus the
+/// events that set up its controls (session ready, open permission requests, usage).
+fn code_attach_local(state: &AppState, id: &str) -> serde_json::Value {
+    let running = state.code.is_running(id);
+    let live = state.live.lock().unwrap();
+    let mut events = Vec::new();
+    if running && let Some(l) = live.get(id) {
+        events.extend(l.ready.clone());
+        events.extend(l.permissions.iter().map(|(_, e)| e.clone()));
+        events.extend(l.usage.clone());
+    }
+    serde_json::json!({ "running": running, "busy": state.code.is_busy(id), "events": events })
+}
+
+#[tauri::command]
+async fn code_attach(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
+    if let Some(host) = remote_host(&state, &id)? {
+        if !state.mesh.connected(&host) {
+            return Ok(serde_json::json!({ "running": false, "busy": false, "events": [], "offline": true }));
+        }
+        return Ok(state.mesh.rpc(&host, "code.attach", serde_json::json!({ "id": id })).await?);
+    }
+    Ok(code_attach_local(&state, &id))
 }
 
 #[tauri::command]
@@ -910,6 +967,7 @@ impl mesh::RpcHandler for MeshRpc {
         match method.as_str() {
             "code.start" => code_start_local(&self.app, &state, id()?).await.map(|_| Value::Null),
             "code.is_running" => Ok(json!(state.code.is_running(&id()?))),
+            "code.attach" => Ok(code_attach_local(&state, &id()?)),
             "code.stop" => {
                 state.code.stop(&id()?);
                 Ok(Value::Null)
@@ -1309,6 +1367,7 @@ pub fn run() {
                 terminals: TerminalManager::default(),
                 mesh: mesh.clone(),
                 pulling: Default::default(),
+                live: Default::default(),
             });
             if mesh.is_member() {
                 tauri::async_runtime::spawn(async move { mesh.start() });
@@ -1407,6 +1466,7 @@ pub fn run() {
             mesh_chat_streams,
             code_move,
             code_take_over,
+            code_attach,
             code_checkpoints,
         ])
         .build(tauri::generate_context!())
