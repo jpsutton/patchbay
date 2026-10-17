@@ -141,6 +141,11 @@ END;
 -- NULL until the UI has looked at the session's transcript.
 ALTER TABLE code_sessions ADD COLUMN activity TEXT;
 "#, r#"
+-- Which coding agent runs the session (an AgentKind id), and its own model id for agents
+-- that don't use Patchbay's models.
+ALTER TABLE code_sessions ADD COLUMN agent TEXT NOT NULL DEFAULT 'grok';
+ALTER TABLE code_sessions ADD COLUMN agent_model TEXT;
+"#, r#"
 -- Mesh sync (see src/mesh/sync.rs). `node_id` names this install; `seq` and `hlc` advance on every
 -- local change; `applying` is 1 while remote changes are written, so triggers don't re-log them.
 CREATE TABLE sync_meta (
@@ -452,6 +457,10 @@ pub struct CodeSession {
     pub created_at: i64,
     pub updated_at: i64,
     pub activity: Option<String>,
+    /// `AgentKind` id of the agent that runs this session.
+    pub agent: String,
+    /// The agent's own model id, for agents that keep their own model list.
+    pub agent_model: Option<String>,
     /// Node running this session's agent.
     pub host_node: Option<String>,
     /// Bumped on every handover between nodes.
@@ -906,7 +915,7 @@ impl Db {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT id, cwd, acp_session_id, title, model_ref, created_at, updated_at, pinned, activity,
-                    host_node, epoch
+                    agent, agent_model, host_node, epoch
              FROM code_sessions ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([], map_code_session)?;
@@ -918,7 +927,7 @@ impl Db {
             .conn()
             .query_row(
                 "SELECT id, cwd, acp_session_id, title, model_ref, created_at, updated_at, pinned, activity,
-                        host_node, epoch
+                        agent, agent_model, host_node, epoch
                  FROM code_sessions WHERE id = ?1",
                 [id],
                 map_code_session,
@@ -926,7 +935,12 @@ impl Db {
             .optional()?)
     }
 
-    pub fn create_code_session(&self, cwd: &str, model_ref: Option<&str>) -> Result<CodeSession> {
+    pub fn create_code_session(
+        &self,
+        cwd: &str,
+        model_ref: Option<&str>,
+        agent: &str,
+    ) -> Result<CodeSession> {
         let now = now_ms();
         // The sidebar groups sessions under their folder; the UI retitles from the first prompt.
         let title = "New session".to_owned();
@@ -940,14 +954,16 @@ impl Db {
             created_at: now,
             updated_at: now,
             activity: None,
+            agent: agent.to_owned(),
+            agent_model: None,
             host_node: Some(self.node_id()),
             epoch: 0,
         };
         self.conn().execute(
             "INSERT INTO code_sessions (id, cwd, acp_session_id, title, model_ref, created_at, updated_at,
-                                        host_node, epoch)
-             VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?5, ?6, 0)",
-            params![s.id, s.cwd, s.title, s.model_ref, now, s.host_node],
+                                        agent, host_node, epoch)
+             VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?5, ?6, ?7, 0)",
+            params![s.id, s.cwd, s.title, s.model_ref, now, s.agent, s.host_node],
         )?;
         Ok(s)
     }
@@ -990,6 +1006,14 @@ impl Db {
         self.conn().execute(
             "UPDATE code_sessions SET activity = ?2 WHERE id = ?1",
             params![id, activity],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_code_session_agent_model(&self, id: &str, model: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE code_sessions SET agent_model = ?2 WHERE id = ?1",
+            params![id, model],
         )?;
         Ok(())
     }
@@ -1307,8 +1331,10 @@ fn map_code_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<CodeSession> {
         updated_at: r.get(6)?,
         pinned: r.get(7)?,
         activity: r.get(8)?,
-        host_node: r.get(9)?,
-        epoch: r.get(10)?,
+        agent: r.get(9)?,
+        agent_model: r.get(10)?,
+        host_node: r.get(11)?,
+        epoch: r.get(12)?,
     })
 }
 
@@ -1326,7 +1352,7 @@ mod tests {
     #[test]
     fn code_session_activity_is_stored_without_bumping_updated_at() {
         let (db, _) = temp_db();
-        let s = db.create_code_session("/tmp", None).unwrap();
+        let s = db.create_code_session("/tmp", None, "grok").unwrap();
         assert_eq!(db.get_code_session(&s.id).unwrap().unwrap().activity, None);
         db.set_code_session_activity(&s.id, "branch").unwrap();
         let got = db.get_code_session(&s.id).unwrap().unwrap();

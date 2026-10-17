@@ -3,7 +3,9 @@ import {
   api,
   errorText,
   type AgentCapabilities,
+  type AgentExtensions,
   type AcpCommand,
+  type AcpConfigOption,
   type AcpModels,
   type AcpModes,
   type AcpPermissionRequest,
@@ -48,6 +50,10 @@ export interface CodeState {
   usage: UsageView | null;
   commands: AcpCommand[];
   capabilities: AgentCapabilities | null;
+  /** Session config options besides model and mode (e.g. reasoning effort). */
+  configOptions: AcpConfigOption[];
+  /** Non-standard extensions the agent understands; gates rewind and the like. */
+  extensions: AgentExtensions;
   /** Tool call id -> why a saved rule approved it. */
   autoApproved: Record<string, string>;
   /** Cached transcript from a previous run, shown until (or unless) the agent replays it. */
@@ -79,6 +85,8 @@ const emptyCode = (): CodeState => ({
   usage: null,
   commands: [],
   capabilities: null,
+  configOptions: [],
+  extensions: { statusLine: false, rewind: false },
   autoApproved: {},
   history: null,
   configRev: 0,
@@ -91,6 +99,7 @@ const AGENT_PREF_KEYS: (keyof Preferences)[] = [
   "autoCompactPercent",
   "backgroundSummaries",
   "claudeConfig",
+  "agentPaths",
 ];
 
 /** Persist what the transcript shows, so the session renders before the agent replays it. */
@@ -522,9 +531,20 @@ export const useStore = create<Store>((set, get) => ({
           models: e.models ?? null,
           modes: e.modes ?? null,
           capabilities: e.capabilities ?? null,
+          configOptions: e.configOptions ?? [],
+          extensions: e.extensions ?? { statusLine: false, rewind: false },
         };
         break;
       }
+      case "config":
+        // Options-based agents resend their full config; legacy model/mode lists stay as they are.
+        next = {
+          ...s,
+          models: e.models ?? s.models,
+          modes: e.modes ?? s.modes,
+          configOptions: e.configOptions ?? [],
+        };
+        break;
       case "autoApproved":
         next = { ...s, autoApproved: { ...s.autoApproved, [e.toolCallId]: e.description } };
         break;

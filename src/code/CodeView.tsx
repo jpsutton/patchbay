@@ -1,11 +1,15 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
+  AGENT_LABELS,
   api,
   errorText,
   estimateCost,
+  type AcpConfigOption,
   type AcpToolCall,
   type AcpToolCallContent,
+  type AgentId,
+  type AgentInfo,
   type Attachment,
 } from "../lib/ipc";
 import { memberName, memberOnline, remoteHost, useStore, type CodeState, type Entry } from "../lib/store";
@@ -42,10 +46,11 @@ import { JumpToBottom, ScrollFade, useStickyScroll } from "../lib/useStickyScrol
 
 export const NEW_SESSION_TITLE = "New session";
 
-export async function newSessionIn(dir: string) {
+/** Start a Code session in `dir` with `agent`, or the default agent from Settings. */
+export async function newSessionIn(dir: string, agent?: AgentId) {
   const st = useStore.getState();
   try {
-    const s = await api.createCodeSession(dir, st.defaultModelRef);
+    const s = await api.createCodeSession(dir, st.defaultModelRef, agent ?? st.prefs.defaultAgent);
     await st.refreshCodeSessions();
     st.setMode("code");
     st.selectCodeSession(s.id);
@@ -54,10 +59,47 @@ export async function newSessionIn(dir: string) {
   }
 }
 
-export async function openFolderAsSession() {
+export async function openFolderAsSession(agent?: AgentId) {
   const dir = await open({ directory: true, multiple: false, title: "Open project folder" });
   if (!dir || Array.isArray(dir)) return;
-  await newSessionIn(dir);
+  await newSessionIn(dir, agent);
+}
+
+/** Choices of a select config option, flattening groups. */
+function configChoices(o: AcpConfigOption) {
+  return o.options.flatMap((c) => ("options" in c ? c.options : [c]));
+}
+
+/** Picks the agent for new sessions on the empty Code screen; saves it as the default. */
+function AgentPicker() {
+  const prefs = useStore((s) => s.prefs);
+  const updatePrefs = useStore((s) => s.updatePrefs);
+  const [agents, setAgents] = useState<AgentInfo[] | null>(null);
+  useEffect(() => {
+    api.listAgents().then(setAgents, () => setAgents(null));
+  }, []);
+  if (!agents) return null;
+  const cur = agents.find((a) => a.id === prefs.defaultAgent);
+  return (
+    <div className="mt-3 flex flex-col items-center gap-1.5 text-[13px]">
+      <label className="flex items-center gap-2">
+        <span className="text-muted">Agent</span>
+        <ChipSelect
+          value={prefs.defaultAgent}
+          aria-label="Coding agent for new sessions"
+          onChange={(e) => updatePrefs({ defaultAgent: e.target.value as AgentId })}
+        >
+          {agents.map((a) => (
+            <option key={a.id} value={a.id}>
+              {a.label}
+              {a.available ? "" : " (not installed)"}
+            </option>
+          ))}
+        </ChipSelect>
+      </label>
+      {cur && !cur.available && <div className="max-w-md text-[12px] text-danger">{cur.error ?? cur.installHint}</div>}
+    </div>
+  );
 }
 
 function Thought({ text }: { text: string }) {
@@ -424,11 +466,12 @@ export function CodeView() {
         <div>It reads, edits and runs things there, and asks before anything risky.</div>
         <button
           className="mt-4 flex h-10 items-center gap-2 rounded-[10px] bg-accent px-4 text-sm font-semibold text-accent-fg hover:brightness-105"
-          onClick={openFolderAsSession}
+          onClick={() => openFolderAsSession()}
         >
           <FolderPlusIcon size={17} />
           Open folder…
         </button>
+        <AgentPicker />
       </div>
       </div>
     );
@@ -442,8 +485,21 @@ export function CodeView() {
   const ready = status === "ready";
   const busy = !!s?.busy;
   const acpModels = s?.models;
-  const currentModelRef = acpModels?.currentModelId?.replace(/^pb-/, "") ?? session.modelRef;
-  const model = models.find((m) => m.id === currentModelRef);
+  // Only Grok Build runs on Patchbay's models (`pb-<id>`); other agents bring their own.
+  const patchbayModels = session.agent === "grok";
+  const currentModelRef = patchbayModels
+    ? (acpModels?.currentModelId?.replace(/^pb-/, "") ?? session.modelRef)
+    : (acpModels?.currentModelId ?? session.agentModel);
+  const model = patchbayModels ? models.find((m) => m.id === currentModelRef) : undefined;
+  const configOptions = (s?.configOptions ?? []).filter((o) => o.type === "select");
+
+  const setConfigOption = async (o: AcpConfigOption, value: string) => {
+    try {
+      await api.codeSetConfigOption(session.id, o.id, value);
+    } catch (err) {
+      setToast(errorText(err));
+    }
+  };
 
   const send = async (text: string, atts: Attachment[], mentions: string[] = []) => {
     if (!activeId) return;
@@ -544,6 +600,11 @@ export function CodeView() {
           <span {...drag} className="min-w-0 flex-[1_1_0] truncate font-mono text-[12px] text-faint" title={session.cwd}>
             {session.cwd.replace(/^\/home\/[^/]+|^\/Users\/[^/]+/, "~")}
           </span>
+          {session.agent !== "grok" && (
+            <span {...drag} className="shrink-0 text-[12px] text-muted" title="Coding agent">
+              {AGENT_LABELS[session.agent] ?? session.agent}
+            </span>
+          )}
           <HostBadge session={session} />
         </div>
         {modes.length > 0 && modes.length <= 3 && s?.modes && (
@@ -679,7 +740,11 @@ export function CodeView() {
                     cwd={session.cwd}
                     editing={editingIdx === i}
                     setEditing={(on) => setEditingIdx(on ? i : null)}
-                    onEdit={ready && !busy && e.kind === "user" ? (t, a) => editAndResend(i, t, a) : undefined}
+                    onEdit={
+                      ready && !busy && e.kind === "user" && s.extensions.rewind
+                        ? (t, a) => editAndResend(i, t, a)
+                        : undefined
+                    }
                   />
                 ))}
                 {s?.permissions
@@ -733,7 +798,8 @@ export function CodeView() {
               }
               warnNoVision={model ? !model.vision : false}
               footer={
-                acpModels && acpModels.availableModels.length > 0 ? (
+                <>
+                {acpModels && acpModels.availableModels.length > 0 ? (
                   <ChipSelect
                     lead={<ModelRing id={currentModelRef} />}
                     mono
@@ -770,7 +836,25 @@ export function CodeView() {
                       <span className="truncate">{model.displayName}</span>
                     </span>
                   )
-                )
+                )}
+                {configOptions.map((o) => (
+                  <ChipSelect
+                    key={o.id}
+                    className="max-w-40"
+                    value={o.currentValue}
+                    disabled={!ready || busy}
+                    title={o.description ?? o.name}
+                    aria-label={o.name}
+                    onChange={(e) => setConfigOption(o, e.target.value)}
+                  >
+                    {configChoices(o).map((c) => (
+                      <option key={c.value} value={c.value}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </ChipSelect>
+                ))}
+                </>
               }
             />
             <UsageBar

@@ -1,7 +1,9 @@
-//! Code tab: Grok Build agent sidecars speaking ACP.
+//! Code tab: coding agents (Grok Build, Claude Code, OpenCode, Cursor CLI, Kilo Code) speaking
+//! ACP over stdio.
 
 pub mod acp;
 pub mod agent_state;
+pub mod agents;
 pub mod grok_config;
 pub mod mcp;
 pub mod permissions;
@@ -113,17 +115,7 @@ impl CodeManager {
         let session = db
             .get_code_session(code_session_id)?
             .ok_or_else(|| anyhow!("code session not found"))?;
-        if db.list_models()?.is_empty() {
-            return Err(anyhow!("add a provider and model in Settings first"));
-        }
-        let grok_home = data_dir.join("grok");
-        let rendered = grok_config::render(&db, session.model_ref.as_deref())?;
-        grok_config::write(&grok_home, &rendered)?;
-        let model_key = session
-            .model_ref
-            .as_deref()
-            .filter(|r| db.get_model(r).ok().flatten().is_some())
-            .map(grok_config::model_key);
+        let launch = agents::prepare(&db, data_dir, &session)?;
         // A new agent process keeps its own usage ledger; carry earlier totals forward.
         let mut usage = db.code_usage(code_session_id)?;
         usage.roll_over();
@@ -133,20 +125,24 @@ impl CodeManager {
             let db = db.clone();
             let csid = code_session_id.to_owned();
             Arc::new(move |env: acp::Envelope| {
-                if let acp::CodeEvent::SessionStatus { status } = &env.event {
-                    let view = {
-                        let mut u = usage.lock().unwrap();
-                        u.apply_status(status);
-                        let _ = db.set_code_usage(&csid, &u);
-                        u.view()
-                    };
-                    sink(acp::Envelope {
-                        code_session_id: env.code_session_id,
-                        event: acp::CodeEvent::Usage { usage: view },
-                    });
-                } else {
-                    sink(env);
-                }
+                let view = {
+                    let mut u = usage.lock().unwrap();
+                    match &env.event {
+                        acp::CodeEvent::SessionStatus { status } => u.apply_status(status),
+                        acp::CodeEvent::ContextUsage { update } => u.apply_context(update),
+                        acp::CodeEvent::TurnUsage { usage } => u.apply_turn(usage),
+                        _ => {
+                            drop(u);
+                            return sink(env);
+                        }
+                    }
+                    let _ = db.set_code_usage(&csid, &u);
+                    u.view()
+                };
+                sink(acp::Envelope {
+                    code_session_id: env.code_session_id,
+                    event: acp::CodeEvent::Usage { usage: view },
+                });
             })
         };
         let csid = code_session_id.to_owned();
@@ -154,13 +150,9 @@ impl CodeManager {
         let (tx, thread) = acp::spawn(SpawnSpec {
             sink,
             code_session_id: csid.clone(),
-            binary: sidecar_path()?,
+            launch,
             cwd: PathBuf::from(&session.cwd),
-            grok_home,
-            env: rendered.env,
-            model_key,
             resume: session.acp_session_id.clone(),
-            rules: Some(crate::prefs::load(&db).agent_instructions),
             pending: self.pending.clone(),
             on_session: Box::new(move |sid| {
                 let _ = db2.update_code_session(&csid, Some(&sid), None, None);
@@ -217,6 +209,17 @@ impl CodeManager {
     pub async fn set_mode(&self, code_session_id: &str, mode_id: String) -> Result<()> {
         let (reply, rx) = oneshot::channel();
         self.send(code_session_id, AgentCmd::SetMode { mode_id, reply })?;
+        rx.await.map_err(|_| anyhow!("agent stopped"))?
+    }
+
+    pub async fn set_config_option(
+        &self,
+        code_session_id: &str,
+        config_id: String,
+        value: String,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.send(code_session_id, AgentCmd::SetConfigOption { config_id, value, reply })?;
         rx.await.map_err(|_| anyhow!("agent stopped"))?
     }
 

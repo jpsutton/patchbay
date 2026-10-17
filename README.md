@@ -118,7 +118,16 @@ To work on Patchbay itself, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## How it works
 
-Patchbay's coding agent is [Grok Build](https://github.com/xai-org/grok-build), the open-source agent from xAI, with a few small fixes so it works with any provider. Patchbay talks to it over the [Agent Client Protocol](https://agentclientprotocol.com), an open standard, so other agents could slot in later. Patchbay turns off the agent's telemetry and auto-updates.
+Patchbay's built-in coding agent is [Grok Build](https://github.com/xai-org/grok-build), the open-source agent from xAI, with a few small fixes so it works with any provider. Patchbay turns off its telemetry and auto-updates.
+
+Patchbay talks to coding agents over the [Agent Client Protocol](https://agentclientprotocol.com), an open standard. So a Code session can also run an agent you already have installed and signed in to:
+
+- [Claude Code](https://claude.com/claude-code), through the [Claude Agent ACP adapter](https://github.com/agentclientprotocol/claude-agent-acp). Patchbay runs the adapter with `npx` when it isn't installed.
+- [OpenCode](https://opencode.ai)
+- [Cursor CLI](https://cursor.com/cli)
+- [Kilo Code](https://kilo.ai) CLI
+
+These agents use their own sign-in and model list. Pick the default agent in Settings → Coding agents.
 
 ## Known limitations
 

@@ -77,7 +77,7 @@ async fn move_checkpoint_take_over_and_orphaned_work() {
     repo(&proj_a);
     std::fs::write(proj_a.join("app.txt"), "v2, not committed\n").unwrap();
     std::fs::write(proj_a.join("notes.txt"), "untracked\n").unwrap();
-    let s = a.state.db.create_code_session(&proj_a.to_string_lossy(), None).unwrap();
+    let s = a.state.db.create_code_session(&proj_a.to_string_lossy(), None, "grok").unwrap();
     until("session reaches B", 10, || b.state.db.get_code_session(&s.id).unwrap().is_some()).await;
 
     // Move it to B.
@@ -130,7 +130,7 @@ async fn remote_session_commands_and_terminal() {
     let an = a.state.mesh.node_id().to_owned();
     let proj = a.dir.join("proj");
     repo(&proj);
-    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None).unwrap();
+    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok").unwrap();
     until("session reaches B", 10, || b.state.db.get_code_session(&s.id).unwrap().is_some()).await;
 
     // B sees the session as remote and asks A about it.

@@ -240,7 +240,7 @@ export function PermissionCard({
     if (!rule || !allowId) return;
     try {
       await api.addPermissionRule(cwd, rule.kind, rule.pattern);
-      useStore.getState().setToast("Saved. Manage rules in Settings → Code agent.");
+      useStore.getState().setToast("Saved. Manage rules in Settings → Coding agents.");
     } catch (e) {
       useStore.getState().setToast(errorText(e));
       return;

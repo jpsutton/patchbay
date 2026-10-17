@@ -201,6 +201,10 @@ export interface CodeSession {
   updatedAt: number;
   /** What the session has done, for its sidebar icon; null until its transcript was checked. */
   activity: Activity | null;
+  /** Coding agent that runs the session. */
+  agent: AgentId;
+  /** The agent's own model id, for agents that keep their own model list. */
+  agentModel: string | null;
   /** Mesh node running this session's agent. */
   hostNode: string | null;
   /** Bumped on every move between nodes. */
@@ -272,6 +276,52 @@ export interface CodeAttach {
   offline?: boolean;
 }
 
+export type AgentId = "grok" | "claude-code" | "opencode" | "cursor" | "kilo";
+
+/** One coding agent backend, as the Agents settings page lists it. */
+export interface AgentInfo {
+  id: AgentId;
+  label: string;
+  available: boolean;
+  program: string | null;
+  source: "override" | "bundled" | "path" | "npx" | null;
+  version: string | null;
+  error: string | null;
+  installHint: string;
+  usesPatchbayModels: boolean;
+  supportsInstructions: boolean;
+}
+
+/** Labels for agent ids, for places that don't load the full list. */
+export const AGENT_LABELS: Record<AgentId, string> = {
+  grok: "Grok Build",
+  "claude-code": "Claude Code",
+  opencode: "OpenCode",
+  cursor: "Cursor CLI",
+  kilo: "Kilo Code",
+};
+
+/** Non-standard ACP extensions the session's agent understands. */
+export interface AgentExtensions {
+  statusLine: boolean;
+  rewind: boolean;
+}
+
+/** An ACP session config option (only `select` ones are shown). */
+export interface AcpConfigOption {
+  id: string;
+  name: string;
+  description?: string | null;
+  category?: string | null;
+  type: string;
+  currentValue: string;
+  options: AcpConfigChoice[];
+}
+
+export type AcpConfigChoice =
+  | { value: string; name: string; description?: string | null }
+  | { group: string; name: string; options: { value: string; name: string; description?: string | null }[] };
+
 export type ChatEvent =
   | { type: "started"; userMessageId: string; assistantMessageId: string }
   | { type: "text"; text: string }
@@ -291,7 +341,10 @@ export type CodeEvent =
       loaded: boolean;
       capabilities: AgentCapabilities | null;
       agentInfo: { name?: string; title?: string; version?: string } | null;
+      configOptions: AcpConfigOption[] | null;
+      extensions: AgentExtensions;
     }
+  | { type: "config"; models: AcpModels | null; modes: AcpModes | null; configOptions: AcpConfigOption[] | null }
   | { type: "autoApproved"; toolCallId: string; description: string }
   | { type: "notice"; message: string }
   | { type: "update"; update: AcpUpdate }
@@ -399,6 +452,9 @@ export interface Preferences {
   defaultSystemPrompt: string;
   expandReasoning: boolean;
   generateTitles: boolean;
+  defaultAgent: AgentId;
+  /** Executable overrides: agent id -> path. */
+  agentPaths: Partial<Record<AgentId, string>>;
   permissionMode: "default" | "auto" | "always-approve";
   agentInstructions: string;
   webFetch: boolean;
@@ -420,6 +476,8 @@ export const defaultPreferences: Preferences = {
   defaultSystemPrompt: "",
   expandReasoning: false,
   generateTitles: true,
+  defaultAgent: "grok",
+  agentPaths: {},
   permissionMode: "default",
   agentInstructions: "",
   webFetch: false,
@@ -519,8 +577,9 @@ export const api = {
   attachmentThumbnail: (id: string) => invoke<string>("attachment_thumbnail", { id }),
 
   listCodeSessions: () => invoke<CodeSession[]>("list_code_sessions"),
-  createCodeSession: (cwd: string, modelRef: string | null) =>
-    invoke<CodeSession>("create_code_session", { cwd, modelRef }),
+  createCodeSession: (cwd: string, modelRef: string | null, agent?: AgentId) =>
+    invoke<CodeSession>("create_code_session", { cwd, modelRef, agent: agent ?? null }),
+  listAgents: () => invoke<AgentInfo[]>("list_agents"),
   updateCodeSession: (
     id: string,
     patch: { title?: string; modelRef?: string; pinned?: boolean; activity?: Activity },
@@ -557,6 +616,8 @@ export const api = {
   codeCancel: (id: string) => invoke<void>("code_cancel", { id }),
   codeSetModel: (id: string, modelId: string) => invoke<void>("code_set_model", { id, modelId }),
   codeSetMode: (id: string, modeId: string) => invoke<void>("code_set_mode", { id, modeId }),
+  codeSetConfigOption: (id: string, configId: string, value: string) =>
+    invoke<void>("code_set_config_option", { id, configId, value }),
   codeRewind: (id: string, ordinal: number, preview: string, revertFiles: boolean) =>
     invoke<void>("code_rewind", { id, ordinal, preview, revertFiles }),
   codeUsage: (id: string) => invoke<UsageView>("code_usage", { id }),

@@ -69,6 +69,8 @@ pub const TABLES: &[Table] = &[
             "activity",
             "host_node",
             "epoch",
+            "agent",
+            "agent_model",
         ],
     },
     Table { name: "mcp_servers", pk: &["id"], cols: &["name", "config_json", "enabled", "created_at"] },

@@ -267,7 +267,7 @@ export function ModelPage({
         <Field label="Context window (tokens)" hint="Drives the context meter and agent compaction">
           {text("contextWindow", "e.g. 128000")}
         </Field>
-        <Field label="Auto-compact at (%)" hint="Code agent only. Default 85">
+        <Field label="Auto-compact at (%)" hint="Grok Build only. Default 85">
           {text("autoCompactPercent", "85")}
         </Field>
       </Section>

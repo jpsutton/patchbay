@@ -174,7 +174,10 @@ pub fn package(
         files.push("workspace.tar".to_owned());
     }
     let mut agent = false;
-    if let Some(sid) = &s.acp_session_id
+    // Only Grok Build's state is portable; other agents keep theirs in their own homes and get
+    // the hand-off note instead.
+    if s.agent == "grok"
+        && let Some(sid) = &s.acp_session_id
         && let Some(bytes) = agent_state::export(grok_home, &s.cwd, sid)?
     {
         std::fs::write(dir.join("agent.tar"), bytes)?;
@@ -436,6 +439,8 @@ mod tests {
             created_at: 0,
             updated_at: 0,
             activity: None,
+            agent: "grok".into(),
+            agent_model: None,
             host_node: None,
             epoch: 0,
         }
