@@ -26,7 +26,7 @@ env:
 jobs:
   # .deb, .rpm and AppImage from Tauri's bundler. The oldest supported Ubuntu
   # (24.04) sets the glibc the packages need (2.39).
-  linux:
+  linux-packages:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
