@@ -109,3 +109,29 @@ jobs:
       - name: Unit tests
         working-directory: src-tauri
         run: cargo test --lib --locked
+      - name: Mesh protocol crate tests
+        working-directory: crates/patchbay-mesh
+        run: cargo test --locked
+
+  # The phone app (remote/) on Linux: its frontend builds and its backend compiles. The APK
+  # itself builds on release pull requests (build.yml).
+  remote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/ci/deps-ubuntu.sh
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: remote/src-tauri -> target
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:remote
+      - name: Check the backend
+        working-directory: remote/src-tauri
+        run: cargo check --locked
