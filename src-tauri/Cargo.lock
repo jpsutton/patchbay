@@ -4034,6 +4034,7 @@ dependencies = [
  "indexmap 2.14.0",
  "infer 0.19.0",
  "keyring",
+ "patchbay-mesh",
  "pdf_oxide",
  "portable-pty",
  "rand 0.8.5",
@@ -4062,6 +4063,28 @@ dependencies = [
  "uuid",
  "xai-grok-sampler",
  "xai-grok-sampling-types",
+]
+
+[[package]]
+name = "patchbay-mesh"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "futures",
+ "hex",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "snow",
+ "spake2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

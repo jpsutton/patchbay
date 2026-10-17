@@ -66,6 +66,47 @@ jobs:
           retention-days: 14
           compression-level: 0
 
+  # Patchbay Remote, the phone app: an arm64 APK, unsigned (release.yml signs it). Best effort
+  # like Windows and macOS: a release ships it if it built.
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Android NDK
+        run: |
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdkmanager" --licenses >/dev/null
+          "$sdkmanager" "ndk;27.2.12479018" >/dev/null
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: remote/src-tauri -> target
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:remote
+      - name: Build the APK
+        working-directory: remote
+        run: ../node_modules/.bin/tauri android build --apk --target aarch64 --ci --config '{"build":{"beforeBuildCommand":""}}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: patchbay-android
+          path: remote/src-tauri/gen/android/app/build/outputs/apk/**/release/*.apk
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
   arch:
     runs-on: ubuntu-latest
     timeout-minutes: 90

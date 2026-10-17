@@ -1,0 +1,15 @@
+/* Patchbay Remote: a touch screen, edge to edge. */
+html,
+body {
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* Touch targets: the desktop's compact header buttons grow a little. */
+@media (pointer: coarse) {
+  header button {
+    min-height: 36px;
+    min-width: 36px;
+  }
+}

@@ -1,4 +1,6 @@
 //! Connection setup: SPAKE2 on the mesh passphrase, then Noise `XXpsk0` keyed by its result.
+//! A remote member reconnecting to a gateway can instead present a resume ticket: Noise
+//! `IKpsk2` keyed by the ticket, one round trip.
 //!
 //! SPAKE2 turns a memorable passphrase into a strong shared key without exposing it to offline
 //! guessing: each connection attempt tests one guess. Noise then authenticates both nodes'
@@ -13,11 +15,17 @@ use spake2::{Ed25519Group, Identity as SpakeId, Password, Spake2};
 use tokio::sync::mpsc;
 
 pub const NOISE_PARAMS: &str = "Noise_XXpsk0_25519_ChaChaPoly_BLAKE2s";
+pub const RESUME_PARAMS: &str = "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s";
 const MAGIC: &[u8] = b"PBMESH1";
 const SPAKE_ID: &[u8] = b"patchbay-mesh";
 /// Sent in the clear by a responder whose first Noise message failed, so the dialer can tell a
 /// wrong passphrase from a network failure.
 const MISMATCH: &[u8] = b"PBMESH1!mismatch";
+/// First frame of a resume: this, the ticket id, then the first Noise message.
+const RESUME_MAGIC: &[u8] = b"PBRESUME1";
+/// Sent in the clear when the ticket is unknown or its key doesn't match.
+const RESUME_UNKNOWN: &[u8] = b"PBRESUME1!unknown";
+pub const TICKET_ID_LEN: usize = 16;
 const STEP_TIMEOUT: Duration = Duration::from_secs(15);
 /// Largest plaintext per Noise message, leaving room for the tag and our fragment flag.
 const CHUNK: usize = 65_535 - 16 - 1;
@@ -32,7 +40,7 @@ pub struct Link {
 
 impl Link {
     /// Two links wired to each other (tests).
-    #[cfg(test)]
+    #[doc(hidden)]
     pub fn pair() -> (Link, Link) {
         let (atx, brx) = mpsc::unbounded_channel();
         let (btx, arx) = mpsc::unbounded_channel();
@@ -57,6 +65,9 @@ pub enum HandshakeError {
     /// The other side doesn't share our passphrase (or isn't speaking our protocol).
     #[error("passphrase mismatch")]
     WrongPassphrase,
+    /// The gateway doesn't know the resume ticket (expired, or it restarted).
+    #[error("resume ticket not accepted")]
+    UnknownTicket,
     #[error("{0:#}")]
     Other(#[from] anyhow::Error),
 }
@@ -155,8 +166,55 @@ pub async fn initiate(link: &mut Link, passphrase: &str, static_private: &[u8; 3
 
 /// Accepting side.
 pub async fn respond(link: &mut Link, passphrase: &str, static_private: &[u8; 32]) -> Result<Secure, HandshakeError> {
-    let their = link.recv().await?;
-    let their_msg = strip_magic(&their)?.to_vec();
+    let first = link.recv().await?;
+    respond_passphrase(link, first, passphrase, static_private).await
+}
+
+/// Accepting side for either kind of opening. `lookup` gives a resume ticket's key; the result
+/// carries the ticket id when the dialer resumed with one.
+pub async fn respond_any(
+    link: &mut Link,
+    passphrase: &str,
+    static_private: &[u8; 32],
+    lookup: impl FnOnce(&[u8; TICKET_ID_LEN]) -> Option<[u8; 32]>,
+) -> Result<(Secure, Option<[u8; TICKET_ID_LEN]>), HandshakeError> {
+    let first = link.recv().await?;
+    let Some(rest) = first.strip_prefix(RESUME_MAGIC) else {
+        return Ok((respond_passphrase(link, first, passphrase, static_private).await?, None));
+    };
+    let refuse = |link: &Link| {
+        let _ = link.send(RESUME_UNKNOWN.to_vec());
+        HandshakeError::UnknownTicket
+    };
+    if rest.len() <= TICKET_ID_LEN {
+        return Err(refuse(link));
+    }
+    let mut id = [0u8; TICKET_ID_LEN];
+    id.copy_from_slice(&rest[..TICKET_ID_LEN]);
+    let Some(key) = lookup(&id) else { return Err(refuse(link)) };
+    let pro = resume_prologue(&id);
+    let mut hs = snow::Builder::new(RESUME_PARAMS.parse().map_err(anyhow::Error::from)?)
+        .local_private_key(static_private)
+        .and_then(|b| b.psk(2, &key))
+        .and_then(|b| b.prologue(&pro))
+        .and_then(|b| b.build_responder())
+        .map_err(anyhow::Error::from)?;
+    let mut buf = vec![0u8; 65_535];
+    if hs.read_message(&rest[TICKET_ID_LEN..], &mut buf).is_err() {
+        return Err(refuse(link));
+    }
+    let n = hs.write_message(&[], &mut buf).map_err(anyhow::Error::from)?;
+    link.send(buf[..n].to_vec())?;
+    Ok((finish(hs)?, Some(id)))
+}
+
+async fn respond_passphrase(
+    link: &mut Link,
+    first: Vec<u8>,
+    passphrase: &str,
+    static_private: &[u8; 32],
+) -> Result<Secure, HandshakeError> {
+    let their_msg = strip_magic(&first)?.to_vec();
     let (state, my_msg) = spake(passphrase);
     link.send(with_magic(&my_msg))?;
     let key = psk(state.finish(&their_msg).map_err(|_| HandshakeError::WrongPassphrase)?)?;
@@ -178,6 +236,41 @@ pub async fn respond(link: &mut Link, passphrase: &str, static_private: &[u8; 32
     link.send(buf[..n].to_vec())?;
     let m3 = link.recv().await?;
     hs.read_message(&m3, &mut buf).map_err(|_| HandshakeError::WrongPassphrase)?;
+    finish(hs)
+}
+
+fn resume_prologue(id: &[u8; TICKET_ID_LEN]) -> Vec<u8> {
+    let mut p = RESUME_MAGIC.to_vec();
+    p.extend_from_slice(id);
+    p
+}
+
+/// Dialing side of a resume: one round trip to a gateway whose static key we already know.
+pub async fn initiate_resume(
+    link: &mut Link,
+    static_private: &[u8; 32],
+    gateway_static: &[u8; 32],
+    ticket_id: &[u8; TICKET_ID_LEN],
+    ticket_key: &[u8; 32],
+) -> Result<Secure, HandshakeError> {
+    let pro = resume_prologue(ticket_id);
+    let mut hs = snow::Builder::new(RESUME_PARAMS.parse().map_err(anyhow::Error::from)?)
+        .local_private_key(static_private)
+        .and_then(|b| b.remote_public_key(gateway_static))
+        .and_then(|b| b.psk(2, ticket_key))
+        .and_then(|b| b.prologue(&pro))
+        .and_then(|b| b.build_initiator())
+        .map_err(anyhow::Error::from)?;
+    let mut buf = vec![0u8; 65_535];
+    let n = hs.write_message(&[], &mut buf).map_err(anyhow::Error::from)?;
+    let mut frame = resume_prologue(ticket_id);
+    frame.extend_from_slice(&buf[..n]);
+    link.send(frame)?;
+    let m2 = link.recv().await?;
+    if m2 == RESUME_UNKNOWN {
+        return Err(HandshakeError::UnknownTicket);
+    }
+    hs.read_message(&m2, &mut buf).map_err(|_| HandshakeError::UnknownTicket)?;
     finish(hs)
 }
 
@@ -211,7 +304,7 @@ pub fn confirmation_code(a: &[u8; 32], b: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mesh::keys::Identity;
+    use crate::keys::Identity;
 
     async fn run(pa: &str, pb: &str) -> (Result<Secure, HandshakeError>, Result<Secure, HandshakeError>) {
         let (mut la, mut lb) = Link::pair();
@@ -243,6 +336,54 @@ mod tests {
         let (a, b) = run("correct horse", "battery staple").await;
         assert!(matches!(b, Err(HandshakeError::WrongPassphrase)));
         assert!(matches!(a, Err(HandshakeError::WrongPassphrase)));
+    }
+
+    #[tokio::test]
+    async fn resume_ticket_connects_in_one_round_trip() {
+        let (mut la, mut lb) = Link::pair();
+        let (phone, gw) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+        let (id, key) = ([9u8; TICKET_ID_LEN], [4u8; 32]);
+        let (gw_pub, phone_pub) = (gw.noise_public, phone.noise_public);
+        let ta = tokio::spawn(async move { initiate_resume(&mut la, &phone.noise_private, &gw_pub, &id, &key).await });
+        let tb = tokio::spawn(async move {
+            respond_any(&mut lb, "unused passphrase", &gw.noise_private, |t| (t == &id).then_some(key)).await
+        });
+        let (mut a, (mut b, used)) = (ta.await.unwrap().unwrap(), tb.await.unwrap().unwrap());
+        assert_eq!(used, Some(id));
+        assert_eq!(b.remote_static, phone_pub);
+        let f = a.seal(b"hi").unwrap();
+        assert_eq!(b.open(&f[0]).unwrap().unwrap(), b"hi");
+    }
+
+    #[tokio::test]
+    async fn unknown_or_wrong_ticket_is_refused() {
+        for known in [None, Some([5u8; 32])] {
+            let (mut la, mut lb) = Link::pair();
+            let (phone, gw) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+            let gw_pub = gw.noise_public;
+            let ta = tokio::spawn(async move {
+                initiate_resume(&mut la, &phone.noise_private, &gw_pub, &[1; TICKET_ID_LEN], &[4; 32]).await
+            });
+            let tb = tokio::spawn(async move { respond_any(&mut lb, "p", &gw.noise_private, |_| known).await });
+            assert!(matches!(ta.await.unwrap(), Err(HandshakeError::UnknownTicket)));
+            match (known, tb.await.unwrap()) {
+                (None, r) => assert!(matches!(r, Err(HandshakeError::UnknownTicket))),
+                // The key enters at message 2, so only the dialer sees a wrong one; the gateway
+                // finds out when the dialer's first message fails to decrypt.
+                (Some(_), Ok((mut b, _))) => assert!(b.open(&[0u8; 32]).is_err()),
+                (Some(_), Err(_)) => {}
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn respond_any_still_takes_the_passphrase() {
+        let (mut la, mut lb) = Link::pair();
+        let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+        let ta = tokio::spawn(async move { initiate(&mut la, "correct horse", &a.noise_private).await });
+        let tb = tokio::spawn(async move { respond_any(&mut lb, "correct horse", &b.noise_private, |_| None).await });
+        assert!(ta.await.unwrap().is_ok());
+        assert!(tb.await.unwrap().unwrap().1.is_none());
     }
 
     #[test]

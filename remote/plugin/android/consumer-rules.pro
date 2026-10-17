@@ -1,0 +1,1 @@
+-keep class dev.patchbay.remote.platform.** { *; }

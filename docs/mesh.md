@@ -93,6 +93,29 @@ Removing a computer also changes the key that encrypts synced secrets. However, 
 
 To take the current computer out of the mesh, click **Leave mesh**. It stops syncing and forgets the passphrase, and keeps its own copy of everything.
 
+## From your phone
+
+**Patchbay Remote**, the Android app, joins the mesh as a phone. It shows the chats and Code sessions of your computers live, and lets you send messages and prompts, answer permission requests, switch models and stop a turn. It does no work of its own: chat replies run on the computer it's connected through, and each Code session keeps running on its own computer. The phone never gets your API keys or a copy of your data.
+
+### Install it
+
+Add Patchbay's F-Droid repository to F-Droid, Droid-ify or Neo Store: open `https://jpsutton.github.io/patchbay/fdroid/` on the phone and tap **Add to F-Droid**. The page also shows the repository's address and fingerprint. Alternatively, install `patchbay-remote-<version>-arm64.apk` from a GitHub release, or let Obtainium follow the releases.
+
+### Join
+
+1. In the app, enter the address of any computer in the mesh, as for adding a computer, then the passphrase and a name for the phone, and tap **Join**.
+2. The phone shows a six-digit code. On that computer, **Settings → Mesh** shows a request to join as a phone. Check that the codes match, then click **Approve**.
+
+The computer must run a Patchbay version that serves phones; the app says so if it doesn't.
+
+### Using it
+
+The phone connects through whichever of your computers it reaches first: on your home network, or over ZeroTier, Tailscale or a VPN when you're away. When the network changes, or that computer goes away, it finds another one within seconds and catches up on what it missed, without replaying everything.
+
+The **Code** tab groups sessions by computer, and marks those that are working and those that **Need you**. While an agent or a reply is running and you switch away from the app, it can stay connected in the background (Android shows a quiet notification for that) and notifies you of permission requests and finished turns. Turn that off, or turn on the fingerprint or screen lock, in the app's **Settings**.
+
+To remove the phone, click **Remove** next to it in **Settings → Mesh** on any computer. It never had API keys, so there's nothing to replace.
+
 ## Cloudflare Tunnel
 
 A Cloudflare Tunnel lets a computer accept mesh connections without a public IP address or an open port.

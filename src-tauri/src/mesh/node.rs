@@ -9,22 +9,29 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
-use futures::{SinkExt, StreamExt};
+use patchbay_mesh::ws::{normalize_url, recv, send, ws_link};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
-use super::handshake::{self, HandshakeError, Link, Secure};
+use super::handshake::{self, HandshakeError, Link, Secure, TICKET_ID_LEN};
 use super::keys::{Identity, KeyStore, random32};
-use super::members::{self, Member};
+use super::members::{self, Member, ROLE_REMOTE};
+use super::remote::{self as rmt, Live, Numbering, Ring};
 use super::secrets::{self, DataKey};
 use super::sync::{self, Applied, LocalDefaults, Op, VersionVector};
-use super::wire::{Hello, LinkReport, Msg, PROTOCOL_VERSION};
+use super::wire::{FEATURE_GATEWAY, Hello, LinkReport, Msg, PROTOCOL_VERSION};
 use crate::db::{Db, now_ms};
 
-pub const DEFAULT_PORT: u16 = 41890;
+pub use patchbay_mesh::ws::DEFAULT_PORT;
 const PASSPHRASE: &str = "mesh:passphrase";
+/// How long a remote member's resume ticket stays valid.
+const TICKET_MS: i64 = 24 * 3600 * 1000;
+/// A remote member pings every 15 s in the foreground and every 60 s in the background.
+const REMOTE_TIMEOUT: Duration = Duration::from_secs(200);
+/// Event rings for topics nothing touched for this long are dropped.
+const RING_IDLE: Duration = Duration::from_secs(2 * 3600);
 const DATA_KEY: &str = "mesh:data_key";
 const SYNC_BATCH: usize = 2000;
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
@@ -88,6 +95,30 @@ struct State {
     /// Known URLs per node.
     addrs: HashMap<String, BTreeSet<String>>,
     streams: HashMap<String, Stream>,
+    /// Remote members (phones) connected to this node as their gateway.
+    remotes: HashMap<String, RemoteSess>,
+    tickets: HashMap<[u8; TICKET_ID_LEN], Ticket>,
+    /// Recent live events per topic, for remote members resuming; and when each was last touched.
+    rings: HashMap<String, (Ring, Instant)>,
+    /// Points for the live events this node originates.
+    numbering: Numbering,
+    /// What the session list shows per Code session, from the events seen here.
+    live: HashMap<String, Live>,
+}
+
+struct RemoteSess {
+    id: u64,
+    tx: mpsc::UnboundedSender<Msg>,
+    kill: CancellationToken,
+    /// Topics it follows.
+    subs: HashSet<String>,
+}
+
+struct Ticket {
+    node: String,
+    noise_pub: [u8; 32],
+    key: [u8; 32],
+    expires: i64,
 }
 
 struct Sess {
@@ -106,6 +137,7 @@ struct Pending {
     code: String,
     sign_pub: String,
     noise_pub: String,
+    role: Option<String>,
     tx: mpsc::UnboundedSender<Msg>,
 }
 
@@ -148,21 +180,6 @@ impl LocalDefaults for Defaults {
         let name = cells.get("name").and_then(Value::as_str).unwrap_or_default();
         let path = crate::attachments::stored_path(&self.data_dir, sha, name);
         vec![("path", Value::String(path.to_string_lossy().into_owned()))]
-    }
-}
-
-fn normalize_url(s: &str) -> String {
-    let s = s.trim().trim_end_matches('/');
-    if s.starts_with("ws://") || s.starts_with("wss://") {
-        s.to_owned()
-    } else if let Some(rest) = s.strip_prefix("https://") {
-        format!("wss://{rest}")
-    } else if let Some(rest) = s.strip_prefix("http://") {
-        format!("ws://{rest}")
-    } else if s.contains(':') {
-        format!("ws://{s}")
-    } else {
-        format!("ws://{s}:{DEFAULT_PORT}")
     }
 }
 
@@ -245,7 +262,11 @@ impl Mesh {
         for s in st.sessions.values() {
             s.kill.cancel();
         }
+        for r in st.remotes.values() {
+            r.kill.cancel();
+        }
         st.sessions.clear();
+        st.remotes.clear();
         st.pending.clear();
         st.circuits.clear();
         drop(st);
@@ -270,6 +291,7 @@ impl Mesh {
             &inner.name(),
             &inner.ident.sign_pub_hex(),
             &inner.ident.noise_pub_hex(),
+            None,
         );
         members::upsert(&inner.db, &rec)?;
         if !inner.keys.set(PASSPHRASE, passphrase) {
@@ -336,6 +358,11 @@ impl Mesh {
             return Ok(());
         }
         inner.drop_session_soon(node_id);
+        // A phone never held the data key, so nothing it had needs replacing.
+        if m.is_remote() {
+            inner.emit_status();
+            return Ok(());
+        }
         let old = inner.data_key();
         let dk = DataKey { generation: old.map(|d| d.generation).unwrap_or(0) + 1, key: random32() };
         inner.adopt_data_key(dk.clone())?;
@@ -413,9 +440,46 @@ impl Mesh {
             .is_some_and(|s| s.tx.send(Msg::Event { name: name.to_owned(), payload }).is_ok())
     }
 
-    /// Send a live event to every connected member.
-    pub fn broadcast_event(&self, name: &str, payload: Value) {
-        self.0.broadcast(Msg::Event { name: name.to_owned(), payload });
+    /// Send a live event this node originates to every connected member, and to the phones
+    /// following its topic. Returns the payload as sent: with its point, when it has a topic.
+    pub fn broadcast_event(&self, name: &str, mut payload: Value) -> Value {
+        self.0.st.lock().unwrap().numbering.stamp(name, &mut payload);
+        self.0.fanout(name, &payload);
+        self.0.broadcast(Msg::Event { name: name.to_owned(), payload: payload.clone() });
+        payload
+    }
+
+    /// What the session list shows for each Code session, as seen from here.
+    pub fn live(&self) -> HashMap<String, Live> {
+        self.0.st.lock().unwrap().live.clone()
+    }
+
+    /// Every chat reply streaming right now, here or elsewhere.
+    pub fn all_streams(&self) -> Vec<Stream> {
+        self.0.st.lock().unwrap().streams.values().filter(|s| !s.done).cloned().collect()
+    }
+
+    /// Member records, known addresses of full members, and who this node reaches: what a phone
+    /// needs to find another gateway later.
+    pub fn remote_members(&self) -> Value {
+        let inner = &self.0;
+        let mesh = inner.mesh_id();
+        let mems: Vec<Member> =
+            members::list(&inner.db).unwrap_or_default().into_iter().filter(|m| Some(&m.mesh_id) == mesh.as_ref()).collect();
+        let st = inner.st.lock().unwrap();
+        let mut addrs: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let mut online: HashMap<String, &str> = HashMap::new();
+        for m in mems.iter().filter(|m| !m.is_remote() && !m.is_removed()) {
+            if m.node_id == inner.me {
+                let mine: BTreeSet<String> = inner.advertise().into_iter().collect();
+                addrs.insert(m.node_id.clone(), mine);
+                online.insert(m.node_id.clone(), "direct");
+            } else {
+                addrs.insert(m.node_id.clone(), st.addrs.get(&m.node_id).cloned().unwrap_or_default());
+                online.insert(m.node_id.clone(), if st.sessions.contains_key(&m.node_id) { "relay" } else { "offline" });
+            }
+        }
+        json!({ "members": mems, "addrs": addrs, "online": online })
     }
 
     /// Call `method` on another node.
@@ -434,6 +498,14 @@ impl Mesh {
         self.0.st.lock().unwrap().no_direct.insert(node.to_owned());
     }
 
+    /// Cut a phone's connection, as a network change would (tests).
+    #[cfg(test)]
+    pub fn drop_remote(&self, node: &str) {
+        if let Some(r) = self.0.st.lock().unwrap().remotes.remove(node) {
+            r.kill.cancel();
+        }
+    }
+
     pub fn connected(&self, node: &str) -> bool {
         self.0.st.lock().unwrap().sessions.contains_key(node)
     }
@@ -444,14 +516,16 @@ impl Mesh {
 
     /// A local chat stream event: track it and send it to every member.
     pub fn chat_event(&self, conversation_id: &str, event: Value) {
-        let payload = json!({
+        let mut payload = json!({
             "conversationId": conversation_id,
             "streamer": self.0.me,
             "streamerName": self.0.name(),
             "event": event,
         });
+        self.0.st.lock().unwrap().numbering.stamp(rmt::EV_CHAT, &mut payload);
         self.0.track_stream(&payload);
-        self.0.broadcast(Msg::Event { name: "mesh://chat".into(), payload });
+        self.0.fanout(rmt::EV_CHAT, &payload);
+        self.0.broadcast(Msg::Event { name: rmt::EV_CHAT.into(), payload });
     }
 
     /// Chat replies streaming on other nodes right now.
@@ -612,6 +686,8 @@ impl Inner {
                     "self"
                 } else if m.is_removed() {
                     "removed"
+                } else if m.is_remote() {
+                    if st.remotes.contains_key(&m.node_id) { "direct" } else { "offline" }
                 } else {
                     match sess {
                         Some(s) if s.via.is_some() => "relay",
@@ -630,13 +706,14 @@ impl Inner {
                     "url": sess.and_then(|s| s.url.clone()),
                     "admittedAt": m.admitted_at,
                     "approver": m.approver,
+                    "role": m.role,
                 })
             })
             .collect();
         let pending: Vec<Value> = st
             .pending
             .iter()
-            .map(|(id, p)| json!({ "nodeId": id, "name": p.name, "code": p.code }))
+            .map(|(id, p)| json!({ "nodeId": id, "name": p.name, "code": p.code, "role": p.role }))
             .collect();
         let joining = st.joining.as_ref().map(|j| {
             json!({ "url": j.url, "code": j.code, "status": j.status, "error": j.error })
@@ -730,7 +807,8 @@ impl Inner {
         if member {
             let mems = members::list(&self.db).unwrap_or_default();
             let st = self.st.lock().unwrap();
-            for m in mems.iter().filter(|m| m.node_id != self.me && !m.is_removed()) {
+            // Phones dial us; they never listen.
+            for m in mems.iter().filter(|m| m.node_id != self.me && !m.is_removed() && !m.is_remote()) {
                 let sess = st.sessions.get(&m.node_id);
                 if sess.is_some_and(|s| s.via.is_none()) {
                     continue;
@@ -852,6 +930,12 @@ impl Inner {
                 self.send_links();
             }
             self.finish_lost_streams();
+            {
+                let mut st = self.st.lock().unwrap();
+                let now = now_ms();
+                st.tickets.retain(|_, t| t.expires > now);
+                st.rings.retain(|_, (_, touched)| touched.elapsed() < RING_IDLE);
+            }
             if tick % 720 == 1 {
                 let db = self.db.clone();
                 let _ = tokio::task::spawn_blocking(move || db.with_conn(|c| sync::prune_stale_clocks(c))).await;
@@ -891,11 +975,12 @@ impl Inner {
             _ => bail!("no mesh passphrase"),
         };
         let hs = if initiator {
-            handshake::initiate(&mut link, &pass, &self.ident.noise_private).await
+            handshake::initiate(&mut link, &pass, &self.ident.noise_private).await.map(|s| (s, None))
         } else {
-            handshake::respond(&mut link, &pass, &self.ident.noise_private).await
+            let inner = self.clone();
+            handshake::respond_any(&mut link, &pass, &self.ident.noise_private, move |id| inner.ticket_key(id)).await
         };
-        let mut sec = match hs {
+        let (mut sec, ticket) = match hs {
             Ok(s) => s,
             Err(HandshakeError::WrongPassphrase) => {
                 if !initiator {
@@ -904,7 +989,16 @@ impl Inner {
                 self.set_join_error(url.as_deref(), "The passphrase doesn't match this mesh's");
                 bail!("passphrase mismatch");
             }
+            // A phone with a stale ticket; it retries with the passphrase.
+            Err(HandshakeError::UnknownTicket) => bail!("unknown resume ticket"),
             Err(HandshakeError::Other(e)) => return Err(e),
+        };
+        // A ticket stands in for the passphrase only for the device it was issued to.
+        let ticket_node = match ticket.and_then(|id| self.st.lock().unwrap().tickets.get(&id).map(|t| (t.node.clone(), t.noise_pub))) {
+            Some((node, key)) if key == sec.remote_static => Some(node),
+            Some(_) => bail!("resume ticket presented with other keys"),
+            None if ticket.is_some() => bail!("resume ticket expired"),
+            None => None,
         };
         let hello = self.hello();
         send(&mut sec, &link, &Msg::Hello(Box::new(hello)))?;
@@ -917,6 +1011,12 @@ impl Inner {
         }
         if theirs.version != PROTOCOL_VERSION {
             bail!("peer speaks mesh protocol {}", theirs.version);
+        }
+        if ticket_node.as_ref().is_some_and(|n| n != &theirs.node_id) {
+            bail!("resume ticket belongs to another device");
+        }
+        if theirs.role.as_deref() == Some(ROLE_REMOTE) {
+            return self.remote_conn(sec, link, theirs, token).await;
         }
         let mut addrs = theirs.addrs.clone();
         // Where this peer can be reached: the URL we dialed, or its address as seen here.
@@ -932,12 +1032,18 @@ impl Inner {
         // Who is this, relative to us?
         if let Some(mesh_id) = my_mesh.clone() {
             let known = members::get(&self.db, &theirs.node_id)?.filter(|m| m.mesh_id == mesh_id);
+            if known.as_ref().is_some_and(Member::is_remote) {
+                bail!("{} is a phone and can't connect as a full member", theirs.name);
+            }
             let trusted = known
                 .as_ref()
                 .is_some_and(|m| !m.is_removed() && m.noise_pub == noise_pub && m.sign_pub == theirs.sign_pub);
             if !trusted {
                 if theirs.joining {
-                    // New, or coming back after being removed: a member has to approve it.
+                    // New, or coming back after being removed: a member has to approve it. Its
+                    // address counts only once it is a member (dial_round dials members only),
+                    // but other members and phones learn it from here.
+                    self.learn_addrs(&theirs.node_id, addrs);
                     return self.pending_join(sec, link, theirs, noise_pub, token).await;
                 }
                 if let Some(m) = &known {
@@ -948,7 +1054,11 @@ impl Inner {
                 }
                 // A member admitted elsewhere whose record hasn't reached us yet.
                 let rec = theirs.record.clone().filter(|r| {
-                    r.node_id == theirs.node_id && r.mesh_id == mesh_id && r.noise_pub == noise_pub && !r.is_removed()
+                    r.node_id == theirs.node_id
+                        && r.mesh_id == mesh_id
+                        && r.noise_pub == noise_pub
+                        && !r.is_removed()
+                        && !r.is_remote()
                 });
                 match rec {
                     Some(r) if members::verify_record(&self.db, &r)? => members::upsert(&self.db, &r)?,
@@ -1024,6 +1134,19 @@ impl Inner {
     /// Disconnect a removed member once the removal record has had a moment to reach it.
     fn drop_session_soon(&self, node: &str) {
         self.changed.send_modify(|v| *v += 1);
+        let phone = {
+            let mut st = self.st.lock().unwrap();
+            st.tickets.retain(|_, t| t.node != node);
+            st.remotes.get(node).map(|r| (r.tx.clone(), r.kill.clone()))
+        };
+        // Records don't sync to phones, so say it outright.
+        if let Some((tx, kill)) = phone {
+            let _ = tx.send(Msg::Rejected { reason: "this device was removed from the mesh".into() });
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                kill.cancel();
+            });
+        }
         let kill = self.st.lock().unwrap().sessions.get(node).map(|s| s.kill.clone());
         if let Some(kill) = kill {
             tokio::spawn(async move {
@@ -1066,6 +1189,8 @@ impl Inner {
             data_key_gen: self.data_key().map(|d| d.generation).unwrap_or(0),
             addrs: self.advertise(),
             listen_port: *self.bound_port.lock().unwrap(),
+            role: None,
+            features: vec![FEATURE_GATEWAY.into()],
         }
     }
 
@@ -1080,12 +1205,20 @@ impl Inner {
     ) -> Result<()> {
         let code = handshake::confirmation_code(&self.ident.noise_public, &sec.remote_static);
         let (tx, mut rx) = mpsc::unbounded_channel();
+        let role = theirs.role.clone().filter(|r| r == ROLE_REMOTE);
         self.st.lock().unwrap().pending.insert(
             theirs.node_id.clone(),
-            Pending { name: theirs.name.clone(), code: code.clone(), sign_pub: theirs.sign_pub.clone(), noise_pub, tx },
+            Pending {
+                name: theirs.name.clone(),
+                code: code.clone(),
+                sign_pub: theirs.sign_pub.clone(),
+                noise_pub,
+                role: role.clone(),
+                tx,
+            },
         );
         self.emit_status();
-        self.ui("mesh://join-request", json!({ "nodeId": theirs.node_id, "name": theirs.name, "code": code }));
+        self.ui("mesh://join-request", json!({ "nodeId": theirs.node_id, "name": theirs.name, "code": code, "role": role }));
         send(&mut sec, &link, &Msg::JoinPending { code })?;
         let deadline = tokio::time::sleep(Duration::from_secs(600));
         tokio::pin!(deadline);
@@ -1113,6 +1246,7 @@ impl Inner {
         self.st.lock().unwrap().pending.remove(&theirs.node_id);
         self.emit_status();
         match outcome {
+            Some(()) if role.is_some() => self.remote_session(sec, link, theirs.node_id, theirs.name, token).await,
             Some(()) => {
                 let opener = theirs.node_id.clone();
                 self.session(sec, link, theirs.node_id, theirs.name, opener, None, None, token).await
@@ -1123,16 +1257,20 @@ impl Inner {
 
     fn approve(&self, node_id: &str) -> Result<()> {
         let mesh_id = self.mesh_id().ok_or_else(|| anyhow!("not in a mesh"))?;
-        let (name, sign_pub, noise_pub, tx) = {
+        let (name, sign_pub, noise_pub, role, tx) = {
             let st = self.st.lock().unwrap();
             let p = st.pending.get(node_id).ok_or_else(|| anyhow!("that request is gone"))?;
-            (p.name.clone(), p.sign_pub.clone(), p.noise_pub.clone(), p.tx.clone())
+            (p.name.clone(), p.sign_pub.clone(), p.noise_pub.clone(), p.role.clone(), p.tx.clone())
         };
-        let rec = Member::admit(&self.me, &self.ident, &mesh_id, node_id, &name, &sign_pub, &noise_pub);
+        let rec = Member::admit(&self.me, &self.ident, &mesh_id, node_id, &name, &sign_pub, &noise_pub, role.as_deref());
         members::upsert(&self.db, &rec)?;
-        let dk = self.data_key().ok_or_else(|| anyhow!("no mesh data key"))?;
+        // A phone gets no data key: it holds no secrets and syncs nothing.
+        let data_key = match role {
+            Some(_) => String::new(),
+            None => self.data_key().ok_or_else(|| anyhow!("no mesh data key"))?.encode(),
+        };
         let recs: Vec<Member> = members::list(&self.db)?.into_iter().filter(|m| m.mesh_id == mesh_id).collect();
-        tx.send(Msg::Admitted { members: recs, data_key: dk.encode() }).map_err(|_| anyhow!("the node disconnected"))?;
+        tx.send(Msg::Admitted { members: recs, data_key }).map_err(|_| anyhow!("the node disconnected"))?;
         Ok(())
     }
 
@@ -1369,6 +1507,7 @@ impl Inner {
                 if name == "mesh://chat" {
                     self.track_stream(&payload);
                 }
+                self.fanout(&name, &payload);
                 if let Some(h) = self.handler.read().unwrap().clone() {
                     h.event(&name, &payload);
                 }
@@ -1653,6 +1792,315 @@ impl Inner {
         }
     }
 
+    // ---------------- remote members (phones) ----------------
+
+    fn ticket_key(&self, id: &[u8; TICKET_ID_LEN]) -> Option<[u8; 32]> {
+        let st = self.st.lock().unwrap();
+        st.tickets.get(id).filter(|t| t.expires > now_ms()).map(|t| t.key)
+    }
+
+    fn issue_ticket(&self, node: &str, noise_pub: [u8; 32]) -> Msg {
+        let id: [u8; TICKET_ID_LEN] = rand::random();
+        let key = random32();
+        let expires = now_ms() + TICKET_MS;
+        let mut st = self.st.lock().unwrap();
+        // Keep the newest few per device.
+        let mut mine: Vec<([u8; TICKET_ID_LEN], i64)> =
+            st.tickets.iter().filter(|(_, t)| t.node == node).map(|(k, t)| (*k, t.expires)).collect();
+        mine.sort_by_key(|x| x.1);
+        while mine.len() >= 4 {
+            let (k, _) = mine.remove(0);
+            st.tickets.remove(&k);
+        }
+        st.tickets.insert(id, Ticket { node: node.to_owned(), noise_pub, key, expires });
+        Msg::Ticket { id: hex::encode(id), key: hex::encode(key), expires }
+    }
+
+    /// A phone connecting: check it against its record (or park it for approval), then serve it.
+    async fn remote_conn(self: Arc<Self>, mut sec: Secure, link: Link, theirs: Hello, token: CancellationToken) -> Result<()> {
+        let Some(mesh_id) = self.mesh_id() else { bail!("not in a mesh") };
+        let noise_pub = hex::encode(sec.remote_static);
+        let known = members::get(&self.db, &theirs.node_id)?.filter(|m| m.mesh_id == mesh_id);
+        let trusted = known.as_ref().is_some_and(|m| {
+            !m.is_removed() && m.is_remote() && m.noise_pub == noise_pub && m.sign_pub == theirs.sign_pub
+        });
+        if !trusted {
+            if theirs.joining {
+                return self.pending_join(sec, link, theirs, noise_pub, token).await;
+            }
+            if let Some(m) = &known {
+                if m.is_removed() {
+                    let _ = send(&mut sec, &link, &Msg::Rejected { reason: "this device was removed from the mesh".into() });
+                    bail!("{} was removed from the mesh", m.name);
+                }
+                bail!("{} presented different keys than its admission record", m.name);
+            }
+            let rec = theirs.record.clone().filter(|r| {
+                r.node_id == theirs.node_id && r.mesh_id == mesh_id && r.noise_pub == noise_pub && r.is_remote() && !r.is_removed()
+            });
+            match rec {
+                Some(r) if members::verify_record(&self.db, &r)? => members::upsert(&self.db, &r)?,
+                Some(_) => bail!("can't verify the admission of {} yet", theirs.name),
+                None => bail!("{} is not a member of this mesh", theirs.name),
+            }
+        }
+        self.remote_session(sec, link, theirs.node_id, theirs.name, token).await
+    }
+
+    /// Serve a phone that uses this node as its gateway: its requests, the topics it follows,
+    /// and a nudge whenever the lists it shows may have changed.
+    async fn remote_session(
+        self: Arc<Self>,
+        mut sec: Secure,
+        mut link: Link,
+        node: String,
+        name: String,
+        token: CancellationToken,
+    ) -> Result<()> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let kill = token.child_token();
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let old = self.st.lock().unwrap().remotes.insert(
+            node.clone(),
+            RemoteSess { id, tx: tx.clone(), kill: kill.clone(), subs: HashSet::new() },
+        );
+        if let Some(old) = old {
+            old.kill.cancel();
+        }
+        tracing::info!("mesh: phone {name} connected");
+        self.emit_status();
+        let ticket = self.issue_ticket(&node, sec.remote_static);
+        send(&mut sec, &link, &ticket)?;
+        let mut changed = self.changed.subscribe();
+        let mut index_due: Option<tokio::time::Instant> = None;
+        let mut last_seen = Instant::now();
+        let mut check = tokio::time::interval(Duration::from_secs(10));
+        let res: Result<()> = async {
+            loop {
+                let due = async {
+                    match index_due {
+                        Some(t) => tokio::time::sleep_until(t).await,
+                        None => std::future::pending().await,
+                    }
+                };
+                tokio::select! {
+                    _ = kill.cancelled() => return Ok(()),
+                    m = recv(&mut sec, &mut link) => {
+                        let Some(m) = m? else { return Ok(()) };
+                        last_seen = Instant::now();
+                        match m {
+                            Msg::Rpc { id, method, params } => self.clone().remote_rpc(&node, id, method, params, tx.clone()),
+                            Msg::Ping { t } => send(&mut sec, &link, &Msg::Pong { t })?,
+                            _ => {}
+                        }
+                    }
+                    out = rx.recv() => {
+                        let Some(out) = out else { return Ok(()) };
+                        send(&mut sec, &link, &out)?;
+                    }
+                    r = changed.changed() => {
+                        if r.is_err() {
+                            return Ok(());
+                        }
+                        // Coalesced: an agent's turn writes often, and each nudge refetches lists.
+                        index_due.get_or_insert_with(|| tokio::time::Instant::now() + Duration::from_millis(1500));
+                    }
+                    _ = due => {
+                        index_due = None;
+                        let follows = self.st.lock().unwrap().remotes.get(&node).is_some_and(|r| r.id == id && r.subs.contains(rmt::TOPIC_INDEX));
+                        if follows {
+                            send(&mut sec, &link, &Msg::Event { name: rmt::EV_INDEX.into(), payload: Value::Null })?;
+                        }
+                    }
+                    _ = check.tick() => {
+                        if last_seen.elapsed() > REMOTE_TIMEOUT {
+                            bail!("{name} stopped responding");
+                        }
+                    }
+                }
+            }
+        }
+        .await;
+        let mine = {
+            let mut st = self.st.lock().unwrap();
+            let mine = st.remotes.get(&node).is_some_and(|r| r.id == id);
+            if mine {
+                st.remotes.remove(&node);
+            }
+            mine
+        };
+        if mine {
+            tracing::info!("mesh: phone {name} disconnected");
+            self.emit_status();
+        }
+        res
+    }
+
+    fn remote_rpc(self: Arc<Self>, from: &str, id: u64, method: String, params: Value, reply: mpsc::UnboundedSender<Msg>) {
+        let from = from.to_owned();
+        // Register the topics now, so events after this point follow the reply in order.
+        let plans = (method == "remote.subscribe").then(|| self.plan_subscribe(&from, &params));
+        tokio::spawn(async move {
+            let r = match method.as_str() {
+                "remote.subscribe" => Ok(self.clone().finish_subscribe(&from, plans.unwrap_or_default()).await),
+                "remote.unsubscribe" => {
+                    let topics: Vec<String> = serde_json::from_value(params["topics"].clone()).unwrap_or_default();
+                    if let Some(r) = self.st.lock().unwrap().remotes.get_mut(&from) {
+                        for t in topics {
+                            r.subs.remove(&t);
+                        }
+                    }
+                    Ok(Value::Null)
+                }
+                "remote.members" => Ok(Mesh(self.clone()).remote_members()),
+                "mesh.file" => self.clone().serve_rpc(from.clone(), method.clone(), params).await,
+                m if m.starts_with("remote.") => {
+                    let h = self.handler.read().unwrap().clone();
+                    match h {
+                        Some(h) => h.call(from, method, params).await,
+                        None => Err(anyhow!("not ready")),
+                    }
+                }
+                other => Err(anyhow!("{other} isn't available to a phone")),
+            };
+            let msg = match r {
+                Ok(v) => Msg::RpcResult { id, ok: Some(v), err: None },
+                Err(e) => Msg::RpcResult { id, ok: None, err: Some(format!("{e:#}")) },
+            };
+            let _ = reply.send(msg);
+        });
+    }
+
+    /// Start following topics. A known point still in the ring resumes with a delta; anything
+    /// else gets a snapshot (finished by [`finish_subscribe`] with the app's data).
+    fn plan_subscribe(&self, from: &str, params: &Value) -> Vec<Plan> {
+        let reqs = params["topics"].as_array().cloned().unwrap_or_default();
+        let mut st = self.st.lock().unwrap();
+        let mut plans = Vec::new();
+        for r in reqs {
+            let Some(topic) = r["topic"].as_str().map(str::to_owned) else { continue };
+            if let Some(rs) = st.remotes.get_mut(from) {
+                rs.subs.insert(topic.clone());
+            }
+            let point: Option<rmt::Point> = serde_json::from_value(r["point"].clone()).ok();
+            let ring = st.rings.get(&topic).map(|(r, _)| r);
+            let last = ring.and_then(Ring::last);
+            if let (Some(p), Some(ring)) = (&point, ring)
+                && let Some(events) = ring.since(p)
+            {
+                plans.push(Plan {
+                    topic,
+                    delta: Some(events),
+                    tail: Vec::new(),
+                    covered: true,
+                    full: None,
+                    point: last.or(point),
+                });
+                continue;
+            }
+            let (tail, covered, full) = match ring {
+                Some(ring) if topic.starts_with("session:") => {
+                    let (tail, covered) =
+                        ring.tail(|_, p| matches!(p["event"]["type"].as_str(), Some("promptDone" | "sessionReady")));
+                    // The whole run, for a session no window has saved a transcript of.
+                    let (all, complete) = ring.tail(|_, _| false);
+                    (tail, covered, (complete && !all.is_empty()).then_some(all))
+                }
+                _ => (Vec::new(), true, None),
+            };
+            plans.push(Plan { topic, delta: None, tail, covered, full, point: last });
+        }
+        plans
+    }
+
+    async fn finish_subscribe(self: Arc<Self>, from: &str, plans: Vec<Plan>) -> Value {
+        let mut results = Vec::new();
+        for p in plans {
+            let pair = |(n, v): (String, Value)| json!([n, v]);
+            if let Some(events) = p.delta {
+                let events: Vec<Value> = rmt::coalesce(events).into_iter().map(pair).collect();
+                results.push(json!({ "topic": p.topic, "mode": "delta", "events": events, "point": p.point }));
+                continue;
+            }
+            let mut snapshot = Value::Null;
+            let mut tail = p.tail;
+            if let Some(id) = p.topic.strip_prefix("session:") {
+                let h = self.handler.read().unwrap().clone();
+                if let Some(h) = h {
+                    snapshot = h.call(from.to_owned(), "remote.snapshot".into(), json!({ "id": id })).await.unwrap_or(Value::Null);
+                }
+                // Without a saved transcript the earlier turns of this run would be missing.
+                if snapshot["hasTranscript"] == false
+                    && let Some(full) = p.full
+                {
+                    tail = full;
+                }
+                // The attach replay already brings the ready state, usage and open requests.
+                let open: HashSet<String> = snapshot["attach"]["events"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|e| e["requestId"].as_str().map(str::to_owned)).collect())
+                    .unwrap_or_default();
+                tail.retain(|(_, v)| {
+                    let ev = &v["event"];
+                    !matches!(ev["type"].as_str(), Some("sessionReady" | "usage"))
+                        && !(ev["type"] == "permission" && ev["requestId"].as_str().is_some_and(|r| open.contains(r)))
+                });
+                for (_, v) in tail.iter_mut() {
+                    if v["event"]["type"] == "userPrompt" {
+                        v["event"]["replay"] = Value::Bool(true);
+                    }
+                }
+            } else if let Some(conv) = p.topic.strip_prefix("chat:") {
+                let st = self.st.lock().unwrap();
+                snapshot = json!({ "stream": st.streams.get(conv).filter(|s| !s.done) });
+            }
+            let tail: Vec<Value> = rmt::coalesce(tail).into_iter().map(pair).collect();
+            results.push(json!({
+                "topic": p.topic,
+                "mode": "snapshot",
+                "snapshot": snapshot,
+                "tail": tail,
+                "covered": p.covered,
+                "point": p.point,
+            }));
+        }
+        json!({ "results": results })
+    }
+
+    /// Record a live event for resuming, update the session list's summary, and pass it to the
+    /// phones following its topic.
+    fn fanout(&self, name: &str, payload: &Value) {
+        let Some(topic) = rmt::topic_of(name, payload) else { return };
+        let mut st = self.st.lock().unwrap();
+        if let Some(pt) = rmt::point_of(payload) {
+            let e = st.rings.entry(topic.clone()).or_insert_with(|| (Ring::default(), Instant::now()));
+            e.0.push(&pt, name, payload);
+            e.1 = Instant::now();
+        }
+        let mut live = None;
+        if name == rmt::EV_CODE
+            && let Some(id) = payload["codeSessionId"].as_str()
+        {
+            let l = st.live.entry(id.to_owned()).or_default();
+            if l.apply(payload, now_ms()) {
+                live = Some(json!({ "id": id, "live": l }));
+            }
+        }
+        if st.remotes.is_empty() {
+            return;
+        }
+        for r in st.remotes.values() {
+            if r.subs.contains(&topic) {
+                let _ = r.tx.send(Msg::Event { name: name.to_owned(), payload: payload.clone() });
+            }
+            if let Some(l) = &live
+                && r.subs.contains(rmt::TOPIC_INDEX)
+            {
+                let _ = r.tx.send(Msg::Event { name: rmt::EV_LIVE.into(), payload: l.clone() });
+            }
+        }
+    }
+
     // ---------------- chat streams ----------------
 
     fn track_stream(&self, payload: &Value) {
@@ -1761,53 +2209,17 @@ pub async fn read_chunk(path: PathBuf, offset: u64) -> Result<Value> {
     Ok(json!({ "data": B64.encode(&buf), "eof": offset + buf.len() as u64 >= size, "size": size }))
 }
 
-fn send(sec: &mut Secure, link: &Link, m: &Msg) -> Result<()> {
-    let bytes = serde_json::to_vec(m)?;
-    for f in sec.seal(&bytes)? {
-        link.tx.send(f).map_err(|_| anyhow!("connection closed"))?;
-    }
-    Ok(())
-}
-
-async fn recv(sec: &mut Secure, link: &mut Link) -> Result<Option<Msg>> {
-    loop {
-        let Some(frame) = link.rx.recv().await else { return Ok(None) };
-        if let Some(whole) = sec.open(&frame)? {
-            return Ok(Some(serde_json::from_slice(&whole)?));
-        }
-    }
-}
-
-fn ws_link<S>(ws: tokio_tungstenite::WebSocketStream<S>) -> Link
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-{
-    use tokio_tungstenite::tungstenite::Message;
-    let (mut sink, mut stream) = ws.split();
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let (in_tx, in_rx) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        while let Some(f) = out_rx.recv().await {
-            if sink.send(Message::binary(f)).await.is_err() {
-                break;
-            }
-        }
-        let _ = sink.close().await;
-    });
-    tokio::spawn(async move {
-        while let Some(Ok(m)) = stream.next().await {
-            match m {
-                Message::Binary(b) => {
-                    if in_tx.send(b.to_vec()).is_err() {
-                        break;
-                    }
-                }
-                Message::Close(_) => break,
-                _ => {}
-            }
-        }
-    });
-    Link { tx: out_tx, rx: in_rx }
+/// How to answer one topic of a phone's subscribe: with the events since its point, or with a
+/// snapshot plus the events since the last finished turn.
+struct Plan {
+    topic: String,
+    delta: Option<Vec<(String, Value)>>,
+    tail: Vec<(String, Value)>,
+    /// The tail starts where it should (false when the ring lost its beginning).
+    covered: bool,
+    /// The whole stream, when the ring still holds it from its start.
+    full: Option<Vec<(String, Value)>>,
+    point: Option<rmt::Point>,
 }
 
 fn hostname() -> Option<String> {

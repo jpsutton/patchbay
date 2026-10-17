@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Patchbay Remote</title>
+    <!-- Views check this (src/lib/platform.ts) before any module runs. -->
+    <script>
+      window.__PATCHBAY_REMOTE__ = true;
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/remote/main.tsx"></script>
+  </body>
+</html>

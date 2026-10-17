@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { api, errorText, estimateCost, type Attachment, type ChatEvent, type Message } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { AttachmentChip, Composer } from "../components/Composer";
@@ -27,6 +27,7 @@ import { CopyButton, copyText } from "../components/CopyButton";
 import { EffortPicker } from "../components/EffortPicker";
 import { SystemPromptPanel } from "./SystemPromptPanel";
 import { notifyInBackground } from "../lib/notify";
+import { isRemoteApp } from "../lib/platform";
 
 function BranchNav({ m, onSwitch }: { m: Message; onSwitch: (id: string) => void }) {
   const n = m.siblingIds.length;
@@ -241,7 +242,8 @@ function MessageRow({
   );
 }
 
-export function ChatView() {
+/** `leading`: something before the title (the phone app's back button). */
+export function ChatView({ leading }: { leading?: ReactNode } = {}) {
   const drag = useDragRegion();
   const activeId = useStore((s) => s.activeConversationId);
   const conversations = useStore((s) => s.conversations);
@@ -470,7 +472,8 @@ export function ChatView() {
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
-      <header {...drag} className="flex h-12 shrink-0 items-center gap-1 border-b border-line pl-6 pr-3">
+      <header {...drag} className={`flex h-12 shrink-0 items-center gap-1 border-b border-line pr-3 ${leading ? "pl-1" : "pl-6"}`}>
+        {leading}
         <h1 {...drag} className="mr-2 min-w-0 flex-1 truncate text-[15px] font-medium">
           {conv?.title ?? "New chat"}
         </h1>
@@ -483,13 +486,15 @@ export function ChatView() {
         >
           <ScrollTextIcon />
         </HeaderButton>
-        <ExportMenu
-          disabled={!conv || messages.length === 0}
-          onExport={(f) =>
-            conv &&
-            saveExport(conv.title, f, f === "markdown" ? chatToMarkdown(conv, messages, models) : chatToJson(conv, messages))
-          }
-        />
+        {!isRemoteApp() && (
+          <ExportMenu
+            disabled={!conv || messages.length === 0}
+            onExport={(f) =>
+              conv &&
+              saveExport(conv.title, f, f === "markdown" ? chatToMarkdown(conv, messages, models) : chatToJson(conv, messages))
+            }
+          />
+        )}
         <WindowControls />
       </header>
       {showSystem && conv && <SystemPromptPanel conv={conv} />}

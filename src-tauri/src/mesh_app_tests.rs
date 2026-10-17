@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::mesh::keys::MemKeyStore;
+use crate::mesh::members;
 
 const PASS: &str = "correct horse battery";
 
@@ -160,4 +161,189 @@ async fn remote_session_commands_and_terminal() {
     };
     until("terminal output on B", 15, || output().contains("mesh-42")).await;
     b.state.mesh.rpc(&an, "term.close", json!({ "termId": "t1" })).await.unwrap();
+}
+
+/// A phone's view of the mesh: what reached its app.
+struct Phone {
+    client: patchbay_mesh::client::RemoteClient,
+    events: Arc<Mutex<Vec<(String, Value)>>>,
+}
+
+impl Phone {
+    fn count(&self, f: impl Fn(&str, &Value) -> bool) -> usize {
+        self.events.lock().unwrap().iter().filter(|(n, p)| f(n, p)).count()
+    }
+
+    fn texts(&self, session: &str) -> Vec<String> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(n, p)| n == code::acp::EVENT && p["codeSessionId"] == session)
+            .filter_map(|(_, p)| p["event"]["update"]["content"]["text"].as_str().map(str::to_owned))
+            .collect()
+    }
+}
+
+fn phone() -> Phone {
+    let dir = std::env::temp_dir().join(format!("pb-phone-{}", db::new_id()));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let ev = events.clone();
+    let sink: patchbay_mesh::client::Sink = Arc::new(move |n: &str, p: Value| ev.lock().unwrap().push((n.to_owned(), p)));
+    let client = patchbay_mesh::client::RemoteClient::new(dir, Arc::new(MemKeyStore::default()), sink).unwrap();
+    client.start();
+    Phone { client, events }
+}
+
+fn emit(n: &Node, id: &str, event: code::acp::CodeEvent) {
+    code_sink(&n.state)(code::acp::Envelope { code_session_id: id.to_owned(), event });
+}
+
+fn chunk(text: &str) -> code::acp::CodeEvent {
+    code::acp::CodeEvent::Update {
+        update: json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": text } }),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn phone_joins_follows_resumes_and_switches_gateway() {
+    let (a, b) = (node("alpha3"), node("bravo3"));
+    link(&a, &b).await;
+    let proj = a.dir.join("proj");
+    repo(&proj);
+    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok").unwrap();
+    until("session reaches B", 10, || b.state.db.get_code_session(&s.id).unwrap().is_some()).await;
+
+    // The phone asks A to join; a person approves it there.
+    let p = phone();
+    let url = format!("127.0.0.1:{}", a.state.mesh.bound_port().unwrap());
+    p.client.join(&url, PASS, "pocket").unwrap();
+    let pid = p.client.node_id();
+    until("phone's join request", 10, || {
+        a.state.mesh.status()["pending"].as_array().unwrap().iter().any(|r| r["nodeId"] == pid && r["role"] == "remote")
+    })
+    .await;
+    a.state.mesh.approve(&pid).unwrap();
+    until("phone admitted", 10, || p.client.is_member()).await;
+    until("phone online", 10, || p.client.status()["phase"] == "online").await;
+    let rec = members::get(&a.state.db, &pid).unwrap().unwrap();
+    assert!(rec.is_remote());
+    // The record syncs to B like any member's; the phone never got the data key.
+    until("B knows the phone", 10, || members::get(&b.state.db, &pid).unwrap().is_some()).await;
+
+    // Lists come from the gateway; the phone learns B's address for later.
+    let idx = p.client.rpc("remote.index", Value::Null).await.unwrap();
+    assert!(idx["codeSessions"].as_array().unwrap().iter().any(|c| c["id"] == s.id));
+    until("phone knows two computers", 10, || {
+        p.client.status()["members"].as_array().unwrap().iter().filter(|m| m["role"].is_null()).count() == 2
+    })
+    .await;
+
+    // Follow the session: a snapshot first, then live events with points.
+    let topic = format!("session:{}", s.id);
+    let snap = p.client.subscribe(&topic, true).await.unwrap();
+    assert_eq!(snap["mode"], "snapshot");
+    emit(&a, &s.id, code::acp::CodeEvent::Status { state: "starting".into(), message: None });
+    emit(&a, &s.id, chunk("Hel"));
+    emit(&a, &s.id, chunk("lo"));
+    until("live events on the phone", 10, || p.texts(&s.id).len() == 2).await;
+
+    // The network drops; the agent keeps going meanwhile.
+    a.state.mesh.drop_remote(&pid);
+    emit(&a, &s.id, chunk(" wor"));
+    emit(&a, &s.id, chunk("ld"));
+    emit(&a, &s.id, code::acp::CodeEvent::PromptDone { stop_reason: json!("end_turn") });
+    until("phone back online", 15, || p.client.status()["phase"] == "online" && p.client.status()["gateway"].is_string()).await;
+    until("missed events caught up", 10, || p.count(|n, e| n == code::acp::EVENT && e["event"]["type"] == "promptDone") == 1).await;
+    // Resumed with its ticket, and the missed chunks came merged, with no snapshot needed.
+    assert_eq!(p.client.status()["resumed"], true);
+    assert_eq!(p.texts(&s.id).concat(), "Hello world");
+    assert_eq!(p.count(|n, e| n == patchbay_mesh::client::EV_RESYNC && e["topic"] == topic), 0);
+
+    // A goes away: the phone finds B, and its point still resumes there.
+    until("B saw the turn end", 10, || {
+        b.events.lock().unwrap().iter().any(|(n, e)| n == code::acp::EVENT && e["event"]["type"] == "promptDone")
+    })
+    .await;
+    a.state.mesh.stop();
+    let bn = b.state.mesh.node_id().to_owned();
+    until("phone on B", 30, || p.client.status()["gateway"] == bn.as_str()).await;
+    let idx = p.client.rpc("remote.index", Value::Null).await.unwrap();
+    assert!(idx["codeSessions"].as_array().unwrap().iter().any(|c| c["id"] == s.id));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(p.count(|n, e| n == patchbay_mesh::client::EV_RESYNC && e["topic"] == topic), 0);
+    assert_eq!(p.texts(&s.id).concat(), "Hello world");
+
+    // Removed on B: the phone is told and forgets the mesh.
+    b.state.mesh.remove(&pid).unwrap();
+    until("phone forgets the mesh", 10, || !p.client.is_member()).await;
+}
+
+/// A gateway for trying the phone app by hand (an emulator reaches the host at 10.0.2.2):
+/// a mesh on `0.0.0.0:41890` whose passphrase is `PASS`, with a provider pointing at
+/// `scripts/mock-llm.py` (start it first) and a Grok Build session using it. Every phone that
+/// asks to join is approved. Each run is a new mesh.
+///
+/// `cargo test --lib manual_phone_gateway -- --ignored --nocapture` (PATCHBAY_TEST_SECS limits it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn manual_phone_gateway() {
+    let n = node("studio");
+    n.state.mesh.set_config(Some("studio"), Some("0.0.0.0:41890"), None).unwrap();
+    n.state.mesh.create(PASS, "studio").unwrap();
+    let db = &n.state.db;
+    let p = db::Provider {
+        id: "mock".into(),
+        name: "Mock LLM".into(),
+        kind: db::ProviderKind::OpenaiChat,
+        base_url: std::env::var("PATCHBAY_MOCK_URL").unwrap_or_else(|_| "http://127.0.0.1:8765/v1".into()),
+        has_key: true,
+    };
+    db.upsert_provider(&p, Some("mock-key")).unwrap();
+    for (id, model) in [("m-echo", "mock-echo"), ("m-agent", "mock-agent")] {
+        db.upsert_model(&db::Model {
+            id: id.into(),
+            provider_id: "mock".into(),
+            model_id: model.into(),
+            display_name: model.into(),
+            vision: true,
+            context_window: Some(128_000),
+            params: Default::default(),
+        })
+        .unwrap();
+    }
+    db.set_setting("default_model", "m-echo").unwrap();
+    let proj = n.dir.join("proj");
+    repo(&proj);
+    let s = db.create_code_session(&proj.to_string_lossy(), Some("m-agent"), "grok").unwrap();
+    db.update_code_session(&s.id, None, Some("Try !edit from the phone"), None).unwrap();
+    let c = db.create_conversation(Some("m-echo")).unwrap();
+    db.update_conversation(&c.id, Some("Hello from studio"), None, None).unwrap();
+    let u = db.insert_message(&c.id, None, "user", "Is this thing on?", None, &[]).unwrap();
+    let a = db.insert_message(&c.id, Some(&u), "assistant", "Loud and clear.", Some("m-echo"), &[]).unwrap();
+    db.set_active_leaf(&c.id, &a).unwrap();
+    serve_phones(&n).await;
+}
+
+async fn serve_phones(n: &Node) {
+    eprintln!("gateway: ws://0.0.0.0:41890, passphrase {PASS:?}, node {}", n.state.mesh.node_id());
+    let secs: u64 = std::env::var("PATCHBAY_TEST_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(900);
+    let t0 = std::time::Instant::now();
+    let mut last = String::new();
+    while t0.elapsed() < Duration::from_secs(secs) {
+        let st = n.state.mesh.status();
+        for p in st["pending"].as_array().cloned().unwrap_or_default() {
+            let id = p["nodeId"].as_str().unwrap_or_default();
+            eprintln!("approving {} ({}), code {}", p["name"], p["role"], p["code"]);
+            let _ = n.state.mesh.approve(id);
+        }
+        let members: Vec<String> =
+            st["members"].as_array().unwrap().iter().map(|m| format!("{}:{}", m["name"], m["state"])).collect();
+        let now = members.join(" ");
+        if now != last {
+            eprintln!("members: {now}");
+            last = now;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
 }

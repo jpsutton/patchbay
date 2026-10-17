@@ -1,0 +1,32 @@
+[package]
+name = "patchbay-remote"
+version = "0.2.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Patchbay Remote: drive a Patchbay mesh's chats and Code sessions from a phone"
+
+[lib]
+name = "patchbay_remote_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+patchbay-mesh = { path = "../../crates/patchbay-mesh" }
+tauri-plugin-remote-platform = { path = "../plugin" }
+anyhow = "1"
+base64 = "0.22"
+hex = "0.4.3"
+if-addrs = "0.13"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-notification = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+tauri-plugin-biometric = "2"

@@ -199,6 +199,9 @@ CREATE TABLE mesh_secrets (
     ct TEXT NOT NULL,
     digest TEXT NOT NULL
 );
+"#, r#"
+-- A member's role: NULL for a full member, 'remote' for a phone that only drives others' work.
+ALTER TABLE mesh_members ADD COLUMN role TEXT;
 "#];
 
 pub fn now_ms() -> i64 {

@@ -13,6 +13,8 @@ import {
   type AcpToolCall,
   type AcpUpdate,
   type CodeEvent,
+  type CodeEnvelope,
+  type EventPoint,
   type Attachment,
   type CodeSession,
   type Conversation,
@@ -582,8 +584,8 @@ export const useStore = create<Store>((set, get) => ({
         next = { ...s, usage: e.usage };
         break;
       case "userPrompt":
-        // The window that sent it already shows it.
-        if (e.origin === get().mesh?.nodeId) return;
+        // The window that sent it already shows it, unless this is a catch-up after reconnecting.
+        if (e.origin === get().mesh?.nodeId && !e.replay) return;
         next = {
           ...s,
           busy: true,
@@ -657,6 +659,16 @@ export const useStore = create<Store>((set, get) => ({
     }
   },
   attachAgent: async (id) => {
+    // Live events that arrive while the catch-up is in flight wait, so none is lost or doubled.
+    attaching.set(id, []);
+    const finish = (point?: EventPoint | null) => {
+      const held = attaching.get(id) ?? [];
+      attaching.delete(id);
+      for (const { e, pt } of held) {
+        if (point && pt && pt.s === point.s && pt.n <= point.n) continue;
+        get().applyCodeEvent(id, e);
+      }
+    };
     const history = await loadTranscript(id);
     let info;
     try {
@@ -664,9 +676,11 @@ export const useStore = create<Store>((set, get) => ({
     } catch (e) {
       set((st) => ({ code: { ...st.code, [id]: { ...emptyCode(), history, status: "exited" } } }));
       get().applyCodeEvent(id, { type: "error", message: errorText(e) });
+      finish();
       return;
     }
     if (!info.running) {
+      finish(info.point);
       if (info.offline) {
         set((st) => ({ code: { ...st.code, [id]: { ...emptyCode(), history, status: "exited" } } }));
         return;
@@ -684,8 +698,19 @@ export const useStore = create<Store>((set, get) => ({
         code: { ...st.code, [id]: { ...cur, entries: cur.history!.entries, toolCalls: cur.history!.toolCalls, history: null } },
       }));
     }
+    finish(info.point);
   },
 }));
+
+/** Sessions mid-catch-up, with the live events held back meanwhile. */
+const attaching = new Map<string, { e: CodeEvent; pt?: EventPoint }[]>();
+
+/** A live Code event from the backend: applied now, or after the catch-up in progress. */
+export function codeEventArrived(env: CodeEnvelope) {
+  const held = attaching.get(env.codeSessionId);
+  if (held) held.push({ e: env.event, pt: env._pt });
+  else useStore.getState().applyCodeEvent(env.codeSessionId, env.event);
+}
 
 function notifyCode(id: string, what: string) {
   const title = useStore.getState().codeSessions.find((c) => c.id === id)?.title ?? "Code session";

@@ -170,4 +170,5 @@ Take-over is manual, because the mesh can't tell a dead host from a network part
 
 ## Later
 
-- **Phone and browser access.** A node could serve the frontend, which already runs outside Tauri against `fakeBackend.ts`, to a browser on the overlay. That browser would need a SPAKE2 and Noise client in JavaScript, or a per-node pairing token over HTTPS.
+- **Phone access.** Designed in [mobile.md](mobile.md): a remote-only member role and a phone app, Android first.
+- **Browser access.** A node could serve the frontend, which already runs outside Tauri against `fakeBackend.ts`, to a browser on the overlay. That browser would need the `patchbay-mesh` handshake compiled to WebAssembly, or a per-node pairing token over HTTPS.
