@@ -498,6 +498,14 @@ impl Mesh {
         self.0.st.lock().unwrap().no_direct.insert(node.to_owned());
     }
 
+    /// Cut a phone's connection, as a network change would (tests).
+    #[cfg(test)]
+    pub fn drop_remote(&self, node: &str) {
+        if let Some(r) = self.0.st.lock().unwrap().remotes.remove(node) {
+            r.kill.cancel();
+        }
+    }
+
     pub fn connected(&self, node: &str) -> bool {
         self.0.st.lock().unwrap().sessions.contains_key(node)
     }
@@ -1032,7 +1040,10 @@ impl Inner {
                 .is_some_and(|m| !m.is_removed() && m.noise_pub == noise_pub && m.sign_pub == theirs.sign_pub);
             if !trusted {
                 if theirs.joining {
-                    // New, or coming back after being removed: a member has to approve it.
+                    // New, or coming back after being removed: a member has to approve it. Its
+                    // address counts only once it is a member (dial_round dials members only),
+                    // but other members and phones learn it from here.
+                    self.learn_addrs(&theirs.node_id, addrs);
                     return self.pending_join(sec, link, theirs, noise_pub, token).await;
                 }
                 if let Some(m) = &known {

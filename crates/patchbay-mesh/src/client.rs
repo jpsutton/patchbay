@@ -505,7 +505,8 @@ impl Inner {
                     }
                 }
             } else if self.is_member() {
-                self.set_phase("connecting", self.st.lock().unwrap().error.clone());
+                let last_error = self.st.lock().unwrap().error.clone();
+                self.set_phase("connecting", last_error);
                 match self.clone().race().await {
                     Ok(e) => Some(e),
                     Err(e) => {
@@ -675,15 +676,12 @@ impl Inner {
                 r = rx.recv() => match r {
                     Some(Ok(e)) => break Ok(e),
                     Some(Err(e)) => errors.push(e),
-                    None => break Err(anyhow!("no computer in the mesh answered")),
+                    None => break Err(anyhow!("no computer in the mesh answered ({})", errors.join("; "))),
                 },
             }
         };
         won.cancel();
         tasks.abort_all();
-        if result.is_err() {
-            tracing::debug!("remote: race failed: {errors:?}");
-        }
         result
     }
 
