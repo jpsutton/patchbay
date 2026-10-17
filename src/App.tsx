@@ -17,7 +17,7 @@ import { ModelRing } from "./lib/cable";
 import { emitViewAction, focusComposer, focusSidebarSearch, isMac, isMod, keyLabel, ViewActive } from "./lib/shortcuts";
 import { ScrollFade } from "./lib/useStickyScroll";
 import { notifyInBackground } from "./lib/notify";
-import { useDragRegion } from "./components/WindowControls";
+import { useDragRegion, useRoundedWindow } from "./components/WindowControls";
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
@@ -564,6 +564,7 @@ export default function App() {
   } = st;
 
   useGlobalShortcuts();
+  useRoundedWindow();
   useEffect(() => initZoom(isMod), []);
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const drag = useDragRegion();
