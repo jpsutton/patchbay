@@ -10,6 +10,7 @@ Notes for working on Patchbay itself. For what the app does and how to install i
 - `0002-chat-completions-accept-null-numbers.patch` treats explicit `null` token counts and indexes in Chat Completions responses and stream chunks as `0`. Fireworks sends these, and the unpatched parser fails with "invalid type: null, expected u32".
 - `0003-messages-pdf-document-blocks.patch`: the Anthropic Messages encoder turns a `data:application/pdf` part into a `document` block, so PDFs can be sent natively.
 - `0004-claude-plugins-env-gate.patch`: `GROK_CLAUDE_PLUGINS_ENABLED=false` stops the agent from loading Claude Code plugins. Grok's `[compat.claude]` config has no switch for plugins.
+- `0005-windows-find-msvc-tools.patch` bumps `find-msvc-tools` to 0.1.14 in Grok Build's `Cargo.lock`. With 0.1.13, `cc` does not compile on Windows.
 
 | Patchbay piece | Grok Build plumbing |
 | --- | --- |
