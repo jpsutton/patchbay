@@ -6,6 +6,7 @@ import { isSendKey, useStore } from "../lib/store";
 import { ViewActive } from "../lib/shortcuts";
 import { fuzzyPaths } from "../lib/fuzzy";
 import { ArrowUpIcon, PaperclipIcon } from "./icons";
+import { isRemoteApp } from "../lib/platform";
 
 const MAX_ATTACHMENTS = 10;
 
@@ -15,13 +16,39 @@ function fmtSize(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function fileToBase64(f: File): Promise<string> {
+function fileToBase64(f: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
     r.onload = () => resolve(String(r.result).split(",", 2)[1] ?? "");
     r.onerror = () => reject(r.error);
     r.readAsDataURL(f);
   });
+}
+
+/** Longest edge the backend sends a model (src-tauri/src/attachments.rs, MAX_IMAGE_EDGE). */
+const MAX_IMAGE_EDGE = 2048;
+
+/**
+ * A phone photo shrunk to what the model would get anyway, before it goes over the network.
+ * Returns the file unchanged when it isn't a larger still image.
+ */
+async function shrinkPhoto(f: File): Promise<{ blob: Blob; name: string }> {
+  const keep = { blob: f as Blob, name: f.name || `photo-${Date.now()}.jpg` };
+  if (!f.type.startsWith("image/") || f.type === "image/gif") return keep;
+  const bmp = await createImageBitmap(f).catch(() => null);
+  if (!bmp) return keep;
+  const k = MAX_IMAGE_EDGE / Math.max(bmp.width, bmp.height);
+  if (k >= 1) {
+    bmp.close();
+    return keep;
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bmp.width * k);
+  canvas.height = Math.round(bmp.height * k);
+  canvas.getContext("2d")?.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+  bmp.close();
+  const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, "image/jpeg", 0.88));
+  return blob ? { blob, name: keep.name.replace(/\.[^.]*$/, "") + ".jpg" } : keep;
 }
 
 export function AttachmentChip({ att, onRemove }: { att: Attachment; onRemove?: () => void }) {
@@ -234,7 +261,13 @@ export function Composer({
     el.style.height = `${Math.min(el.scrollHeight, 280)}px`;
   }, [text]);
 
+  const filesRef = useRef<HTMLInputElement>(null);
   const pick = async () => {
+    // The phone app has no native file dialog; the web view's picker reaches the photo library.
+    if (isRemoteApp()) {
+      filesRef.current?.click();
+      return;
+    }
     const sel = await open({ multiple: true, directory: false });
     if (!sel) return;
     const paths = Array.isArray(sel) ? sel : [sel];
@@ -371,6 +404,24 @@ export function Composer({
         >
           <PaperclipIcon size={16} />
         </button>
+        {isRemoteApp() && (
+          <input
+            ref={filesRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              const files = Array.from(e.currentTarget.files ?? []);
+              e.currentTarget.value = "";
+              addMany(
+                files.map((f) => async () => {
+                  const { blob, name } = await shrinkPhoto(f);
+                  return api.addAttachmentBytes(name, await fileToBase64(blob));
+                }),
+              );
+            }}
+          />
+        )}
         <div className="flex min-w-0 flex-1 items-center gap-1.5">{footer}</div>
         {busy ? (
           <button

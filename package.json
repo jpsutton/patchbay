@@ -8,6 +8,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "dev:remote": "vite --config vite.remote.config.ts",
+    "build:remote": "tsc --noEmit && vite build --config vite.remote.config.ts",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri",
     "sidecar": "scripts/build-sidecar.sh",

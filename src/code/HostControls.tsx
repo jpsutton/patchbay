@@ -3,6 +3,7 @@ import { api, errorText, type CodeSession } from "../lib/ipc";
 import { memberName, memberOnline, remoteHost, useStore } from "../lib/store";
 import { input } from "../settings/ProviderPage";
 import { MonitorIcon } from "../components/icons";
+import { isRemoteApp } from "../lib/platform";
 
 /** "on <computer>" next to a session hosted elsewhere in the mesh. */
 export function HostBadge({ session }: { session: CodeSession }) {
@@ -154,11 +155,17 @@ export function OfflineHostBanner({ session, onTakeOver }: { session: CodeSessio
       <MonitorIcon size={16} />
       <div className="min-w-0 flex-1 text-muted">
         <span className="text-fg">{memberName(mesh, host)}</span> runs this session and is offline.
-        {checkpoint ? ` A checkpoint from ${new Date(checkpoint).toLocaleString()} is on this computer.` : ""}
+        {isRemoteApp()
+          ? " Take it over from another computer to keep working."
+          : checkpoint
+            ? ` A checkpoint from ${new Date(checkpoint).toLocaleString()} is on this computer.`
+            : ""}
       </div>
-      <button className="shrink-0 rounded-md bg-accent px-3 py-1.5 font-medium text-accent-fg" onClick={onTakeOver}>
-        Take over here
-      </button>
+      {!isRemoteApp() && (
+        <button className="shrink-0 rounded-md bg-accent px-3 py-1.5 font-medium text-accent-fg" onClick={onTakeOver}>
+          Take over here
+        </button>
+      )}
     </div>
   );
 }

@@ -1902,7 +1902,8 @@ impl Inner {
                         if r.is_err() {
                             return Ok(());
                         }
-                        index_due.get_or_insert_with(|| tokio::time::Instant::now() + Duration::from_millis(700));
+                        // Coalesced: an agent's turn writes often, and each nudge refetches lists.
+                        index_due.get_or_insert_with(|| tokio::time::Instant::now() + Duration::from_millis(1500));
                     }
                     _ = due => {
                         index_due = None;

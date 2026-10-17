@@ -226,6 +226,8 @@ export interface MeshMember {
   url: string | null;
   admittedAt: number;
   approver: string;
+  /** "remote" for a phone that only drives other members' work. */
+  role?: string | null;
 }
 
 export interface MeshStatus {
@@ -244,7 +246,7 @@ export interface MeshStatus {
     error: string | null;
   } | null;
   members: MeshMember[];
-  pending: { nodeId: string; name: string; code: string }[];
+  pending: { nodeId: string; name: string; code: string; role?: string | null }[];
 }
 
 /** A chat reply streaming on another node. */
@@ -274,6 +276,8 @@ export interface CodeAttach {
   events: CodeEvent[];
   /** The host isn't connected. */
   offline?: boolean;
+  /** The last live event the catch-up covers (phone app); later ones continue from here. */
+  point?: EventPoint | null;
 }
 
 export type AgentId = "grok" | "claude-code" | "opencode" | "cursor" | "kilo";
@@ -354,11 +358,19 @@ export type CodeEvent =
   | { type: "error"; message: string }
   | { type: "usage"; usage: UsageView }
   /** A prompt sent to the agent from `origin` (a mesh node). */
-  | { type: "userPrompt"; text: string; origin: string; attachments: Attachment[] };
+  /** `replay`: part of a catch-up, so shown even in the window that sent it. */
+  | { type: "userPrompt"; text: string; origin: string; attachments: Attachment[]; replay?: boolean };
+
+/** Where a live event sits in its topic's stream (see docs/design/mobile.md, section 3). */
+export interface EventPoint {
+  s: string;
+  n: number;
+}
 
 export interface CodeEnvelope {
   codeSessionId: string;
   event: CodeEvent;
+  _pt?: EventPoint;
 }
 
 // ---- ACP wire shapes (subset) ----
