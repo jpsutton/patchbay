@@ -85,7 +85,11 @@ pub(crate) async fn call(state: &AppState, from: &str, method: &str, p: &Value) 
         }
         "remote.streams" => json!(state.mesh.all_streams()),
         "remote.transcript" => json!(db.code_transcript(&s("id")?)?),
-        "remote.snapshot" => json!({ "attach": attach_any(state, &s("id")?).await }),
+        "remote.snapshot" => {
+            let id = s("id")?;
+            let has = db.code_transcript(&id)?.is_some_and(|t| !t.is_empty());
+            json!({ "attach": attach_any(state, &id).await, "hasTranscript": has })
+        }
         "remote.code" => forward_code(state, from, p).await?,
         "remote.usage" => json!(db.code_usage(&s("id")?)?.view()),
         "remote.update_code_session" => {

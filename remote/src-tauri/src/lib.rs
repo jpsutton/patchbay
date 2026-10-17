@@ -241,10 +241,11 @@ fn remote_set_foreground(r: Shared<'_>, foreground: bool) {
 
 /// Stop following a session or conversation the window no longer shows.
 #[tauri::command]
-fn remote_unwatch(r: Shared<'_>, topic: String) {
+async fn remote_unwatch(r: Shared<'_>, topic: String) -> CmdResult<()> {
     if topic != rmt::TOPIC_INDEX {
         r.client.unsubscribe(&topic);
     }
+    Ok(())
 }
 
 /// Keep the connection open in the background (Android's foreground service). Async, so it runs

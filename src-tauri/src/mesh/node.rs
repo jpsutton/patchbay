@@ -1988,16 +1988,27 @@ impl Inner {
             if let (Some(p), Some(ring)) = (&point, ring)
                 && let Some(events) = ring.since(p)
             {
-                plans.push(Plan { topic, delta: Some(events), tail: Vec::new(), covered: true, point: last.or(point) });
+                plans.push(Plan {
+                    topic,
+                    delta: Some(events),
+                    tail: Vec::new(),
+                    covered: true,
+                    full: None,
+                    point: last.or(point),
+                });
                 continue;
             }
-            let (tail, covered) = match ring {
+            let (tail, covered, full) = match ring {
                 Some(ring) if topic.starts_with("session:") => {
-                    ring.tail(|_, p| matches!(p["event"]["type"].as_str(), Some("promptDone" | "sessionReady")))
+                    let (tail, covered) =
+                        ring.tail(|_, p| matches!(p["event"]["type"].as_str(), Some("promptDone" | "sessionReady")));
+                    // The whole run, for a session no window has saved a transcript of.
+                    let (all, complete) = ring.tail(|_, _| false);
+                    (tail, covered, (complete && !all.is_empty()).then_some(all))
                 }
-                _ => (Vec::new(), true),
+                _ => (Vec::new(), true, None),
             };
-            plans.push(Plan { topic, delta: None, tail, covered, point: last });
+            plans.push(Plan { topic, delta: None, tail, covered, full, point: last });
         }
         plans
     }
@@ -2017,6 +2028,12 @@ impl Inner {
                 let h = self.handler.read().unwrap().clone();
                 if let Some(h) = h {
                     snapshot = h.call(from.to_owned(), "remote.snapshot".into(), json!({ "id": id })).await.unwrap_or(Value::Null);
+                }
+                // Without a saved transcript the earlier turns of this run would be missing.
+                if snapshot["hasTranscript"] == false
+                    && let Some(full) = p.full
+                {
+                    tail = full;
                 }
                 // The attach replay already brings the ready state, usage and open requests.
                 let open: HashSet<String> = snapshot["attach"]["events"]
@@ -2200,6 +2217,8 @@ struct Plan {
     tail: Vec<(String, Value)>,
     /// The tail starts where it should (false when the ring lost its beginning).
     covered: bool,
+    /// The whole stream, when the ring still holds it from its start.
+    full: Option<Vec<(String, Value)>>,
     point: Option<rmt::Point>,
 }
 

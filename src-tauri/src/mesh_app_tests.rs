@@ -278,3 +278,72 @@ async fn phone_joins_follows_resumes_and_switches_gateway() {
     b.state.mesh.remove(&pid).unwrap();
     until("phone forgets the mesh", 10, || !p.client.is_member()).await;
 }
+
+/// A gateway for trying the phone app by hand (an emulator reaches the host at 10.0.2.2):
+/// a mesh on `0.0.0.0:41890` whose passphrase is `PASS`, with a provider pointing at
+/// `scripts/mock-llm.py` (start it first) and a Grok Build session using it. Every phone that
+/// asks to join is approved. Each run is a new mesh.
+///
+/// `cargo test --lib manual_phone_gateway -- --ignored --nocapture` (PATCHBAY_TEST_SECS limits it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn manual_phone_gateway() {
+    let n = node("studio");
+    n.state.mesh.set_config(Some("studio"), Some("0.0.0.0:41890"), None).unwrap();
+    n.state.mesh.create(PASS, "studio").unwrap();
+    let db = &n.state.db;
+    let p = db::Provider {
+        id: "mock".into(),
+        name: "Mock LLM".into(),
+        kind: db::ProviderKind::OpenaiChat,
+        base_url: std::env::var("PATCHBAY_MOCK_URL").unwrap_or_else(|_| "http://127.0.0.1:8765/v1".into()),
+        has_key: true,
+    };
+    db.upsert_provider(&p, Some("mock-key")).unwrap();
+    for (id, model) in [("m-echo", "mock-echo"), ("m-agent", "mock-agent")] {
+        db.upsert_model(&db::Model {
+            id: id.into(),
+            provider_id: "mock".into(),
+            model_id: model.into(),
+            display_name: model.into(),
+            vision: true,
+            context_window: Some(128_000),
+            params: Default::default(),
+        })
+        .unwrap();
+    }
+    db.set_setting("default_model", "m-echo").unwrap();
+    let proj = n.dir.join("proj");
+    repo(&proj);
+    let s = db.create_code_session(&proj.to_string_lossy(), Some("m-agent"), "grok").unwrap();
+    db.update_code_session(&s.id, None, Some("Try !edit from the phone"), None).unwrap();
+    let c = db.create_conversation(Some("m-echo")).unwrap();
+    db.update_conversation(&c.id, Some("Hello from studio"), None, None).unwrap();
+    let u = db.insert_message(&c.id, None, "user", "Is this thing on?", None, &[]).unwrap();
+    let a = db.insert_message(&c.id, Some(&u), "assistant", "Loud and clear.", Some("m-echo"), &[]).unwrap();
+    db.set_active_leaf(&c.id, &a).unwrap();
+    serve_phones(&n).await;
+}
+
+async fn serve_phones(n: &Node) {
+    eprintln!("gateway: ws://0.0.0.0:41890, passphrase {PASS:?}, node {}", n.state.mesh.node_id());
+    let secs: u64 = std::env::var("PATCHBAY_TEST_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(900);
+    let t0 = std::time::Instant::now();
+    let mut last = String::new();
+    while t0.elapsed() < Duration::from_secs(secs) {
+        let st = n.state.mesh.status();
+        for p in st["pending"].as_array().cloned().unwrap_or_default() {
+            let id = p["nodeId"].as_str().unwrap_or_default();
+            eprintln!("approving {} ({}), code {}", p["name"], p["role"], p["code"]);
+            let _ = n.state.mesh.approve(id);
+        }
+        let members: Vec<String> =
+            st["members"].as_array().unwrap().iter().map(|m| format!("{}:{}", m["name"], m["state"])).collect();
+        let now = members.join(" ");
+        if now != last {
+            eprintln!("members: {now}");
+            last = now;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}

@@ -10,7 +10,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CARGO_HOME=/opt/cargo \
     JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
 ENV NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION \
-    PATH=/opt/cargo/bin:/opt/fdroid/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:$PATH
+    PATH=/opt/cargo/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:$PATH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl unzip git build-essential pkg-config file \
@@ -33,7 +33,9 @@ RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-to
     && rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android \
     && chmod -R a+rwX $RUSTUP_HOME $CARGO_HOME
 
-# The same fdroidserver release.yml installs; Ubuntu's (2.2) can't read current APKs.
+# The same fdroidserver release.yml installs; Ubuntu's (2.2) can't read current APKs. Last on
+# PATH: it brings its own `sdkmanager`, which must not shadow Google's.
 RUN python3 -m venv /opt/fdroid && /opt/fdroid/bin/pip install --no-cache-dir fdroidserver==2.4.5
+ENV PATH=$PATH:/opt/fdroid/bin
 
 WORKDIR /src

@@ -46,6 +46,20 @@ cd remote && ../node_modules/.bin/tauri android build --apk --target aarch64 --c
 
 The desktop build of the app (`cargo run` in `src-tauri/`, after `pnpm build:remote`) works too, for trying it against a real mesh from a computer.
 
+## Trying it end to end in an emulator
+
+A gateway with something to drive: `scripts/mock-llm.py` as the model, and a test node that serves phones on port 41890 (passphrase `correct horse battery`), with a Grok Build session and a chat, approving every phone that asks to join:
+
+```bash
+scripts/mock-llm.py
+```
+
+```bash
+cd src-tauri && cargo test --lib manual_phone_gateway -- --ignored --nocapture
+```
+
+Build for the emulator with `ANDROID_TARGET=x86_64 scripts/android-build.sh --debug`, install it on an x86_64 Android image, and join `10.0.2.2` (the emulator's name for the host). In the Code session, `!edit` makes the mock model ask for an edit permission, which the phone answers.
+
 ## Release keys (one-time setup, by a person)
 
 Releases sign the APK and publish it to the F-Droid repository on GitHub Pages (see `.github/workflows/release.yml`). Until these secrets exist, releases go out without the phone app.

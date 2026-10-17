@@ -125,6 +125,8 @@ struct Inner {
     /// Loaded when the connection manager starts, not in `new`: on Android the key store calls
     /// into the main thread, where `new` may be running.
     ident: OnceLock<Identity>,
+    /// The runtime `start` ran on.
+    rt: OnceLock<tokio::runtime::Handle>,
     sink: Sink,
     saved: Mutex<Saved>,
     tickets: Mutex<HashMap<String, Ticket>>,
@@ -152,6 +154,7 @@ impl RemoteClient {
             dir,
             keys,
             ident: OnceLock::new(),
+            rt: OnceLock::new(),
             sink,
             saved: Mutex::new(saved),
             tickets: Mutex::default(),
@@ -174,7 +177,9 @@ impl RemoteClient {
         if self.0.started.swap(true, Ordering::SeqCst) {
             return;
         }
-        tokio::spawn(self.0.clone().manage());
+        let rt = tokio::runtime::Handle::current();
+        let _ = self.0.rt.set(rt.clone());
+        rt.spawn(self.0.clone().manage());
     }
 
     pub fn shutdown(&self) {
@@ -289,9 +294,12 @@ impl RemoteClient {
         }
         let c = self.clone();
         let topic = topic.to_owned();
-        tokio::spawn(async move {
-            let _ = c.rpc("remote.unsubscribe", json!({ "topics": [topic] })).await;
-        });
+        // On the runtime `start` ran on: this may be called from a thread without one.
+        if let Some(rt) = self.0.rt.get() {
+            rt.spawn(async move {
+                let _ = c.rpc("remote.unsubscribe", json!({ "topics": [topic] })).await;
+            });
+        }
     }
 
     /// Topics subscribed now.
