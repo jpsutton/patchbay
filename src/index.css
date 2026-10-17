@@ -130,6 +130,23 @@ body {
   font-feature-settings: "ss01", "cv11";
 }
 
+/*
+ * App-drawn title bar on Linux (see useRoundedWindow): the window is transparent and #root is
+ * the visible window, with rounded corners and a hairline edge. `contain: paint` also clips the
+ * fixed-position dialog backdrops, which would otherwise fill the square corners.
+ */
+html.rounded-window,
+html.rounded-window body {
+  background: transparent;
+}
+html.rounded-window #root {
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  overflow: hidden;
+  contain: paint;
+}
+
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--color-border) transparent;

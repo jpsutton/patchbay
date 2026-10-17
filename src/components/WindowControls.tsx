@@ -32,6 +32,32 @@ function useMaximized(): boolean {
   return max;
 }
 
+/**
+ * Rounds the window's corners when Patchbay draws its own title bar on Linux, where the main
+ * window is transparent (src-tauri/tauri.linux.conf.json) so the page can draw its own edge.
+ * Square again when maximized or fullscreen. Windows 11 rounds undecorated windows itself.
+ */
+export function useRoundedWindow() {
+  const on = useAppTitleBar() && inTauri && navigator.userAgent.includes("Linux");
+  const [filled, setFilled] = useState(false);
+  useEffect(() => {
+    if (!on) return;
+    const w = getCurrentWindow();
+    let un: (() => void) | undefined;
+    const sync = () =>
+      Promise.all([w.isMaximized(), w.isFullscreen()])
+        .then(([max, full]) => setFilled(max || full))
+        .catch(() => {});
+    sync();
+    w.onResized(sync).then((u) => (un = u));
+    return () => un?.();
+  }, [on]);
+  const rounded = on && !filled;
+  useEffect(() => {
+    document.documentElement.classList.toggle("rounded-window", rounded);
+  }, [rounded]);
+}
+
 function ControlButton({
   label,
   danger,
