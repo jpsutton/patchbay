@@ -12,6 +12,8 @@ mod terminal;
 mod usage;
 #[cfg(test)]
 mod smoke_tests;
+#[cfg(test)]
+mod mesh_app_tests;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,20 +32,45 @@ use crate::db::{
 use crate::mesh::Mesh;
 use crate::terminal::{TermEvent, TerminalManager};
 
+/// Everything commands share. Cheap to clone (all handles), so the mesh's request handler and
+/// background tasks hold their own copy.
+#[derive(Clone)]
 pub struct AppState {
     db: Arc<Db>,
     data_dir: PathBuf,
     chat: Arc<ChatManager>,
     code: Arc<CodeManager>,
-    terminals: TerminalManager,
+    terminals: Arc<TerminalManager>,
     mesh: Mesh,
+    /// Sends an event to this node's window.
+    emit: mesh::node::UiSink,
     /// Sessions whose checkpoint is being fetched right now.
-    pulling: std::sync::Mutex<std::collections::HashSet<String>>,
+    pulling: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Per running session: the events a newly attached viewer needs to catch up.
-    live: std::sync::Mutex<std::collections::HashMap<String, LiveAgent>>,
+    live: Arc<std::sync::Mutex<std::collections::HashMap<String, LiveAgent>>>,
     /// Terminals of sessions on other nodes, shown here: terminal id -> output channel and
     /// an ordered queue of input for the host.
-    remote_terms: std::sync::Mutex<std::collections::HashMap<String, RemoteTerm>>,
+    remote_terms: Arc<std::sync::Mutex<std::collections::HashMap<String, RemoteTerm>>>,
+}
+
+impl AppState {
+    fn new(db: Arc<Db>, data_dir: PathBuf, mesh: Mesh, emit: mesh::node::UiSink) -> Self {
+        let state = AppState {
+            db,
+            data_dir,
+            chat: Arc::default(),
+            code: Arc::default(),
+            terminals: Arc::default(),
+            mesh: mesh.clone(),
+            emit: emit.clone(),
+            pulling: Arc::default(),
+            live: Arc::default(),
+            remote_terms: Arc::default(),
+        };
+        mesh.set_ui(emit);
+        mesh.set_handler(Arc::new(MeshRpc { state: state.clone() }));
+        state
+    }
 }
 
 struct RemoteTerm {
@@ -493,18 +520,16 @@ fn ensure_local_host(state: &AppState, id: &str) -> anyhow::Result<()> {
 
 /// Agent events go to this window and, live, to every other node. A finished turn also tells
 /// the other nodes to fetch a checkpoint, so the session survives this node going away.
-fn code_sink(app: &tauri::AppHandle, mesh: &Mesh) -> code::acp::Sink {
+fn code_sink(state: &AppState) -> code::acp::Sink {
     use code::acp::CodeEvent;
-    use tauri::Emitter;
-    let app = app.clone();
-    let mesh = mesh.clone();
+    let state = state.clone();
     Arc::new(move |env| {
+        let mesh = &state.mesh;
         let turn_over = match &env.event {
             CodeEvent::PromptDone { .. } => true,
             CodeEvent::Status { state, .. } => state == "exited",
             _ => false,
         };
-        let state = app.state::<AppState>();
         if turn_over {
             state.code.set_busy(&env.code_session_id, false);
         }
@@ -533,17 +558,18 @@ fn code_sink(app: &tauri::AppHandle, mesh: &Mesh) -> code::acp::Sink {
             let p = serde_json::json!({ "id": env.code_session_id, "host": mesh.node_id() });
             mesh.broadcast_event("mesh://checkpoint", p);
         }
-        mesh.broadcast_event(code::acp::EVENT, serde_json::to_value(&env).unwrap_or_default());
-        let _ = app.emit(code::acp::EVENT, env);
+        let v = serde_json::to_value(&env).unwrap_or_default();
+        mesh.broadcast_event(code::acp::EVENT, v.clone());
+        (state.emit)(code::acp::EVENT, v);
     })
 }
 
-async fn code_start_local(app: &tauri::AppHandle, state: &AppState, id: String) -> anyhow::Result<()> {
+async fn code_start_local(state: &AppState, id: String) -> anyhow::Result<()> {
     ensure_local_host(state, &id)?;
     if state.code.is_moving(&id) {
         anyhow::bail!("this session is being moved to another computer");
     }
-    let sink = code_sink(app, &state.mesh);
+    let sink = code_sink(state);
     let (code, db, dir) = (state.code.clone(), state.db.clone(), state.data_dir.clone());
     // `start` may block briefly while a previous agent for this session shuts down.
     tokio::task::spawn_blocking(move || code.start(sink, db, &dir, &id)).await??;
@@ -552,12 +578,12 @@ async fn code_start_local(app: &tauri::AppHandle, state: &AppState, id: String) 
 
 /// Start (or restart) the agent for a code session. Output arrives as `code://event`.
 #[tauri::command]
-async fn code_start(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+async fn code_start(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     if let Some(host) = remote_host(&state, &id)? {
         state.mesh.rpc(&host, "code.start", serde_json::json!({ "id": id })).await?;
         return Ok(());
     }
-    Ok(code_start_local(&app, &state, id).await?)
+    Ok(code_start_local(&state, id).await?)
 }
 
 /// Catch-up for a window opening a running session: whether it runs and is mid-turn, plus the
@@ -608,7 +634,6 @@ async fn code_stop(state: State<'_, AppState>, id: String) -> CmdResult<()> {
 }
 
 async fn code_prompt_local(
-    app: &tauri::AppHandle,
     state: &AppState,
     id: String,
     text: String,
@@ -654,7 +679,7 @@ async fn code_prompt_local(
         state.db.with_conn(|c| c.execute("DELETE FROM settings WHERE key = ?1", [&note_key]))?;
     }
     // Every viewer shows the prompt; the window that sent it already has.
-    code_sink(app, &state.mesh)(code::acp::Envelope {
+    code_sink(state)(code::acp::Envelope {
         code_session_id: id,
         event: code::acp::CodeEvent::UserPrompt { text, origin, attachments: serde_json::to_value(&atts)? },
     });
@@ -663,7 +688,6 @@ async fn code_prompt_local(
 
 #[tauri::command]
 async fn code_prompt(
-    app: tauri::AppHandle,
     state: State<'_, AppState>,
     id: String,
     text: String,
@@ -677,7 +701,7 @@ async fn code_prompt(
         return Ok(());
     }
     let me = state.mesh.node_id().to_owned();
-    Ok(code_prompt_local(&app, &state, id, text, attachment_ids, mentions, me).await?)
+    Ok(code_prompt_local(&state, id, text, attachment_ids, mentions, me).await?)
 }
 
 #[tauri::command]
@@ -883,26 +907,30 @@ async fn code_move(state: State<'_, AppState>, id: String, target: String, cwd: 
 }
 
 /// Continue a session here from the last checkpoint this node holds, when its host is gone.
-#[tauri::command]
-async fn code_take_over(state: State<'_, AppState>, id: String, cwd: String) -> CmdResult<Option<String>> {
-    let s = state.db.get_code_session(&id)?.ok_or_else(|| CmdError("no such session".into()))?;
+async fn take_over_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Result<Option<String>> {
+    let s = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("no such session"))?;
     let me = state.mesh.node_id().to_owned();
-    let host = s.host_node.clone().filter(|h| h != &me).ok_or_else(|| CmdError("this session already runs here".into()))?;
+    let host = s.host_node.clone().filter(|h| h != &me).ok_or_else(|| anyhow::anyhow!("this session already runs here"))?;
     let host_name = state.mesh.member_name(&host);
     if state.mesh.connected(&host) {
-        return Err(CmdError(format!("{host_name} is online; move the session instead")));
+        anyhow::bail!("{host_name} is online; move the session instead");
     }
-    let (dir, home, target) = (state.data_dir.clone(), grok_home(&state), PathBuf::from(cwd.trim()));
-    let (sid, from) = (id.clone(), host_name.clone());
-    let (restored, note) = if handoff::checkpoint(&state.data_dir, &id).is_some() {
+    let (dir, home, target) = (state.data_dir.clone(), grok_home(state), PathBuf::from(cwd));
+    let (sid, from) = (id.to_owned(), host_name.clone());
+    let (restored, note) = if handoff::checkpoint(&state.data_dir, id).is_some() {
         tokio::task::spawn_blocking(move || handoff::restore_checkpoint(&dir, &home, &sid, &target, &from)).await??
     } else if target.is_dir() {
         (false, Some(format!("No checkpoint from {host_name} reached this computer, so only the conversation came along.")))
     } else {
-        return Err(CmdError(format!("no checkpoint from {host_name} is here and {} doesn't exist", target.display())));
+        anyhow::bail!("no checkpoint from {host_name} is here and {} doesn't exist", target.display());
     };
-    finish_takeover(&state, &s, cwd.trim(), restored, &host_name)?;
+    finish_takeover(state, &s, cwd, restored, &host_name)?;
     Ok(note)
+}
+
+#[tauri::command]
+async fn code_take_over(state: State<'_, AppState>, id: String, cwd: String) -> CmdResult<Option<String>> {
+    Ok(take_over_local(&state, &id, cwd.trim()).await?)
 }
 
 /// Checkpoints of other nodes' sessions this node holds: session id -> taken at (ms).
@@ -918,8 +946,7 @@ fn code_checkpoints(state: State<'_, AppState>) -> CmdResult<std::collections::H
 }
 
 /// Fetch the latest checkpoint of a session hosted on `host`.
-async fn pull_checkpoint(app: tauri::AppHandle, id: String, host: String) {
-    let state = app.state::<AppState>();
+async fn pull_checkpoint(state: AppState, id: String, host: String) {
     if !state.pulling.lock().unwrap().insert(id.clone()) {
         return;
     }
@@ -959,7 +986,7 @@ async fn pull_checkpoint(app: tauri::AppHandle, id: String, host: String) {
 
 /// Serves other nodes' requests: remote control of sessions hosted here.
 struct MeshRpc {
-    app: tauri::AppHandle,
+    state: AppState,
 }
 
 fn param<'a>(p: &'a serde_json::Value, k: &str) -> anyhow::Result<&'a str> {
@@ -970,12 +997,12 @@ fn param<'a>(p: &'a serde_json::Value, k: &str) -> anyhow::Result<&'a str> {
 impl mesh::RpcHandler for MeshRpc {
     async fn call(&self, from: String, method: String, p: serde_json::Value) -> anyhow::Result<serde_json::Value> {
         use serde_json::{Value, json};
-        let state = self.app.state::<AppState>();
+        let state = &self.state;
         let id = || param(&p, "id").map(str::to_owned);
         match method.as_str() {
-            "code.start" => code_start_local(&self.app, &state, id()?).await.map(|_| Value::Null),
+            "code.start" => code_start_local(state, id()?).await.map(|_| Value::Null),
             "code.is_running" => Ok(json!(state.code.is_running(&id()?))),
-            "code.attach" => Ok(code_attach_local(&state, &id()?)),
+            "code.attach" => Ok(code_attach_local(state, &id()?)),
             "code.stop" => {
                 state.code.stop(&id()?);
                 Ok(Value::Null)
@@ -984,19 +1011,19 @@ impl mesh::RpcHandler for MeshRpc {
                 let atts: Vec<String> = serde_json::from_value(p["attachmentIds"].clone()).unwrap_or_default();
                 let mentions: Vec<String> = serde_json::from_value(p["mentions"].clone()).unwrap_or_default();
                 let text = p["text"].as_str().unwrap_or_default().to_owned();
-                code_prompt_local(&self.app, &state, id()?, text, atts, mentions, from).await.map(|_| Value::Null)
+                code_prompt_local(state, id()?, text, atts, mentions, from).await.map(|_| Value::Null)
             }
             "code.cancel" => {
-                ensure_local_host(&state, &id()?)?;
+                ensure_local_host(state, &id()?)?;
                 state.code.send(&id()?, AgentCmd::Cancel).map(|_| Value::Null)
             }
-            "code.set_model" => code_set_model_local(&state, &id()?, param(&p, "modelId")?.to_owned()).await.map(|_| Value::Null),
+            "code.set_model" => code_set_model_local(state, &id()?, param(&p, "modelId")?.to_owned()).await.map(|_| Value::Null),
             "code.set_mode" => {
-                ensure_local_host(&state, &id()?)?;
+                ensure_local_host(state, &id()?)?;
                 state.code.set_mode(&id()?, param(&p, "modeId")?.to_owned()).await.map(|_| Value::Null)
             }
             "code.rewind" => {
-                ensure_local_host(&state, &id()?)?;
+                ensure_local_host(state, &id()?)?;
                 let ordinal = p["ordinal"].as_u64().unwrap_or(0) as usize;
                 let preview = p["preview"].as_str().unwrap_or_default().to_owned();
                 let revert = p["revertFiles"].as_bool().unwrap_or(false);
@@ -1018,7 +1045,7 @@ impl mesh::RpcHandler for MeshRpc {
             }
             "code.package" => {
                 let have: Vec<String> = serde_json::from_value(p["have"].clone()).unwrap_or_default();
-                package_local(&state, &id()?, param(&p, "kind")?, have).await
+                package_local(state, &id()?, param(&p, "kind")?, have).await
             }
             "code.fetch" => {
                 let (token, name) = (param(&p, "token")?, param(&p, "name")?);
@@ -1040,7 +1067,7 @@ impl mesh::RpcHandler for MeshRpc {
             }
             "term.open" => {
                 let sid = param(&p, "sessionId")?;
-                ensure_local_host(&state, sid)?;
+                ensure_local_host(state, sid)?;
                 let s = state.db.get_code_session(sid)?.ok_or_else(|| anyhow::anyhow!("no such session"))?;
                 // Keyed by requester too, so it never collides with this node's own terminal.
                 let key = format!("{}@{from}", param(&p, "termId")?);
@@ -1068,7 +1095,7 @@ impl mesh::RpcHandler for MeshRpc {
                 Ok(Value::Null)
             }
             "code.import" => {
-                let note = import_local(&state, &id()?, param(&p, "cwd")?).await?;
+                let note = import_local(state, &id()?, param(&p, "cwd")?).await?;
                 Ok(json!(note))
             }
             other => anyhow::bail!("unknown request {other}"),
@@ -1077,8 +1104,7 @@ impl mesh::RpcHandler for MeshRpc {
 
     fn event(&self, name: &str, payload: &serde_json::Value) {
         if name == "mesh://term" {
-            let state = self.app.state::<AppState>();
-            let terms = state.remote_terms.lock().unwrap();
+            let terms = self.state.remote_terms.lock().unwrap();
             if let Some(t) = payload["termId"].as_str().and_then(|id| terms.get(id))
                 && let Ok(ev) = serde_json::from_value::<TermEvent>(payload["event"].clone())
             {
@@ -1090,16 +1116,16 @@ impl mesh::RpcHandler for MeshRpc {
             return;
         }
         let (Some(id), Some(host)) = (payload["id"].as_str(), payload["host"].as_str()) else { return };
-        tauri::async_runtime::spawn(pull_checkpoint(self.app.clone(), id.to_owned(), host.to_owned()));
+        tokio::spawn(pull_checkpoint(self.state.clone(), id.to_owned(), host.to_owned()));
     }
 
     fn synced(&self, applied: &mesh::sync::Applied) {
         if !applied.tables.contains("code_sessions") {
             return;
         }
-        let state = self.app.state::<AppState>();
+        let state = &self.state;
         let me = state.mesh.node_id().to_owned();
-        for (id, prev) in &applied.host_changes {
+        for (id, prev, prev_cwd) in &applied.host_changes {
             if prev.as_deref() != Some(me.as_str()) {
                 continue;
             }
@@ -1108,17 +1134,18 @@ impl mesh::RpcHandler for MeshRpc {
                 state.code.set_moving(id, false);
                 continue;
             }
-            // Taken over elsewhere while we were away: keep whatever we did since.
-            let Ok(Some(s)) = state.db.get_code_session(id) else { continue };
-            let (app, id) = (self.app.clone(), id.clone());
-            tauri::async_runtime::spawn(async move {
-                let cwd = PathBuf::from(&s.cwd);
-                let kept = tokio::task::spawn_blocking(move || handoff::keep_orphaned_work(&cwd, &s.id)).await;
+            // Taken over elsewhere while we were away: keep whatever we did since, in the
+            // folder the session had here (the synced row now names the new host's folder).
+            let Some(cwd) = prev_cwd.clone() else { continue };
+            let (emit, id) = (state.emit.clone(), id.clone());
+            tokio::spawn(async move {
+                let sid = id.clone();
+                let cwd = PathBuf::from(cwd);
+                let kept = tokio::task::spawn_blocking(move || handoff::keep_orphaned_work(&cwd, &sid)).await;
                 if let Ok(Ok(Some(r))) = kept {
-                    use tauri::Emitter;
                     let msg = format!("This session continued on another computer. Work done here since is saved as git ref {r}.");
                     let env = code::acp::Envelope { code_session_id: id, event: code::acp::CodeEvent::Notice { message: msg } };
-                    let _ = app.emit(code::acp::EVENT, env);
+                    emit(code::acp::EVENT, serde_json::to_value(env).unwrap_or_default());
                 }
             });
         }
@@ -1440,25 +1467,14 @@ pub fn run() {
             let db = Arc::new(Db::open(&data_dir.join("patchbay.sqlite"))?);
             let keys = Arc::new(mesh::keys::OsKeyStore::new(&data_dir));
             let mesh = Mesh::new(db.clone(), data_dir.clone(), keys)?;
-            {
+            let emit: mesh::node::UiSink = {
                 use tauri::Emitter;
                 let h = app.handle().clone();
-                mesh.set_ui(Arc::new(move |name: &str, payload: serde_json::Value| {
+                Arc::new(move |name: &str, payload: serde_json::Value| {
                     let _ = h.emit(name, payload);
-                }));
-            }
-            mesh.set_handler(Arc::new(MeshRpc { app: app.handle().clone() }));
-            app.manage(AppState {
-                db,
-                data_dir,
-                chat: Arc::default(),
-                code: Arc::default(),
-                terminals: TerminalManager::default(),
-                mesh: mesh.clone(),
-                pulling: Default::default(),
-                live: Default::default(),
-                remote_terms: Default::default(),
-            });
+                })
+            };
+            app.manage(AppState::new(db, data_dir, mesh.clone(), emit));
             if mesh.is_member() {
                 tauri::async_runtime::spawn(async move { mesh.start() });
             }
