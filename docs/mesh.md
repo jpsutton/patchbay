@@ -49,7 +49,7 @@ Code sessions in the sidebar include those running on other computers. The sessi
 
 Opening such a session connects you to its agent without interrupting it. Prompts, permission answers, model and mode changes and the Stop button all go to the computer running it. Every computer watching the session sees the same transcript, live, including prompts sent from other computers. A permission request appears on all of them, and the first answer counts.
 
-The terminal panel works only on the computer that runs the session.
+The terminal panel opens a shell on the computer that runs the session, wherever you are.
 
 ## Moving a session
 
@@ -134,7 +134,6 @@ Behind a Cloudflare Tunnel, every connection arrives from the tunnel's local add
 
 ## Limitations
 
-- The terminal panel opens only on the computer running a session.
 - Moving the agent's own session history works with Grok Build, the agent Patchbay ships with. With other agents, the moved session starts fresh and gets the conversation so far as context on its first prompt.
 - Window preferences (theme, text size, shortcuts and similar) stay per computer.
 - Two copies of the same Patchbay database can't both join a mesh, because they share one identity. Use a fresh install on each computer instead of copying the data folder.

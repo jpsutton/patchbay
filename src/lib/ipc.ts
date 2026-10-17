@@ -581,10 +581,11 @@ export const api = {
   meshAddAddress: (url: string) => invoke<void>("mesh_add_address", { url }),
   meshChatStreams: () => invoke<RemoteStream[]>("mesh_chat_streams"),
 
-  termOpen: (id: string, cwd: string, cols: number, rows: number, onEvent: (e: TermEvent) => void) => {
+  /** With `sessionId`, the shell runs on the computer hosting that session. */
+  termOpen: (id: string, cwd: string, cols: number, rows: number, onEvent: (e: TermEvent) => void, sessionId?: string) => {
     const ch = new Channel<TermEvent>();
     ch.onmessage = onEvent;
-    return invoke<void>("term_open", { id, cwd, cols, rows, onEvent: ch });
+    return invoke<void>("term_open", { id, cwd, cols, rows, onEvent: ch, sessionId });
   },
   termWrite: (id: string, data: string) => invoke<void>("term_write", { id, data }),
   termResize: (id: string, cols: number, rows: number) => invoke<void>("term_resize", { id, cols, rows }),

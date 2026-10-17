@@ -126,7 +126,6 @@ Patchbay's coding agent is [Grok Build](https://github.com/xai-org/grok-build), 
 - Chat can't use tools yet, so MCP servers only work in the Code tab.
 - On Wayland, the global shortcut may not work. The tray icon on Linux needs a desktop that supports tray icons (StatusNotifier).
 - No auto-update yet, and no support for Office files (Word, Excel, PowerPoint).
-- In a mesh, a Code session's terminal opens only on the computer running the session.
 
 ## License
 

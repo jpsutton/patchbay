@@ -41,6 +41,14 @@ pub struct AppState {
     pulling: std::sync::Mutex<std::collections::HashSet<String>>,
     /// Per running session: the events a newly attached viewer needs to catch up.
     live: std::sync::Mutex<std::collections::HashMap<String, LiveAgent>>,
+    /// Terminals of sessions on other nodes, shown here: terminal id -> output channel and
+    /// an ordered queue of input for the host.
+    remote_terms: std::sync::Mutex<std::collections::HashMap<String, RemoteTerm>>,
+}
+
+struct RemoteTerm {
+    channel: Channel<TermEvent>,
+    input: tokio::sync::mpsc::UnboundedSender<(String, serde_json::Value)>,
 }
 
 /// What a window opening an already-running session (here or on another node) must replay.
@@ -1030,6 +1038,35 @@ impl mesh::RpcHandler for MeshRpc {
                 }
                 Ok(Value::Null)
             }
+            "term.open" => {
+                let sid = param(&p, "sessionId")?;
+                ensure_local_host(&state, sid)?;
+                let s = state.db.get_code_session(sid)?.ok_or_else(|| anyhow::anyhow!("no such session"))?;
+                // Keyed by requester too, so it never collides with this node's own terminal.
+                let key = format!("{}@{from}", param(&p, "termId")?);
+                let (mesh, to, term_id) = (state.mesh.clone(), from.clone(), param(&p, "termId")?.to_owned());
+                let sink: terminal::TermSink = Arc::new(move |ev| {
+                    let payload = json!({ "termId": term_id, "event": ev });
+                    mesh.send_event(&to, "mesh://term", payload)
+                });
+                let shell = prefs::load(&state.db).terminal_shell;
+                let (cols, rows) = (p["cols"].as_u64().unwrap_or(80) as u16, p["rows"].as_u64().unwrap_or(24) as u16);
+                state.terminals.open(&key, &s.cwd, Some(&shell), cols, rows, sink)?;
+                Ok(Value::Null)
+            }
+            "term.write" => {
+                let key = format!("{}@{from}", param(&p, "termId")?);
+                state.terminals.write(&key, param(&p, "data")?).map(|_| Value::Null)
+            }
+            "term.resize" => {
+                let key = format!("{}@{from}", param(&p, "termId")?);
+                let (cols, rows) = (p["cols"].as_u64().unwrap_or(80) as u16, p["rows"].as_u64().unwrap_or(24) as u16);
+                state.terminals.resize(&key, cols, rows).map(|_| Value::Null)
+            }
+            "term.close" => {
+                state.terminals.close(&format!("{}@{from}", param(&p, "termId")?));
+                Ok(Value::Null)
+            }
             "code.import" => {
                 let note = import_local(&state, &id()?, param(&p, "cwd")?).await?;
                 Ok(json!(note))
@@ -1039,6 +1076,16 @@ impl mesh::RpcHandler for MeshRpc {
     }
 
     fn event(&self, name: &str, payload: &serde_json::Value) {
+        if name == "mesh://term" {
+            let state = self.app.state::<AppState>();
+            let terms = state.remote_terms.lock().unwrap();
+            if let Some(t) = payload["termId"].as_str().and_then(|id| terms.get(id))
+                && let Ok(ev) = serde_json::from_value::<TermEvent>(payload["event"].clone())
+            {
+                let _ = t.channel.send(ev);
+            }
+            return;
+        }
         if name != "mesh://checkpoint" {
             return;
         }
@@ -1156,34 +1203,76 @@ fn mesh_chat_streams(state: State<'_, AppState>) -> Vec<mesh::node::Stream> {
 }
 
 // ---------------- terminal ----------------
+//
+// With `session_id`, the terminal runs on the node hosting that session: output arrives as
+// `mesh://term` events, and input goes there in order through a per-terminal queue.
 
 #[tauri::command]
-fn term_open(
+async fn term_open(
     state: State<'_, AppState>,
     id: String,
     cwd: String,
     cols: u16,
     rows: u16,
     on_event: Channel<TermEvent>,
+    session_id: Option<String>,
 ) -> CmdResult<()> {
+    if let Some(sid) = session_id
+        && let Some(host) = remote_host(&state, &sid)?
+    {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, serde_json::Value)>();
+        let mesh = state.mesh.clone();
+        let h = host.clone();
+        tauri::async_runtime::spawn(async move {
+            while let Some((method, params)) = rx.recv().await {
+                if let Err(e) = mesh.rpc(&h, &method, params).await {
+                    tracing::debug!("remote terminal: {e:#}");
+                }
+            }
+        });
+        state.remote_terms.lock().unwrap().insert(id.clone(), RemoteTerm { channel: on_event, input: tx });
+        let params = serde_json::json!({ "termId": id, "sessionId": sid, "cols": cols, "rows": rows });
+        state.mesh.rpc(&host, "term.open", params).await?;
+        return Ok(());
+    }
     let shell = prefs::load(&state.db).terminal_shell;
-    Ok(state
-        .terminals
-        .open(&id, &cwd, Some(&shell), cols, rows, on_event)?)
+    let sink: terminal::TermSink = Arc::new(move |ev| on_event.send(ev).is_ok());
+    Ok(state.terminals.open(&id, &cwd, Some(&shell), cols, rows, sink)?)
+}
+
+/// Queue input for a remote terminal; false when `id` is local.
+fn remote_term(state: &AppState, id: &str, method: &str, params: serde_json::Value) -> bool {
+    match state.remote_terms.lock().unwrap().get(id) {
+        Some(t) => {
+            let _ = t.input.send((method.to_owned(), params));
+            true
+        }
+        None => false,
+    }
 }
 
 #[tauri::command]
 fn term_write(state: State<'_, AppState>, id: String, data: String) -> CmdResult<()> {
+    if remote_term(&state, &id, "term.write", serde_json::json!({ "termId": id, "data": data })) {
+        return Ok(());
+    }
     Ok(state.terminals.write(&id, &data)?)
 }
 
 #[tauri::command]
 fn term_resize(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> CmdResult<()> {
+    if remote_term(&state, &id, "term.resize", serde_json::json!({ "termId": id, "cols": cols, "rows": rows })) {
+        return Ok(());
+    }
     Ok(state.terminals.resize(&id, cols, rows)?)
 }
 
 #[tauri::command]
 fn term_close(state: State<'_, AppState>, id: String) {
+    if remote_term(&state, &id, "term.close", serde_json::json!({ "termId": id })) {
+        state.remote_terms.lock().unwrap().remove(&id);
+        return;
+    }
     state.terminals.close(&id);
 }
 
@@ -1368,6 +1457,7 @@ pub fn run() {
                 mesh: mesh.clone(),
                 pulling: Default::default(),
                 live: Default::default(),
+                remote_terms: Default::default(),
             });
             if mesh.is_member() {
                 tauri::async_runtime::spawn(async move { mesh.start() });

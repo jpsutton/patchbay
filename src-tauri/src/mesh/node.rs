@@ -405,6 +405,14 @@ impl Mesh {
         self.0.status()
     }
 
+    /// Send a live event to one member; false when it isn't connected.
+    pub fn send_event(&self, node: &str, name: &str, payload: Value) -> bool {
+        let st = self.0.st.lock().unwrap();
+        st.sessions
+            .get(node)
+            .is_some_and(|s| s.tx.send(Msg::Event { name: name.to_owned(), payload }).is_ok())
+    }
+
     /// Send a live event to every connected member.
     pub fn broadcast_event(&self, name: &str, payload: Value) {
         self.0.broadcast(Msg::Event { name: name.to_owned(), payload });

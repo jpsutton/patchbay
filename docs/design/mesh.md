@@ -123,7 +123,7 @@ On the host, every agent event goes to the local window and to every member as a
 
 A window that opens a session already running, here or elsewhere, calls `code_attach` instead of restarting the agent. The host keeps each running session's last `sessionReady`, open permission requests and latest usage, and replays them. The window shows the synced transcript cache until live events extend it.
 
-The terminal panel stays local to the host.
+The terminal panel of a remote session opens its shell on the host (`term.open` and friends). The host keys it by requester, streams output back to that node only (`mesh://term`), and the requester queues keystrokes so they arrive in order.
 
 ### Fencing
 
@@ -163,7 +163,6 @@ Take-over is manual, because the mesh can't tell a dead host from a network part
 
 ## Known gaps
 
-- The terminal doesn't work remotely. Running it over the mesh means streaming PTY data to one window instead of broadcasting.
 - Folder mapping between nodes is manual: the move dialog defaults to the same path. Remembering a mapping per repository (by remote URL) would save typing.
 - Permission rules match absolute folders, so a rule saved on one node doesn't apply to the same project at a different path elsewhere.
 - Grok session directories whose encoded path exceeds 255 bytes use a hashed name Patchbay doesn't reproduce. Those sessions use the hand-off note.

@@ -47,10 +47,17 @@ export function TerminalPane({ id, cwd, visible }: { id: string; cwd: string; vi
     const termId = `term-${id}`;
     let closed = false;
     api
-      .termOpen(termId, cwd, term.cols || 80, term.rows || 24, (e) => {
-        if (e.type === "data") term.write(b64ToBytes(e.data));
-        else term.write(`\r\n\x1b[2m[process exited${e.code != null ? ` with code ${e.code}` : ""}]\x1b[0m\r\n`);
-      })
+      .termOpen(
+        termId,
+        cwd,
+        term.cols || 80,
+        term.rows || 24,
+        (e) => {
+          if (e.type === "data") term.write(b64ToBytes(e.data));
+          else term.write(`\r\n\x1b[2m[process exited${e.code != null ? ` with code ${e.code}` : ""}]\x1b[0m\r\n`);
+        },
+        id,
+      )
       .catch((err) => term.write(`\x1b[31m${String(err)}\x1b[0m\r\n`));
     const onData = term.onData((d) => {
       if (!closed) api.termWrite(termId, d).catch(() => {});

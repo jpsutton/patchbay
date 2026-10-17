@@ -8,7 +8,7 @@ import {
   type AcpToolCallContent,
   type Attachment,
 } from "../lib/ipc";
-import { memberOnline, remoteHost, useStore, type CodeState, type Entry } from "../lib/store";
+import { memberName, memberOnline, remoteHost, useStore, type CodeState, type Entry } from "../lib/store";
 import { HostBadge, MoveDialog, OfflineHostBanner } from "./HostControls";
 import { Composer } from "../components/Composer";
 import { Markdown } from "../components/Markdown";
@@ -611,9 +611,9 @@ export function CodeView() {
           </HeaderButton>
         )}
         <HeaderButton
-          label={remoteHost(session, mesh) ? "The terminal is available on the computer running this session" : "Terminal"}
+          label={host ? `Terminal on ${memberName(mesh, host)}` : "Terminal"}
           active={showTerm}
-          disabled={!!remoteHost(session, mesh)}
+          disabled={hostOffline}
           onClick={() => {
             setShowTerm(!showTerm);
             setTermMounted((m) => ({ ...m, [session.id]: true }));
@@ -792,7 +792,8 @@ export function CodeView() {
 
       {termMounted[session.id] && (
         <div className={`h-64 shrink-0 border-t border-line ${showTerm ? "" : "hidden"}`}>
-          <TerminalPane id={session.id} cwd={session.cwd} visible={showTerm && !remoteHost(session, mesh)} />
+          {/* Keyed by host, so a moved session's terminal reopens on its new computer. */}
+          <TerminalPane key={session.hostNode ?? ""} id={session.id} cwd={session.cwd} visible={showTerm} />
         </div>
       )}
       {moving && <MoveDialog session={session} takeOver={moving === "takeOver"} onClose={() => setMoving(null)} />}
