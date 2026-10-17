@@ -1,0 +1,33 @@
+Patchbay modification to Grok Build (https://github.com/xai-org/grok-build),
+Apache License 2.0, Copyright 2023-2026 SpaceXAI. Modified by Patchbay
+from upstream commit 2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8.
+
+On Windows, track proto rebuilds per file instead of running protoc with
+--dependency_out=/dev/stdout, which does not exist there and fails the build.
+
+Files changed:
+  crates/build/xai-proto-build/src/lib.rs
+
+diff --git a/crates/build/xai-proto-build/src/lib.rs b/crates/build/xai-proto-build/src/lib.rs
+index 60fbc0ac..4a9bf1a4 100644
+--- a/crates/build/xai-proto-build/src/lib.rs
++++ b/crates/build/xai-proto-build/src/lib.rs
+@@ -150,6 +150,18 @@ impl XaiProtoBuilder {
+             );
+         }
+ 
++        // Windows has no /dev/stdout or /dev/null for protoc to write to: watch the protos and
++        // include directories instead of asking protoc for the exact dependency list.
++        if cfg!(windows) {
++            for path in protos.into_iter().chain(includes) {
++                println!(
++                    "cargo:rerun-if-changed={}",
++                    path.to_str().context("path not UTF-8")?
++                );
++            }
++            return Ok(());
++        }
++
+         // Can only process one input file when using --dependency_out=FILE.
+         for proto in protos {
+             let mut command = Command::new(protoc.unwrap_or(Path::new("protoc")));
