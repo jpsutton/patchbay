@@ -8,7 +8,8 @@ import {
   type AcpToolCallContent,
   type Attachment,
 } from "../lib/ipc";
-import { useStore, type CodeState, type Entry } from "../lib/store";
+import { memberOnline, remoteHost, useStore, type CodeState, type Entry } from "../lib/store";
+import { HostBadge, MoveDialog, OfflineHostBanner } from "./HostControls";
 import { Composer } from "../components/Composer";
 import { Markdown } from "../components/Markdown";
 import { EditMessage } from "../components/EditMessage";
@@ -28,6 +29,7 @@ import {
   CopyIcon,
   FileDiffIcon,
   FolderPlusIcon,
+  MonitorUpIcon,
   PaperclipIcon,
   PencilIcon,
   RestartIcon,
@@ -362,9 +364,13 @@ export function CodeView() {
   const [showChanges, setShowChanges] = useState(false);
   const [termMounted, setTermMounted] = useState<Record<string, boolean>>({});
   const [editingIdx, setEditingIdx] = useState<number | null>(null);
+  const [moving, setMoving] = useState<"move" | "takeOver" | null>(null);
   const sticky = useStickyScroll([state?.entries, state?.toolCalls, state?.permissions]);
+  const mesh = useStore((st) => st.mesh);
+  const meshLoaded = !!mesh;
 
   const start = useStore((st) => st.startAgent);
+  const attach = useStore((st) => st.attachAgent);
 
   useEffect(() => {
     setEditingIdx(null);
@@ -372,12 +378,20 @@ export function CodeView() {
     if (!activeId) return;
     const cur = useStore.getState().code[activeId];
     if (cur && cur.status !== "idle") return;
+    const sess = useStore.getState().codeSessions.find((x) => x.id === activeId);
+    // Until the mesh state is known, a session might be running on another computer.
+    if (sess?.hostNode && !meshLoaded) return;
+    // Running on another computer: watch it there, never restart it just because we looked.
+    if (remoteHost(sess, useStore.getState().mesh)) {
+      attach(activeId);
+      return;
+    }
     api.codeIsRunning(activeId).then((running) => {
       // A running agent without UI state (e.g. after a reload) is restarted so history replays.
       if (!running || !cur) start(activeId);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeId]);
+  }, [activeId, meshLoaded]);
 
   const changes = useMemo(
     () => (state ? collectChanges(state.entries, state.toolCalls) : []),
@@ -422,6 +436,9 @@ export function CodeView() {
 
   const s = state;
   const status = s?.status ?? "idle";
+  const host = remoteHost(session, mesh);
+  // The offline banner offers the way forward instead of a restart that can't work.
+  const hostOffline = !!host && !memberOnline(mesh, host);
   const ready = status === "ready";
   const busy = !!s?.busy;
   const acpModels = s?.models;
@@ -527,6 +544,7 @@ export function CodeView() {
           <span {...drag} className="min-w-0 flex-[1_1_0] truncate font-mono text-[12px] text-faint" title={session.cwd}>
             {session.cwd.replace(/^\/home\/[^/]+|^\/Users\/[^/]+/, "~")}
           </span>
+          <HostBadge session={session} />
         </div>
         {modes.length > 0 && modes.length <= 3 && s?.modes && (
           <div
@@ -587,9 +605,15 @@ export function CodeView() {
         >
           <FileDiffIcon />
         </HeaderButton>
+        {mesh?.member && mesh.members.filter((m) => m.state !== "removed").length > 1 && (
+          <HeaderButton label="Move to another computer" disabled={busy} onClick={() => setMoving("move")}>
+            <MonitorUpIcon />
+          </HeaderButton>
+        )}
         <HeaderButton
-          label="Terminal"
+          label={remoteHost(session, mesh) ? "The terminal is available on the computer running this session" : "Terminal"}
           active={showTerm}
+          disabled={!!remoteHost(session, mesh)}
           onClick={() => {
             setShowTerm(!showTerm);
             setTermMounted((m) => ({ ...m, [session.id]: true }));
@@ -613,6 +637,7 @@ export function CodeView() {
               onScroll={sticky.onScroll}
             >
               <div className="mx-auto flex max-w-3xl flex-col gap-4 px-6 py-6">
+                <OfflineHostBanner session={session} onTakeOver={() => setMoving("takeOver")} />
                 {status === "starting" && (s?.entries.length ?? 0) === 0 && (
                   <div className="flex items-center justify-center gap-2 text-xs text-muted">
                     <span className="signal-pulse h-1.5 w-1.5 rounded-full bg-accent" />
@@ -673,7 +698,7 @@ export function CodeView() {
                     <span className="signal-pulse h-1.5 w-1.5 rounded-full bg-live" /> Working…
                   </div>
                 )}
-                {status === "exited" && (
+                {status === "exited" && !hostOffline && (
                   <div className="flex items-center justify-center gap-2 text-xs text-muted">
                     Agent stopped.
                     <button className="text-accent-ink underline underline-offset-2" onClick={() => start(session.id)}>
@@ -690,7 +715,7 @@ export function CodeView() {
               busy={busy}
               disabled={!ready}
               commands={s?.commands}
-              mentionFiles={() => api.listProjectFiles(session.cwd)}
+              mentionFiles={() => api.listProjectFiles(session.cwd, session.id)}
               onEditLast={() => {
                 if (!ready || busy || !s) return;
                 for (let i = s.entries.length - 1; i >= 0; i--) {
@@ -767,9 +792,10 @@ export function CodeView() {
 
       {termMounted[session.id] && (
         <div className={`h-64 shrink-0 border-t border-line ${showTerm ? "" : "hidden"}`}>
-          <TerminalPane id={session.id} cwd={session.cwd} visible={showTerm} />
+          <TerminalPane id={session.id} cwd={session.cwd} visible={showTerm && !remoteHost(session, mesh)} />
         </div>
       )}
+      {moving && <MoveDialog session={session} takeOver={moving === "takeOver"} onClose={() => setMoving(null)} />}
     </div>
   );
 }

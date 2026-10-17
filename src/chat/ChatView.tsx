@@ -263,6 +263,7 @@ export function ChatView() {
   const setChatEffort = useStore((s) => s.setChatEffort);
   const pendingJump = useStore((s) => s.pendingJump);
   const pendingQuickPrompt = useStore((s) => s.pendingQuickPrompt);
+  const syncRev = useStore((s) => s.syncRev);
   const sticky = useStickyScroll([messages, stream?.text, stream?.reasoning]);
 
   const modelRef = conv?.modelRef && models.some((m) => m.id === conv.modelRef) ? conv.modelRef : defaultModelRef;
@@ -280,6 +281,29 @@ export function ChatView() {
     sticky.pin();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, load]);
+
+  // Another computer's changes landed (a new message, a finished reply): show them.
+  useEffect(() => {
+    if (syncRev && activeId) load(activeId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncRev]);
+
+  // A reply already streaming on another computer when this window opened.
+  useEffect(() => {
+    api
+      .meshChatStreams()
+      .then((streams) => {
+        for (const r of streams) {
+          useStore.getState().applyMeshChat({
+            conversationId: r.conversationId,
+            streamer: r.streamer,
+            streamerName: r.streamerName,
+            event: { type: "snapshot", userMessageId: r.userMessageId, assistantMessageId: r.assistantMessageId, text: r.text, reasoning: r.reasoning },
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   // Jump to a search hit: switch to its branch if needed, then scroll and flash it.
   useEffect(() => {
@@ -302,7 +326,7 @@ export function ChatView() {
 
   /** Stream one turn; `start` makes the backend call with the channel handler. */
   const runTurn = async (convId: string, start: (onEvent: (e: ChatEvent) => void) => Promise<void>) => {
-    patchChatStream(convId, { assistantId: null, text: "", reasoning: "", status: null, error: null, running: true });
+    patchChatStream(convId, { assistantId: null, text: "", reasoning: "", status: null, error: null, running: true, remote: null });
     sticky.pin();
     try {
       await start((e) => {
@@ -502,6 +526,9 @@ export function ChatView() {
               />
             ))}
             {stream?.status && running && <div className="text-xs text-warn">{stream.status}</div>}
+            {stream?.remote && running && (
+              <div className="meta text-faint">Replying on {stream.remote}</div>
+            )}
             {stream?.error && !running && !messages.some((m) => m.error) && (
               <div className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger">
                 {stream.error}

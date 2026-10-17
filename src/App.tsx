@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { api, errorText, type CodeEnvelope, type Conversation } from "./lib/ipc";
+import { api, errorText, type CodeEnvelope, type Conversation, type MeshChatEvent } from "./lib/ipc";
 import { useStore, type Mode } from "./lib/store";
 import { goBack, goForward, resetHistory, useHistory } from "./lib/history";
 import { initZoom, zoomIn, zoomOut, zoomReset } from "./lib/zoom";
@@ -16,6 +16,7 @@ import { fmtShort, groupByDate, matchesQuery } from "./lib/format";
 import { ModelRing } from "./lib/cable";
 import { emitViewAction, focusComposer, focusSidebarSearch, isMac, isMod, keyLabel, ViewActive } from "./lib/shortcuts";
 import { ScrollFade } from "./lib/useStickyScroll";
+import { notifyInBackground } from "./lib/notify";
 import { useDragRegion } from "./components/WindowControls";
 import {
   ArrowLeftIcon,
@@ -590,10 +591,21 @@ export default function App() {
         if (s.models.length === 0) s.setSettingsOpen(true);
       })
       .catch((e) => setToast(errorText(e)));
+    useStore.getState().refreshMesh();
     const unlisteners = [
       listen<CodeEnvelope>("code://event", (ev) => {
         useStore.getState().applyCodeEvent(ev.payload.codeSessionId, ev.payload.event);
       }),
+      // Mesh (see src-tauri/src/mesh): membership changes, other nodes' writes, live streams.
+      listen("mesh://status", () => useStore.getState().refreshMesh()),
+      listen<{ tables: string[] }>("mesh://changed", (ev) => useStore.getState().onSynced(ev.payload.tables)),
+      listen<MeshChatEvent>("mesh://chat", (ev) => useStore.getState().applyMeshChat(ev.payload)),
+      listen<{ name: string; code: string }>("mesh://join-request", (ev) => {
+        const s = useStore.getState();
+        s.setToast(`${ev.payload.name} asks to join the mesh. Approve it in Settings → Mesh.`);
+        notifyInBackground("Mesh join request", `${ev.payload.name} asks to join (code ${ev.payload.code})`);
+      }),
+      listen<{ message: string }>("mesh://error", (ev) => useStore.getState().setToast(ev.payload.message)),
       // From the tray menu and the quick-entry window (see src-tauri/src/desktop.rs).
       listen("tray://new-chat", () => {
         const s = useStore.getState();

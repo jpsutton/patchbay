@@ -228,6 +228,11 @@ export function PermissionCard({
 }) {
   const tc = { ...request.toolCall, ...(live ?? {}) };
   const rule = suggestRule(tc);
+  // The session id routes the answer to whichever node runs the agent.
+  const respond = (optionId: string) =>
+    api
+      .codePermissionRespond(requestId, optionId, useStore.getState().activeCodeSessionId ?? undefined)
+      .catch((e) => useStore.getState().setToast(errorText(e)));
   const allowId =
     request.options.find((o) => o.kind === "allow_once")?.optionId ??
     request.options.find((o) => o.kind === "allow_always")?.optionId;
@@ -240,7 +245,7 @@ export function PermissionCard({
       useStore.getState().setToast(errorText(e));
       return;
     }
-    api.codePermissionRespond(requestId, allowId);
+    respond(allowId);
   };
   const cmd = tc.kind === "execute" ? commandOf(tc) : null;
   // The one-off "allow" leads as the primary button; broader allows follow it.
@@ -252,7 +257,7 @@ export function PermissionCard({
     <button
       key={o.optionId}
       className={`h-[34px] rounded-lg px-3.5 text-xs ${OPTION_STYLE[o.kind] ?? "border border-border bg-panel"}`}
-      onClick={() => api.codePermissionRespond(requestId, o.optionId)}
+      onClick={() => respond(o.optionId)}
     >
       {o.name}
     </button>

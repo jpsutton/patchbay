@@ -3,11 +3,12 @@ import type { Preferences } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { input } from "./ProviderPage";
 import { McpPage } from "./McpPage";
+import { MeshPage } from "./MeshPage";
 import { PermissionRulesList } from "./PermissionRules";
 import { PromptsPage } from "./PromptsPage";
 import { UsagePage } from "./UsagePage";
 
-export type PrefSection = "general" | "chat" | "prompts" | "code" | "mcp" | "terminal" | "usage";
+export type PrefSection = "general" | "chat" | "prompts" | "code" | "mcp" | "terminal" | "mesh" | "usage";
 
 export const PREF_SECTIONS: { id: PrefSection; label: string }[] = [
   { id: "general", label: "General" },
@@ -16,6 +17,7 @@ export const PREF_SECTIONS: { id: PrefSection; label: string }[] = [
   { id: "code", label: "Code agent" },
   { id: "mcp", label: "MCP servers" },
   { id: "terminal", label: "Terminal" },
+  { id: "mesh", label: "Mesh" },
   { id: "usage", label: "Usage" },
 ];
 
@@ -257,6 +259,7 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
 
   if (section === "prompts") return <PromptsPage />;
   if (section === "mcp") return <McpPage />;
+  if (section === "mesh") return <MeshPage />;
   if (section === "usage") return <UsagePage />;
 
   if (section === "chat") {
