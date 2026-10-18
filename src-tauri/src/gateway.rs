@@ -29,6 +29,7 @@ const CODE_METHODS: &[&str] = &[
     "code.rewind",
     "code.permission",
     "code.files",
+    "code.auto_title",
 ];
 /// Largest attachment a phone may upload.
 const MAX_UPLOAD: u64 = 200 * 1024 * 1024;
@@ -100,7 +101,7 @@ pub(crate) async fn call(state: &AppState, from: &str, method: &str, p: &Value) 
         "remote.update_code_session" => {
             let id = s("id")?;
             if let Some(t) = p["title"].as_str() {
-                db.update_code_session(&id, None, Some(t), None)?;
+                db.set_code_session_title(&id, t, true)?;
             }
             if let Some(pinned) = p["pinned"].as_bool() {
                 db.set_code_session_pinned(&id, pinned)?;

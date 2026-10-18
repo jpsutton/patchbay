@@ -72,6 +72,7 @@ pub const TABLES: &[Table] = &[
             "agent_model",
             "permission_mode",
             "archived_at",
+            "title_manual",
         ],
     },
     Table { name: "mcp_servers", pk: &["id"], cols: &["name", "config_json", "enabled", "created_at"] },

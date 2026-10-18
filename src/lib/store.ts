@@ -41,6 +41,11 @@ export type Entry =
   | { kind: "error"; text: string }
   | { kind: "info"; text: string };
 
+export interface TranscriptPart {
+  entries: Entry[];
+  toolCalls: Record<string, AcpToolCall>;
+}
+
 export interface CodeState {
   status: "idle" | "starting" | "ready" | "exited";
   busy: boolean;
@@ -62,7 +67,9 @@ export interface CodeState {
   /** Tool call id -> why a saved rule or the approval mode approved it. */
   autoApproved: Record<string, string>;
   /** Cached transcript from a previous run, shown until (or unless) the agent replays it. */
-  history: { entries: Entry[]; toolCalls: Record<string, AcpToolCall> } | null;
+  history: TranscriptPart | null;
+  /** Turns run by agents the session had before its current one: shown, never replayed. */
+  earlier: TranscriptPart | null;
   /** `agentConfigRev` this agent was started with; older ones restart when idle. */
   configRev: number;
   /** `catalogRev` this agent was started with, for agents that run on Patchbay's models. */
@@ -97,6 +104,7 @@ const emptyCode = (): CodeState => ({
   approvalGaps: [],
   autoApproved: {},
   history: null,
+  earlier: null,
   configRev: 0,
   catalogRev: 0,
 });
@@ -114,26 +122,43 @@ const AGENT_PREF_KEYS: (keyof Preferences)[] = [
 /** Persist what the transcript shows, so the session renders before the agent replays it. */
 function saveTranscript(id: string, s: CodeState) {
   if (s.entries.length === 0) return;
-  let json = JSON.stringify({ v: 1, entries: s.entries, toolCalls: s.toolCalls });
+  const earlier = s.earlier ?? undefined;
+  let json = JSON.stringify({ v: 1, earlier, entries: s.entries, toolCalls: s.toolCalls });
   if (json.length > 3_500_000) {
     // Too big: keep the conversation, drop tool payloads (diffs, outputs).
-    const slim = Object.fromEntries(
-      Object.entries(s.toolCalls).map(([k, tc]) => [k, { ...tc, content: null, rawInput: null, rawOutput: null }]),
-    );
-    json = JSON.stringify({ v: 1, entries: s.entries, toolCalls: slim });
+    const slim = (calls: Record<string, AcpToolCall>) =>
+      Object.fromEntries(
+        Object.entries(calls).map(([k, tc]) => [k, { ...tc, content: null, rawInput: null, rawOutput: null }]),
+      );
+    json = JSON.stringify({
+      v: 1,
+      earlier: earlier && { entries: earlier.entries, toolCalls: slim(earlier.toolCalls) },
+      entries: s.entries,
+      toolCalls: slim(s.toolCalls),
+    });
   }
   api.saveCodeTranscript(id, json).catch(() => {});
 }
 
-async function loadTranscript(id: string): Promise<CodeState["history"]> {
+/** The saved transcript: the current agent's part (`history`) and earlier agents' (`earlier`). */
+async function loadTranscript(id: string): Promise<{ history: TranscriptPart | null; earlier: TranscriptPart | null }> {
+  const part = (p?: Partial<TranscriptPart>): TranscriptPart | null =>
+    p?.entries?.length ? { entries: p.entries, toolCalls: p.toolCalls ?? {} } : null;
   try {
     const raw = await api.getCodeTranscript(id);
-    if (!raw) return null;
-    const v = JSON.parse(raw) as { entries?: Entry[]; toolCalls?: Record<string, AcpToolCall> };
-    return v.entries?.length ? { entries: v.entries, toolCalls: v.toolCalls ?? {} } : null;
+    if (!raw) return { history: null, earlier: null };
+    const v = JSON.parse(raw) as Partial<TranscriptPart> & { earlier?: Partial<TranscriptPart> };
+    return { history: part(v), earlier: part(v.earlier) };
   } catch {
-    return null;
+    return { history: null, earlier: null };
   }
+}
+
+/** Hide the context note Patchbay put before a prompt (see `handoff.rs`) when the agent replays it. */
+function withoutNote(text: string): string {
+  if (!text.startsWith("<patchbay-handoff>")) return text;
+  const end = text.indexOf("</patchbay-handoff>");
+  return end < 0 ? "" : text.slice(end + "</patchbay-handoff>".length).replace(/^\s+/, "");
 }
 
 /** Raise a session's stored activity (its sidebar icon) to `found`; it never goes back down. */
@@ -155,8 +180,9 @@ async function backfillActivity() {
   backfilling = true;
   try {
     for (const s of useStore.getState().codeSessions.filter((x) => x.activity === null)) {
-      const h = await loadTranscript(s.id);
-      recordActivity(s.id, h ? activityOf(Object.values(h.toolCalls)) : "chat");
+      const { history, earlier } = await loadTranscript(s.id);
+      const calls = [...Object.values(earlier?.toolCalls ?? {}), ...Object.values(history?.toolCalls ?? {})];
+      recordActivity(s.id, history || earlier ? activityOf(calls) : "chat");
     }
   } finally {
     backfilling = false;
@@ -307,7 +333,10 @@ function reduceUpdate(s: CodeState, u: AcpUpdate): CodeState {
     case "user_message_chunk":
       // Live prompts are echoed locally; only replayed history (session/load) adds user entries.
       if (s.busy) return s;
-      return { ...s, entries: appendText(s.entries, "user", textOf((u as unknown as { content: { type: string; text?: string } }).content)) };
+      return {
+        ...s,
+        entries: appendText(s.entries, "user", withoutNote(textOf((u as unknown as { content: { type: string; text?: string } }).content))),
+      };
     case "agent_message_chunk":
       return { ...s, entries: appendText(s.entries, "agent", textOf((u as unknown as { content: { type: string; text?: string } }).content)) };
     case "agent_thought_chunk":
@@ -374,13 +403,16 @@ export const useStore = create<Store>((set, get) => ({
     const prev = get().code[id];
     // Keep what is on screen as the placeholder; otherwise use the cached transcript.
     const shown = prev && prev.entries.length ? { entries: prev.entries, toolCalls: prev.toolCalls } : null;
-    set((st) => ({ code: { ...st.code, [id]: { ...emptyCode(), configRev: rev, catalogRev, history: shown } } }));
-    if (!shown) {
-      loadTranscript(id).then((history) => {
+    const earlier = prev?.earlier ?? null;
+    set((st) => ({ code: { ...st.code, [id]: { ...emptyCode(), configRev: rev, catalogRev, history: shown, earlier } } }));
+    if (!shown || !earlier) {
+      loadTranscript(id).then((saved) => {
         const cur = get().code[id];
-        if (history && cur && cur.status !== "ready" && cur.entries.length === 0) {
-          set((st) => ({ code: { ...st.code, [id]: { ...st.code[id], history } } }));
-        }
+        if (!cur) return;
+        const patch: Partial<CodeState> = {};
+        if (!cur.earlier && saved.earlier) patch.earlier = saved.earlier;
+        if (!cur.history && saved.history && cur.status !== "ready" && cur.entries.length === 0) patch.history = saved.history;
+        if (Object.keys(patch).length) set((st) => ({ code: { ...st.code, [id]: { ...st.code[id], ...patch } } }));
       });
     }
     // Show stored totals right away; live updates arrive once the agent reports.
@@ -530,6 +562,12 @@ export const useStore = create<Store>((set, get) => ({
     }),
 
   applyCodeEvent: (id, e) => {
+    if (e.type === "title") {
+      set((st) => ({
+        codeSessions: st.codeSessions.map((x) => (x.id === id ? { ...x, title: e.title, titleManual: false } : x)),
+      }));
+      return;
+    }
     const s = get().code[id] ?? emptyCode();
     let next: CodeState = s;
     switch (e.type) {
@@ -544,11 +582,18 @@ export const useStore = create<Store>((set, get) => ({
       case "sessionReady": {
         // A replay rebuilt the transcript: drop the cached copy. No replay but resumed: the cache
         // is the transcript. A fresh session keeps the cache as earlier, out-of-context history.
-        let { entries, toolCalls, history } = s;
+        let { entries, toolCalls, history, earlier } = s;
         if (history && entries.length > 0) history = null;
         else if (history && e.loaded) {
           entries = history.entries;
           toolCalls = { ...history.toolCalls, ...toolCalls };
+          history = null;
+        } else if (history) {
+          // Kept as earlier turns, so the next save doesn't drop them.
+          earlier = {
+            entries: [...(earlier?.entries ?? []), ...history.entries],
+            toolCalls: { ...earlier?.toolCalls, ...history.toolCalls },
+          };
           history = null;
         }
         next = {
@@ -556,6 +601,7 @@ export const useStore = create<Store>((set, get) => ({
           entries,
           toolCalls,
           history,
+          earlier,
           models: e.models ?? null,
           modes: e.modes ?? null,
           capabilities: e.capabilities ?? null,
@@ -699,12 +745,12 @@ export const useStore = create<Store>((set, get) => ({
     // Both go to the gateway: ask at once rather than one round trip after the other.
     const attached = api.codeAttach(id);
     attached.catch(() => {});
-    const history = await loadTranscript(id);
+    const { history, earlier } = await loadTranscript(id);
     let info;
     try {
       info = await attached;
     } catch (e) {
-      set((st) => ({ code: { ...st.code, [id]: { ...emptyCode(), history, status: "exited" } } }));
+      set((st) => ({ code: { ...st.code, [id]: { ...emptyCode(), history, earlier, status: "exited" } } }));
       get().applyCodeEvent(id, { type: "error", message: errorText(e) });
       finish();
       return;
@@ -712,7 +758,7 @@ export const useStore = create<Store>((set, get) => ({
     if (!info.running) {
       finish(info.point);
       if (info.offline) {
-        set((st) => ({ code: { ...st.code, [id]: { ...emptyCode(), history, status: "exited" } } }));
+        set((st) => ({ code: { ...st.code, [id]: { ...emptyCode(), history, earlier, status: "exited" } } }));
         return;
       }
       await get().startAgent(id);
@@ -721,7 +767,7 @@ export const useStore = create<Store>((set, get) => ({
     const rev = get().agentConfigRev;
     const catalogRev = get().catalogRev;
     set((st) => ({
-      code: { ...st.code, [id]: { ...emptyCode(), configRev: rev, catalogRev, history, status: "ready", busy: info.busy } },
+      code: { ...st.code, [id]: { ...emptyCode(), configRev: rev, catalogRev, history, earlier, status: "ready", busy: info.busy } },
     }));
     for (const e of info.events) get().applyCodeEvent(id, e);
     // A replayed "ready" counts as loaded, so the cached transcript becomes the session's.

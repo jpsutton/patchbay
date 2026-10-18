@@ -210,6 +210,9 @@ ALTER TABLE code_sessions ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'defa
 -- When a chat or Code session was archived: out of the lists, kept, and restorable.
 ALTER TABLE conversations ADD COLUMN archived_at INTEGER;
 ALTER TABLE code_sessions ADD COLUMN archived_at INTEGER;
+"#, r#"
+-- 1 once someone named a Code session themselves: automatic titles leave it alone.
+ALTER TABLE code_sessions ADD COLUMN title_manual INTEGER NOT NULL DEFAULT 0;
 "#];
 
 pub fn now_ms() -> i64 {
@@ -482,6 +485,8 @@ pub struct CodeSession {
     pub permission_mode: String,
     /// When it was archived (unix ms): its agent stopped, out of the lists until restored.
     pub archived_at: Option<i64>,
+    /// Someone named it: automatic titles leave it alone until "Auto-retitle".
+    pub title_manual: bool,
 }
 
 /// Values `code_sessions.activity` may hold.
@@ -945,7 +950,7 @@ impl Db {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT id, cwd, acp_session_id, title, model_ref, created_at, updated_at, pinned, activity,
-                    agent, agent_model, host_node, epoch, permission_mode, archived_at
+                    agent, agent_model, host_node, epoch, permission_mode, archived_at, title_manual
              FROM code_sessions ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([], map_code_session)?;
@@ -957,7 +962,7 @@ impl Db {
             .conn()
             .query_row(
                 "SELECT id, cwd, acp_session_id, title, model_ref, created_at, updated_at, pinned, activity,
-                        agent, agent_model, host_node, epoch, permission_mode, archived_at
+                        agent, agent_model, host_node, epoch, permission_mode, archived_at, title_manual
                  FROM code_sessions WHERE id = ?1",
                 [id],
                 map_code_session,
@@ -978,7 +983,7 @@ impl Db {
             "default"
         };
         let now = now_ms();
-        // The sidebar groups sessions under their folder; the UI retitles from the first prompt.
+        // The sidebar groups sessions under their folder; the first prompt retitles it.
         let title = "New session".to_owned();
         let s = CodeSession {
             id: new_id(),
@@ -996,6 +1001,7 @@ impl Db {
             epoch: 0,
             permission_mode: mode.to_owned(),
             archived_at: None,
+            title_manual: false,
         };
         self.conn().execute(
             "INSERT INTO code_sessions (id, cwd, acp_session_id, title, model_ref, created_at, updated_at,
@@ -1045,6 +1051,22 @@ impl Db {
             "UPDATE code_sessions SET updated_at = ?2 WHERE id = ?1",
             params![id, now_ms()],
         )?;
+        Ok(())
+    }
+
+    /// A title someone typed (`manual`) pins it; an automatic one only lands while it isn't pinned.
+    /// Returns whether it was written. Doesn't touch `updated_at`: naming isn't activity.
+    pub fn set_code_session_title(&self, id: &str, title: &str, manual: bool) -> Result<bool> {
+        let n = self.conn().execute(
+            "UPDATE code_sessions SET title = ?2, title_manual = ?3 WHERE id = ?1 AND (?3 OR NOT title_manual)",
+            params![id, title, manual],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Unpin the title so automatic titles apply again.
+    pub fn unpin_code_session_title(&self, id: &str) -> Result<()> {
+        self.conn().execute("UPDATE code_sessions SET title_manual = 0 WHERE id = ?1", [id])?;
         Ok(())
     }
 
@@ -1407,6 +1429,7 @@ fn map_code_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<CodeSession> {
         epoch: r.get(12)?,
         permission_mode: r.get(13)?,
         archived_at: r.get(14)?,
+        title_manual: r.get(15)?,
     })
 }
 

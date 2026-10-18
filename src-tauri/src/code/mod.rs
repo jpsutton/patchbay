@@ -7,6 +7,7 @@ pub mod agents;
 pub mod grok_config;
 pub mod mcp;
 pub mod permissions;
+pub mod titles;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -31,6 +32,7 @@ pub struct CodeManager {
     busy: Mutex<std::collections::HashSet<String>>,
     /// Sessions being handed to another node: no restarts until the handover settles.
     moving: Mutex<HashMap<String, std::time::Instant>>,
+    pub titles: titles::Titles,
 }
 
 /// Locate the Grok Build binary: bundled sidecar next to our exe, `PATCHBAY_GROK_BIN`, or the

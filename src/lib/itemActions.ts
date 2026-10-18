@@ -80,6 +80,14 @@ export function sessionActions(
   const actions: ItemAction[] = [
     { label: "Rename", onSelect: rename },
     {
+      label: "Auto-retitle",
+      onSelect: attempt(async () => {
+        const title = await api.codeAutoTitle(s.id);
+        await st().refreshCodeSessions();
+        st().setToast(`Renamed to "${title}"`);
+      }),
+    },
+    {
       label: s.pinned ? "Unpin" : "Pin",
       onSelect: attempt(async () => {
         await api.updateCodeSession(s.id, { pinned: !s.pinned });
