@@ -238,6 +238,8 @@ export interface MeshMember {
 
 export interface MeshStatus {
   nodeId: string;
+  /** On a phone: its connection to the gateway. */
+  phase?: "offline" | "connecting" | "online";
   name: string;
   member: boolean;
   meshId: string | null;
@@ -315,6 +317,8 @@ export const AGENT_LABELS: Record<AgentId, string> = {
 export interface AgentExtensions {
   statusLine: boolean;
   rewind: boolean;
+  /** Runs on Patchbay's providers and models: a change to them needs a restart to apply. */
+  patchbayModels?: boolean;
 }
 
 /** An ACP session config option (only `select` ones are shown). */

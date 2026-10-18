@@ -540,6 +540,18 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const hostOffline = !!host && !memberOnline(mesh, host);
   const ready = status === "ready";
   const busy = !!s?.busy;
+  // What the session is waiting on, said plainly. A phone reaches it through a gateway, so it
+  // can be reconnecting, or catching up on a session whose agent already runs.
+  const reconnecting = remote && !!mesh?.phase && mesh.phase !== "online";
+  const waiting = reconnecting
+    ? "Reconnecting…"
+    : remote && status === "idle"
+      ? "Loading session…"
+      : status === "starting"
+        ? s?.history
+          ? "Resuming session…"
+          : "Starting agent…"
+        : null;
   const acpModels = s?.models;
   // Only Grok Build runs on Patchbay's models (`pb-<id>`); other agents bring their own.
   const patchbayModels = session.agent === "grok";
@@ -667,113 +679,128 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   ];
   const gaps = s?.approvalGaps ?? [];
 
+  const agentLabel = session.agent !== "grok" && (
+    <span {...drag} className="shrink-0 text-[12px] text-muted" title="Coding agent">
+      {AGENT_LABELS[session.agent] ?? session.agent}
+    </span>
+  );
+  // A phone always gets a select: a segmented control doesn't fit beside the others.
+  const modeControl =
+    s?.modes && modes.length > 0 ? (
+      modes.length <= 3 && !remote ? (
+        <div
+          role="radiogroup"
+          aria-label="Agent mode"
+          className={`mr-1 flex gap-0.5 rounded-[9px] border border-line bg-panel p-0.5 text-[12px] ${ready ? "" : "pointer-events-none opacity-50"}`}
+        >
+          {modes.map((m) => {
+            const on = m.id === s.modes!.currentModeId;
+            return (
+              <button
+                key={m.id}
+                role="radio"
+                aria-checked={on}
+                title={m.description ?? m.name}
+                className={`h-[26px] rounded-[7px] px-2.5 ${on ? "bg-panel-2 text-fg" : "text-muted hover:text-fg"}`}
+                onClick={() => !on && setAcpMode(m.id)}
+              >
+                {m.name}
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <ChipSelect
+          className={remote ? "shrink-0" : "mr-1 max-w-44"}
+          value={s.modes.currentModeId}
+          disabled={!ready}
+          title="Agent mode"
+          aria-label="Agent mode"
+          onChange={(e) => setAcpMode(e.target.value)}
+        >
+          {modes.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.name}
+            </option>
+          ))}
+        </ChipSelect>
+      )
+    ) : null;
+  const approvalControl = remote ? (
+    <ChipSelect
+      className={`shrink-0 ${approval === "always-approve" ? "text-danger" : ""}`}
+      value={approval}
+      title="Approvals"
+      aria-label="Approvals"
+      onChange={(e) => setApprovals(e.target.value as CodeSession["permissionMode"])}
+    >
+      {approvalOpts.map((m) => (
+        <option key={m.id} value={m.id}>
+          {m.name}
+        </option>
+      ))}
+    </ChipSelect>
+  ) : (
+    <div
+      role="radiogroup"
+      aria-label="Approvals"
+      title="What runs without asking you"
+      className="mr-1 flex gap-0.5 rounded-[9px] border border-line bg-panel p-0.5 text-[12px]"
+    >
+      {approvalOpts.map((m) => {
+        const on = m.id === approval;
+        const tone = on ? (m.id === "always-approve" ? "bg-panel-2 text-danger" : "bg-panel-2 text-fg") : "text-muted hover:text-fg";
+        return (
+          <button
+            key={m.id}
+            role="radio"
+            aria-checked={on}
+            title={m.title}
+            className={`h-[26px] whitespace-nowrap rounded-[7px] px-2.5 ${tone}`}
+            onClick={() => !on && setApprovals(m.id)}
+          >
+            {m.name}
+          </button>
+        );
+      })}
+    </div>
+  );
+  const gapsButton = gaps.length > 0 && (
+    <button
+      className="mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border font-mono text-[11px] text-muted hover:text-fg"
+      title={`Runs without asking, whatever the approval mode:\n${gaps.join("\n")}`}
+      aria-label="What this agent runs without asking"
+      onClick={() => setToast(gaps.join(" "))}
+    >
+      i
+    </button>
+  );
+
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
-      <header {...drag} className={`flex h-12 shrink-0 items-center gap-1 border-b border-line pr-3 ${leading ? "pl-1" : "pl-6"}`}>
+      <header {...drag} className={`flex h-12 shrink-0 items-center gap-1 ${remote ? "" : "border-b border-line"} pr-3 ${leading ? "pl-1" : "pl-6"}`}>
         {leading}
         <span className={`h-2 w-2 shrink-0 rounded-full ${dot}`} title={dotLabel} role="img" aria-label={`Agent ${dotLabel}`} />
         <div {...drag} className="mx-2.5 flex min-w-0 flex-1 items-baseline gap-2.5">
           <h1 {...drag} className="shrink truncate text-[15px] font-medium" style={{ minWidth: "4rem" }}>
             {session.title}
           </h1>
-          <span {...drag} className={`min-w-0 flex-[1_1_0] truncate font-mono text-[12px] text-faint ${remote ? "hidden" : ""}`} title={session.cwd}>
-            {session.cwd.replace(/^\/home\/[^/]+|^\/Users\/[^/]+/, "~")}
-          </span>
-          {session.agent !== "grok" && (
-            <span {...drag} className="shrink-0 text-[12px] text-muted" title="Coding agent">
-              {AGENT_LABELS[session.agent] ?? session.agent}
-            </span>
+          {!remote && (
+            <>
+              <span {...drag} className="min-w-0 flex-[1_1_0] truncate font-mono text-[12px] text-faint" title={session.cwd}>
+                {session.cwd.replace(/^\/home\/[^/]+|^\/Users\/[^/]+/, "~")}
+              </span>
+              {agentLabel}
+              <HostBadge session={session} />
+            </>
           )}
-          <HostBadge session={session} />
         </div>
-        {modes.length > 0 && modes.length <= 3 && s?.modes && (
-          <div
-            role="radiogroup"
-            aria-label="Agent mode"
-            className={`mr-1 flex gap-0.5 rounded-[9px] border border-line bg-panel p-0.5 text-[12px] ${ready ? "" : "pointer-events-none opacity-50"}`}
-          >
-            {modes.map((m) => {
-              const on = m.id === s.modes!.currentModeId;
-              return (
-                <button
-                  key={m.id}
-                  role="radio"
-                  aria-checked={on}
-                  title={m.description ?? m.name}
-                  className={`h-[26px] rounded-[7px] px-2.5 ${on ? "bg-panel-2 text-fg" : "text-muted hover:text-fg"}`}
-                  onClick={() => !on && setAcpMode(m.id)}
-                >
-                  {m.name}
-                </button>
-              );
-            })}
-          </div>
-        )}
-        {modes.length > 3 && s?.modes && (
-          <ChipSelect
-            className="mr-1 max-w-44"
-            value={s.modes.currentModeId}
-            disabled={!ready}
-            title="Agent mode"
-            aria-label="Agent mode"
-            onChange={(e) => setAcpMode(e.target.value)}
-          >
-            {modes.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-              </option>
-            ))}
-          </ChipSelect>
-        )}
-        {remote ? (
-          // Two segmented controls don't fit a phone's header.
-          <ChipSelect
-            className={`mr-1 max-w-32 ${approval === "always-approve" ? "text-danger" : ""}`}
-            value={approval}
-            title="Approvals"
-            aria-label="Approvals"
-            onChange={(e) => setApprovals(e.target.value as CodeSession["permissionMode"])}
-          >
-            {approvalOpts.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-              </option>
-            ))}
-          </ChipSelect>
-        ) : (
-          <div
-            role="radiogroup"
-            aria-label="Approvals"
-            title="What runs without asking you"
-            className="mr-1 flex gap-0.5 rounded-[9px] border border-line bg-panel p-0.5 text-[12px]"
-          >
-            {approvalOpts.map((m) => {
-              const on = m.id === approval;
-              const tone = on ? (m.id === "always-approve" ? "bg-panel-2 text-danger" : "bg-panel-2 text-fg") : "text-muted hover:text-fg";
-              return (
-                <button
-                  key={m.id}
-                  role="radio"
-                  aria-checked={on}
-                  title={m.title}
-                  className={`h-[26px] whitespace-nowrap rounded-[7px] px-2.5 ${tone}`}
-                  onClick={() => !on && setApprovals(m.id)}
-                >
-                  {m.name}
-                </button>
-              );
-            })}
-          </div>
-        )}
-        {gaps.length > 0 && (
-          <button
-            className="mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border font-mono text-[11px] text-muted hover:text-fg"
-            title={`Runs without asking, whatever the approval mode:\n${gaps.join("\n")}`}
-            aria-label="What this agent runs without asking"
-            onClick={() => setToast(gaps.join(" "))}
-          >
-            i
-          </button>
+        {!remote && (
+          <>
+            {modeControl}
+            {approvalControl}
+            {gapsButton}
+          </>
         )}
         <div className="mx-1 h-5 w-px bg-line" />
         {!remote && (
@@ -820,6 +847,20 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
         </HeaderButton>
         <WindowControls />
       </header>
+      {remote && (
+        // The phone's second row: everything about how the agent runs, in one line that scrolls
+        // sideways rather than crowding the title.
+        <div
+          aria-label="Session settings"
+          className="flex h-11 shrink-0 items-center gap-2 overflow-x-auto whitespace-nowrap border-b border-line px-4 [scrollbar-width:none]"
+        >
+          <HostBadge session={session} />
+          {agentLabel}
+          {modeControl}
+          {approvalControl}
+          {gapsButton}
+        </div>
+      )}
 
       <div className="flex min-h-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col">
@@ -832,10 +873,10 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             >
               <div className="mx-auto flex max-w-3xl flex-col gap-4 px-6 py-6">
                 <OfflineHostBanner session={session} onTakeOver={() => setMoving("takeOver")} />
-                {status === "starting" && (s?.entries.length ?? 0) === 0 && (
+                {waiting && (s?.entries.length ?? 0) === 0 && (
                   <div className="flex items-center justify-center gap-2 text-xs text-muted">
                     <span className="signal-pulse h-1.5 w-1.5 rounded-full bg-accent" />
-                    {s?.history ? "Resuming session…" : "Starting agent…"}
+                    {waiting}
                   </div>
                 )}
                 {s?.history && (
@@ -923,11 +964,11 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
               onStop={() => api.codeCancel(session.id)}
               onSend={send}
               placeholder={
-                ready
-                  ? `Ask the agent…${s?.commands?.length ? "  / for commands, @ for files" : "  @ for files"}`
-                  : status === "starting"
-                    ? "Starting agent…"
-                    : "Agent not running"
+                reconnecting
+                  ? "Reconnecting…"
+                  : ready
+                    ? `Ask the agent…${s?.commands?.length ? "  / for commands, @ for files" : "  @ for files"}`
+                    : (waiting ?? "Agent not running")
               }
               warnNoVision={model ? !model.vision : false}
               footer={

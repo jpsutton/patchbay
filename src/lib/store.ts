@@ -29,6 +29,7 @@ import {
 
 import { notifyInBackground } from "./notify";
 import { activityOf, strongest, type Activity } from "./activity";
+import { isRemoteApp } from "./platform";
 
 export type Mode = "chat" | "code";
 
@@ -64,6 +65,8 @@ export interface CodeState {
   history: { entries: Entry[]; toolCalls: Record<string, AcpToolCall> } | null;
   /** `agentConfigRev` this agent was started with; older ones restart when idle. */
   configRev: number;
+  /** `catalogRev` this agent was started with, for agents that run on Patchbay's models. */
+  catalogRev: number;
 }
 
 export interface ChatStream {
@@ -95,6 +98,7 @@ const emptyCode = (): CodeState => ({
   autoApproved: {},
   history: null,
   configRev: 0,
+  catalogRev: 0,
 });
 
 // The default permission mode isn't here: it only seeds new sessions, and agents always ask.
@@ -194,6 +198,8 @@ interface Store {
   /** Bumped whenever settings that shape the agent change. */
   agentConfigRev: number;
   bumpAgentConfig: () => void;
+  /** Bumped when Patchbay's providers or models actually change. */
+  catalogRev: number;
   /** (Re)start the agent for a code session, showing the cached transcript meanwhile. */
   startAgent: (id: string) => Promise<void>;
   restartStaleAgents: () => void;
@@ -341,7 +347,8 @@ function loadSidebarCollapsed(): boolean {
   }
 }
 
-let catalogLoaded = false;
+/** The catalog last loaded, to tell a real change from a reload. */
+let catalogKey: string | null = null;
 
 export const useStore = create<Store>((set, get) => ({
   mode: "chat",
@@ -356,16 +363,18 @@ export const useStore = create<Store>((set, get) => ({
   chatEffort: {},
   setChatEffort: (key, effort) => set((st) => ({ chatEffort: { ...st.chatEffort, [key]: effort } })),
   agentConfigRev: 0,
+  catalogRev: 0,
   bumpAgentConfig: () => {
     set((st) => ({ agentConfigRev: st.agentConfigRev + 1 }));
     get().restartStaleAgents();
   },
   startAgent: async (id) => {
     const rev = get().agentConfigRev;
+    const catalogRev = get().catalogRev;
     const prev = get().code[id];
     // Keep what is on screen as the placeholder; otherwise use the cached transcript.
     const shown = prev && prev.entries.length ? { entries: prev.entries, toolCalls: prev.toolCalls } : null;
-    set((st) => ({ code: { ...st.code, [id]: { ...emptyCode(), configRev: rev, history: shown } } }));
+    set((st) => ({ code: { ...st.code, [id]: { ...emptyCode(), configRev: rev, catalogRev, history: shown } } }));
     if (!shown) {
       loadTranscript(id).then((history) => {
         const cur = get().code[id];
@@ -384,9 +393,15 @@ export const useStore = create<Store>((set, get) => ({
     }
   },
   restartStaleAgents: () => {
-    const { code, agentConfigRev, startAgent } = get();
+    const { code, agentConfigRev, catalogRev, codeSessions, mesh, startAgent } = get();
+    // Only agents running on this computer: a phone hosts none, and another computer's agent
+    // follows that computer's settings, applied when it next starts there.
+    if (isRemoteApp()) return;
     for (const [id, s] of Object.entries(code)) {
-      if (s.status === "ready" && !s.busy && s.permissions.length === 0 && s.configRev < agentConfigRev) {
+      const session = codeSessions.find((c) => c.id === id);
+      if (!session || remoteHost(session, mesh)) continue;
+      const stale = s.configRev < agentConfigRev || (!!s.extensions.patchbayModels && s.catalogRev < catalogRev);
+      if (s.status === "ready" && !s.busy && s.permissions.length === 0 && stale) {
         startAgent(id).then(() =>
           get().pushCodeEntry(id, { kind: "info", text: "Restarted the agent to apply changed settings" }),
         );
@@ -473,9 +488,14 @@ export const useStore = create<Store>((set, get) => ({
     ]);
     const defaultModelRef = def && models.some((m) => m.id === def) ? def : (models[0]?.id ?? null);
     set({ providers, models, defaultModelRef });
-    // Later reloads follow provider/model edits, which the agent config is generated from.
-    if (catalogLoaded) get().bumpAgentConfig();
-    catalogLoaded = true;
+    // Agents built from the catalog restart when it really changed, not on every reload: a phone
+    // reloads it after each reconnect.
+    const key = JSON.stringify([providers, models]);
+    if (catalogKey !== null && key !== catalogKey) {
+      set((st) => ({ catalogRev: st.catalogRev + 1 }));
+      get().restartStaleAgents();
+    }
+    catalogKey = key;
   },
   setDefaultModel: async (ref) => {
     await api.setSetting("default_model", ref);
@@ -676,10 +696,13 @@ export const useStore = create<Store>((set, get) => ({
         get().applyCodeEvent(id, e);
       }
     };
+    // Both go to the gateway: ask at once rather than one round trip after the other.
+    const attached = api.codeAttach(id);
+    attached.catch(() => {});
     const history = await loadTranscript(id);
     let info;
     try {
-      info = await api.codeAttach(id);
+      info = await attached;
     } catch (e) {
       set((st) => ({ code: { ...st.code, [id]: { ...emptyCode(), history, status: "exited" } } }));
       get().applyCodeEvent(id, { type: "error", message: errorText(e) });
@@ -696,7 +719,10 @@ export const useStore = create<Store>((set, get) => ({
       return;
     }
     const rev = get().agentConfigRev;
-    set((st) => ({ code: { ...st.code, [id]: { ...emptyCode(), configRev: rev, history, status: "ready", busy: info.busy } } }));
+    const catalogRev = get().catalogRev;
+    set((st) => ({
+      code: { ...st.code, [id]: { ...emptyCode(), configRev: rev, catalogRev, history, status: "ready", busy: info.busy } },
+    }));
     for (const e of info.events) get().applyCodeEvent(id, e);
     // A replayed "ready" counts as loaded, so the cached transcript becomes the session's.
     const cur = get().code[id];
