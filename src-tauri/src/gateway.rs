@@ -98,6 +98,10 @@ pub(crate) async fn call(state: &AppState, from: &str, method: &str, p: &Value) 
             }
             Value::Null
         }
+        // Starting a Code session on a chosen computer.
+        "remote.new_session_options" => on_host(state, p, "code.new_options").await?,
+        "remote.list_dirs" => on_host(state, p, "fs.dirs").await?,
+        "remote.create_code_session" => on_host(state, p, "code.create").await?,
         "remote.attach_put" => upload(state, p).await?,
         "remote.thumbnail" => {
             let att = db.get_attachment(&s("id")?)?.ok_or_else(|| anyhow!("attachment not found"))?;
@@ -108,6 +112,92 @@ pub(crate) async fn call(state: &AppState, from: &str, method: &str, p: &Value) 
         }
         other => bail!("unknown request {other}"),
     })
+}
+
+/// Answer a request about the computer named in `host`: here, or passed to it.
+async fn on_host(state: &AppState, p: &Value, method: &str) -> Result<Value> {
+    let host = p["host"].as_str().ok_or_else(|| anyhow!("missing host"))?;
+    if host == state.mesh.node_id() {
+        return match method {
+            "code.new_options" => new_session_options_local(state).await,
+            "code.create" => create_local(state, p).map(|s| json!(s)),
+            "fs.dirs" => list_dirs_local(p["path"].as_str()),
+            other => bail!("unknown request {other}"),
+        };
+    }
+    if !state.mesh.connected(host) {
+        bail!("{} is offline", state.mesh.member_name(host));
+    }
+    state.mesh.rpc(host, method, p.clone()).await
+}
+
+/// Most recent folders offered when starting a session.
+const RECENT_FOLDERS: usize = 12;
+/// Most folders one listing returns.
+const MAX_DIRS: usize = 500;
+
+/// What a phone needs to start a Code session on this computer: the agents installed here,
+/// the default one, the home folder to browse from, and folders recent sessions here used.
+pub(crate) async fn new_session_options_local(state: &AppState) -> Result<Value> {
+    let prefs = prefs::load(&state.db);
+    let paths = prefs.agent_paths.clone();
+    let agents = tokio::task::spawn_blocking(move || crate::code::agents::detect_all(&paths)).await?;
+    let me = state.mesh.node_id();
+    let mut recent: Vec<String> = Vec::new();
+    for s in state.db.list_code_sessions()? {
+        let here = s.host_node.as_deref().is_none_or(|h| h == me);
+        if here && !recent.contains(&s.cwd) && std::path::Path::new(&s.cwd).is_dir() {
+            recent.push(s.cwd);
+        }
+        if recent.len() == RECENT_FOLDERS {
+            break;
+        }
+    }
+    Ok(json!({
+        "agents": agents,
+        "defaultAgent": prefs.default_agent,
+        "home": crate::code::agents::home_dir().map(|h| h.to_string_lossy().into_owned()),
+        "recent": recent,
+    }))
+}
+
+/// The folders in `path` (default: home), for picking where a session runs. Only folders, only
+/// inside the home folder, and no hidden ones: a phone gets no more of the disk than it needs.
+pub(crate) fn list_dirs_local(path: Option<&str>) -> Result<Value> {
+    let home = crate::code::agents::home_dir()
+        .ok_or_else(|| anyhow!("no home folder"))?
+        .canonicalize()?;
+    let dir = match path.filter(|p| !p.is_empty()) {
+        Some(p) => std::path::Path::new(p).canonicalize()?,
+        None => home.clone(),
+    };
+    if !dir.starts_with(&home) {
+        bail!("only folders inside your home folder can be listed");
+    }
+    let mut dirs: Vec<String> = std::fs::read_dir(&dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.metadata().is_ok_and(|m| m.is_dir()))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    dirs.sort_by_key(|n| n.to_lowercase());
+    let truncated = dirs.len() > MAX_DIRS;
+    dirs.truncate(MAX_DIRS);
+    let parent = (dir != home).then(|| dir.parent().map(|p| p.to_string_lossy().into_owned())).flatten();
+    Ok(json!({
+        "path": dir.to_string_lossy(),
+        "parent": parent,
+        "home": home.to_string_lossy(),
+        "dirs": dirs,
+        "truncated": truncated,
+    }))
+}
+
+/// A new Code session hosted on this computer, for a phone.
+pub(crate) fn create_local(state: &AppState, p: &Value) -> Result<crate::db::CodeSession> {
+    let cwd = p["cwd"].as_str().ok_or_else(|| anyhow!("missing cwd"))?;
+    let agent = p["agent"].as_str().map(str::to_owned);
+    crate::create_code_session_local(state, cwd, p["modelRef"].as_str(), agent)
 }
 
 /// Conversations, Code sessions with what each is doing now, and the replies streaming.

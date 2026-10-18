@@ -727,6 +727,34 @@ export function install() {
           };
         }
         case "remote_kick": case "remote_set_foreground": case "remote_unwatch": case "remote_keep_alive": return null;
+        case "remote_new_session_options": {
+          const agent = (id: AgentId, label: string, available: boolean) =>
+            ({ id, label, available, program: null, source: null, version: null, error: null, installHint: "", usesPatchbayModels: id === "grok", supportsInstructions: id === "grok" });
+          return {
+            agents: [agent("grok", "Grok Build", true), agent("claude-code", "Claude Code", true), agent("cursor", "Cursor CLI", false)],
+            defaultAgent: "grok",
+            home: "/home/demo",
+            recent: [...new Set(db.code.map((s) => s.cwd))].slice(0, 12),
+          };
+        }
+        case "remote_list_dirs": {
+          const path = (a.path as string | null) ?? "/home/demo";
+          const tree: Record<string, string[]> = {
+            "/home/demo": ["Documents", "Downloads", "Projects"],
+            "/home/demo/Projects": ["nulamp", "omnimark", "patchbay"],
+          };
+          if (!path.startsWith("/home/demo")) throw "only folders inside your home folder can be listed";
+          return { path, parent: path === "/home/demo" ? null : path.replace(/\/[^/]+$/, ""), home: "/home/demo", dirs: tree[path] ?? [], truncated: false };
+        }
+        case "remote_create_code_session": {
+          const s: CodeSession = {
+            id: id(), cwd: a.cwd as string, acpSessionId: null, title: "New session", modelRef: (a.modelRef as string) ?? null,
+            pinned: false, createdAt: now(), updatedAt: now(), activity: null, agent: (a.agent as AgentId) ?? "grok",
+            agentModel: null, hostNode: a.host as string, epoch: 0,
+          };
+          db.code.push(s);
+          return s;
+        }
       }
       console.warn("fake backend: unhandled", cmd, a);
       return null;

@@ -279,6 +279,66 @@ async fn phone_joins_follows_resumes_and_switches_gateway() {
     until("phone forgets the mesh", 10, || !p.client.is_member()).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn phone_starts_a_session_on_another_computer() {
+    let (a, b) = (node("alpha4"), node("bravo4"));
+    link(&a, &b).await;
+    let p = phone();
+    let url = format!("127.0.0.1:{}", a.state.mesh.bound_port().unwrap());
+    p.client.join(&url, PASS, "pocket").unwrap();
+    let pid = p.client.node_id();
+    until("phone's join request", 10, || {
+        a.state.mesh.status()["pending"].as_array().unwrap().iter().any(|r| r["nodeId"] == pid)
+    })
+    .await;
+    a.state.mesh.approve(&pid).unwrap();
+    until("phone online", 10, || p.client.status()["phase"] == "online").await;
+    let bn = b.state.mesh.node_id().to_owned();
+
+    // What B offers, asked through A.
+    let opts = p.client.rpc("remote.new_session_options", json!({ "host": bn })).await.unwrap();
+    assert!(opts["agents"].as_array().unwrap().iter().any(|x| x["id"] == "grok"));
+    assert_eq!(opts["defaultAgent"], "grok");
+
+    // Browsing stays inside the home folder, and lists only visible folders.
+    let home = p.client.rpc("remote.list_dirs", json!({ "host": bn })).await.unwrap();
+    assert_eq!(home["path"], home["home"]);
+    assert!(home["parent"].is_null());
+    assert!(home["dirs"].as_array().unwrap().iter().all(|d| !d.as_str().unwrap().starts_with('.')));
+    let err = p.client.rpc("remote.list_dirs", json!({ "host": bn, "path": "/" })).await.unwrap_err();
+    assert!(format!("{err:#}").contains("home folder"), "{err:#}");
+
+    // A session started for the phone runs on B, and every computer knows it.
+    let proj = b.dir.join("proj");
+    repo(&proj);
+    let cwd = proj.to_string_lossy().into_owned();
+    let s = p
+        .client
+        .rpc("remote.create_code_session", json!({ "host": bn, "cwd": cwd, "agent": "grok" }))
+        .await
+        .unwrap();
+    let id = s["id"].as_str().unwrap().to_owned();
+    assert_eq!(s["hostNode"], bn.as_str());
+    until("session reaches A", 10, || a.state.db.get_code_session(&id).unwrap().is_some()).await;
+    let idx = p.client.rpc("remote.index", Value::Null).await.unwrap();
+    assert!(idx["codeSessions"].as_array().unwrap().iter().any(|c| c["id"] == id.as_str()));
+    // And the next start offers that folder as recent.
+    let opts = p.client.rpc("remote.new_session_options", json!({ "host": bn })).await.unwrap();
+    assert_eq!(opts["recent"][0], cwd.as_str());
+
+    // A folder that isn't there is refused; so is a computer that's gone.
+    let err = p
+        .client
+        .rpc("remote.create_code_session", json!({ "host": bn, "cwd": "/nope/missing" }))
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("not a directory"), "{err:#}");
+    b.state.mesh.stop();
+    until("B gone from A", 15, || !a.state.mesh.connected(&bn)).await;
+    let err = p.client.rpc("remote.new_session_options", json!({ "host": bn })).await.unwrap_err();
+    assert!(format!("{err:#}").contains("offline"), "{err:#}");
+}
+
 /// A gateway for trying the phone app by hand (an emulator reaches the host at 10.0.2.2):
 /// a mesh on `0.0.0.0:41890` whose passphrase is `PASS`, with a provider pointing at
 /// `scripts/mock-llm.py` (start it first) and a Grok Build session using it. Every phone that
