@@ -530,6 +530,12 @@ export const useStore = create<Store>((set, get) => ({
     }),
 
   applyCodeEvent: (id, e) => {
+    if (e.type === "title") {
+      set((st) => ({
+        codeSessions: st.codeSessions.map((x) => (x.id === id ? { ...x, title: e.title, titleManual: false } : x)),
+      }));
+      return;
+    }
     const s = get().code[id] ?? emptyCode();
     let next: CodeState = s;
     switch (e.type) {

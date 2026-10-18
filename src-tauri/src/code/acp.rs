@@ -105,6 +105,10 @@ pub enum CodeEvent {
         origin: String,
         attachments: Value,
     },
+    /// The session was renamed automatically (see `code::titles`).
+    Title {
+        title: String,
+    },
 }
 
 #[derive(Serialize, Clone, Debug)]

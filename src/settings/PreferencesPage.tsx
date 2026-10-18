@@ -272,7 +272,7 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
         </Row>
         <Row
           label="Generate conversation titles"
-          hint="After the first reply, ask the same model for a short title. Costs one small extra request."
+          hint="After the first reply, ask the same model for a short title. Code sessions whose agent doesn't name them get one too, after the first and third turns. Each costs one small extra request."
         >
           <Toggle label="Generate conversation titles" checked={prefs.generateTitles} onChange={(v) => set("generateTitles", v)} />
         </Row>

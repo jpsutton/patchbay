@@ -215,6 +215,8 @@ export interface CodeSession {
   permissionMode: "default" | "auto" | "always-approve";
   /** When it was archived (unix ms): its agent stopped, out of the lists until restored. */
   archivedAt?: number | null;
+  /** Someone named it: automatic titles leave it alone until "Auto-retitle". */
+  titleManual?: boolean;
 }
 
 // ---- mesh ----
@@ -371,7 +373,9 @@ export type CodeEvent =
   | { type: "usage"; usage: UsageView }
   /** A prompt sent to the agent from `origin` (a mesh node). */
   /** `replay`: part of a catch-up, so shown even in the window that sent it. */
-  | { type: "userPrompt"; text: string; origin: string; attachments: Attachment[]; replay?: boolean };
+  | { type: "userPrompt"; text: string; origin: string; attachments: Attachment[]; replay?: boolean }
+  /** The session was renamed automatically. */
+  | { type: "title"; title: string };
 
 /** Where a live event sits in its topic's stream (see docs/design/mobile.md, section 3). */
 export interface EventPoint {
@@ -610,6 +614,8 @@ export const api = {
   ) =>
     invoke<void>("update_code_session", { id, ...patch }),
   deleteCodeSession: (id: string) => invoke<void>("delete_code_session", { id }),
+  /** Name the session from its conversation, replacing a title someone typed. Returns the title. */
+  codeAutoTitle: (id: string) => invoke<string>("code_auto_title", { id }),
   codeStart: (id: string) => invoke<void>("code_start", { id }),
   codeIsRunning: (id: string) => invoke<boolean>("code_is_running", { id }),
   codeStop: (id: string) => invoke<void>("code_stop", { id }),
