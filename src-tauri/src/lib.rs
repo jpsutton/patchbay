@@ -816,14 +816,24 @@ async fn code_set_config_option(
 /// starts the new one, as when opening the session.
 fn code_set_agent_local(state: &AppState, id: &str, agent: &str, model_ref: Option<&str>) -> anyhow::Result<()> {
     ensure_local_host(state, id)?;
-    if code::agents::AgentKind::parse(agent).is_none() {
-        anyhow::bail!("unknown coding agent {agent}");
-    }
+    let kind = code::agents::AgentKind::parse(agent).ok_or_else(|| anyhow::anyhow!("unknown coding agent {agent}"))?;
     let session = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("code session not found"))?;
+    if session.agent == agent {
+        return Ok(());
+    }
+    if state.code.is_busy(id) {
+        anyhow::bail!("the agent is working; wait for it to finish, or stop it, before switching agents");
+    }
     // The transcript is the UI's (JSON entries); any user turn means the old agent has the history.
-    let started = state.db.code_transcript(id)?.is_some_and(|t| t.contains(r#""kind":"user""#)) || state.code.is_busy(id);
-    if started {
-        anyhow::bail!("this session already has messages; start a new session to use another agent");
+    let transcript = state.db.code_transcript(id)?;
+    if transcript.as_deref().is_some_and(|t| t.contains(r#""kind":"user""#)) {
+        // The new agent can't load the old one's session. Its first prompt carries the
+        // conversation so far, and the transcript keeps the old turns as earlier history.
+        let from = code::agents::AgentKind::parse(&session.agent).map_or(session.agent.as_str(), |k| k.label());
+        let divider = format!("Switched from {from} to {}. It got the conversation so far as context.", kind.label());
+        let folded = handoff::fold_for_switch(transcript.as_deref(), &divider);
+        state.db.set_setting(&format!("mesh.handoff.{id}"), &handoff::switch_prompt(Some(&folded), from))?;
+        state.db.set_code_transcript(id, &folded)?;
     }
     state.code.stop(id);
     state.db.set_code_session_agent(id, agent)?;

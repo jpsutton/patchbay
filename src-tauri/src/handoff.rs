@@ -389,35 +389,105 @@ pub fn keep_orphaned_work(cwd: &Path, session_id: &str) -> Result<Option<String>
     Ok(r?.map(|_| reference))
 }
 
-/// What the agent gets as context when its own state couldn't move with the session.
-pub fn handoff_prompt(transcript_json: Option<&str>, from_name: &str) -> String {
-    const MAX: usize = 24_000;
+/// Wraps every context note Patchbay puts before a prompt, so a replayed prompt can hide it.
+pub const NOTE_OPEN: &str = "<patchbay-handoff>";
+pub const NOTE_CLOSE: &str = "</patchbay-handoff>";
+/// Most conversation a context note carries.
+const NOTE_MAX: usize = 24_000;
+
+/// The saved transcript's conversation as `User: …` / `Assistant: …` lines, oldest first,
+/// including turns from agents the session had before. `tools` adds a `Tool: …` line per tool
+/// call (its title, e.g. "Edit src/main.rs").
+pub fn transcript_lines(transcript_json: Option<&str>, tools: bool) -> Vec<String> {
     let mut lines = Vec::new();
-    if let Some(raw) = transcript_json
-        && let Ok(v) = serde_json::from_str::<serde_json::Value>(raw)
-    {
-        for e in v["entries"].as_array().into_iter().flatten() {
+    let Some(v) = transcript_json.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()) else {
+        return lines;
+    };
+    for part in [&v["earlier"], &v] {
+        for e in part["entries"].as_array().into_iter().flatten() {
             let text = e["text"].as_str().unwrap_or_default().trim();
             match e["kind"].as_str() {
                 Some("user") if !text.is_empty() => lines.push(format!("User: {text}")),
                 Some("agent") if !text.is_empty() => lines.push(format!("Assistant: {text}")),
+                Some("info") if tools && !text.is_empty() => lines.push(format!("[{text}]")),
+                Some("tool") if tools => {
+                    let id = e["id"].as_str().unwrap_or_default();
+                    let title = part["toolCalls"][id]["title"].as_str().unwrap_or_default().trim();
+                    if !title.is_empty() {
+                        lines.push(format!("Tool: {}", one_line(title, 200)));
+                    }
+                }
                 _ => {}
             }
         }
     }
+    lines
+}
+
+fn one_line(s: &str, max: usize) -> String {
+    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if s.chars().count() <= max {
+        return s;
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+/// `lines` joined, keeping the latest `max` bytes when it runs long.
+pub fn conversation_text(lines: &[String], max: usize) -> String {
     let mut body = lines.join("\n\n");
-    if body.len() > MAX {
-        let mut cut = body.len() - MAX;
+    if body.len() > max {
+        let mut cut = body.len() - max;
         while !body.is_char_boundary(cut) {
             cut += 1;
         }
         body = format!("[earlier conversation omitted]\n\n{}", &body[cut..]);
     }
-    format!(
-        "This session was moved here from {from_name}. Your earlier session state couldn't come along, \
-         so here is the conversation so far for context. The project files are as they were on \
-         {from_name}, including uncommitted changes.\n\n<previous-conversation>\n{body}\n</previous-conversation>"
+    body
+}
+
+fn note(intro: &str, transcript_json: Option<&str>) -> String {
+    let body = conversation_text(&transcript_lines(transcript_json, true), NOTE_MAX);
+    format!("{NOTE_OPEN}\n{intro}\n\n<previous-conversation>\n{body}\n</previous-conversation>\n{NOTE_CLOSE}")
+}
+
+/// What the agent gets as context when its own state couldn't move with the session.
+pub fn handoff_prompt(transcript_json: Option<&str>, from_name: &str) -> String {
+    note(
+        &format!(
+            "This session was moved here from {from_name}. Your earlier session state couldn't come along, \
+             so here is the conversation so far for context. The project files are as they were on \
+             {from_name}, including uncommitted changes."
+        ),
+        transcript_json,
     )
+}
+
+/// What a newly chosen agent gets as context: the session so far, run by `from_agent`.
+pub fn switch_prompt(transcript_json: Option<&str>, from_agent: &str) -> String {
+    note(
+        &format!(
+            "You are taking over this coding session from another agent, {from_agent}. You don't have \
+             its internal state, so here is the conversation so far, with the tools it used. The \
+             project files are as {from_agent} left them, including uncommitted changes; check them \
+             rather than assuming. Carry on from where it stopped."
+        ),
+        transcript_json,
+    )
+}
+
+/// The transcript after switching agents: everything shown so far moves to `earlier` (out of
+/// the new agent's own session) behind a divider, and the new agent's turns start empty.
+pub fn fold_for_switch(transcript_json: Option<&str>, divider: &str) -> String {
+    use serde_json::{Value, json};
+    let v = transcript_json.and_then(|raw| serde_json::from_str::<Value>(raw).ok()).unwrap_or(Value::Null);
+    let mut entries: Vec<Value> = v["earlier"]["entries"].as_array().cloned().unwrap_or_default();
+    entries.extend(v["entries"].as_array().cloned().unwrap_or_default());
+    entries.push(json!({ "kind": "info", "text": divider }));
+    let mut tools = v["earlier"]["toolCalls"].as_object().cloned().unwrap_or_default();
+    tools.extend(v["toolCalls"].as_object().cloned().unwrap_or_default());
+    json!({ "v": 1, "earlier": { "entries": entries, "toolCalls": tools }, "entries": [], "toolCalls": {} }).to_string()
 }
 
 #[cfg(test)]
@@ -505,6 +575,28 @@ mod tests {
         let (dir, meta) = package(&data, &data.join("grok"), &session(&src), "handoff", &[]).unwrap();
         let err = unpack(&dir, &meta, &data.join("g"), &dst, "alpha").unwrap_err();
         assert!(err.to_string().contains("uncommitted"), "{err}");
+    }
+
+    #[test]
+    fn switching_agents_folds_the_transcript_into_earlier() {
+        let t = r#"{"v":1,"earlier":{"entries":[{"kind":"user","text":"first"}],"toolCalls":{}},
+            "entries":[{"kind":"user","text":"fix the bug"},{"kind":"tool","id":"t1"},{"kind":"agent","text":"done"}],
+            "toolCalls":{"t1":{"title":"Edit src/main.rs"}}}"#;
+        let folded = fold_for_switch(Some(t), "Switched from Claude Code to Grok Build");
+        let v: serde_json::Value = serde_json::from_str(&folded).unwrap();
+        assert_eq!(v["entries"].as_array().unwrap().len(), 0);
+        let earlier = v["earlier"]["entries"].as_array().unwrap();
+        assert_eq!(earlier.len(), 5);
+        assert_eq!(earlier[4]["kind"], "info");
+        assert_eq!(v["earlier"]["toolCalls"]["t1"]["title"], "Edit src/main.rs");
+
+        let p = switch_prompt(Some(&folded), "Claude Code");
+        assert!(p.starts_with(NOTE_OPEN) && p.ends_with(NOTE_CLOSE));
+        let at = |needle: &str| p.find(needle).unwrap_or_else(|| panic!("missing {needle}"));
+        assert!(at("User: first") < at("User: fix the bug"));
+        assert!(at("Tool: Edit src/main.rs") < at("Assistant: done"));
+        assert!(p.contains("[Switched from Claude Code to Grok Build]"));
+        assert!(fold_for_switch(None, "x").contains(r#""entries":[]"#));
     }
 
     #[test]
