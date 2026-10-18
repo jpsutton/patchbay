@@ -70,11 +70,12 @@ export function UsageBar({
 
   return (
     <div className="meta mt-1.5 flex h-5 items-center gap-3 px-1.5 text-faint" aria-label="Token usage">
+      {/* On a narrow screen the counts stay whole and the context label gives way instead. */}
       {hasTotals && totals && (
-        <div className="flex min-w-0 items-center gap-2 truncate" title={detail}>
+        <div className="flex shrink-0 items-center gap-2 whitespace-nowrap" title={detail}>
           <span>
             In <span className="text-muted">{fmtTokens(totals.input)}</span>
-            {totals.cachedRead > 0 && <span> ({fmtTokens(totals.cachedRead)} cached)</span>}
+            {totals.cachedRead > 0 && <span className="hidden sm:inline"> ({fmtTokens(totals.cachedRead)} cached)</span>}
           </span>
           <span>·</span>
           <span>
@@ -89,8 +90,8 @@ export function UsageBar({
         </div>
       )}
       <div className="flex-1" />
-      <div className="flex shrink-0 items-center gap-2" title={ctxTitle}>
-        <span>
+      <div className="flex min-w-0 items-center gap-2" title={ctxTitle}>
+        <span className="min-w-0 truncate">
           Context{" "}
           {contextTokens == null ? (
             "—"
@@ -104,7 +105,7 @@ export function UsageBar({
         </span>
         {contextWindow ? (
           <div
-            className="relative h-1 w-24 overflow-hidden rounded-full bg-panel-2"
+            className="relative h-1 w-10 shrink-0 overflow-hidden rounded-full bg-panel-2 sm:w-24"
             role="meter"
             aria-valuemin={0}
             aria-valuemax={100}
@@ -119,7 +120,7 @@ export function UsageBar({
         ) : (
           onConfigureWindow &&
           contextTokens != null && (
-            <button className="font-sans text-accent-ink hover:underline" onClick={onConfigureWindow}>
+            <button className="shrink-0 whitespace-nowrap font-sans text-accent-ink hover:underline" onClick={onConfigureWindow}>
               set window
             </button>
           )
