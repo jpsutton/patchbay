@@ -43,6 +43,7 @@ import {
   XIcon,
 } from "../components/icons";
 import { ChipSelect } from "../components/ChipSelect";
+import { AgentImage } from "../components/AgentImage";
 import { ModelRing } from "../lib/cable";
 import { JumpToBottom, ScrollFade, useStickyScroll } from "../lib/useStickyScroll";
 
@@ -296,6 +297,8 @@ function EntryView({
       return <UserEntry e={e} editing={editing} setEditing={setEditing} onEdit={onEdit} />;
     case "agent":
       return <AgentEntry text={e.text} />;
+    case "image":
+      return <AgentImage data={e.data} mimeType={e.mimeType} alt="Image from the agent" />;
     case "thought":
       return <Thought text={e.text} />;
     case "tool": {

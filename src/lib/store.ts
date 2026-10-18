@@ -36,6 +36,8 @@ export type Mode = "chat" | "code";
 export type Entry =
   | { kind: "user"; text: string; attachments?: Attachment[] }
   | { kind: "agent"; text: string }
+  /** An image the agent sent in its reply (an ACP image block). */
+  | { kind: "image"; data: string; mimeType: string }
   | { kind: "thought"; text: string }
   | { kind: "tool"; id: string }
   | { kind: "error"; text: string }
@@ -125,15 +127,17 @@ function saveTranscript(id: string, s: CodeState) {
   const earlier = s.earlier ?? undefined;
   let json = JSON.stringify({ v: 1, earlier, entries: s.entries, toolCalls: s.toolCalls });
   if (json.length > 3_500_000) {
-    // Too big: keep the conversation, drop tool payloads (diffs, outputs).
+    // Too big: keep the conversation, drop tool payloads (diffs, outputs, images) and images.
     const slim = (calls: Record<string, AcpToolCall>) =>
       Object.fromEntries(
         Object.entries(calls).map(([k, tc]) => [k, { ...tc, content: null, rawInput: null, rawOutput: null }]),
       );
+    const noImages = (entries: Entry[]): Entry[] =>
+      entries.map((e) => (e.kind === "image" ? { kind: "info", text: "Image not kept: the saved transcript was too large." } : e));
     json = JSON.stringify({
       v: 1,
-      earlier: earlier && { entries: earlier.entries, toolCalls: slim(earlier.toolCalls) },
-      entries: s.entries,
+      earlier: earlier && { entries: noImages(earlier.entries), toolCalls: slim(earlier.toolCalls) },
+      entries: noImages(s.entries),
       toolCalls: slim(s.toolCalls),
     });
   }
@@ -337,8 +341,13 @@ function reduceUpdate(s: CodeState, u: AcpUpdate): CodeState {
         ...s,
         entries: appendText(s.entries, "user", withoutNote(textOf((u as unknown as { content: { type: string; text?: string } }).content))),
       };
-    case "agent_message_chunk":
-      return { ...s, entries: appendText(s.entries, "agent", textOf((u as unknown as { content: { type: string; text?: string } }).content)) };
+    case "agent_message_chunk": {
+      const c = (u as unknown as { content: { type: string; text?: string; data?: string; mimeType?: string } }).content;
+      if (c?.type === "image" && c.data && c.mimeType) {
+        return { ...s, entries: [...s.entries, { kind: "image", data: c.data, mimeType: c.mimeType }] };
+      }
+      return { ...s, entries: appendText(s.entries, "agent", textOf(c)) };
+    }
     case "agent_thought_chunk":
       return { ...s, entries: appendText(s.entries, "thought", textOf((u as unknown as { content: { type: string; text?: string } }).content)) };
     case "tool_call":
