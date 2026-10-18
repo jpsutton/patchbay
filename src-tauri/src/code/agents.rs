@@ -12,7 +12,7 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::grok_config;
+use super::{agent_providers, grok_config};
 use crate::db::{CodeSession, Db};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -153,7 +153,9 @@ impl ApprovalSetup {
 
 /// Config that makes OpenCode and Kilo ask over ACP for every tool. Both read inline config
 /// from an env var; deny rules in the user's own config still apply.
-const ASK_EVERYTHING: &str = r#"{"permission":{"*":"ask"}}"#;
+fn ask_everything() -> serde_json::Map<String, Value> {
+    serde_json::Map::from_iter([("permission".to_owned(), json!({ "*": "ask" }))])
+}
 
 /// Where an agent's executable was found.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -302,6 +304,8 @@ pub struct AgentInfo {
     pub uses_patchbay_models: bool,
     /// Receives Settings → Code → custom instructions.
     pub supports_instructions: bool,
+    /// Can be set to run on Patchbay's providers instead of its own sign-in.
+    pub takes_providers: bool,
 }
 
 /// Probe every backend. Blocking: runs `--version` on each agent found, in parallel.
@@ -327,6 +331,7 @@ fn detect(kind: AgentKind, overrides: &AgentPaths) -> AgentInfo {
         install_hint: kind.install_hint(),
         uses_patchbay_models: kind.uses_patchbay_models(),
         supports_instructions: supports_instructions(kind),
+        takes_providers: agent_providers::supported(kind),
     };
     match resolve(kind, overrides) {
         Ok(r) => {
@@ -413,19 +418,28 @@ pub fn prepare(db: &Db, data_dir: &Path, session: &CodeSession) -> Result<Launch
     if let Some(path) = child_path(&resolved.program) {
         env.push(("PATH".to_owned(), path));
     }
+    // Patchbay's providers, only for an agent the user set to use them.
+    let providers = match prefs.agent_providers.get(kind.id()).filter(|_| agent_providers::supported(kind)) {
+        Some(model_ref) => agent_providers::setup(db, kind, model_ref)?,
+        None => agent_providers::Setup::default(),
+    };
+    let mut config = ask_everything();
+    config.extend(providers.config);
+    let config = Value::Object(config).to_string();
     match kind {
         AgentKind::Opencode => {
             env.push(("OPENCODE_DISABLE_AUTOUPDATE".to_owned(), "1".to_owned()));
-            env.push(("OPENCODE_CONFIG_CONTENT".to_owned(), ASK_EVERYTHING.to_owned()));
+            env.push(("OPENCODE_CONFIG_CONTENT".to_owned(), config));
         }
-        AgentKind::Kilo => env.push(("KILO_CONFIG_CONTENT".to_owned(), ASK_EVERYTHING.to_owned())),
+        AgentKind::Kilo => env.push(("KILO_CONFIG_CONTENT".to_owned(), config)),
         _ => {}
     }
+    env.extend(providers.env);
     Ok(Launch {
         program: resolved.program,
         args: resolved.args,
         env,
-        env_remove: Vec::new(),
+        env_remove: providers.env_remove,
         ext: Extensions::default(),
         session_meta,
         initial_model: session.agent_model.clone(),
@@ -510,6 +524,55 @@ mod tests {
             session_meta(AgentKind::ClaudeCode, "  ")["claudeCode"]["options"]["thinking"],
             json!({ "type": "adaptive", "display": "summarized" })
         );
+    }
+
+    /// OpenCode set to use Patchbay's providers: they join its config next to the approval rule.
+    /// `PB_PRINT_LAUNCH=1` prints the env, for trying it against a real `opencode acp`.
+    #[test]
+    fn opencode_launch_carries_patchbay_providers_when_chosen() {
+        let dir = std::env::temp_dir().join(format!("pb-ag-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("db.sqlite")).unwrap();
+        let url = std::env::var("PB_MOCK_URL").unwrap_or_else(|_| "http://127.0.0.1:8799/v1".into());
+        let p = crate::db::Provider { id: "fw".into(), name: "Fireworks".into(), kind: crate::db::ProviderKind::OpenaiChat, base_url: url, has_key: true };
+        db.upsert_provider(&p, Some("secret")).unwrap();
+        let m = crate::db::Model {
+            id: "echo".into(),
+            provider_id: "fw".into(),
+            model_id: "mock-echo".into(),
+            display_name: "Echo".into(),
+            vision: false,
+            context_window: None,
+            params: Default::default(),
+        };
+        db.upsert_model(&m).unwrap();
+        let mut o = AgentPaths::new();
+        o.insert("opencode".into(), std::env::current_exe().unwrap().to_string_lossy().into_owned());
+        let mut prefs = crate::prefs::Preferences { agent_paths: o, ..Default::default() };
+        crate::prefs::save(&db, &prefs).unwrap();
+        let session = db.create_code_session(&dir.to_string_lossy(), None, "opencode", "default").unwrap();
+        let config = |l: &Launch| -> Value {
+            serde_json::from_str(&l.env.iter().find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT").unwrap().1).unwrap()
+        };
+
+        // Off by default: only the approval rule.
+        let own = prepare(&db, &dir, &session).unwrap();
+        assert_eq!(config(&own), json!({ "permission": { "*": "ask" } }));
+
+        prefs.agent_providers.insert("opencode".into(), "echo".into());
+        crate::prefs::save(&db, &prefs).unwrap();
+        let l = prepare(&db, &dir, &session).unwrap();
+        let c = config(&l);
+        assert_eq!(c["permission"], json!({ "*": "ask" }));
+        assert_eq!(c["model"], "patchbay-fw/mock-echo");
+        assert_eq!(c["provider"]["patchbay-fw"]["options"]["apiKey"], "{env:PATCHBAY_KEY_0}");
+        assert!(l.env.iter().any(|(k, v)| k == "PATCHBAY_KEY_0" && v == "secret"));
+        if std::env::var_os("PB_PRINT_LAUNCH").is_some() {
+            for (k, v) in l.env.iter().filter(|(k, _)| k != "PATH") {
+                println!("{k}={v}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

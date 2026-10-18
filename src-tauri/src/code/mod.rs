@@ -2,6 +2,7 @@
 //! ACP over stdio.
 
 pub mod acp;
+pub mod agent_providers;
 pub mod agent_state;
 pub mod agents;
 pub mod grok_config;

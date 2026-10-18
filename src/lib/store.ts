@@ -119,6 +119,7 @@ const AGENT_PREF_KEYS: (keyof Preferences)[] = [
   "backgroundSummaries",
   "claudeConfig",
   "agentPaths",
+  "agentProviders",
 ];
 
 /** Persist what the transcript shows, so the session renders before the agent replays it. */
