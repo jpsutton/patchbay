@@ -1,11 +1,13 @@
 import { useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, errorText, type AcpCommand, type Attachment } from "../lib/ipc";
 import { isSendKey, useStore } from "../lib/store";
 import { ViewActive } from "../lib/shortcuts";
 import { fuzzyPaths } from "../lib/fuzzy";
-import { ArrowUpIcon, PaperclipIcon } from "./icons";
+import { ArrowUpIcon, PaperclipIcon, SlidersIcon } from "./icons";
+import { ChipRows } from "./ChipSelect";
 import { isRemoteApp } from "../lib/platform";
 
 const MAX_ATTACHMENTS = 10;
@@ -145,6 +147,9 @@ export function Composer({
   const [files, setFiles] = useState<string[] | null>(null);
   const filesAt = useRef(0);
   const menuRef = useRef<HTMLDivElement>(null);
+  // The phone keeps the footer's chips in a sheet behind one button; a row of them doesn't fit.
+  const sheetFooter = isRemoteApp() && !!footer;
+  const [optionsOpen, setOptionsOpen] = useState(false);
 
   // "@query" right before the caret, when mentions are on.
   const mention = useMemo(() => {
@@ -422,7 +427,22 @@ export function Composer({
             }}
           />
         )}
-        <div className="flex min-w-0 flex-1 items-center gap-1.5">{footer}</div>
+        {sheetFooter ? (
+          <>
+            <button
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] border border-border text-muted hover:bg-panel-2/60 hover:text-fg"
+              onClick={() => setOptionsOpen(true)}
+              title="Model and options"
+              aria-label="Model and options"
+              aria-haspopup="dialog"
+            >
+              <SlidersIcon size={16} />
+            </button>
+            <div className="flex-1" />
+          </>
+        ) : (
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">{footer}</div>
+        )}
         {busy ? (
           <button
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-border bg-panel-2 text-fg hover:bg-border"
@@ -444,6 +464,30 @@ export function Composer({
           </button>
         )}
       </div>
+      {sheetFooter &&
+        optionsOpen &&
+        createPortal(
+          <div className="fixed inset-0 z-[60] flex flex-col justify-end bg-black/45" onClick={() => setOptionsOpen(false)}>
+            <div
+              role="dialog"
+              aria-label="Model and options"
+              className="rounded-t-2xl border-t border-border bg-raised px-2 pb-[calc(env(safe-area-inset-bottom)+8px)] pt-2"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="px-3 pb-1 pt-1 text-[13px] text-muted">Model and options</div>
+              <ChipRows.Provider value={true}>
+                <div className="flex flex-col divide-y divide-line">{footer}</div>
+              </ChipRows.Provider>
+              <button
+                className="mt-1 flex h-12 w-full items-center justify-center rounded-xl text-[16px] text-muted active:bg-panel-2"
+                onClick={() => setOptionsOpen(false)}
+              >
+                Done
+              </button>
+            </div>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

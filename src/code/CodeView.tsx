@@ -42,7 +42,7 @@ import {
   TerminalIcon,
   XIcon,
 } from "../components/icons";
-import { ChipSelect } from "../components/ChipSelect";
+import { ChipSelect, ChipText } from "../components/ChipSelect";
 import { ModelRing } from "../lib/cable";
 import { JumpToBottom, ScrollFade, useStickyScroll } from "../lib/useStickyScroll";
 
@@ -121,6 +121,7 @@ function SessionAgentPicker({
       disabled={disabled}
       title="Agent for this session"
       aria-label="Agent for this session"
+      label="Agent"
       onChange={async (e) => {
         const st = useStore.getState();
         const next = e.target.value as AgentId;
@@ -1032,6 +1033,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     value={acpModels.currentModelId}
                     disabled={!ready || busy}
                     aria-label="Agent model"
+                    label="Model"
                     onChange={async (e) => {
                       const id = e.target.value;
                       try {
@@ -1056,10 +1058,10 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                   </ChipSelect>
                 ) : (
                   model && (
-                    <span className="flex min-w-0 items-center gap-2 px-1 font-mono text-[12px] text-muted">
+                    <ChipText label="Model">
                       <ModelRing id={model.id} />
                       <span className="truncate">{model.displayName}</span>
-                    </span>
+                    </ChipText>
                   )
                 )}
                 {configOptions.map((o) => (
