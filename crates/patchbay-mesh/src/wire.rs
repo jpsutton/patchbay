@@ -50,6 +50,9 @@ pub struct LinkReport {
     /// (peer node, URL it was reached at), so others can try the same address directly.
     #[serde(default)]
     pub peers: Vec<(String, String)>,
+    /// Phones using this node as their gateway right now. Older nodes omit it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remotes: Vec<String>,
 }
 
 /// One synced cell write (or a row delete when `c` is the tombstone column).
