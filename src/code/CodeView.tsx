@@ -46,7 +46,6 @@ import { ChipSelect } from "../components/ChipSelect";
 import { ModelRing } from "../lib/cable";
 import { JumpToBottom, ScrollFade, useStickyScroll } from "../lib/useStickyScroll";
 
-export const NEW_SESSION_TITLE = "New session";
 
 /** Start a Code session in `dir` with `agent`, or the default agent from Settings. */
 export async function newSessionIn(dir: string, agent?: AgentId) {
@@ -571,15 +570,6 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
 
   const send = async (text: string, atts: Attachment[], mentions: string[] = []) => {
     if (!activeId) return;
-    const isFirst = !(useStore.getState().code[activeId]?.entries ?? []).some((x) => x.kind === "user");
-    const folder = session.cwd.split(/[\\/]/).filter(Boolean).pop();
-    if (isFirst && (session.title === NEW_SESSION_TITLE || session.title === folder)) {
-      const line = text.split("\n").find((l) => l.trim())?.trim() ?? atts[0]?.name ?? "";
-      if (line) {
-        api.updateCodeSession(session.id, { title: line.length > 60 ? `${line.slice(0, 60)}…` : line })
-          .then(refreshCodeSessions);
-      }
-    }
     pushCodeEntry(activeId, { kind: "user", text, attachments: atts });
     setCodeBusy(activeId, true);
     sticky.pin();

@@ -576,7 +576,10 @@ export function install() {
         }
         case "update_code_session": {
           const s = db.code.find((x) => x.id === a.id)!;
-          if (a.title != null) s.title = a.title as string;
+          if (a.title != null) {
+            s.title = a.title as string;
+            s.titleManual = true;
+          }
           if (a.pinned != null) s.pinned = a.pinned as boolean;
           if (a.activity != null) s.activity = a.activity as CodeSession["activity"];
           if (a.archived != null) s.archivedAt = a.archived ? now() : null;
@@ -623,7 +626,25 @@ export function install() {
           return null;
         }
         case "code_stop": return null;
-        case "code_prompt": fakeAgentTurn(a.id as string, a.text as string, (a.mentions as string[]) ?? []); return null;
+        case "code_prompt": {
+          // Like the backend: an unnamed session takes its first prompt's first line.
+          const s = db.code.find((x) => x.id === a.id)!;
+          const line = (a.text as string).split("\n").find((l) => l.trim())?.trim();
+          if (line && !s.titleManual && s.title === "New session") {
+            s.title = line.length > 60 ? `${line.slice(0, 60)}…` : line;
+            codeEmit(s.id, { type: "title", title: s.title });
+          }
+          fakeAgentTurn(a.id as string, a.text as string, (a.mentions as string[]) ?? []);
+          return null;
+        }
+        case "code_auto_title": {
+          const s = db.code.find((x) => x.id === a.id)!;
+          await sleep(400);
+          s.title = "Fake generated title";
+          s.titleManual = false;
+          codeEmit(s.id, { type: "title", title: s.title });
+          return s.title;
+        }
         case "get_code_transcript": return db.transcripts[a.id as string] ?? null;
         case "save_code_transcript": db.transcripts[a.id as string] = a.json as string; return null;
         case "list_project_files": await sleep(80); return DEMO_FILES;

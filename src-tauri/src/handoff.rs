@@ -389,9 +389,8 @@ pub fn keep_orphaned_work(cwd: &Path, session_id: &str) -> Result<Option<String>
     Ok(r?.map(|_| reference))
 }
 
-/// What the agent gets as context when its own state couldn't move with the session.
-pub fn handoff_prompt(transcript_json: Option<&str>, from_name: &str) -> String {
-    const MAX: usize = 24_000;
+/// The saved transcript's conversation as `User: …` / `Assistant: …` lines, without tool calls.
+pub fn transcript_lines(transcript_json: Option<&str>) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(raw) = transcript_json
         && let Ok(v) = serde_json::from_str::<serde_json::Value>(raw)
@@ -405,14 +404,25 @@ pub fn handoff_prompt(transcript_json: Option<&str>, from_name: &str) -> String 
             }
         }
     }
+    lines
+}
+
+/// `lines` joined, keeping the latest `max` bytes when it runs long.
+pub fn conversation_text(lines: &[String], max: usize) -> String {
     let mut body = lines.join("\n\n");
-    if body.len() > MAX {
-        let mut cut = body.len() - MAX;
+    if body.len() > max {
+        let mut cut = body.len() - max;
         while !body.is_char_boundary(cut) {
             cut += 1;
         }
         body = format!("[earlier conversation omitted]\n\n{}", &body[cut..]);
     }
+    body
+}
+
+/// What the agent gets as context when its own state couldn't move with the session.
+pub fn handoff_prompt(transcript_json: Option<&str>, from_name: &str) -> String {
+    let body = conversation_text(&transcript_lines(transcript_json), 24_000);
     format!(
         "This session was moved here from {from_name}. Your earlier session state couldn't come along, \
          so here is the conversation so far for context. The project files are as they were on \
@@ -445,6 +455,7 @@ mod tests {
             epoch: 0,
             permission_mode: "default".into(),
             archived_at: None,
+            title_manual: false,
         }
     }
 
