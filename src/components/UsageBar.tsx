@@ -59,7 +59,8 @@ export function UsageBar({
   const pct =
     contextTokens != null && contextWindow ? Math.min(100, (contextTokens / contextWindow) * 100) : null;
   const limit = autoCompactPercent ?? 90;
-  const tone = pct == null ? "bg-muted" : pct >= limit ? "bg-danger" : pct >= limit * 0.75 ? "bg-warn" : "bg-live";
+  const tone =
+    pct == null ? "stroke-muted" : pct >= limit ? "stroke-danger" : pct >= limit * 0.75 ? "stroke-warn" : "stroke-live";
   const ctxTitle =
     contextTokens == null
       ? "Context fill is reported after the next model call"
@@ -70,7 +71,7 @@ export function UsageBar({
 
   return (
     <div className="meta mt-1.5 flex h-5 items-center gap-3 px-1.5 text-faint" aria-label="Token usage">
-      {/* Narrow screens (phones) show only In, Out and the context share; the rest is in the tooltips. */}
+      {/* Narrow screens (phones) leave out the cached count and the context counts; both are in the tooltips. */}
       {hasTotals && totals && (
         <div className="flex shrink-0 items-center gap-2 whitespace-nowrap" title={detail}>
           <span>
@@ -82,15 +83,16 @@ export function UsageBar({
             Out <span className="text-muted">{fmtTokens(totals.output)}</span>
           </span>
           {cost != null && (
-            <span className="hidden items-center gap-2 sm:flex">
+            <>
               <span>·</span>
               <span>{reported != null ? fmtCost(cost) : `~${fmtCost(cost)}`}</span>
-            </span>
+            </>
           )}
         </div>
       )}
       <div className="flex-1" />
-      <div className="flex shrink-0 items-center gap-2 whitespace-nowrap" title={ctxTitle}>
+      <div className="flex shrink-0 items-center gap-1.5 whitespace-nowrap" title={ctxTitle}>
+        {contextWindow ? <ContextRing pct={pct ?? 0} tone={tone} compactAt={autoCompactPercent ?? null} /> : null}
         <span>
           {/* Next to its meter a bare percentage reads as context; a bare count wouldn't. */}
           <span className={pct != null ? "hidden sm:inline" : ""}>Context </span>
@@ -107,29 +109,55 @@ export function UsageBar({
             <span className="text-muted">{fmtTokens(contextTokens)}</span>
           )}
         </span>
-        {contextWindow ? (
-          <div
-            className="relative h-1 w-10 shrink-0 overflow-hidden rounded-full bg-panel-2 sm:w-24"
-            role="meter"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={pct == null ? undefined : Math.round(pct)}
-            aria-label="Context window used"
-          >
-            <div className={`h-full rounded-full ${tone}`} style={{ width: `${pct ?? 0}%` }} />
-            {autoCompactPercent ? (
-              <div className="absolute top-0 h-full w-px bg-faint" style={{ left: `${autoCompactPercent}%` }} />
-            ) : null}
-          </div>
-        ) : (
-          onConfigureWindow &&
-          contextTokens != null && (
-            <button className="shrink-0 whitespace-nowrap font-sans text-accent-ink hover:underline" onClick={onConfigureWindow}>
-              set window
-            </button>
-          )
+        {!contextWindow && onConfigureWindow && contextTokens != null && (
+          <button className="hidden shrink-0 whitespace-nowrap font-sans text-accent-ink hover:underline sm:inline" onClick={onConfigureWindow}>
+            set window
+          </button>
         )}
       </div>
     </div>
+  );
+}
+
+const RING_R = 5.5;
+const RING_C = 2 * Math.PI * RING_R;
+
+/** The context window as a ring filling clockwise from the top, with a tick where it auto-compacts. */
+function ContextRing({ pct, tone, compactAt }: { pct: number; tone: string; compactAt: number | null }) {
+  const tick = compactAt != null ? (compactAt / 100) * 2 * Math.PI : null;
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className="h-3.5 w-3.5 shrink-0 -rotate-90"
+      role="meter"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Math.round(pct)}
+      aria-label="Context window used"
+    >
+      <circle cx="8" cy="8" r={RING_R} fill="none" strokeWidth="2.5" className="stroke-border" />
+      {pct > 0 && (
+        <circle
+          cx="8"
+          cy="8"
+          r={RING_R}
+          fill="none"
+          strokeWidth="2.5"
+          className={tone}
+          // A sliver stays visible however small the share.
+          strokeDasharray={`${Math.max(0.6, (pct / 100) * RING_C)} ${RING_C}`}
+        />
+      )}
+      {tick != null && (
+        <line
+          x1={8 + (RING_R - 1.75) * Math.cos(tick)}
+          y1={8 + (RING_R - 1.75) * Math.sin(tick)}
+          x2={8 + (RING_R + 1.75) * Math.cos(tick)}
+          y2={8 + (RING_R + 1.75) * Math.sin(tick)}
+          strokeWidth="1"
+          className="stroke-faint"
+        />
+      )}
+    </svg>
   );
 }
