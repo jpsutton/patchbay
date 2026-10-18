@@ -114,6 +114,7 @@ export function Composer({
   placeholder,
   footer,
   footerLabel = "Model and options",
+  trailing,
   warnNoVision,
   commands,
   mentionFiles,
@@ -128,6 +129,8 @@ export function Composer({
   footer?: ReactNode;
   /** Names the phone's button and sheet that hold the footer. */
   footerLabel?: string;
+  /** Shown just left of the send button, and never moved into the phone's sheet. */
+  trailing?: ReactNode;
   warnNoVision?: boolean;
   /** Slash commands the agent advertises (Code tab). */
   commands?: AcpCommand[];
@@ -446,6 +449,7 @@ export function Composer({
         ) : (
           <div className="flex min-w-0 flex-1 items-center gap-1.5">{footer}</div>
         )}
+        {trailing}
         {busy ? (
           <button
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-border bg-panel-2 text-fg hover:bg-border"

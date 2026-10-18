@@ -1,30 +1,17 @@
-import { useContext, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { api, errorText, type CodeSession } from "../lib/ipc";
 import { memberName, memberOnline, remoteHost, useStore } from "../lib/store";
 import { input } from "../settings/ProviderPage";
 import { MonitorIcon } from "../components/icons";
-import { ChipRows, ChipText } from "../components/ChipSelect";
 import { isRemoteApp } from "../lib/platform";
 
 /** "on <computer>" next to a session hosted elsewhere in the mesh. */
 export function HostBadge({ session }: { session: CodeSession }) {
   const mesh = useStore((s) => s.mesh);
   const host = remoteHost(session, mesh);
-  const rows = useContext(ChipRows);
   if (!host) return null;
   const online = memberOnline(mesh, host);
   const name = memberName(mesh, host);
-  const dot = (
-    <span className={`h-1.5 w-1.5 rounded-full ${online ? "bg-ok" : "bg-faint"}`} aria-label={online ? "online" : "offline"} />
-  );
-  if (rows) {
-    return (
-      <ChipText label="Computer">
-        <span className="truncate font-sans text-[15px]">{name}</span>
-        {dot}
-      </ChipText>
-    );
-  }
   return (
     <span
       className="flex shrink-0 items-center gap-1.5 rounded-md border border-line px-1.5 py-0.5 text-[12px] text-muted"
@@ -32,7 +19,7 @@ export function HostBadge({ session }: { session: CodeSession }) {
     >
       <MonitorIcon size={13} />
       {name}
-      {dot}
+      <span className={`h-1.5 w-1.5 rounded-full ${online ? "bg-ok" : "bg-faint"}`} aria-label={online ? "online" : "offline"} />
     </span>
   );
 }

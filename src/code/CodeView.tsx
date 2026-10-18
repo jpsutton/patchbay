@@ -1006,9 +1006,9 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
               }
               warnNoVision={model ? !model.vision : false}
               footerLabel="Session settings"
+              trailing={remote && <HostBadge session={session} />}
               footer={
                 <>
-                {remote && <HostBadge session={session} />}
                 <SessionAgentPicker
                   session={session}
                   host={host}
