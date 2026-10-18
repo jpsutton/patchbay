@@ -1,13 +1,15 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useStore } from "../lib/store";
+import { isWeb } from "../lib/platform";
 import { CloseIcon, MaximizeIcon, MinimizeIcon, RestoreIcon } from "./icons";
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 /** True when the window manager's title bar is off and Patchbay draws its own controls. */
 export function useAppTitleBar(): boolean {
-  return useStore((s) => s.prefs.titleBar === "app");
+  // A browser tab has its own frame.
+  return useStore((s) => s.prefs.titleBar === "app") && !isWeb();
 }
 
 /**

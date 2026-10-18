@@ -4,5 +4,6 @@ fn main() {
         "cargo:rustc-env=PATCHBAY_TARGET={}",
         std::env::var("TARGET").unwrap_or_default()
     );
-    tauri_build::build()
+    #[cfg(feature = "desktop")]
+    tauri_build::build();
 }

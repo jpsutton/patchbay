@@ -108,7 +108,10 @@ jobs:
         run: scripts/apply-patches.sh && scripts/ci/stub-sidecar.sh
       - name: Unit tests
         working-directory: src-tauri
-        run: cargo test --lib --locked
+        run: cargo test --lib --locked --features ipc-test
+      - name: Unit tests of the headless build (patchbayd, no Tauri)
+        working-directory: src-tauri
+        run: cargo test --lib --locked --no-default-features --features web
       - name: Mesh protocol crate tests
         working-directory: crates/patchbay-mesh
         run: cargo test --locked

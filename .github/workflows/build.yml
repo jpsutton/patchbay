@@ -24,7 +24,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # .deb, .rpm and AppImage from Tauri's bundler. The oldest supported Ubuntu
+  # .deb, .rpm and AppImage from Tauri's bundler, plus the patchbayd tarball. The oldest supported Ubuntu
   # (24.04) sets the glibc the packages need (2.39).
   linux-packages:
     runs-on: ubuntu-24.04
@@ -55,6 +55,9 @@ jobs:
         run: PROFILE=release scripts/build-sidecar.sh
       - name: Build and bundle
         run: pnpm tauri build --bundles deb,rpm,appimage
+      # patchbayd, the headless build, reuses the frontend and sidecar built above.
+      - name: Build and pack patchbayd
+        run: scripts/package-daemon.sh
       - uses: actions/upload-artifact@v4
         with:
           name: patchbay-linux
@@ -62,6 +65,7 @@ jobs:
             src-tauri/target/release/bundle/deb/*.deb
             src-tauri/target/release/bundle/rpm/*.rpm
             src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/bundle/daemon/*.tar.gz
           if-no-files-found: error
           retention-days: 14
           compression-level: 0

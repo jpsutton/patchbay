@@ -8,7 +8,7 @@ import { ViewActive } from "../lib/shortcuts";
 import { fuzzyPaths } from "../lib/fuzzy";
 import { ArrowUpIcon, PaperclipIcon, SlidersIcon } from "./icons";
 import { ChipRows } from "./ChipSelect";
-import { isRemoteApp } from "../lib/platform";
+import { isRemoteApp, isWeb } from "../lib/platform";
 
 const MAX_ATTACHMENTS = 10;
 
@@ -249,6 +249,7 @@ export function Composer({
   const activeRef = useRef(viewActive);
   activeRef.current = viewActive;
   useEffect(() => {
+    if (isWeb()) return webDrops();
     let unlisten: (() => void) | undefined;
     getCurrentWebview()
       .onDragDropEvent((ev) => {
@@ -272,10 +273,40 @@ export function Composer({
     el.style.height = `${Math.min(el.scrollHeight, 280)}px`;
   }, [text]);
 
+  // In a browser, dropped files arrive as HTML5 drops carrying their contents, not local paths.
+  const webDrops = () => {
+    const files = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes("Files");
+    const over = (e: DragEvent) => {
+      if (!activeRef.current || !files(e)) return;
+      e.preventDefault();
+      setDragging(true);
+    };
+    const leave = (e: DragEvent) => {
+      // Leaving the page, not just crossing between elements inside it.
+      if (!e.relatedTarget) setDragging(false);
+    };
+    const drop = (e: DragEvent) => {
+      if (!activeRef.current || !files(e)) return;
+      e.preventDefault();
+      setDragging(false);
+      const list = Array.from(e.dataTransfer?.files ?? []);
+      addRef.current(list.map((f) => async () => api.addAttachmentBytes(f.name, await fileToBase64(f))));
+    };
+    window.addEventListener("dragover", over);
+    window.addEventListener("dragleave", leave);
+    window.addEventListener("drop", drop);
+    return () => {
+      window.removeEventListener("dragover", over);
+      window.removeEventListener("dragleave", leave);
+      window.removeEventListener("drop", drop);
+    };
+  };
+
   const filesRef = useRef<HTMLInputElement>(null);
   const pick = async () => {
-    // The phone app has no native file dialog; the web view's picker reaches the photo library.
-    if (isRemoteApp()) {
+    // The phone app and a browser have no native file dialog; the web view's picker reaches the
+    // photo library on a phone.
+    if (isRemoteApp() || isWeb()) {
       filesRef.current?.click();
       return;
     }
@@ -415,7 +446,7 @@ export function Composer({
         >
           <PaperclipIcon size={16} />
         </button>
-        {isRemoteApp() && (
+        {(isRemoteApp() || isWeb()) && (
           <input
             ref={filesRef}
             type="file"
@@ -426,7 +457,8 @@ export function Composer({
               e.currentTarget.value = "";
               addMany(
                 files.map((f) => async () => {
-                  const { blob, name } = await shrinkPhoto(f);
+                  // Phones shrink camera photos before the upload; a browser sends files as they are.
+                  const { blob, name } = isWeb() ? { blob: f, name: f.name } : await shrinkPhoto(f);
                   return api.addAttachmentBytes(name, await fileToBase64(blob));
                 }),
               );

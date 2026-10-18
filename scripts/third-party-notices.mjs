@@ -28,9 +28,9 @@ function licenseFiles(dir) {
 }
 
 // Rust: walk the resolve graph from each app (the desktop app, and the phone app in remote/)
-// through normal and build edges.
+// through normal and build edges. All features, so optional builds (patchbayd's web UI) count.
 function cratesOf(dir, rootName) {
-  const meta = JSON.parse(execFileSync('cargo', ['metadata', '--format-version', '1', '--locked'], {
+  const meta = JSON.parse(execFileSync('cargo', ['metadata', '--format-version', '1', '--locked', '--all-features'], {
     cwd: join(root, dir),
     encoding: 'utf8',
     maxBuffer: 256 * 1024 * 1024,
