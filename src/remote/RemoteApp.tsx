@@ -9,6 +9,7 @@ import { CodeView } from "../code/CodeView";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ActionSheet, useHold, type ItemAction } from "../components/ItemMenu";
 import { chatActions, promptRename, sessionActions } from "../lib/itemActions";
+import { NewSessionSheet } from "./NewSession";
 import { fmtShort } from "../lib/format";
 import { ChatIcon, ChevronLeftIcon, CodeIcon, MonitorIcon, PlusIcon, SettingsIcon, StarIcon, XIcon } from "../components/icons";
 
@@ -222,6 +223,7 @@ function Main({ status, onLock }: { status: RemoteStatus; onLock: () => void }) 
   });
   const [live, setLive] = useState<Record<string, Live>>({});
   const [settings, setSettings] = useState(false);
+  const [newSession, setNewSession] = useState(false);
   const toast = useStore((s) => s.toast);
   const setToast = useStore((s) => s.setToast);
   const hiddenAt = useRef<number | null>(null);
@@ -294,9 +296,22 @@ function Main({ status, onLock }: { status: RemoteStatus; onLock: () => void }) 
     return () => document.removeEventListener("visibilitychange", onVis);
   }, [onLock]);
 
-  // The system back gesture returns to the list.
+  // The back button and the system back gesture both return to the list. Leaving a Code session
+  // stops following it, so its state here goes too: opening it again catches up from the host
+  // instead of showing what it was doing when we left.
   useEffect(() => {
-    const onPop = () => setView({ kind: "home" });
+    const onPop = () => {
+      const s = useStore.getState();
+      const id = s.activeCodeSessionId;
+      if (id) {
+        remote.unwatch(`session:${id}`).catch(() => {});
+        useStore.setState((st) => {
+          const { [id]: _, ...code } = st.code;
+          return { code };
+        });
+      }
+      setView({ kind: "home" });
+    };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
@@ -311,11 +326,7 @@ function Main({ status, onLock }: { status: RemoteStatus; onLock: () => void }) 
     history.pushState({ v: v.kind }, "");
     setView(v);
   };
-  const back = () => {
-    const s = useStore.getState();
-    if (view.kind === "code" && s.activeCodeSessionId) remote.unwatch(`session:${s.activeCodeSessionId}`).catch(() => {});
-    history.back();
-  };
+  const back = () => history.back();
   const backButton = (
     <button className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-muted active:bg-panel-2" aria-label="Back" onClick={back}>
       <ChevronLeftIcon size={20} />
@@ -350,11 +361,24 @@ function Main({ status, onLock }: { status: RemoteStatus; onLock: () => void }) 
             useStore.getState().selectCodeSession(id);
             open({ kind: "code" });
           }}
+          onNewSession={() => setNewSession(true)}
           onSettings={() => setSettings(true)}
         />
       )}
       {view.kind !== "home" && status.phase !== "online" && <ConnectionBar status={status} />}
       {settings && <SettingsSheet status={status} onClose={() => setSettings(false)} />}
+      {newSession && (
+        <NewSessionSheet
+          members={status.members}
+          gateway={status.gateway}
+          onClose={() => setNewSession(false)}
+          onCreated={(id) => {
+            setNewSession(false);
+            useStore.getState().selectCodeSession(id);
+            open({ kind: "code" });
+          }}
+        />
+      )}
       <ConfirmDialog />
       {toast && (
         <div className="pointer-events-none fixed inset-x-4 bottom-[calc(env(safe-area-inset-bottom)+16px)] z-50 flex justify-center">
@@ -400,6 +424,7 @@ function Home({
   live,
   onOpenChat,
   onOpenCode,
+  onNewSession,
   onSettings,
 }: {
   status: RemoteStatus;
@@ -408,6 +433,7 @@ function Home({
   live: Record<string, Live>;
   onOpenChat: (id: string | null) => void;
   onOpenCode: (id: string) => void;
+  onNewSession: () => void;
   onSettings: () => void;
 }) {
   const conversations = useStore((s) => s.conversations);
@@ -559,7 +585,7 @@ function Home({
             </>
           )
         ) : byHost.length === 0 && archivedSessions.length === 0 ? (
-          <Empty line="No Code sessions" sub="Start one on a computer; it shows up here to follow and drive." />
+          <Empty line="No Code sessions" sub="Start one here or on a computer; it runs on that computer, and you follow and drive it here." />
         ) : (
           byHost.map(([host, list]) => (
             <section key={host}>
@@ -579,15 +605,13 @@ function Home({
           </>
         )}
       </div>
-      {tab === "chats" && (
-        <button
-          className="fixed bottom-[calc(env(safe-area-inset-bottom)+20px)] right-5 flex h-14 items-center gap-2 rounded-2xl bg-accent px-5 text-[15px] font-semibold text-accent-fg shadow-float active:brightness-95"
-          onClick={() => onOpenChat(null)}
-        >
-          <PlusIcon size={18} />
-          New chat
-        </button>
-      )}
+      <button
+        className="fixed bottom-[calc(env(safe-area-inset-bottom)+20px)] right-5 flex h-14 items-center gap-2 rounded-2xl bg-accent px-5 text-[15px] font-semibold text-accent-fg shadow-float active:brightness-95"
+        onClick={() => (tab === "chats" ? onOpenChat(null) : onNewSession())}
+      >
+        <PlusIcon size={18} />
+        {tab === "chats" ? "New chat" : "New session"}
+      </button>
     </div>
   );
 }

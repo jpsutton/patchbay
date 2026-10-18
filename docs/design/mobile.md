@@ -16,7 +16,7 @@ The code: `crates/patchbay-mesh` (protocol and the phone's client), `src-tauri/s
 - Hosting Code sessions, running agents, or making LLM calls on the phone.
 - Push notifications through Apple or Google services. They would put a cloud broker back in. See section 7.
 - A custom UDP transport. See section 5.
-- Terminals, starting new Code sessions, and moving or taking over sessions, in v1.
+- Terminals, and moving or taking over sessions, in v1.
 
 ## 1. Remote members
 
@@ -113,6 +113,16 @@ If the gateway drops mid-reply, the reply keeps going there. The phone's new gat
 
 v1 covers new chats, replies, stop, regenerate, model and effort choice, attachments, editing (a new branch) and moving between branches. The phone's picker opens the system file and photo chooser, and shrinks photos to the 2048-pixel edge the model gets anyway before uploading.
 
+### Starting a Code session
+
+The phone picks a computer, an agent and a folder on that computer, and the session runs there as if it had been started at that computer's own screen. Three gateway requests carry it, each naming the computer in `host`. The gateway answers them itself when it is that computer, and otherwise passes them on over the mesh. Those mesh methods are member-only; phones reach them only through their gateway.
+
+- `remote.new_session_options` (mesh: `code.new_options`): the agents installed on that computer, its default agent, its home folder, and up to 12 folders that recent sessions hosted there used and that still exist.
+- `remote.list_dirs` (mesh: `fs.dirs`): the folders in one directory. It lists folders only, never files. It hides hidden folders, stays inside the home folder (after resolving symlinks), and returns at most 500.
+- `remote.create_code_session` (mesh: `code.create`): creates the session on that computer, with the same checks as the desktop's folder dialog. The row syncs to every member, and the phone then opens it, which starts the agent there.
+
+An offline computer is refused with its name.
+
 ## 5. Transport
 
 The phone uses the existing WebSocket transport, unchanged.
@@ -159,4 +169,3 @@ Human time: creating the APK signing key and the repository key, backing both up
 
 - Whether the phone keeps a small encrypted on-disk cache of recently viewed transcripts, so the app shows something before the first round trip.
 - Whether a remote member should be able to approve new members. The default is no: only full members approve.
-- Starting a Code session from the phone: it needs a folder picker on a chosen computer.

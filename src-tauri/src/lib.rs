@@ -479,14 +479,25 @@ fn create_code_session(
     model_ref: Option<String>,
     agent: Option<String>,
 ) -> CmdResult<CodeSession> {
-    if !std::path::Path::new(&cwd).is_dir() {
-        return Err(CmdError(format!("{cwd} is not a directory")));
+    Ok(create_code_session_local(&state, &cwd, model_ref.as_deref(), agent)?)
+}
+
+/// A new Code session hosted here, in `cwd` on this computer.
+fn create_code_session_local(
+    state: &AppState,
+    cwd: &str,
+    model_ref: Option<&str>,
+    agent: Option<String>,
+) -> anyhow::Result<CodeSession> {
+    if !std::path::Path::new(cwd).is_dir() {
+        anyhow::bail!("{cwd} is not a directory");
     }
-    let agent = agent.unwrap_or_else(|| prefs::load(&state.db).default_agent);
+    let prefs = prefs::load(&state.db);
+    let agent = agent.unwrap_or_else(|| prefs.default_agent.clone());
     if code::agents::AgentKind::parse(&agent).is_none() {
-        return Err(CmdError(format!("unknown coding agent {agent}")));
+        anyhow::bail!("unknown coding agent {agent}");
     }
-    Ok(state.db.create_code_session(&cwd, model_ref.as_deref(), &agent)?)
+    state.db.create_code_session(cwd, model_ref, &agent, &prefs.permission_mode)
 }
 
 /// The coding agents Patchbay can drive, and whether each is installed.
@@ -810,6 +821,19 @@ async fn code_set_mode(state: State<'_, AppState>, id: String, mode_id: String) 
     Ok(state.code.set_mode(&id, mode_id).await?)
 }
 
+/// Patchbay's Ask / Auto / Always-approve policy for this session's ACP permission prompts.
+#[tauri::command]
+async fn code_set_permission_mode(state: State<'_, AppState>, id: String, mode: String) -> CmdResult<()> {
+    if let Some(host) = remote_host(&state, &id)? {
+        state
+            .mesh
+            .rpc(&host, "code.set_permission_mode", serde_json::json!({ "id": id, "mode": mode }))
+            .await?;
+        return Ok(());
+    }
+    Ok(state.db.set_code_session_permission_mode(&id, &mode)?)
+}
+
 #[tauri::command]
 async fn code_rewind(
     state: State<'_, AppState>,
@@ -1099,6 +1123,10 @@ impl mesh::RpcHandler for MeshRpc {
                 ensure_local_host(state, &id()?)?;
                 state.code.set_mode(&id()?, param(&p, "modeId")?.to_owned()).await.map(|_| Value::Null)
             }
+            "code.set_permission_mode" => {
+                ensure_local_host(state, &id()?)?;
+                state.db.set_code_session_permission_mode(&id()?, param(&p, "mode")?).map(|_| Value::Null)
+            }
             "code.rewind" => {
                 ensure_local_host(state, &id()?)?;
                 let ordinal = p["ordinal"].as_u64().unwrap_or(0) as usize;
@@ -1175,6 +1203,10 @@ impl mesh::RpcHandler for MeshRpc {
                 let note = import_local(state, &id()?, param(&p, "cwd")?).await?;
                 Ok(json!(note))
             }
+            // Starting a session here for a phone, through its gateway.
+            "code.new_options" => gateway::new_session_options_local(state).await,
+            "code.create" => gateway::create_local(state, &p).map(|s| json!(s)),
+            "fs.dirs" => gateway::list_dirs_local(p["path"].as_str()),
             m if m.starts_with("remote.") => gateway::call(state, &from, m, &p).await,
             other => anyhow::bail!("unknown request {other}"),
         }
@@ -1614,6 +1646,7 @@ pub fn run() {
             code_cancel,
             code_set_model,
             code_set_mode,
+            code_set_permission_mode,
             code_set_config_option,
             list_agents,
             code_permission_respond,

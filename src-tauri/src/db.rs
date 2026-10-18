@@ -203,6 +203,10 @@ CREATE TABLE mesh_secrets (
 -- A member's role: NULL for a full member, 'remote' for a phone that only drives others' work.
 ALTER TABLE mesh_members ADD COLUMN role TEXT;
 "#, r#"
+-- Patchbay-owned approval policy for ACP permission prompts (ask / auto / always-approve).
+-- Seeded from prefs on create; agents that don't expose this over ACP still honor it here.
+ALTER TABLE code_sessions ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'default';
+"#, r#"
 -- When a chat or Code session was archived: out of the lists, kept, and restorable.
 ALTER TABLE conversations ADD COLUMN archived_at INTEGER;
 ALTER TABLE code_sessions ADD COLUMN archived_at INTEGER;
@@ -474,12 +478,17 @@ pub struct CodeSession {
     pub host_node: Option<String>,
     /// Bumped on every handover between nodes.
     pub epoch: i64,
+    /// Ask / auto / always-approve: Patchbay answers ACP permission prompts for this session.
+    pub permission_mode: String,
     /// When it was archived (unix ms): its agent stopped, out of the lists until restored.
     pub archived_at: Option<i64>,
 }
 
 /// Values `code_sessions.activity` may hold.
 pub const CODE_ACTIVITIES: &[&str] = &["chat", "edit", "commit", "branch", "pr"];
+
+/// Values `code_sessions.permission_mode` may hold.
+pub const PERMISSION_MODES: &[&str] = &["default", "auto", "always-approve"];
 
 impl Db {
     pub fn open(path: &Path) -> Result<Self> {
@@ -936,7 +945,7 @@ impl Db {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT id, cwd, acp_session_id, title, model_ref, created_at, updated_at, pinned, activity,
-                    agent, agent_model, host_node, epoch, archived_at
+                    agent, agent_model, host_node, epoch, permission_mode, archived_at
              FROM code_sessions ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([], map_code_session)?;
@@ -948,7 +957,7 @@ impl Db {
             .conn()
             .query_row(
                 "SELECT id, cwd, acp_session_id, title, model_ref, created_at, updated_at, pinned, activity,
-                        agent, agent_model, host_node, epoch, archived_at
+                        agent, agent_model, host_node, epoch, permission_mode, archived_at
                  FROM code_sessions WHERE id = ?1",
                 [id],
                 map_code_session,
@@ -961,7 +970,13 @@ impl Db {
         cwd: &str,
         model_ref: Option<&str>,
         agent: &str,
+        permission_mode: &str,
     ) -> Result<CodeSession> {
+        let mode = if PERMISSION_MODES.contains(&permission_mode) {
+            permission_mode
+        } else {
+            "default"
+        };
         let now = now_ms();
         // The sidebar groups sessions under their folder; the UI retitles from the first prompt.
         let title = "New session".to_owned();
@@ -979,15 +994,28 @@ impl Db {
             agent_model: None,
             host_node: Some(self.node_id()),
             epoch: 0,
+            permission_mode: mode.to_owned(),
             archived_at: None,
         };
         self.conn().execute(
             "INSERT INTO code_sessions (id, cwd, acp_session_id, title, model_ref, created_at, updated_at,
-                                        agent, host_node, epoch)
-             VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?5, ?6, ?7, 0)",
-            params![s.id, s.cwd, s.title, s.model_ref, now, s.agent, s.host_node],
+                                        agent, host_node, epoch, permission_mode)
+             VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?5, ?6, ?7, 0, ?8)",
+            params![s.id, s.cwd, s.title, s.model_ref, now, s.agent, s.host_node, s.permission_mode],
         )?;
         Ok(s)
+    }
+
+    pub fn set_code_session_permission_mode(&self, id: &str, mode: &str) -> Result<()> {
+        if !PERMISSION_MODES.contains(&mode) {
+            anyhow::bail!("unknown permission mode {mode:?}");
+        }
+        // Like activity: a setting change shouldn't move the session to the top of the list.
+        self.conn().execute(
+            "UPDATE code_sessions SET permission_mode = ?2 WHERE id = ?1",
+            params![id, mode],
+        )?;
+        Ok(())
     }
 
     pub fn update_code_session(
@@ -1367,7 +1395,8 @@ fn map_code_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<CodeSession> {
         agent_model: r.get(10)?,
         host_node: r.get(11)?,
         epoch: r.get(12)?,
-        archived_at: r.get(13)?,
+        permission_mode: r.get(13)?,
+        archived_at: r.get(14)?,
     })
 }
 
@@ -1385,7 +1414,7 @@ mod tests {
     #[test]
     fn code_session_activity_is_stored_without_bumping_updated_at() {
         let (db, _) = temp_db();
-        let s = db.create_code_session("/tmp", None, "grok").unwrap();
+        let s = db.create_code_session("/tmp", None, "grok", "default").unwrap();
         assert_eq!(db.get_code_session(&s.id).unwrap().unwrap().activity, None);
         db.set_code_session_activity(&s.id, "branch").unwrap();
         let got = db.get_code_session(&s.id).unwrap().unwrap();
@@ -1395,10 +1424,22 @@ mod tests {
     }
 
     #[test]
+    fn code_session_permission_mode_is_stored() {
+        let (db, _) = temp_db();
+        let s = db.create_code_session("/tmp", None, "grok", "auto").unwrap();
+        assert_eq!(s.permission_mode, "auto");
+        db.set_code_session_permission_mode(&s.id, "always-approve").unwrap();
+        let got = db.get_code_session(&s.id).unwrap().unwrap();
+        assert_eq!(got.permission_mode, "always-approve");
+        assert_eq!(got.updated_at, s.updated_at);
+        assert!(db.set_code_session_permission_mode(&s.id, "yolo").is_err());
+    }
+
+    #[test]
     fn archiving_keeps_the_row_and_its_place() {
         let (db, _) = temp_db();
         let c = db.create_conversation(None).unwrap();
-        let s = db.create_code_session("/tmp", None, "grok").unwrap();
+        let s = db.create_code_session("/tmp", None, "grok", "default").unwrap();
         db.set_conversation_archived(&c.id, true).unwrap();
         db.set_code_session_archived(&s.id, true).unwrap();
         let got_c = db.get_conversation(&c.id).unwrap().unwrap();
