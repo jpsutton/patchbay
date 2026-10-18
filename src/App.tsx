@@ -395,7 +395,7 @@ function ModeToggle({ vertical }: { vertical?: boolean }) {
             }`}
             onClick={() => setMode(m)}
           >
-            <Icon size={18} />
+            <Icon />
             {dot && (
               <span className="signal-pulse absolute right-1.5 top-1 h-[7px] w-[7px] rounded-full bg-accent ring-2 ring-bg" />
             )}

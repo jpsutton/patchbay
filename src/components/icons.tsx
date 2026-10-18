@@ -3,21 +3,26 @@ import type { ReactNode, SVGProps } from "react";
 /**
  * Line icons drawn on Lucide's 24-unit grid (ISC license).
  *
- * The viewBox crops Lucide's 2-unit margin, so at the standard 20px size one unit is exactly one
- * screen pixel and 2-unit strokes land on whole pixels: crisp on 1x displays, where Lucide's usual
- * 16px rendering smears every line across two pixel rows. Strokes may poke past the crop by a
- * pixel, hence `overflow: visible`.
+ * The viewBox crops Lucide's 2-unit margin, so at 20px one unit is exactly one screen pixel and
+ * 2-unit strokes land on whole pixels: crisp on 1x displays, where Lucide's usual 16px rendering
+ * smears every line across two pixel rows. Strokes may poke past the crop by a pixel, hence
+ * `overflow: visible`.
+ *
+ * Toolbar icons use the standard 18px size, which would scale those lines off the pixel grid.
+ * They pass a second drawing, redrawn by hand on an 18-unit grid with 2-unit strokes on whole
+ * coordinates, and render it 1:1 at 18px. Any other size scales the 24-grid drawing.
  */
 type IconProps = SVGProps<SVGSVGElement> & { size?: number | string };
 
-function icon(paths: ReactNode) {
-  return function Icon({ size = 20, strokeWidth = 2, ...rest }: IconProps) {
+function icon(paths: ReactNode, grid18?: ReactNode) {
+  return function Icon({ size = 18, strokeWidth = 2, ...rest }: IconProps) {
+    const snapped = grid18 !== undefined && Number(size) === 18;
     return (
       <svg
         xmlns="http://www.w3.org/2000/svg"
         width={size}
         height={size}
-        viewBox="2 2 20 20"
+        viewBox={snapped ? "0 0 18 18" : "2 2 20 20"}
         overflow="visible"
         fill="none"
         stroke="currentColor"
@@ -27,7 +32,7 @@ function icon(paths: ReactNode) {
         aria-hidden="true"
         {...rest}
       >
-        {paths}
+        {snapped ? grid18 : paths}
       </svg>
     );
   };
@@ -39,12 +44,21 @@ export const MenuIcon = icon(
     <path d="M4 12h12" />
     <path d="M4 18h8" />
   </>,
+  <>
+    <path d="M2 4h14" />
+    <path d="M2 9h10" />
+    <path d="M2 14h7" />
+  </>,
 );
 
 export const PanelLeftIcon = icon(
   <>
     <rect x="3" y="3" width="18" height="18" rx="2" />
     <path d="M9 3v18" />
+  </>,
+  <>
+    <rect x="1" y="1" width="16" height="16" rx="2" />
+    <path d="M6 1v16" />
   </>,
 );
 
@@ -53,12 +67,20 @@ export const ArrowLeftIcon = icon(
     <path d="m12 19-7-7 7-7" />
     <path d="M19 12H5" />
   </>,
+  <>
+    <path d="M9 15 3 9l6-6" />
+    <path d="M15 9H3" />
+  </>,
 );
 
 export const ArrowRightIcon = icon(
   <>
     <path d="M5 12h14" />
     <path d="m12 5 7 7-7 7" />
+  </>,
+  <>
+    <path d="M3 9h12" />
+    <path d="m9 3 6 6-6 6" />
   </>,
 );
 
@@ -71,6 +93,10 @@ export const ChatsIcon = icon(
     <path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z" />
     <path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1" />
   </>,
+  <>
+    <path d="M11 6a2 2 0 0 1-2 2H5l-4 4V3a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2z" />
+    <path d="M15 6a2 2 0 0 1 2 2v9l-4-4H9a2 2 0 0 1-2-2" />
+  </>,
 );
 
 export const CodeIcon = icon(
@@ -78,6 +104,11 @@ export const CodeIcon = icon(
     <path d="m18 16 4-4-4-4" />
     <path d="m6 8-4 4 4 4" />
     <path d="m14.5 4-5 16" />
+  </>,
+  <>
+    <path d="m13 5 4 4-4 4" />
+    <path d="M5 5 1 9l4 4" />
+    <path d="M11 2 7 16" />
   </>,
 );
 
@@ -94,6 +125,11 @@ export const PlusCircleIcon = icon(
     <path d="M8 12h8" />
     <path d="M12 8v8" />
   </>,
+  <>
+    <circle cx="9" cy="9" r="8" />
+    <path d="M6 9h6" />
+    <path d="M9 6v6" />
+  </>,
 );
 
 export const FolderPlusIcon = icon(
@@ -109,12 +145,20 @@ export const SearchIcon = icon(
     <circle cx="11" cy="11" r="8" />
     <path d="m21 21-4.3-4.3" />
   </>,
+  <>
+    <circle cx="8" cy="8" r="7" />
+    <path d="m17 17-4.05-4.05" />
+  </>,
 );
 
 export const SettingsIcon = icon(
   <>
     <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
     <circle cx="12" cy="12" r="3" />
+  </>,
+  <>
+    <path d="M9.18 1h-.35a1.6 1.6 0 0 0-1.6 1.6v.14a1.6 1.6 0 0 1-.8 1.38l-.34 .2a1.6 1.6 0 0 1-1.6 0l-.12-.06a1.6 1.6 0 0 0-2.18 .58l-.18 .3a1.6 1.6 0 0 0 .58 2.18l.12 .08a1.6 1.6 0 0 1 .8 1.38v.41a1.6 1.6 0 0 1-.8 1.39l-.12 .07a1.6 1.6 0 0 0-.58 2.18l.18 .3a1.6 1.6 0 0 0 2.18 .58l.12-.06a1.6 1.6 0 0 1 1.6 0l.34 .2a1.6 1.6 0 0 1 .8 1.38V15.4a1.6 1.6 0 0 0 1.6 1.6h.35a1.6 1.6 0 0 0 1.6-1.6v-.14a1.6 1.6 0 0 1 .8-1.38l.34-.2a1.6 1.6 0 0 1 1.6 0l.12 .06a1.6 1.6 0 0 0 2.18-.58l.18-.31a1.6 1.6 0 0 0-.58-2.18l-.12-.06a1.6 1.6 0 0 1-.8-1.39v-.4a1.6 1.6 0 0 1 .8-1.39l.12-.07a1.6 1.6 0 0 0 .58-2.18l-.18-.3a1.6 1.6 0 0 0-2.18-.58l-.12 .06a1.6 1.6 0 0 1-1.6 0l-.34-.2a1.6 1.6 0 0 1-.8-1.38V2.6a1.6 1.6 0 0 0-1.6-1.6z" />
+    <circle cx="9" cy="9" r="2.4" />
   </>,
 );
 
@@ -129,6 +173,17 @@ export const KeyboardIcon = icon(
     <path d="M7 16h10" />
     <path d="M8 12h.01" />
     <rect width="20" height="16" x="2" y="4" rx="2" />
+  </>,
+  <>
+    <path d="M4 6h.01" />
+    <path d="M7 6h.01" />
+    <path d="M11 6h.01" />
+    <path d="M14 6h.01" />
+    <path d="M6 9h.01" />
+    <path d="M9 9h.01" />
+    <path d="M12 9h.01" />
+    <path d="M5 12h8" />
+    <rect width="16" height="14" x="1" y="2" rx="2" />
   </>,
 );
 
@@ -179,6 +234,13 @@ export const FileDiffIcon = icon(
     <path d="M12 7v6" />
     <path d="M9 17h6" />
   </>,
+  <>
+    <path d="M12 1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V5Z" />
+    <path d="M11 1v2a2 2 0 0 0 2 2h3" />
+    <path d="M7 7h4" />
+    <path d="M9 5v4" />
+    <path d="M7 12h4" />
+  </>,
 );
 
 export const MessageCodeIcon = icon(
@@ -190,14 +252,18 @@ export const MessageCodeIcon = icon(
 );
 
 // Window controls: kept small inside the 20px box, on whole-pixel coordinates.
-export const MinimizeIcon = icon(<path d="M7 12h10" />);
+export const MinimizeIcon = icon(<path d="M7 12h10" />, <path d="M5 9h8" />);
 
-export const MaximizeIcon = icon(<rect x="7" y="7" width="10" height="10" rx="1" />);
+export const MaximizeIcon = icon(<rect x="7" y="7" width="10" height="10" rx="1" />, <rect x="5" y="5" width="8" height="8" rx="1" />);
 
 export const RestoreIcon = icon(
   <>
     <rect x="7" y="9" width="8" height="8" rx="1" />
     <path d="M9 9V8a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-1" />
+  </>,
+  <>
+    <rect x="5" y="7" width="6" height="6" rx="1" />
+    <path d="M7 7V6a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-1" />
   </>,
 );
 
@@ -205,6 +271,10 @@ export const CloseIcon = icon(
   <>
     <path d="M17 7 7 17" />
     <path d="m7 7 10 10" />
+  </>,
+  <>
+    <path d="M13 5 5 13" />
+    <path d="m5 5 8 8" />
   </>,
 );
 
@@ -214,6 +284,11 @@ export const DownloadIcon = icon(
     <path d="m7 10 5 5 5-5" />
     <path d="M12 15V3" />
   </>,
+  <>
+    <path d="M17 12v3a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2v-3" />
+    <path d="m5 8 4 4 4-4" />
+    <path d="M9 12V1" />
+  </>,
 );
 
 export const TerminalIcon = icon(
@@ -222,12 +297,21 @@ export const TerminalIcon = icon(
     <path d="M11 13h4" />
     <rect x="3" y="3" width="18" height="18" rx="2" />
   </>,
+  <>
+    <path d="m5 5 3 3-3 3" />
+    <path d="M10 11h3" />
+    <rect x="1" y="1" width="16" height="16" rx="2" />
+  </>,
 );
 
 export const RestartIcon = icon(
   <>
     <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
     <path d="M21 3v5h-5" />
+  </>,
+  <>
+    <path d="M17 9a8 8 0 1 1-8-8c2.24 0 4.38.89 5.99 2.44L17 5" />
+    <path d="M17 1v4h-4" />
   </>,
 );
 
@@ -237,6 +321,12 @@ export const ScrollTextIcon = icon(
     <path d="M15 8h-5" />
     <path d="M19 17V5a2 2 0 0 0-2-2H4" />
     <path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3" />
+  </>,
+  <>
+    <path d="M12 9H8" />
+    <path d="M12 5H8" />
+    <path d="M15 13V3a2 2 0 0 0-2-2H3" />
+    <path d="M7 17h8a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H10a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V3a2 2 0 1 0-4 0v1a1 1 0 0 0 1 1h3" />
   </>,
 );
 
@@ -268,6 +358,15 @@ export const PencilIcon = icon(
   <>
     <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" />
     <path d="m15 5 4 4" />
+  </>,
+);
+
+export const SlidersIcon = icon(
+  <>
+    <path d="M14 17H5" />
+    <path d="M19 7h-9" />
+    <circle cx="17" cy="17" r="3" />
+    <circle cx="7" cy="7" r="3" />
   </>,
 );
 
@@ -340,5 +439,12 @@ export const MonitorUpIcon = icon(
     <rect width="20" height="14" x="2" y="3" rx="2" />
     <path d="M12 17v4" />
     <path d="M8 21h8" />
+  </>,
+  <>
+    <path d="m6 7 3-3 3 3" />
+    <path d="M9 10V4" />
+    <rect width="16" height="12" x="1" y="1" rx="2" />
+    <path d="M9 13v4" />
+    <path d="M5 17h8" />
   </>,
 );
