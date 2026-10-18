@@ -475,20 +475,25 @@ fn create_code_session(
     model_ref: Option<String>,
     agent: Option<String>,
 ) -> CmdResult<CodeSession> {
-    if !std::path::Path::new(&cwd).is_dir() {
-        return Err(CmdError(format!("{cwd} is not a directory")));
+    Ok(create_code_session_local(&state, &cwd, model_ref.as_deref(), agent)?)
+}
+
+/// A new Code session hosted here, in `cwd` on this computer.
+fn create_code_session_local(
+    state: &AppState,
+    cwd: &str,
+    model_ref: Option<&str>,
+    agent: Option<String>,
+) -> anyhow::Result<CodeSession> {
+    if !std::path::Path::new(cwd).is_dir() {
+        anyhow::bail!("{cwd} is not a directory");
     }
     let prefs = prefs::load(&state.db);
     let agent = agent.unwrap_or_else(|| prefs.default_agent.clone());
     if code::agents::AgentKind::parse(&agent).is_none() {
-        return Err(CmdError(format!("unknown coding agent {agent}")));
+        anyhow::bail!("unknown coding agent {agent}");
     }
-    Ok(state.db.create_code_session(
-        &cwd,
-        model_ref.as_deref(),
-        &agent,
-        &prefs.permission_mode,
-    )?)
+    state.db.create_code_session(cwd, model_ref, &agent, &prefs.permission_mode)
 }
 
 /// The coding agents Patchbay can drive, and whether each is installed.
@@ -1175,6 +1180,10 @@ impl mesh::RpcHandler for MeshRpc {
                 let note = import_local(state, &id()?, param(&p, "cwd")?).await?;
                 Ok(json!(note))
             }
+            // Starting a session here for a phone, through its gateway.
+            "code.new_options" => gateway::new_session_options_local(state).await,
+            "code.create" => gateway::create_local(state, &p).map(|s| json!(s)),
+            "fs.dirs" => gateway::list_dirs_local(p["path"].as_str()),
             m if m.starts_with("remote.") => gateway::call(state, &from, m, &p).await,
             other => anyhow::bail!("unknown request {other}"),
         }
