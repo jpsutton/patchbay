@@ -24,6 +24,7 @@ const CODE_METHODS: &[&str] = &[
     "code.set_model",
     "code.set_config_option",
     "code.set_mode",
+    "code.set_permission_mode",
     "code.rewind",
     "code.permission",
     "code.files",

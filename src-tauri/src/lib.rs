@@ -478,11 +478,17 @@ fn create_code_session(
     if !std::path::Path::new(&cwd).is_dir() {
         return Err(CmdError(format!("{cwd} is not a directory")));
     }
-    let agent = agent.unwrap_or_else(|| prefs::load(&state.db).default_agent);
+    let prefs = prefs::load(&state.db);
+    let agent = agent.unwrap_or_else(|| prefs.default_agent.clone());
     if code::agents::AgentKind::parse(&agent).is_none() {
         return Err(CmdError(format!("unknown coding agent {agent}")));
     }
-    Ok(state.db.create_code_session(&cwd, model_ref.as_deref(), &agent)?)
+    Ok(state.db.create_code_session(
+        &cwd,
+        model_ref.as_deref(),
+        &agent,
+        &prefs.permission_mode,
+    )?)
 }
 
 /// The coding agents Patchbay can drive, and whether each is installed.
@@ -787,6 +793,19 @@ async fn code_set_mode(state: State<'_, AppState>, id: String, mode_id: String) 
     Ok(state.code.set_mode(&id, mode_id).await?)
 }
 
+/// Patchbay's Ask / Auto / Always-approve policy for this session's ACP permission prompts.
+#[tauri::command]
+async fn code_set_permission_mode(state: State<'_, AppState>, id: String, mode: String) -> CmdResult<()> {
+    if let Some(host) = remote_host(&state, &id)? {
+        state
+            .mesh
+            .rpc(&host, "code.set_permission_mode", serde_json::json!({ "id": id, "mode": mode }))
+            .await?;
+        return Ok(());
+    }
+    Ok(state.db.set_code_session_permission_mode(&id, &mode)?)
+}
+
 #[tauri::command]
 async fn code_rewind(
     state: State<'_, AppState>,
@@ -1075,6 +1094,10 @@ impl mesh::RpcHandler for MeshRpc {
             "code.set_mode" => {
                 ensure_local_host(state, &id()?)?;
                 state.code.set_mode(&id()?, param(&p, "modeId")?.to_owned()).await.map(|_| Value::Null)
+            }
+            "code.set_permission_mode" => {
+                ensure_local_host(state, &id()?)?;
+                state.db.set_code_session_permission_mode(&id()?, param(&p, "mode")?).map(|_| Value::Null)
             }
             "code.rewind" => {
                 ensure_local_host(state, &id()?)?;
@@ -1591,6 +1614,7 @@ pub fn run() {
             code_cancel,
             code_set_model,
             code_set_mode,
+            code_set_permission_mode,
             code_set_config_option,
             list_agents,
             code_permission_respond,

@@ -113,6 +113,46 @@ pub struct Extensions {
     pub rewind: bool,
 }
 
+/// What makes an agent ask Patchbay before acting, so the session's approval mode decides
+/// (code/permissions.rs, docs/design/approval-modes.md).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApprovalSetup {
+    /// Agent mode to select once the session is up, and again whenever the agent leaves it for
+    /// one in `hide_modes`.
+    pub select_mode: Option<String>,
+    /// Agent modes that are really approval policies of the agent's own; hidden from the UI.
+    pub hide_modes: &'static [&'static str],
+    /// What this agent does without asking, whatever the mode. Shown in the session header.
+    pub gaps: &'static [&'static str],
+}
+
+impl ApprovalSetup {
+    fn for_agent(kind: AgentKind) -> Self {
+        match kind {
+            // Grok's own mode is pinned to "default" in its config.toml (grok_config.rs).
+            AgentKind::Grok | AgentKind::Opencode | AgentKind::Kilo => Self::default(),
+            AgentKind::ClaudeCode => Self {
+                select_mode: Some("default".into()),
+                hide_modes: &["acceptEdits", "auto", "bypassPermissions", "dontAsk"],
+                gaps: &["Rules in your own Claude Code settings (permissions.allow) run without asking."],
+            },
+            // Cursor has no per-session approval control over ACP.
+            AgentKind::Cursor => Self {
+                select_mode: None,
+                hide_modes: &[],
+                gaps: &[
+                    "Cursor edits files in this project without asking, in every mode.",
+                    "Shell commands on Cursor's own allowlist (~/.cursor/cli-config.json) run without asking.",
+                ],
+            },
+        }
+    }
+}
+
+/// Config that makes OpenCode and Kilo ask over ACP for every tool. Both read inline config
+/// from an env var; deny rules in the user's own config still apply.
+const ASK_EVERYTHING: &str = r#"{"permission":{"*":"ask"}}"#;
+
 /// Where an agent's executable was found.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -146,6 +186,7 @@ pub struct Launch {
     pub initial_model: Option<String>,
     /// How to sign in, for an `auth_required` error.
     pub login_hint: &'static str,
+    pub approvals: ApprovalSetup,
 }
 
 /// User overrides from Settings: agent id -> executable path.
@@ -356,8 +397,13 @@ pub fn prepare(db: &Db, data_dir: &Path, session: &CodeSession) -> Result<Launch
     if let Some(path) = child_path(&resolved.program) {
         env.push(("PATH".to_owned(), path));
     }
-    if kind == AgentKind::Opencode {
-        env.push(("OPENCODE_DISABLE_AUTOUPDATE".to_owned(), "1".to_owned()));
+    match kind {
+        AgentKind::Opencode => {
+            env.push(("OPENCODE_DISABLE_AUTOUPDATE".to_owned(), "1".to_owned()));
+            env.push(("OPENCODE_CONFIG_CONTENT".to_owned(), ASK_EVERYTHING.to_owned()));
+        }
+        AgentKind::Kilo => env.push(("KILO_CONFIG_CONTENT".to_owned(), ASK_EVERYTHING.to_owned())),
+        _ => {}
     }
     Ok(Launch {
         program: resolved.program,
@@ -368,6 +414,7 @@ pub fn prepare(db: &Db, data_dir: &Path, session: &CodeSession) -> Result<Launch
         session_meta,
         initial_model: session.agent_model.clone(),
         login_hint: kind.login_hint(),
+        approvals: ApprovalSetup::for_agent(kind),
     })
 }
 
@@ -415,6 +462,7 @@ fn prepare_grok(
         session_meta,
         initial_model: None,
         login_hint: "",
+        approvals: ApprovalSetup::for_agent(AgentKind::Grok),
     })
 }
 

@@ -589,6 +589,12 @@ async fn code_set_mode(r: Shared<'_>, id: String, mode_id: String) -> CmdResult<
 }
 
 #[tauri::command]
+async fn code_set_permission_mode(r: Shared<'_>, id: String, mode: String) -> CmdResult<()> {
+    r.code("code.set_permission_mode", json!({ "id": id, "mode": mode })).await?;
+    Ok(())
+}
+
+#[tauri::command]
 async fn code_set_config_option(r: Shared<'_>, id: String, config_id: String, value: String) -> CmdResult<()> {
     r.code("code.set_config_option", json!({ "id": id, "configId": config_id, "value": value })).await?;
     Ok(())
@@ -744,6 +750,7 @@ pub fn run() {
             code_cancel,
             code_set_model,
             code_set_mode,
+            code_set_permission_mode,
             code_set_config_option,
             code_rewind,
             code_permission_respond,
