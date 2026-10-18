@@ -540,6 +540,18 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const hostOffline = !!host && !memberOnline(mesh, host);
   const ready = status === "ready";
   const busy = !!s?.busy;
+  // What the session is waiting on, said plainly. A phone reaches it through a gateway, so it
+  // can be reconnecting, or catching up on a session whose agent already runs.
+  const reconnecting = remote && !!mesh?.phase && mesh.phase !== "online";
+  const waiting = reconnecting
+    ? "Reconnecting…"
+    : remote && status === "idle"
+      ? "Loading session…"
+      : status === "starting"
+        ? s?.history
+          ? "Resuming session…"
+          : "Starting agent…"
+        : null;
   const acpModels = s?.models;
   // Only Grok Build runs on Patchbay's models (`pb-<id>`); other agents bring their own.
   const patchbayModels = session.agent === "grok";
@@ -832,10 +844,10 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             >
               <div className="mx-auto flex max-w-3xl flex-col gap-4 px-6 py-6">
                 <OfflineHostBanner session={session} onTakeOver={() => setMoving("takeOver")} />
-                {status === "starting" && (s?.entries.length ?? 0) === 0 && (
+                {waiting && (s?.entries.length ?? 0) === 0 && (
                   <div className="flex items-center justify-center gap-2 text-xs text-muted">
                     <span className="signal-pulse h-1.5 w-1.5 rounded-full bg-accent" />
-                    {s?.history ? "Resuming session…" : "Starting agent…"}
+                    {waiting}
                   </div>
                 )}
                 {s?.history && (
@@ -923,11 +935,11 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
               onStop={() => api.codeCancel(session.id)}
               onSend={send}
               placeholder={
-                ready
-                  ? `Ask the agent…${s?.commands?.length ? "  / for commands, @ for files" : "  @ for files"}`
-                  : status === "starting"
-                    ? "Starting agent…"
-                    : "Agent not running"
+                reconnecting
+                  ? "Reconnecting…"
+                  : ready
+                    ? `Ask the agent…${s?.commands?.length ? "  / for commands, @ for files" : "  @ for files"}`
+                    : (waiting ?? "Agent not running")
               }
               warnNoVision={model ? !model.vision : false}
               footer={
