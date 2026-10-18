@@ -801,6 +801,40 @@ async fn code_set_config_option(
     Ok(state.code.set_config_option(&id, config_id, value).await?)
 }
 
+/// Switch a session that hasn't started yet to another agent. The agent here stops; whoever asked
+/// starts the new one, as when opening the session.
+fn code_set_agent_local(state: &AppState, id: &str, agent: &str, model_ref: Option<&str>) -> anyhow::Result<()> {
+    ensure_local_host(state, id)?;
+    if code::agents::AgentKind::parse(agent).is_none() {
+        anyhow::bail!("unknown coding agent {agent}");
+    }
+    let session = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("code session not found"))?;
+    // The transcript is the UI's (JSON entries); any user turn means the old agent has the history.
+    let started = state.db.code_transcript(id)?.is_some_and(|t| t.contains(r#""kind":"user""#)) || state.code.is_busy(id);
+    if started {
+        anyhow::bail!("this session already has messages; start a new session to use another agent");
+    }
+    state.code.stop(id);
+    state.db.set_code_session_agent(id, agent)?;
+    // Grok runs on Patchbay's models: a session made for another agent may have none yet.
+    if session.model_ref.is_none()
+        && let Some(m) = model_ref
+    {
+        state.db.update_code_session(id, None, None, Some(m))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn code_set_agent(state: State<'_, AppState>, id: String, agent: String, model_ref: Option<String>) -> CmdResult<()> {
+    if let Some(host) = remote_host(&state, &id)? {
+        let p = serde_json::json!({ "id": id, "agent": agent, "modelRef": model_ref });
+        state.mesh.rpc(&host, "code.set_agent", p).await?;
+        return Ok(());
+    }
+    Ok(code_set_agent_local(&state, &id, &agent, model_ref.as_deref())?)
+}
+
 #[tauri::command]
 async fn code_set_mode(state: State<'_, AppState>, id: String, mode_id: String) -> CmdResult<()> {
     if let Some(host) = remote_host(&state, &id)? {
@@ -1094,6 +1128,9 @@ impl mesh::RpcHandler for MeshRpc {
                 ensure_local_host(state, &id()?)?;
                 let (cid, value) = (param(&p, "configId")?.to_owned(), param(&p, "value")?.to_owned());
                 state.code.set_config_option(&id()?, cid, value).await.map(|_| Value::Null)
+            }
+            "code.set_agent" => {
+                code_set_agent_local(state, &id()?, param(&p, "agent")?, p["modelRef"].as_str()).map(|_| Value::Null)
             }
             "code.set_mode" => {
                 ensure_local_host(state, &id()?)?;
@@ -1614,6 +1651,7 @@ pub fn run() {
             code_cancel,
             code_set_model,
             code_set_mode,
+            code_set_agent,
             code_set_config_option,
             list_agents,
             code_permission_respond,

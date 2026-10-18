@@ -11,6 +11,7 @@ import {
   type AgentId,
   type AgentInfo,
   type Attachment,
+  type CodeSession,
 } from "../lib/ipc";
 import { memberName, memberOnline, remoteHost, useStore, type CodeState, type Entry } from "../lib/store";
 import { HostBadge, MoveDialog, OfflineHostBanner } from "./HostControls";
@@ -69,6 +70,54 @@ export async function openFolderAsSession(agent?: AgentId) {
 /** Choices of a select config option, flattening groups. */
 function configChoices(o: AcpConfigOption) {
   return o.options.flatMap((c) => ("options" in c ? c.options : [c]));
+}
+
+/** Installed agents, asked once per window. */
+let agentList: Promise<AgentInfo[]> | null = null;
+export function installedAgents(): Promise<AgentInfo[]> {
+  agentList ??= api.listAgents().catch(() => {
+    agentList = null;
+    return [];
+  });
+  return agentList;
+}
+
+/**
+ * The agent of a session that has no messages yet, switchable in its composer. Once a message is
+ * sent the agent holds the conversation, so the choice goes away. The default isn't touched.
+ */
+function SessionAgentPicker({ session, disabled }: { session: CodeSession; disabled: boolean }) {
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  useEffect(() => {
+    installedAgents().then(setAgents);
+  }, []);
+  const usable = agents.filter((a) => a.available || a.id === session.agent);
+  if (usable.length < 2) return null;
+  return (
+    <ChipSelect
+      className="max-w-44"
+      value={session.agent}
+      disabled={disabled}
+      title="Agent for this session (until its first message)"
+      aria-label="Agent for this session"
+      onChange={async (e) => {
+        const st = useStore.getState();
+        try {
+          await api.codeSetAgent(session.id, e.target.value as AgentId, st.defaultModelRef);
+          await st.refreshCodeSessions();
+          await st.startAgent(session.id);
+        } catch (err) {
+          st.setToast(errorText(err));
+        }
+      }}
+    >
+      {usable.map((a) => (
+        <option key={a.id} value={a.id}>
+          {a.label}
+        </option>
+      ))}
+    </ChipSelect>
+  );
 }
 
 /** Picks the agent for new sessions on the empty Code screen; saves it as the default. */
@@ -807,6 +856,10 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
               warnNoVision={model ? !model.vision : false}
               footer={
                 <>
+                {!remoteHost(session, mesh) && !(s?.entries ?? []).some((x) => x.kind === "user") &&
+                  !(s?.history?.entries ?? []).some((x) => x.kind === "user") && (
+                    <SessionAgentPicker session={session} disabled={busy || status === "starting"} />
+                  )}
                 {acpModels && acpModels.availableModels.length > 0 ? (
                   <ChipSelect
                     lead={<ModelRing id={currentModelRef} />}

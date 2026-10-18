@@ -632,6 +632,8 @@ export const api = {
   codeCancel: (id: string) => invoke<void>("code_cancel", { id }),
   codeSetModel: (id: string, modelId: string) => invoke<void>("code_set_model", { id, modelId }),
   codeSetMode: (id: string, modeId: string) => invoke<void>("code_set_mode", { id, modeId }),
+  codeSetAgent: (id: string, agent: AgentId, modelRef: string | null) =>
+    invoke<void>("code_set_agent", { id, agent, modelRef }),
   codeSetConfigOption: (id: string, configId: string, value: string) =>
     invoke<void>("code_set_config_option", { id, configId, value }),
   codeRewind: (id: string, ordinal: number, preview: string, revertFiles: boolean) =>

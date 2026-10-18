@@ -144,6 +144,20 @@ async fn remote_session_commands_and_terminal() {
     let err = a.state.mesh.rpc(b.state.mesh.node_id(), "code.start", json!({ "id": s.id })).await.unwrap_err();
     assert!(err.to_string().contains("runs on"), "{err}");
 
+    // Before its first message, B can give the session another agent; the old agent's ids go.
+    a.state.db.set_code_session_agent_model(&s.id, "old-model").unwrap();
+    let p = json!({ "id": s.id, "agent": "claude-code", "modelRef": "m-x" });
+    b.state.mesh.rpc(&an, "code.set_agent", p).await.unwrap();
+    let got = a.state.db.get_code_session(&s.id).unwrap().unwrap();
+    assert_eq!((got.agent.as_str(), got.agent_model, got.acp_session_id), ("claude-code", None, None));
+    assert_eq!(got.model_ref.as_deref(), Some("m-x"));
+    let err = b.state.mesh.rpc(&an, "code.set_agent", json!({ "id": s.id, "agent": "nope" })).await.unwrap_err();
+    assert!(err.to_string().contains("unknown coding agent"), "{err}");
+    // After one, it can't: that agent holds the conversation.
+    a.state.db.set_code_transcript(&s.id, r#"{"v":1,"entries":[{"kind":"user","text":"hi"}],"toolCalls":{}}"#).unwrap();
+    let err = b.state.mesh.rpc(&an, "code.set_agent", json!({ "id": s.id, "agent": "grok" })).await.unwrap_err();
+    assert!(err.to_string().contains("already has messages"), "{err}");
+
     // A shell on A, driven from B.
     let p = json!({ "termId": "t1", "sessionId": s.id, "cols": 80, "rows": 24 });
     b.state.mesh.rpc(&an, "term.open", p).await.unwrap();
