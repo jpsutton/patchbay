@@ -99,6 +99,8 @@ export interface Conversation {
   pinned: boolean;
   createdAt: number;
   updatedAt: number;
+  /** When it was archived (unix ms): out of the lists until restored. */
+  archivedAt?: number | null;
 }
 
 export interface Attachment {
@@ -211,6 +213,8 @@ export interface CodeSession {
   epoch: number;
   /** Ask / auto / always-approve: Patchbay answers ACP permission prompts for this session. */
   permissionMode: "default" | "auto" | "always-approve";
+  /** When it was archived (unix ms): its agent stopped, out of the lists until restored. */
+  archivedAt?: number | null;
 }
 
 // ---- mesh ----
@@ -539,7 +543,7 @@ export const api = {
   createConversation: (modelRef: string | null) => invoke<Conversation>("create_conversation", { modelRef }),
   updateConversation: (
     id: string,
-    patch: { title?: string; modelRef?: string; systemPrompt?: string; pinned?: boolean },
+    patch: { title?: string; modelRef?: string; systemPrompt?: string; pinned?: boolean; archived?: boolean },
   ) =>
     invoke<void>("update_conversation", { id, ...patch }),
   deleteConversation: (id: string) => invoke<void>("delete_conversation", { id }),
@@ -598,7 +602,7 @@ export const api = {
   listAgents: () => invoke<AgentInfo[]>("list_agents"),
   updateCodeSession: (
     id: string,
-    patch: { title?: string; modelRef?: string; pinned?: boolean; activity?: Activity },
+    patch: { title?: string; modelRef?: string; pinned?: boolean; activity?: Activity; archived?: boolean },
   ) =>
     invoke<void>("update_code_session", { id, ...patch }),
   deleteCodeSession: (id: string) => invoke<void>("delete_code_session", { id }),

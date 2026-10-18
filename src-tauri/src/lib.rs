@@ -298,9 +298,13 @@ fn update_conversation(
     model_ref: Option<String>,
     system_prompt: Option<String>,
     pinned: Option<bool>,
+    archived: Option<bool>,
 ) -> CmdResult<()> {
     if let Some(p) = pinned {
         state.db.set_conversation_pinned(&id, p)?;
+    }
+    if let Some(a) = archived {
+        state.db.set_conversation_archived(&id, a)?;
     }
     Ok(state.db.update_conversation(
         &id,
@@ -504,16 +508,20 @@ async fn list_agents(state: State<'_, AppState>) -> CmdResult<Vec<code::agents::
 }
 
 #[tauri::command]
-fn update_code_session(
+async fn update_code_session(
     state: State<'_, AppState>,
     id: String,
     title: Option<String>,
     model_ref: Option<String>,
     pinned: Option<bool>,
     activity: Option<String>,
+    archived: Option<bool>,
 ) -> CmdResult<()> {
     if let Some(p) = pinned {
         state.db.set_code_session_pinned(&id, p)?;
+    }
+    if let Some(a) = archived {
+        archive_code_session(&state, &id, a).await?;
     }
     if let Some(a) = activity {
         state.db.set_code_session_activity(&id, &a)?;
@@ -532,6 +540,21 @@ fn delete_code_session(state: State<'_, AppState>, id: String) -> CmdResult<()> 
     // Must match the id `TerminalPane` opens with.
     state.terminals.close(&format!("term-{id}"));
     Ok(state.db.delete_code_session(&id)?)
+}
+
+/// Archive or restore a Code session. Archiving ends its agent first, wherever it runs; a host
+/// that's offline has nothing reachable to stop, and the archive still syncs to it.
+async fn archive_code_session(state: &AppState, id: &str, archived: bool) -> anyhow::Result<()> {
+    if archived {
+        match remote_host(state, id).map_err(|e| anyhow::anyhow!(e.0))? {
+            Some(host) if state.mesh.connected(&host) => {
+                state.mesh.rpc(&host, "code.stop", serde_json::json!({ "id": id })).await?;
+            }
+            Some(_) => {}
+            None => state.code.stop(id),
+        }
+    }
+    state.db.set_code_session_archived(id, archived)
 }
 
 /// The node hosting session `id`, when that isn't this one.

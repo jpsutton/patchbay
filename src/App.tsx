@@ -11,7 +11,8 @@ import { CodeSidebar } from "./code/CodeSidebar";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { CommandPalette } from "./components/CommandPalette";
-import { SectionLabel, SidebarItem } from "./components/SidebarItem";
+import { ArchivedToggle, SectionLabel, SidebarItem } from "./components/SidebarItem";
+import { chatActions } from "./lib/itemActions";
 import { fmtShort, groupByDate, matchesQuery } from "./lib/format";
 import { ModelRing } from "./lib/cable";
 import { emitViewAction, focusComposer, focusSidebarSearch, isMac, isMod, keyLabel, ViewActive } from "./lib/shortcuts";
@@ -222,7 +223,15 @@ function ConversationItem({ c }: { c: Conversation }) {
       active={active}
       busy={busy}
       pinned={c.pinned}
-      onSelect={() => selectConversation(c.id)}
+      onSelect={async () => {
+        // Opening an archived chat brings it back.
+        if (c.archivedAt != null) {
+          await api.updateConversation(c.id, { archived: false });
+          await refreshConversations();
+        }
+        selectConversation(c.id);
+      }}
+      menu={(rename) => chatActions(c, { rename, desktop: true })}
       onTogglePin={async () => {
         await api.updateConversation(c.id, { pinned: !c.pinned });
         refreshConversations();
@@ -250,8 +259,13 @@ function ConversationItem({ c }: { c: Conversation }) {
 function ChatList() {
   const conversations = useStore((s) => s.conversations);
   const query = useStore((s) => s.sidebarQuery);
+  const [showArchived, setShowArchived] = useState(false);
+  const archived = useMemo(
+    () => conversations.filter((c) => c.archivedAt != null && matchesQuery(query, c.title)),
+    [conversations, query],
+  );
   const sections = useMemo(() => {
-    const hits = conversations.filter((c) => matchesQuery(query, c.title));
+    const hits = conversations.filter((c) => c.archivedAt == null && matchesQuery(query, c.title));
     const pinned = hits.filter((c) => c.pinned);
     const rest = groupByDate(
       hits.filter((c) => !c.pinned),
@@ -261,7 +275,7 @@ function ChatList() {
   }, [conversations, query]);
 
   if (conversations.length === 0) return <div className="px-4 py-3 text-xs text-faint">No conversations yet</div>;
-  if (sections.length === 0) return <div className="px-4 py-3 text-xs text-faint">No matches</div>;
+  if (sections.length === 0 && archived.length === 0) return <div className="px-4 py-3 text-xs text-faint">No matches</div>;
   return (
     <>
       {sections.map((g) => (
@@ -272,6 +286,8 @@ function ChatList() {
           ))}
         </div>
       ))}
+      <ArchivedToggle count={archived.length} open={showArchived} onToggle={() => setShowArchived(!showArchived)} />
+      {showArchived && archived.map((c) => <ConversationItem key={c.id} c={c} />)}
     </>
   );
 }

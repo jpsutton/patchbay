@@ -444,6 +444,7 @@ mod tests {
             host_node: None,
             epoch: 0,
             permission_mode: "default".into(),
+            archived_at: None,
         }
     }
 

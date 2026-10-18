@@ -286,6 +286,18 @@ async fn phone_joins_follows_resumes_and_switches_gateway() {
     assert_eq!(p.count(|n, e| n == patchbay_mesh::client::EV_RESYNC && e["topic"] == topic), 0);
     assert_eq!(p.texts(&s.id).concat(), "Hello world");
 
+    // Archived from the phone through B while A, its host, is gone: nothing reachable to stop, and
+    // the archive still holds. Restoring brings it back.
+    let p_arch = json!({ "id": s.id, "archived": true, "pinned": true });
+    p.client.rpc("remote.update_code_session", p_arch).await.unwrap();
+    until("archived on B", 10, || {
+        b.state.db.get_code_session(&s.id).unwrap().unwrap().archived_at.is_some()
+    })
+    .await;
+    assert!(b.state.db.get_code_session(&s.id).unwrap().unwrap().pinned);
+    p.client.rpc("remote.update_code_session", json!({ "id": s.id, "archived": false })).await.unwrap();
+    assert!(b.state.db.get_code_session(&s.id).unwrap().unwrap().archived_at.is_none());
+
     // Removed on B: the phone is told and forgets the mesh.
     b.state.mesh.remove(&pid).unwrap();
     until("phone forgets the mesh", 10, || !p.client.is_member()).await;

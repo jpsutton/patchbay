@@ -2,11 +2,13 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
-import { errorText, type CodeEnvelope, type CodeSession, type MeshChatEvent, type MeshMember } from "../lib/ipc";
+import { api, errorText, type CodeEnvelope, type CodeSession, type MeshChatEvent, type MeshMember } from "../lib/ipc";
 import { codeEventArrived, memberName, memberOnline, useStore } from "../lib/store";
 import { ChatView } from "../chat/ChatView";
 import { CodeView } from "../code/CodeView";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { ActionSheet, useHold, type ItemAction } from "../components/ItemMenu";
+import { chatActions, promptRename, sessionActions } from "../lib/itemActions";
 import { NewSessionSheet } from "./NewSession";
 import { fmtShort } from "../lib/format";
 import { ChatIcon, ChevronLeftIcon, CodeIcon, MonitorIcon, PlusIcon, SettingsIcon, StarIcon, XIcon } from "../components/icons";
@@ -440,13 +442,17 @@ function Home({
   const mesh = useStore((s) => s.mesh);
   const needsYou = sessions.filter((s) => (live[s.id]?.permissions.length ?? 0) > 0).length;
 
-  const chats = useMemo(
-    () => [...conversations].sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt),
-    [conversations],
-  );
+  const [sheet, setSheet] = useState<{ title: string; actions: ItemAction[] } | null>(null);
+  const [showArchived, setShowArchived] = useState(false);
+  const pinnedFirst = <T extends { pinned: boolean; updatedAt: number }>(a: T, b: T) =>
+    Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt;
+
+  const chats = useMemo(() => conversations.filter((c) => c.archivedAt == null).sort(pinnedFirst), [conversations]);
+  const archivedChats = useMemo(() => conversations.filter((c) => c.archivedAt != null), [conversations]);
+  const archivedSessions = useMemo(() => sessions.filter((s) => s.archivedAt != null), [sessions]);
   const byHost = useMemo(() => {
     const groups = new Map<string, CodeSession[]>();
-    for (const s of [...sessions].sort((a, b) => b.updatedAt - a.updatedAt)) {
+    for (const s of sessions.filter((x) => x.archivedAt == null).sort(pinnedFirst)) {
       const h = s.hostNode ?? "";
       groups.set(h, [...(groups.get(h) ?? []), s]);
     }
@@ -454,8 +460,92 @@ function Home({
     return [...groups.entries()].sort(([a], [b]) => Number(memberOnline(mesh, b)) - Number(memberOnline(mesh, a)));
   }, [sessions, mesh]);
 
+  // Opening an archived chat or session brings it back.
+  const restoreThen = async (archived: boolean, restore: () => Promise<unknown>, open: () => void) => {
+    try {
+      if (archived) await restore();
+      open();
+    } catch (e) {
+      useStore.getState().setToast(errorText(e));
+    }
+  };
+
+  const chatRow = (c: (typeof conversations)[number]) => (
+    <Row
+      key={c.id}
+      title={c.title}
+      sub={fmtShort(c.updatedAt)}
+      leading={c.pinned ? <StarIcon size={13} /> : null}
+      trailing={streams[c.id]?.running ? <span className="signal-pulse h-2 w-2 rounded-full bg-live" aria-label="Replying" /> : null}
+      onClick={() =>
+        restoreThen(
+          c.archivedAt != null,
+          async () => {
+            await api.updateConversation(c.id, { archived: false });
+            await useStore.getState().refreshConversations();
+          },
+          () => onOpenChat(c.id),
+        )
+      }
+      onHold={() =>
+        setSheet({
+          title: c.title,
+          actions: chatActions(c, {
+            desktop: false,
+            rename: async () => {
+              const t = await promptRename(c.title);
+              if (!t) return;
+              await api.updateConversation(c.id, { title: t });
+              await useStore.getState().refreshConversations();
+            },
+          }),
+        })
+      }
+    />
+  );
+
+  const sessionRow = (s: CodeSession) => {
+    const l = live[s.id];
+    return (
+      <Row
+        key={s.id}
+        title={s.title}
+        sub={`${s.cwd.split(/[\\/]/).filter(Boolean).pop() ?? s.cwd} · ${fmtShort(s.updatedAt)}`}
+        leading={s.pinned ? <StarIcon size={13} /> : null}
+        trailing={<SessionState live={l} online={memberOnline(mesh, s.hostNode ?? "")} />}
+        onClick={() =>
+          restoreThen(
+            s.archivedAt != null,
+            async () => {
+              await api.updateCodeSession(s.id, { archived: false });
+              await useStore.getState().refreshCodeSessions();
+            },
+            () => onOpenCode(s.id),
+          )
+        }
+        onHold={() =>
+          setSheet({
+            title: s.title,
+            actions: sessionActions(s, {
+              desktop: false,
+              local: false,
+              running: !!l && (l.busy || l.status === "ready" || l.status === "starting"),
+              rename: async () => {
+                const t = await promptRename(s.title);
+                if (!t) return;
+                await api.updateCodeSession(s.id, { title: t });
+                await useStore.getState().refreshCodeSessions();
+              },
+            }),
+          })
+        }
+      />
+    );
+  };
+
   return (
     <div className="flex min-h-0 flex-1 flex-col pt-[env(safe-area-inset-top)]">
+      {sheet && <ActionSheet title={sheet.title} actions={sheet.actions} onClose={() => setSheet(null)} />}
       <header className="flex h-14 shrink-0 items-center gap-2 px-4">
         <div className="text-[18px] font-semibold tracking-[-0.01em]">Patchbay</div>
         <div className="flex-1" />
@@ -485,21 +575,16 @@ function Home({
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto pb-[calc(env(safe-area-inset-bottom)+88px)]">
         {tab === "chats" ? (
-          chats.length === 0 ? (
+          chats.length === 0 && archivedChats.length === 0 ? (
             <Empty line="No chats yet" sub="Start one: the reply runs on the computer you're connected through." />
           ) : (
-            chats.map((c) => (
-              <Row
-                key={c.id}
-                title={c.title}
-                sub={fmtShort(c.updatedAt)}
-                leading={c.pinned ? <StarIcon size={13} /> : null}
-                trailing={streams[c.id]?.running ? <span className="signal-pulse h-2 w-2 rounded-full bg-live" aria-label="Replying" /> : null}
-                onClick={() => onOpenChat(c.id)}
-              />
-            ))
+            <>
+              {chats.map((c) => chatRow(c))}
+              <ArchivedRow count={archivedChats.length} open={showArchived} onToggle={() => setShowArchived(!showArchived)} />
+              {showArchived && archivedChats.map((c) => chatRow(c))}
+            </>
           )
-        ) : byHost.length === 0 ? (
+        ) : byHost.length === 0 && archivedSessions.length === 0 ? (
           <Empty line="No Code sessions" sub="Start one here or on a computer; it runs on that computer, and you follow and drive it here." />
         ) : (
           byHost.map(([host, list]) => (
@@ -509,17 +594,15 @@ function Home({
                 {memberName(mesh, host) || "unknown computer"}
                 {!memberOnline(mesh, host) && <span className="normal-case tracking-normal">· offline</span>}
               </div>
-              {list.map((s) => (
-                <Row
-                  key={s.id}
-                  title={s.title}
-                  sub={`${s.cwd.split(/[\\/]/).filter(Boolean).pop() ?? s.cwd} · ${fmtShort(s.updatedAt)}`}
-                  trailing={<SessionState live={live[s.id]} online={memberOnline(mesh, host)} />}
-                  onClick={() => onOpenCode(s.id)}
-                />
-              ))}
+              {list.map((s) => sessionRow(s))}
             </section>
           ))
+        )}
+        {tab === "code" && (
+          <>
+            <ArchivedRow count={archivedSessions.length} open={showArchived} onToggle={() => setShowArchived(!showArchived)} />
+            {showArchived && archivedSessions.map((s) => sessionRow(s))}
+          </>
         )}
       </div>
       <button
@@ -548,21 +631,44 @@ function SessionState({ live, online }: { live?: Live; online: boolean }) {
   return null;
 }
 
+/** The collapsed "Archived" row at the end of a list. */
+function ArchivedRow({ count, open, onToggle }: { count: number; open: boolean; onToggle: () => void }) {
+  if (count === 0) return null;
+  return (
+    <button
+      className="flex w-full items-center gap-2 px-4 pb-1.5 pt-5 text-left font-mono text-[11px] uppercase tracking-[0.06em] text-faint"
+      aria-expanded={open}
+      onClick={onToggle}
+    >
+      <span className={`inline-block transition-transform ${open ? "rotate-90" : ""}`}>›</span>
+      Archived · {count}
+    </button>
+  );
+}
+
 function Row({
   title,
   sub,
   leading,
   trailing,
   onClick,
+  onHold,
 }: {
   title: string;
   sub?: string;
   leading?: ReactNode;
   trailing?: ReactNode;
   onClick: () => void;
+  /** Hold the row (or right-click it) for more. */
+  onHold?: () => void;
 }) {
+  const hold = useHold(onHold ?? (() => {}));
   return (
-    <button className="flex w-full items-center gap-3 px-4 py-3 text-left active:bg-panel-2" onClick={onClick}>
+    <button
+      className="flex w-full select-none items-center gap-3 px-4 py-3 text-left [-webkit-touch-callout:none] active:bg-panel-2"
+      onClick={onClick}
+      {...(onHold ? hold : {})}
+    >
       {leading && <span className="shrink-0 text-accent-ink">{leading}</span>}
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="truncate text-[15px]">{title}</span>
