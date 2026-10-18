@@ -696,10 +696,13 @@ export const useStore = create<Store>((set, get) => ({
         get().applyCodeEvent(id, e);
       }
     };
+    // Both go to the gateway: ask at once rather than one round trip after the other.
+    const attached = api.codeAttach(id);
+    attached.catch(() => {});
     const history = await loadTranscript(id);
     let info;
     try {
-      info = await api.codeAttach(id);
+      info = await attached;
     } catch (e) {
       set((st) => ({ code: { ...st.code, [id]: { ...emptyCode(), history, status: "exited" } } }));
       get().applyCodeEvent(id, { type: "error", message: errorText(e) });

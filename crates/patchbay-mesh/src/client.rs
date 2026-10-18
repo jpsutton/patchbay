@@ -45,6 +45,11 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long an RPC waits for a gateway before failing.
 const CONNECT_WAIT: Duration = Duration::from_secs(20);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(4);
+/// After this long out of sight, Android has most likely frozen the app and its connection is
+/// gone; coming back, a shorter probe decides sooner to dial again.
+const STALE_AFTER: Duration = Duration::from_secs(20);
+/// Enough for a mobile radio to wake and answer one ping; past it, dialing again is faster.
+const RESUME_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
 const MAX_CANDIDATES: usize = 16;
 
 /// Public state, saved as `remote.json`.
@@ -105,6 +110,15 @@ struct State {
     phase: String,
     error: Option<String>,
     foreground: bool,
+    /// When the app went out of sight.
+    hidden_since: Option<Instant>,
+    /// How long the next probe waits for an answer, when not the usual `PROBE_TIMEOUT`.
+    probe_timeout: Option<Duration>,
+}
+
+/// How long to wait for the connection to answer when the app comes back after `hidden_for`.
+fn resume_probe_timeout(hidden_for: Duration) -> Duration {
+    if hidden_for >= STALE_AFTER { RESUME_PROBE_TIMEOUT } else { PROBE_TIMEOUT }
 }
 
 struct Established {
@@ -249,7 +263,17 @@ impl RemoteClient {
 
     /// In the foreground the client pings often; in the background, rarely.
     pub fn set_foreground(&self, fg: bool) {
-        let was = std::mem::replace(&mut self.0.st.lock().unwrap().foreground, fg);
+        let was = {
+            let mut st = self.0.st.lock().unwrap();
+            let was = std::mem::replace(&mut st.foreground, fg);
+            if !fg && was {
+                st.hidden_since = Some(Instant::now());
+            } else if fg && !was {
+                let hidden_for = st.hidden_since.take().map(|t| t.elapsed()).unwrap_or_default();
+                st.probe_timeout = Some(resume_probe_timeout(hidden_for));
+            }
+            was
+        };
         if fg && !was {
             self.kick();
         }
@@ -895,7 +919,10 @@ impl Inner {
                     }
                     _ = probe.notified() => {
                         send(&mut sec, &link, &Msg::Ping { t: member::now_ms() })?;
-                        probe_until = Some(Instant::now() + PROBE_TIMEOUT);
+                        let wait = self.st.lock().unwrap().probe_timeout.take().unwrap_or(PROBE_TIMEOUT);
+                        let until = Instant::now() + wait;
+                        // A second nudge while one probe runs never extends it.
+                        probe_until = Some(probe_until.map_or(until, |u| u.min(until)));
                     }
                     _ = probe_wait => bail!("{name} didn't answer after the network changed"),
                 }
@@ -1020,5 +1047,20 @@ impl Inner {
         self.emit(EV_MEMBERS, Value::Null);
         self.emit_status();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coming_back_after_a_while_probes_briefly() {
+        // A quick glance away keeps the patient probe: the connection is likely still there.
+        assert_eq!(resume_probe_timeout(Duration::from_secs(5)), PROBE_TIMEOUT);
+        // Long enough for Android to have frozen the app: dial again sooner.
+        assert_eq!(resume_probe_timeout(STALE_AFTER), RESUME_PROBE_TIMEOUT);
+        assert_eq!(resume_probe_timeout(Duration::from_secs(600)), RESUME_PROBE_TIMEOUT);
+        assert!(RESUME_PROBE_TIMEOUT < PROBE_TIMEOUT);
     }
 }

@@ -238,6 +238,8 @@ export interface MeshMember {
 
 export interface MeshStatus {
   nodeId: string;
+  /** On a phone: its connection to the gateway. */
+  phase?: "offline" | "connecting" | "online";
   name: string;
   member: boolean;
   meshId: string | null;

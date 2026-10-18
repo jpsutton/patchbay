@@ -40,6 +40,9 @@ const fakeAgent = (id: AgentId, label: string, program: string | null, extra: Pa
   supportsInstructions: id === "grok" || id === "claude-code",
   ...extra,
 });
+/** Sessions whose fake agent was started (code_start) and still runs. */
+const fakeRunning = new Set<string>();
+
 const FAKE_AGENTS: AgentInfo[] = [
   fakeAgent("grok", "Grok Build", "/opt/patchbay/grok", { source: "bundled" }),
   fakeAgent("claude-code", "Claude Code", "/usr/bin/npx", { source: "npx", version: null }),
@@ -583,6 +586,7 @@ export function install() {
         case "code_is_running": return false;
         case "code_start": {
           const csid = a.id as string;
+          fakeRunning.add(csid);
           setTimeout(() => {
             codeEmit(csid, { type: "status", state: "starting", message: null });
             setTimeout(() => {
@@ -719,6 +723,8 @@ export function install() {
         case "code_attach": {
           const s = db.code.find((x) => x.id === a.id);
           if (s?.hostNode === "n-old") return { running: false, busy: false, events: [], offline: true };
+          // An agent this fake started keeps running, so opening its session again just attaches.
+          if (fakeRunning.has(a.id as string)) return { running: true, busy: false, events: [] };
           setTimeout(() => codeEmit(a.id as string, { type: "status", state: "ready", message: null }), 50);
           return { running: false, busy: false, events: [] };
         }
