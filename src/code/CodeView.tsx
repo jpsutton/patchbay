@@ -20,7 +20,7 @@ import { Markdown } from "../components/Markdown";
 import { EditMessage } from "../components/EditMessage";
 import { UsageBar } from "../components/UsageBar";
 import { TerminalPane } from "../terminal/TerminalPane";
-import { PermissionCard, ToolCallCard, ToolGroup } from "./ToolCallCard";
+import { PermissionCard, PlanDocCard, planDocOf, ToolCallCard, ToolGroup } from "./ToolCallCard";
 import { DiffView, diffStats } from "./DiffView";
 import { CopyButton, copyText } from "../components/CopyButton";
 import { ExportMenu } from "../components/ExportMenu";
@@ -218,6 +218,8 @@ function EntryView({
       const tc = s.toolCalls[e.id];
       const perm = s.permissions.find((p) => p.request.toolCall.toolCallId === e.id);
       if (perm) return <PermissionCard requestId={perm.requestId} request={perm.request} live={tc} cwd={cwd} />;
+      const doc = tc && planDocOf(tc);
+      if (doc) return <PlanDocCard name={doc.name} text={doc.text} />;
       return tc ? <ToolCallCard tc={tc} autoApproved={s.autoApproved[e.id]} /> : null;
     }
     case "error":
@@ -289,13 +291,15 @@ type Run = { i: number; e: Entry } | { tools: { i: number; e: Entry }[] };
 
 /**
  * Consecutive tool calls form one run, drawn as a single box with hairlines between rows. A call
- * waiting on a permission stays on its own, so its card can't hide inside a group.
+ * waiting on a permission stays on its own, so its card can't hide inside a group, and so does a
+ * plan document, which reads as part of the conversation.
  */
 function runsOf(entries: Entry[], s: Pick<CodeState, "toolCalls" | "permissions">): Run[] {
   const out: Run[] = [];
   entries.forEach((e, i) => {
+    const tc = e.kind === "tool" ? s.toolCalls[e.id] : undefined;
     const groupable =
-      e.kind === "tool" && !!s.toolCalls[e.id] && !s.permissions.some((p) => p.request.toolCall.toolCallId === e.id);
+      !!tc && !planDocOf(tc) && !s.permissions.some((p) => p.request.toolCall.toolCallId === tc.toolCallId);
     const last = out[out.length - 1];
     if (groupable && last && "tools" in last) last.tools.push({ i, e });
     else if (groupable) out.push({ tools: [{ i, e }] });

@@ -209,6 +209,24 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
     }
   };
   codeEmit(csid, { type: "update", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Planning the change." } } });
+  // A plan document written as a tool call, the way Cursor's plan mode does it.
+  if (text.startsWith("/plan")) {
+    const plan = `# Tidy the README\n\n## Problem\n\nThe intro is out of date.\n\n## Steps\n\n1. Read \`README.md\`.\n2. Rewrite the intro.\n3. Check the links still work.\n`;
+    codeEmit(csid, {
+      type: "update",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: id(),
+        title: "Create Plan: Tidy the README",
+        status: "completed",
+        rawInput: { _toolName: "createPlan", name: "Tidy the README", plan },
+        content: [{ type: "content", content: { type: "text", text: "Plan saved to file:///tmp/tidy-the-readme.plan.md" } }],
+      },
+    });
+    await say("The plan is ready. Say the word and I'll start.");
+    codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
   codeEmit(csid, {
     type: "update",
     update: {
@@ -303,6 +321,18 @@ function meshMember() {
       { nodeId: ME, name: mesh.name, state: "self", via: null, viaName: null, rttMs: null, url: null, admittedAt: now() - 9e8, approver: ME },
       { nodeId: "n-studio", name: "studio", state: "direct", via: null, viaName: null, rttMs: 4, url: "ws://100.64.0.7:41890", admittedAt: now() - 8e8, approver: ME },
       { nodeId: "n-nas", name: "nas", state: "relay", via: "n-studio", viaName: "studio", rttMs: null, url: null, admittedAt: now() - 7e8, approver: "n-studio" },
+      {
+        nodeId: "n-phone",
+        name: "pocket",
+        state: "relay",
+        via: "n-studio",
+        viaName: "studio",
+        rttMs: null,
+        url: null,
+        admittedAt: now() - 6.5e8,
+        approver: "n-studio",
+        role: "remote",
+      },
       { nodeId: "n-old", name: "old-desktop", state: "offline", via: null, viaName: null, rttMs: null, url: null, admittedAt: now() - 6e8, approver: ME },
     ],
   } satisfies Partial<MeshStatus>);

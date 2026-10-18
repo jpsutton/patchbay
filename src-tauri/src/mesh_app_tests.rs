@@ -230,6 +230,18 @@ async fn phone_joins_follows_resumes_and_switches_gateway() {
     assert!(rec.is_remote());
     // The record syncs to B like any member's; the phone never got the data key.
     until("B knows the phone", 10, || members::get(&b.state.db, &pid).unwrap().is_some()).await;
+    // A is the gateway; B still shows the phone as relayed through A, not offline.
+    let an = a.state.mesh.node_id().to_owned();
+    until("phone direct on A", 10, || {
+        a.state.mesh.status()["members"].as_array().unwrap().iter().any(|m| m["nodeId"] == pid && m["state"] == "direct")
+    })
+    .await;
+    until("phone relayed on B", 10, || {
+        b.state.mesh.status()["members"].as_array().unwrap().iter().any(|m| {
+            m["nodeId"] == pid && m["state"] == "relay" && m["via"] == an.as_str()
+        })
+    })
+    .await;
 
     // Lists come from the gateway; the phone learns B's address for later.
     let idx = p.client.rpc("remote.index", Value::Null).await.unwrap();

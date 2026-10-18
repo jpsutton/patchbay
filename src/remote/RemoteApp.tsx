@@ -292,9 +292,22 @@ function Main({ status, onLock }: { status: RemoteStatus; onLock: () => void }) 
     return () => document.removeEventListener("visibilitychange", onVis);
   }, [onLock]);
 
-  // The system back gesture returns to the list.
+  // The back button and the system back gesture both return to the list. Leaving a Code session
+  // stops following it, so its state here goes too: opening it again catches up from the host
+  // instead of showing what it was doing when we left.
   useEffect(() => {
-    const onPop = () => setView({ kind: "home" });
+    const onPop = () => {
+      const s = useStore.getState();
+      const id = s.activeCodeSessionId;
+      if (id) {
+        remote.unwatch(`session:${id}`).catch(() => {});
+        useStore.setState((st) => {
+          const { [id]: _, ...code } = st.code;
+          return { code };
+        });
+      }
+      setView({ kind: "home" });
+    };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
@@ -309,11 +322,7 @@ function Main({ status, onLock }: { status: RemoteStatus; onLock: () => void }) 
     history.pushState({ v: v.kind }, "");
     setView(v);
   };
-  const back = () => {
-    const s = useStore.getState();
-    if (view.kind === "code" && s.activeCodeSessionId) remote.unwatch(`session:${s.activeCodeSessionId}`).catch(() => {});
-    history.back();
-  };
+  const back = () => history.back();
   const backButton = (
     <button className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-muted active:bg-panel-2" aria-label="Back" onClick={back}>
       <ChevronLeftIcon size={20} />

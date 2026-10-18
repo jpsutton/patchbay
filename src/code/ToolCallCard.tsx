@@ -3,11 +3,14 @@ import type { AcpPermissionRequest, AcpToolCall, AcpToolCallContent } from "../l
 import { api, errorText } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { DiffView, diffStats } from "./DiffView";
+import { Markdown } from "../components/Markdown";
+import { CopyButton } from "../components/CopyButton";
 import {
   ArrowRightIcon,
   BrainIcon,
   CheckIcon,
   ChevronRightIcon,
+  CopyIcon,
   DotIcon,
   FileTextIcon,
   GlobeIcon,
@@ -166,6 +169,46 @@ export function ToolCallCard({ tc, autoApproved }: { tc: AcpToolCall; autoApprov
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * A plan document an agent wrote as a tool call (Cursor's `createPlan`, Claude Code's
+ * `ExitPlanMode`): the Markdown sits in the raw input, while the tool's own output only says
+ * where it was saved.
+ */
+export function planDocOf(tc: AcpToolCall): { name: string | null; text: string } | null {
+  const raw = tc.rawInput;
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.plan !== "string" || !r.plan.trim()) return null;
+  return { name: typeof r.name === "string" && r.name ? r.name : null, text: r.plan };
+}
+
+/** A plan document, shown in full so it can be read and approved where it appears. */
+export function PlanDocCard({ name, text }: { name: string | null; text: string }) {
+  const [open, setOpen] = useState(true);
+  return (
+    <section aria-label="Plan" className="overflow-hidden rounded-xl border border-line bg-panel/60">
+      <div className="flex items-center gap-2 px-3.5 py-2">
+        <button className="flex min-w-0 flex-1 items-center gap-2 text-left" onClick={() => setOpen(!open)} aria-expanded={open}>
+          <span className="flex shrink-0 text-faint">
+            <FileTextIcon size={15} />
+          </span>
+          <span className="shrink-0 font-mono text-[11px] uppercase tracking-[0.06em] text-faint">Plan</span>
+          {name && <span className="min-w-0 truncate text-[13px] text-fg/85">{name}</span>}
+          <span className={`ml-auto flex shrink-0 text-faint transition-transform ${open ? "rotate-90" : ""}`}>
+            <ChevronRightIcon size={12} />
+          </span>
+        </button>
+        <CopyButton text={text} label="Copy plan" icon={<CopyIcon size={14} />} />
+      </div>
+      {open && (
+        <div className="border-t border-line px-3.5 py-3">
+          <Markdown text={text} />
+        </div>
+      )}
+    </section>
   );
 }
 
