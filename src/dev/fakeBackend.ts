@@ -599,7 +599,7 @@ export function install() {
                   ? null
                   : { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] },
                 configOptions: grok ? [] : [fakeEffort(fakeConfig[csid] ?? "medium")],
-                extensions: { statusLine: grok, rewind: grok },
+                extensions: { statusLine: grok, rewind: grok, patchbayModels: grok },
               });
               codeEmit(csid, {
                 type: "update",
