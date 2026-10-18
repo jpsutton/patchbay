@@ -298,9 +298,13 @@ fn update_conversation(
     model_ref: Option<String>,
     system_prompt: Option<String>,
     pinned: Option<bool>,
+    archived: Option<bool>,
 ) -> CmdResult<()> {
     if let Some(p) = pinned {
         state.db.set_conversation_pinned(&id, p)?;
+    }
+    if let Some(a) = archived {
+        state.db.set_conversation_archived(&id, a)?;
     }
     Ok(state.db.update_conversation(
         &id,
@@ -475,14 +479,25 @@ fn create_code_session(
     model_ref: Option<String>,
     agent: Option<String>,
 ) -> CmdResult<CodeSession> {
-    if !std::path::Path::new(&cwd).is_dir() {
-        return Err(CmdError(format!("{cwd} is not a directory")));
+    Ok(create_code_session_local(&state, &cwd, model_ref.as_deref(), agent)?)
+}
+
+/// A new Code session hosted here, in `cwd` on this computer.
+fn create_code_session_local(
+    state: &AppState,
+    cwd: &str,
+    model_ref: Option<&str>,
+    agent: Option<String>,
+) -> anyhow::Result<CodeSession> {
+    if !std::path::Path::new(cwd).is_dir() {
+        anyhow::bail!("{cwd} is not a directory");
     }
-    let agent = agent.unwrap_or_else(|| prefs::load(&state.db).default_agent);
+    let prefs = prefs::load(&state.db);
+    let agent = agent.unwrap_or_else(|| prefs.default_agent.clone());
     if code::agents::AgentKind::parse(&agent).is_none() {
-        return Err(CmdError(format!("unknown coding agent {agent}")));
+        anyhow::bail!("unknown coding agent {agent}");
     }
-    Ok(state.db.create_code_session(&cwd, model_ref.as_deref(), &agent)?)
+    state.db.create_code_session(cwd, model_ref, &agent, &prefs.permission_mode)
 }
 
 /// The coding agents Patchbay can drive, and whether each is installed.
@@ -493,16 +508,20 @@ async fn list_agents(state: State<'_, AppState>) -> CmdResult<Vec<code::agents::
 }
 
 #[tauri::command]
-fn update_code_session(
+async fn update_code_session(
     state: State<'_, AppState>,
     id: String,
     title: Option<String>,
     model_ref: Option<String>,
     pinned: Option<bool>,
     activity: Option<String>,
+    archived: Option<bool>,
 ) -> CmdResult<()> {
     if let Some(p) = pinned {
         state.db.set_code_session_pinned(&id, p)?;
+    }
+    if let Some(a) = archived {
+        archive_code_session(&state, &id, a).await?;
     }
     if let Some(a) = activity {
         state.db.set_code_session_activity(&id, &a)?;
@@ -521,6 +540,21 @@ fn delete_code_session(state: State<'_, AppState>, id: String) -> CmdResult<()> 
     // Must match the id `TerminalPane` opens with.
     state.terminals.close(&format!("term-{id}"));
     Ok(state.db.delete_code_session(&id)?)
+}
+
+/// Archive or restore a Code session. Archiving ends its agent first, wherever it runs; a host
+/// that's offline has nothing reachable to stop, and the archive still syncs to it.
+async fn archive_code_session(state: &AppState, id: &str, archived: bool) -> anyhow::Result<()> {
+    if archived {
+        match remote_host(state, id).map_err(|e| anyhow::anyhow!(e.0))? {
+            Some(host) if state.mesh.connected(&host) => {
+                state.mesh.rpc(&host, "code.stop", serde_json::json!({ "id": id })).await?;
+            }
+            Some(_) => {}
+            None => state.code.stop(id),
+        }
+    }
+    state.db.set_code_session_archived(id, archived)
 }
 
 /// The node hosting session `id`, when that isn't this one.
@@ -778,6 +812,40 @@ async fn code_set_config_option(
     Ok(state.code.set_config_option(&id, config_id, value).await?)
 }
 
+/// Switch a session that hasn't started yet to another agent. The agent here stops; whoever asked
+/// starts the new one, as when opening the session.
+fn code_set_agent_local(state: &AppState, id: &str, agent: &str, model_ref: Option<&str>) -> anyhow::Result<()> {
+    ensure_local_host(state, id)?;
+    if code::agents::AgentKind::parse(agent).is_none() {
+        anyhow::bail!("unknown coding agent {agent}");
+    }
+    let session = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("code session not found"))?;
+    // The transcript is the UI's (JSON entries); any user turn means the old agent has the history.
+    let started = state.db.code_transcript(id)?.is_some_and(|t| t.contains(r#""kind":"user""#)) || state.code.is_busy(id);
+    if started {
+        anyhow::bail!("this session already has messages; start a new session to use another agent");
+    }
+    state.code.stop(id);
+    state.db.set_code_session_agent(id, agent)?;
+    // Grok runs on Patchbay's models: a session made for another agent may have none yet.
+    if session.model_ref.is_none()
+        && let Some(m) = model_ref
+    {
+        state.db.update_code_session(id, None, None, Some(m))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn code_set_agent(state: State<'_, AppState>, id: String, agent: String, model_ref: Option<String>) -> CmdResult<()> {
+    if let Some(host) = remote_host(&state, &id)? {
+        let p = serde_json::json!({ "id": id, "agent": agent, "modelRef": model_ref });
+        state.mesh.rpc(&host, "code.set_agent", p).await?;
+        return Ok(());
+    }
+    Ok(code_set_agent_local(&state, &id, &agent, model_ref.as_deref())?)
+}
+
 #[tauri::command]
 async fn code_set_mode(state: State<'_, AppState>, id: String, mode_id: String) -> CmdResult<()> {
     if let Some(host) = remote_host(&state, &id)? {
@@ -785,6 +853,19 @@ async fn code_set_mode(state: State<'_, AppState>, id: String, mode_id: String) 
         return Ok(());
     }
     Ok(state.code.set_mode(&id, mode_id).await?)
+}
+
+/// Patchbay's Ask / Auto / Always-approve policy for this session's ACP permission prompts.
+#[tauri::command]
+async fn code_set_permission_mode(state: State<'_, AppState>, id: String, mode: String) -> CmdResult<()> {
+    if let Some(host) = remote_host(&state, &id)? {
+        state
+            .mesh
+            .rpc(&host, "code.set_permission_mode", serde_json::json!({ "id": id, "mode": mode }))
+            .await?;
+        return Ok(());
+    }
+    Ok(state.db.set_code_session_permission_mode(&id, &mode)?)
 }
 
 #[tauri::command]
@@ -1072,9 +1153,16 @@ impl mesh::RpcHandler for MeshRpc {
                 let (cid, value) = (param(&p, "configId")?.to_owned(), param(&p, "value")?.to_owned());
                 state.code.set_config_option(&id()?, cid, value).await.map(|_| Value::Null)
             }
+            "code.set_agent" => {
+                code_set_agent_local(state, &id()?, param(&p, "agent")?, p["modelRef"].as_str()).map(|_| Value::Null)
+            }
             "code.set_mode" => {
                 ensure_local_host(state, &id()?)?;
                 state.code.set_mode(&id()?, param(&p, "modeId")?.to_owned()).await.map(|_| Value::Null)
+            }
+            "code.set_permission_mode" => {
+                ensure_local_host(state, &id()?)?;
+                state.db.set_code_session_permission_mode(&id()?, param(&p, "mode")?).map(|_| Value::Null)
             }
             "code.rewind" => {
                 ensure_local_host(state, &id()?)?;
@@ -1152,6 +1240,10 @@ impl mesh::RpcHandler for MeshRpc {
                 let note = import_local(state, &id()?, param(&p, "cwd")?).await?;
                 Ok(json!(note))
             }
+            // Starting a session here for a phone, through its gateway.
+            "code.new_options" => gateway::new_session_options_local(state).await,
+            "code.create" => gateway::create_local(state, &p).map(|s| json!(s)),
+            "fs.dirs" => gateway::list_dirs_local(p["path"].as_str()),
             m if m.starts_with("remote.") => gateway::call(state, &from, m, &p).await,
             other => anyhow::bail!("unknown request {other}"),
         }
@@ -1591,6 +1683,8 @@ pub fn run() {
             code_cancel,
             code_set_model,
             code_set_mode,
+            code_set_permission_mode,
+            code_set_agent,
             code_set_config_option,
             list_agents,
             code_permission_respond,

@@ -27,6 +27,8 @@ jobs:
     # Creating the release branch is a push too; there is nothing to publish yet.
     if: ${{ !github.event.created }}
     runs-on: ubuntu-latest
+    # Includes waiting for the pull request's build to finish (about 90 minutes).
+    timeout-minutes: 240
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -51,9 +53,16 @@ jobs:
             exit 1
           fi
           run=$(gh run list -R "$GITHUB_REPOSITORY" --workflow build.yml --commit "$head" \
-                  --status completed --json databaseId,event \
+                  --json databaseId,event \
                   -q 'map(select(.event == "pull_request")) | .[0].databaseId')
-          [ -n "$run" ] || { echo "::error::no completed pull-request build for $head"; exit 1; }
+          [ -n "$run" ] || { echo "::error::no pull-request build for $head"; exit 1; }
+          # Auto-merge lands the PR once the required checks pass, while the
+          # best-effort jobs (Windows, macOS, Android) may still be building:
+          # wait for the whole run, since its artifacts are what gets published.
+          if [ "$(gh run view "$run" -R "$GITHUB_REPOSITORY" --json status -q .status)" != completed ]; then
+            echo "Waiting for build run $run to finish"
+            gh run watch "$run" -R "$GITHUB_REPOSITORY" --interval 60 >/dev/null
+          fi
           for job in linux-packages arch; do
             conclusion=$(gh run view "$run" -R "$GITHUB_REPOSITORY" --json jobs \
                            -q ".jobs[] | select(.name == \"$job\") | .conclusion")

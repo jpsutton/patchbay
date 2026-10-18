@@ -154,17 +154,25 @@ impl CodeManager {
             cwd: PathBuf::from(&session.cwd),
             resume: session.acp_session_id.clone(),
             pending: self.pending.clone(),
-            on_session: Box::new(move |sid| {
-                let _ = db2.update_code_session(&csid, Some(&sid), None, None);
-            }),
+            on_session: {
+                let csid = csid.clone();
+                Box::new(move |sid| {
+                    let _ = db2.update_code_session(&csid, Some(&sid), None, None);
+                })
+            },
             auto_approve: {
                 let db = db.clone();
                 let cwd = session.cwd.clone();
                 Arc::new(move |tool_call, options| {
-                    // Read fresh each time so rules added mid-session apply at once.
+                    // Read fresh each time so rules and the session's Ask/Auto/Always apply at once.
                     let rules = db.list_permission_rules().ok()?;
-                    let rule = permissions::find(&rules, &cwd, tool_call)?;
-                    Some((permissions::allow_option(options)?, permissions::describe(rule)))
+                    let mode = db
+                        .get_code_session(&csid)
+                        .ok()
+                        .flatten()
+                        .map(|s| s.permission_mode)
+                        .unwrap_or_else(|| "default".into());
+                    permissions::decide(&mode, &rules, &cwd, tool_call, options)
                 })
             },
             mcp: {

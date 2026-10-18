@@ -202,6 +202,14 @@ CREATE TABLE mesh_secrets (
 "#, r#"
 -- A member's role: NULL for a full member, 'remote' for a phone that only drives others' work.
 ALTER TABLE mesh_members ADD COLUMN role TEXT;
+"#, r#"
+-- Patchbay-owned approval policy for ACP permission prompts (ask / auto / always-approve).
+-- Seeded from prefs on create; agents that don't expose this over ACP still honor it here.
+ALTER TABLE code_sessions ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'default';
+"#, r#"
+-- When a chat or Code session was archived: out of the lists, kept, and restorable.
+ALTER TABLE conversations ADD COLUMN archived_at INTEGER;
+ALTER TABLE code_sessions ADD COLUMN archived_at INTEGER;
 "#];
 
 pub fn now_ms() -> i64 {
@@ -348,6 +356,8 @@ pub struct Conversation {
     pub pinned: bool,
     pub created_at: i64,
     pub updated_at: i64,
+    /// When it was archived (unix ms); archived chats stay out of the lists until restored.
+    pub archived_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -468,10 +478,17 @@ pub struct CodeSession {
     pub host_node: Option<String>,
     /// Bumped on every handover between nodes.
     pub epoch: i64,
+    /// Ask / auto / always-approve: Patchbay answers ACP permission prompts for this session.
+    pub permission_mode: String,
+    /// When it was archived (unix ms): its agent stopped, out of the lists until restored.
+    pub archived_at: Option<i64>,
 }
 
 /// Values `code_sessions.activity` may hold.
 pub const CODE_ACTIVITIES: &[&str] = &["chat", "edit", "commit", "branch", "pr"];
+
+/// Values `code_sessions.permission_mode` may hold.
+pub const PERMISSION_MODES: &[&str] = &["default", "auto", "always-approve"];
 
 impl Db {
     pub fn open(path: &Path) -> Result<Self> {
@@ -612,7 +629,7 @@ impl Db {
     pub fn list_conversations(&self) -> Result<Vec<Conversation>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, title, model_ref, system_prompt, created_at, updated_at, pinned
+            "SELECT id, title, model_ref, system_prompt, created_at, updated_at, pinned, archived_at
              FROM conversations ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([], map_conversation)?;
@@ -623,7 +640,7 @@ impl Db {
         Ok(self
             .conn()
             .query_row(
-                "SELECT id, title, model_ref, system_prompt, created_at, updated_at, pinned
+                "SELECT id, title, model_ref, system_prompt, created_at, updated_at, pinned, archived_at
                  FROM conversations WHERE id = ?1",
                 [id],
                 map_conversation,
@@ -641,6 +658,7 @@ impl Db {
             pinned: false,
             created_at: now,
             updated_at: now,
+            archived_at: None,
         };
         self.conn().execute(
             "INSERT INTO conversations (id, title, model_ref, system_prompt, created_at, updated_at)
@@ -681,6 +699,15 @@ impl Db {
         self.conn().execute(
             "UPDATE conversations SET pinned = ?2 WHERE id = ?1",
             params![id, pinned],
+        )?;
+        Ok(())
+    }
+
+    /// Archiving doesn't count as activity, so `updated_at` is left alone.
+    pub fn set_conversation_archived(&self, id: &str, archived: bool) -> Result<()> {
+        self.conn().execute(
+            "UPDATE conversations SET archived_at = CASE WHEN ?2 THEN ?3 END WHERE id = ?1",
+            params![id, archived, now_ms()],
         )?;
         Ok(())
     }
@@ -918,7 +945,7 @@ impl Db {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT id, cwd, acp_session_id, title, model_ref, created_at, updated_at, pinned, activity,
-                    agent, agent_model, host_node, epoch
+                    agent, agent_model, host_node, epoch, permission_mode, archived_at
              FROM code_sessions ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([], map_code_session)?;
@@ -930,7 +957,7 @@ impl Db {
             .conn()
             .query_row(
                 "SELECT id, cwd, acp_session_id, title, model_ref, created_at, updated_at, pinned, activity,
-                        agent, agent_model, host_node, epoch
+                        agent, agent_model, host_node, epoch, permission_mode, archived_at
                  FROM code_sessions WHERE id = ?1",
                 [id],
                 map_code_session,
@@ -943,7 +970,13 @@ impl Db {
         cwd: &str,
         model_ref: Option<&str>,
         agent: &str,
+        permission_mode: &str,
     ) -> Result<CodeSession> {
+        let mode = if PERMISSION_MODES.contains(&permission_mode) {
+            permission_mode
+        } else {
+            "default"
+        };
         let now = now_ms();
         // The sidebar groups sessions under their folder; the UI retitles from the first prompt.
         let title = "New session".to_owned();
@@ -961,14 +994,28 @@ impl Db {
             agent_model: None,
             host_node: Some(self.node_id()),
             epoch: 0,
+            permission_mode: mode.to_owned(),
+            archived_at: None,
         };
         self.conn().execute(
             "INSERT INTO code_sessions (id, cwd, acp_session_id, title, model_ref, created_at, updated_at,
-                                        agent, host_node, epoch)
-             VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?5, ?6, ?7, 0)",
-            params![s.id, s.cwd, s.title, s.model_ref, now, s.agent, s.host_node],
+                                        agent, host_node, epoch, permission_mode)
+             VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?5, ?6, ?7, 0, ?8)",
+            params![s.id, s.cwd, s.title, s.model_ref, now, s.agent, s.host_node, s.permission_mode],
         )?;
         Ok(s)
+    }
+
+    pub fn set_code_session_permission_mode(&self, id: &str, mode: &str) -> Result<()> {
+        if !PERMISSION_MODES.contains(&mode) {
+            anyhow::bail!("unknown permission mode {mode:?}");
+        }
+        // Like activity: a setting change shouldn't move the session to the top of the list.
+        self.conn().execute(
+            "UPDATE code_sessions SET permission_mode = ?2 WHERE id = ?1",
+            params![id, mode],
+        )?;
+        Ok(())
     }
 
     pub fn update_code_session(
@@ -1013,6 +1060,16 @@ impl Db {
         Ok(())
     }
 
+    /// Give a session another agent. Its agent model and ACP session id only meant something to
+    /// the old agent, so both go.
+    pub fn set_code_session_agent(&self, id: &str, agent: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE code_sessions SET agent = ?2, agent_model = NULL, acp_session_id = NULL WHERE id = ?1",
+            params![id, agent],
+        )?;
+        Ok(())
+    }
+
     pub fn set_code_session_agent_model(&self, id: &str, model: &str) -> Result<()> {
         self.conn().execute(
             "UPDATE code_sessions SET agent_model = ?2 WHERE id = ?1",
@@ -1030,6 +1087,15 @@ impl Db {
             params![id, host, cwd, acp_session_id],
         )?;
         Ok(conn.query_row("SELECT epoch FROM code_sessions WHERE id = ?1", [id], |r| r.get(0))?)
+    }
+
+    /// Archiving doesn't count as activity, so `updated_at` is left alone.
+    pub fn set_code_session_archived(&self, id: &str, archived: bool) -> Result<()> {
+        self.conn().execute(
+            "UPDATE code_sessions SET archived_at = CASE WHEN ?2 THEN ?3 END WHERE id = ?1",
+            params![id, archived, now_ms()],
+        )?;
+        Ok(())
     }
 
     pub fn set_code_session_pinned(&self, id: &str, pinned: bool) -> Result<()> {
@@ -1308,6 +1374,7 @@ fn map_conversation(r: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation> {
         created_at: r.get(4)?,
         updated_at: r.get(5)?,
         pinned: r.get(6)?,
+        archived_at: r.get(7)?,
     })
 }
 
@@ -1338,6 +1405,8 @@ fn map_code_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<CodeSession> {
         agent_model: r.get(10)?,
         host_node: r.get(11)?,
         epoch: r.get(12)?,
+        permission_mode: r.get(13)?,
+        archived_at: r.get(14)?,
     })
 }
 
@@ -1355,13 +1424,44 @@ mod tests {
     #[test]
     fn code_session_activity_is_stored_without_bumping_updated_at() {
         let (db, _) = temp_db();
-        let s = db.create_code_session("/tmp", None, "grok").unwrap();
+        let s = db.create_code_session("/tmp", None, "grok", "default").unwrap();
         assert_eq!(db.get_code_session(&s.id).unwrap().unwrap().activity, None);
         db.set_code_session_activity(&s.id, "branch").unwrap();
         let got = db.get_code_session(&s.id).unwrap().unwrap();
         assert_eq!(got.activity.as_deref(), Some("branch"));
         assert_eq!(got.updated_at, s.updated_at);
         assert!(db.set_code_session_activity(&s.id, "nonsense").is_err());
+    }
+
+    #[test]
+    fn code_session_permission_mode_is_stored() {
+        let (db, _) = temp_db();
+        let s = db.create_code_session("/tmp", None, "grok", "auto").unwrap();
+        assert_eq!(s.permission_mode, "auto");
+        db.set_code_session_permission_mode(&s.id, "always-approve").unwrap();
+        let got = db.get_code_session(&s.id).unwrap().unwrap();
+        assert_eq!(got.permission_mode, "always-approve");
+        assert_eq!(got.updated_at, s.updated_at);
+        assert!(db.set_code_session_permission_mode(&s.id, "yolo").is_err());
+    }
+
+    #[test]
+    fn archiving_keeps_the_row_and_its_place() {
+        let (db, _) = temp_db();
+        let c = db.create_conversation(None).unwrap();
+        let s = db.create_code_session("/tmp", None, "grok", "default").unwrap();
+        db.set_conversation_archived(&c.id, true).unwrap();
+        db.set_code_session_archived(&s.id, true).unwrap();
+        let got_c = db.get_conversation(&c.id).unwrap().unwrap();
+        let got_s = db.get_code_session(&s.id).unwrap().unwrap();
+        assert!(got_c.archived_at.is_some() && got_s.archived_at.is_some());
+        // Not activity: the lists keep their order.
+        assert_eq!((got_c.updated_at, got_s.updated_at), (c.updated_at, s.updated_at));
+        assert!(db.list_conversations().unwrap().iter().any(|x| x.id == c.id && x.archived_at.is_some()));
+        db.set_conversation_archived(&c.id, false).unwrap();
+        db.set_code_session_archived(&s.id, false).unwrap();
+        assert_eq!(db.get_conversation(&c.id).unwrap().unwrap().archived_at, None);
+        assert_eq!(db.get_code_session(&s.id).unwrap().unwrap().archived_at, None);
     }
 
     #[test]

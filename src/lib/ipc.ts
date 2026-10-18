@@ -99,6 +99,8 @@ export interface Conversation {
   pinned: boolean;
   createdAt: number;
   updatedAt: number;
+  /** When it was archived (unix ms): out of the lists until restored. */
+  archivedAt?: number | null;
 }
 
 export interface Attachment {
@@ -209,6 +211,10 @@ export interface CodeSession {
   hostNode: string | null;
   /** Bumped on every move between nodes. */
   epoch: number;
+  /** Ask / auto / always-approve: Patchbay answers ACP permission prompts for this session. */
+  permissionMode: "default" | "auto" | "always-approve";
+  /** When it was archived (unix ms): its agent stopped, out of the lists until restored. */
+  archivedAt?: number | null;
 }
 
 // ---- mesh ----
@@ -347,6 +353,8 @@ export type CodeEvent =
       agentInfo: { name?: string; title?: string; version?: string } | null;
       configOptions: AcpConfigOption[] | null;
       extensions: AgentExtensions;
+      /** What this agent does without asking, whatever the session's approval mode. */
+      approvalGaps?: string[];
     }
   | { type: "config"; models: AcpModels | null; modes: AcpModes | null; configOptions: AcpConfigOption[] | null }
   | { type: "autoApproved"; toolCallId: string; description: string }
@@ -535,7 +543,7 @@ export const api = {
   createConversation: (modelRef: string | null) => invoke<Conversation>("create_conversation", { modelRef }),
   updateConversation: (
     id: string,
-    patch: { title?: string; modelRef?: string; systemPrompt?: string; pinned?: boolean },
+    patch: { title?: string; modelRef?: string; systemPrompt?: string; pinned?: boolean; archived?: boolean },
   ) =>
     invoke<void>("update_conversation", { id, ...patch }),
   deleteConversation: (id: string) => invoke<void>("delete_conversation", { id }),
@@ -594,7 +602,7 @@ export const api = {
   listAgents: () => invoke<AgentInfo[]>("list_agents"),
   updateCodeSession: (
     id: string,
-    patch: { title?: string; modelRef?: string; pinned?: boolean; activity?: Activity },
+    patch: { title?: string; modelRef?: string; pinned?: boolean; activity?: Activity; archived?: boolean },
   ) =>
     invoke<void>("update_code_session", { id, ...patch }),
   deleteCodeSession: (id: string) => invoke<void>("delete_code_session", { id }),
@@ -628,6 +636,10 @@ export const api = {
   codeCancel: (id: string) => invoke<void>("code_cancel", { id }),
   codeSetModel: (id: string, modelId: string) => invoke<void>("code_set_model", { id, modelId }),
   codeSetMode: (id: string, modeId: string) => invoke<void>("code_set_mode", { id, modeId }),
+  codeSetPermissionMode: (id: string, mode: "default" | "auto" | "always-approve") =>
+    invoke<void>("code_set_permission_mode", { id, mode }),
+  codeSetAgent: (id: string, agent: AgentId, modelRef: string | null) =>
+    invoke<void>("code_set_agent", { id, agent, modelRef }),
   codeSetConfigOption: (id: string, configId: string, value: string) =>
     invoke<void>("code_set_config_option", { id, configId, value }),
   codeRewind: (id: string, ordinal: number, preview: string, revertFiles: boolean) =>

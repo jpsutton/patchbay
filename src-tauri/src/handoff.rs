@@ -443,6 +443,8 @@ mod tests {
             agent_model: None,
             host_node: None,
             epoch: 0,
+            permission_mode: "default".into(),
+            archived_at: None,
         }
     }
 

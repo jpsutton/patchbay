@@ -345,6 +345,31 @@ async fn create_conversation(r: Shared<'_>, model_ref: Option<String>) -> CmdRes
     Ok(r.client.rpc("remote.create_conversation", json!({ "modelRef": model_ref })).await?)
 }
 
+/// Starting a Code session on a chosen computer: its agents, default agent and recent folders.
+#[tauri::command]
+async fn remote_new_session_options(r: Shared<'_>, host: String) -> CmdResult<Value> {
+    Ok(r.client.rpc("remote.new_session_options", json!({ "host": host })).await?)
+}
+
+/// The folders in `path` on `host` (its home folder when `path` is missing).
+#[tauri::command]
+async fn remote_list_dirs(r: Shared<'_>, host: String, path: Option<String>) -> CmdResult<Value> {
+    Ok(r.client.rpc("remote.list_dirs", json!({ "host": host, "path": path })).await?)
+}
+
+#[tauri::command]
+async fn remote_create_code_session(
+    r: Shared<'_>,
+    host: String,
+    cwd: String,
+    model_ref: Option<String>,
+    agent: Option<String>,
+) -> CmdResult<Value> {
+    *r.index.lock().unwrap() = None;
+    let p = json!({ "host": host, "cwd": cwd, "modelRef": model_ref, "agent": agent });
+    Ok(r.client.rpc("remote.create_code_session", p).await?)
+}
+
 #[tauri::command]
 async fn update_conversation(
     r: Shared<'_>,
@@ -353,9 +378,12 @@ async fn update_conversation(
     model_ref: Option<String>,
     system_prompt: Option<String>,
     pinned: Option<bool>,
+    archived: Option<bool>,
 ) -> CmdResult<()> {
     *r.index.lock().unwrap() = None;
-    let p = json!({ "id": id, "title": title, "modelRef": model_ref, "systemPrompt": system_prompt, "pinned": pinned });
+    let p = json!({
+        "id": id, "title": title, "modelRef": model_ref, "systemPrompt": system_prompt, "pinned": pinned, "archived": archived,
+    });
     r.client.rpc("remote.update_conversation", p).await?;
     Ok(())
 }
@@ -493,10 +521,17 @@ async fn remote_live(r: Shared<'_>) -> CmdResult<Value> {
 }
 
 #[tauri::command]
-async fn update_code_session(r: Shared<'_>, id: String, title: Option<String>) -> CmdResult<()> {
-    if title.is_some() {
+async fn update_code_session(
+    r: Shared<'_>,
+    id: String,
+    title: Option<String>,
+    pinned: Option<bool>,
+    archived: Option<bool>,
+) -> CmdResult<()> {
+    if title.is_some() || pinned.is_some() || archived.is_some() {
         *r.index.lock().unwrap() = None;
-        r.client.rpc("remote.update_code_session", json!({ "id": id, "title": title })).await?;
+        let p = json!({ "id": id, "title": title, "pinned": pinned, "archived": archived });
+        r.client.rpc("remote.update_code_session", p).await?;
     }
     Ok(())
 }
@@ -552,6 +587,13 @@ async fn code_is_running(r: Shared<'_>, id: String) -> CmdResult<bool> {
 }
 
 #[tauri::command]
+async fn code_set_agent(r: Shared<'_>, id: String, agent: String, model_ref: Option<String>) -> CmdResult<()> {
+    *r.index.lock().unwrap() = None;
+    r.code("code.set_agent", json!({ "id": id, "agent": agent, "modelRef": model_ref })).await?;
+    Ok(())
+}
+
+#[tauri::command]
 async fn code_stop(r: Shared<'_>, id: String) -> CmdResult<()> {
     r.code("code.stop", json!({ "id": id })).await?;
     Ok(())
@@ -585,6 +627,12 @@ async fn code_set_model(r: Shared<'_>, id: String, model_id: String) -> CmdResul
 #[tauri::command]
 async fn code_set_mode(r: Shared<'_>, id: String, mode_id: String) -> CmdResult<()> {
     r.code("code.set_mode", json!({ "id": id, "modeId": mode_id })).await?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn code_set_permission_mode(r: Shared<'_>, id: String, mode: String) -> CmdResult<()> {
+    r.code("code.set_permission_mode", json!({ "id": id, "mode": mode })).await?;
     Ok(())
 }
 
@@ -718,6 +766,9 @@ pub fn run() {
             set_preferences,
             list_conversations,
             create_conversation,
+            remote_new_session_options,
+            remote_list_dirs,
+            remote_create_code_session,
             update_conversation,
             delete_conversation,
             list_messages,
@@ -740,10 +791,12 @@ pub fn run() {
             code_start,
             code_is_running,
             code_stop,
+            code_set_agent,
             code_prompt,
             code_cancel,
             code_set_model,
             code_set_mode,
+            code_set_permission_mode,
             code_set_config_option,
             code_rewind,
             code_permission_respond,

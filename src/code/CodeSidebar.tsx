@@ -1,11 +1,13 @@
 import { useMemo, useState } from "react";
-import { AGENT_LABELS, api, type CodeSession } from "../lib/ipc";
-import { useStore } from "../lib/store";
-import { SectionLabel, SidebarItem } from "../components/SidebarItem";
+import { AGENT_LABELS, api, type AgentInfo, type CodeSession } from "../lib/ipc";
+import { remoteHost, useStore } from "../lib/store";
+import { ArchivedToggle, SectionLabel, SidebarItem } from "../components/SidebarItem";
+import { sessionActions } from "../lib/itemActions";
 import { fmtShort, matchesQuery } from "../lib/format";
 import { ChevronRightIcon, PlusIcon } from "../components/icons";
 import { activityOf, strongest } from "../lib/activity";
-import { newSessionIn } from "./CodeView";
+import { installedAgents, newSessionIn } from "./CodeView";
+import { ContextMenu } from "../components/ItemMenu";
 
 const COLLAPSED_KEY = "patchbay.codeSidebar.collapsed";
 
@@ -53,9 +55,15 @@ export function CodeSidebar() {
   const askConfirm = useStore((s) => s.askConfirm);
   const query = useStore((s) => s.sidebarQuery);
   const prefs = useStore((s) => s.prefs);
+  const mesh = useStore((s) => s.mesh);
   const [collapsed, setCollapsed] = useState(loadCollapsed);
+  const [showArchived, setShowArchived] = useState(false);
+  /** Right-click on a folder's "+": which agent to start there. */
+  const [agentMenu, setAgentMenu] = useState<{ x: number; y: number; cwd: string; agents: AgentInfo[] } | null>(null);
 
-  const hits = useMemo(() => sessions.filter((s) => matchesQuery(query, s.title, s.cwd)), [sessions, query]);
+  const matching = useMemo(() => sessions.filter((s) => matchesQuery(query, s.title, s.cwd)), [sessions, query]);
+  const hits = useMemo(() => matching.filter((s) => s.archivedAt == null), [matching]);
+  const archived = useMemo(() => matching.filter((s) => s.archivedAt != null), [matching]);
   const pinned = useMemo(() => hits.filter((s) => s.pinned), [hits]);
 
   const groups = useMemo<Group[]>(() => {
@@ -91,7 +99,7 @@ export function CodeSidebar() {
   if (sessions.length === 0) {
     return <div className="px-4 py-2 text-xs text-muted">No code sessions yet</div>;
   }
-  if (hits.length === 0) {
+  if (hits.length === 0 && archived.length === 0) {
     return <div className="px-4 py-2 text-xs text-muted">No matches</div>;
   }
 
@@ -112,7 +120,22 @@ export function CodeSidebar() {
         meta={fmtShort(s.updatedAt)}
         pinned={s.pinned}
         status={st && (st.status === "ready" || st.status === "starting") ? "running" : "idle"}
-        onSelect={() => select(s.id)}
+        onSelect={async () => {
+          // Opening an archived session brings it back.
+          if (s.archivedAt != null) {
+            await api.updateCodeSession(s.id, { archived: false });
+            await refresh();
+          }
+          select(s.id);
+        }}
+        menu={(rename) =>
+          sessionActions(s, {
+            rename,
+            desktop: true,
+            running: !!st && (st.status === "ready" || st.status === "starting"),
+            local: !remoteHost(s, mesh),
+          })
+        }
         onTogglePin={async () => {
           await api.updateCodeSession(s.id, { pinned: !s.pinned });
           refresh();
@@ -174,7 +197,12 @@ export function CodeSidebar() {
                   if (isCollapsed) toggle(g.cwd);
                   newSessionIn(g.cwd);
                 }}
-                title={`New ${AGENT_LABELS[prefs.defaultAgent] ?? ""} session in ${g.cwd}`}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  const at = { x: e.clientX, y: e.clientY, cwd: g.cwd };
+                  installedAgents().then((agents) => setAgentMenu({ ...at, agents: agents.filter((a) => a.available) }));
+                }}
+                title={`New ${AGENT_LABELS[prefs.defaultAgent] ?? ""} session in ${g.cwd} (right-click for another agent)`}
                 aria-label={`New session in ${g.label}`}
               >
                 <PlusIcon size={14} />
@@ -184,6 +212,23 @@ export function CodeSidebar() {
           </div>
         );
       })}
+      {agentMenu && agentMenu.agents.length > 0 && (
+        <ContextMenu
+          x={agentMenu.x}
+          y={agentMenu.y}
+          title={`New session in ${agentMenu.cwd}`}
+          actions={agentMenu.agents.map((a) => ({
+            label: `New ${a.label} session${a.id === prefs.defaultAgent ? " (default)" : ""}`,
+            onSelect: () => {
+              if (collapsed.has(agentMenu.cwd)) toggle(agentMenu.cwd);
+              newSessionIn(agentMenu.cwd, a.id);
+            },
+          }))}
+          onClose={() => setAgentMenu(null)}
+        />
+      )}
+      <ArchivedToggle count={archived.length} open={showArchived} onToggle={() => setShowArchived(!showArchived)} />
+      {showArchived && archived.map((s) => item(s, true))}
     </>
   );
 }
