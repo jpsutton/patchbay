@@ -4016,7 +4016,7 @@ dependencies = [
 
 [[package]]
 name = "patchbay"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4067,7 +4067,7 @@ dependencies = [
 
 [[package]]
 name = "patchbay-mesh"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
