@@ -23,7 +23,15 @@ import {
   XIcon,
 } from "../components/icons";
 
-function StatusMark({ status }: { status: string }) {
+function StatusMark({ status, background }: { status: string; background?: boolean }) {
+  if (background) {
+    return (
+      <span className="flex items-center gap-1.5 text-[12px] text-live" title="The command runs on in the background">
+        <span className="signal-pulse h-1.5 w-1.5 rounded-full bg-live" />
+        background
+      </span>
+    );
+  }
   switch (status) {
     case "completed":
       return (
@@ -118,28 +126,39 @@ export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withI
   const texts = content.map(textOfContent).filter((t): t is string => !!t);
   // Patchbay doesn't host ACP terminals, so their output only reaches us as raw tool output.
   // A tool that returned an image has it in rawOutput too, as base64: never show that as text.
-  const output = texts.length === 0 && diffs.length === 0 && images.length === 0 ? rawOutputText(tc.rawOutput) : null;
+  const output = texts.length === 0 && diffs.length === 0 && images.length === 0 && !tc.terminalOutput ? rawOutputText(tc.rawOutput) : null;
   return (
     <div className="flex flex-col gap-2">
       {withImages && images.length > 0 && <ToolImages images={images} label={tc.title || "Tool output"} />}
       {diffs.map((d, i) => (
         <DiffView key={i} path={d.path} oldText={d.oldText} newText={d.newText} />
       ))}
-      {terminals.map((t) => (
-        <div key={t.terminalId} className="flex items-center gap-2 text-[12px] text-muted">
+      {terminals.length > 0 && !tc.terminalOutput && (
+        <div className="flex items-center gap-2 text-[12px] text-muted">
           <TerminalIcon size={13} />
           <span>
-            Ran in agent terminal <span className="font-mono">{t.terminalId}</span>
-            {tc.status === "in_progress" ? " (running…)" : ""}
+            {tc.background
+              ? "Running in the background; the agent picks up its output when it ends."
+              : tc.status === "in_progress"
+                ? "Running…"
+                : "No output."}
           </span>
         </div>
-      ))}
+      )}
+      {tc.terminalOutput && (
+        <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12.5px] leading-5">
+          {tc.terminalOutput.trimEnd()}
+        </pre>
+      )}
+      {tc.terminalExit && tc.terminalExit.exitCode !== null && tc.terminalExit.exitCode !== 0 && (
+        <div className="font-mono text-[12px] text-danger">exit code {tc.terminalExit.exitCode}</div>
+      )}
       {(texts.length > 0 || output) && (
         <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12.5px] leading-5">
           {texts.length > 0 ? texts.join("\n") : output}
         </pre>
       )}
-      {diffs.length === 0 && texts.length === 0 && images.length === 0 && !output && tc.rawInput != null && (
+      {diffs.length === 0 && texts.length === 0 && images.length === 0 && terminals.length === 0 && !output && tc.rawInput != null && (
         <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12.5px] leading-5 text-muted">
           {JSON.stringify(tc.rawInput, null, 2)}
         </pre>
@@ -184,7 +203,7 @@ export function ToolCallCard({ tc, autoApproved }: { tc: AcpToolCall; autoApprov
             auto
           </span>
         )}
-        <StatusMark status={tc.status ?? "pending"} />
+        <StatusMark status={tc.status ?? "pending"} background={tc.background} />
         <span className={`flex shrink-0 text-faint transition-transform ${open ? "rotate-90" : ""}`}>
           <ChevronRightIcon size={12} />
         </span>
