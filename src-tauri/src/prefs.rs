@@ -32,7 +32,8 @@ pub struct Preferences {
     /// Copied into each new conversation; editable per conversation afterwards.
     pub default_system_prompt: String,
     pub expand_reasoning: bool,
-    /// One extra model call after the first reply to name the conversation.
+    /// One extra model call after the first reply to name the conversation, and after a Code
+    /// session's first and third turns when its agent doesn't name it (`code::titles`).
     pub generate_titles: bool,
 
     // ---- Code agents ----

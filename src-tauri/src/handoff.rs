@@ -515,6 +515,7 @@ mod tests {
             epoch: 0,
             permission_mode: "default".into(),
             archived_at: None,
+            title_manual: false,
         }
     }
 

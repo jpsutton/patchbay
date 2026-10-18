@@ -532,17 +532,19 @@ async fn update_code_session(
     if let Some(a) = activity {
         state.db.set_code_session_activity(&id, &a)?;
     }
-    if title.is_none() && model_ref.is_none() {
-        return Ok(());
+    if let Some(t) = &title {
+        state.db.set_code_session_title(&id, t, true)?;
     }
-    Ok(state
-        .db
-        .update_code_session(&id, None, title.as_deref(), model_ref.as_deref())?)
+    if let Some(m) = &model_ref {
+        state.db.update_code_session(&id, None, None, Some(m))?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
 fn delete_code_session(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     state.code.stop(&id);
+    state.code.titles.forget(&id);
     // Must match the id `TerminalPane` opens with.
     state.terminals.close(&format!("term-{id}"));
     Ok(state.db.delete_code_session(&id)?)
@@ -583,9 +585,14 @@ fn ensure_local_host(state: &AppState, id: &str) -> anyhow::Result<()> {
 /// Agent events go to this window and, live, to every other node. A finished turn also tells
 /// the other nodes to fetch a checkpoint, so the session survives this node going away.
 fn code_sink(state: &AppState) -> code::acp::Sink {
-    use code::acp::CodeEvent;
     let state = state.clone();
-    Arc::new(move |env| {
+    Arc::new(move |env| on_code_event(&state, env))
+}
+
+fn on_code_event(state: &AppState, env: code::acp::Envelope) {
+    use code::acp::CodeEvent;
+    track_titles(state, &env);
+    {
         let mesh = &state.mesh;
         let turn_over = match &env.event {
             CodeEvent::PromptDone { .. } => true,
@@ -623,7 +630,88 @@ fn code_sink(state: &AppState) -> code::acp::Sink {
         // Stamped with its point, so phones and windows can resume from it.
         let v = mesh.broadcast_event(code::acp::EVENT, serde_json::to_value(&env).unwrap_or_default());
         (state.emit)(code::acp::EVENT, v);
-    })
+    }
+}
+
+/// Feeds a session's automatic title from its agent's events (see `code::titles`).
+fn track_titles(state: &AppState, env: &code::acp::Envelope) {
+    use code::acp::CodeEvent;
+    let id = &env.code_session_id;
+    match &env.event {
+        CodeEvent::Update { update } => match update["sessionUpdate"].as_str() {
+            Some("agent_message_chunk") => {
+                if let Some(t) = update["content"]["text"].as_str() {
+                    state.code.titles.on_chunk(id, t);
+                }
+            }
+            // Agents that name their sessions (Grok Build does) send it as session info.
+            Some("session_info_update") => {
+                if let Some(t) = update["title"].as_str().map(str::trim).filter(|t| !t.is_empty()) {
+                    state.code.titles.on_agent_title(id);
+                    set_auto_title(state, id, t);
+                }
+            }
+            _ => {}
+        },
+        CodeEvent::PromptDone { stop_reason } => {
+            let completed = !matches!(stop_reason.as_str(), Some("cancelled" | "error" | "refusal"));
+            if let Some(convo) = state.code.titles.on_turn_end(id, completed)
+                && prefs::load(&state.db).generate_titles
+            {
+                let (state, id) = (state.clone(), id.clone());
+                tauri::async_runtime::spawn(async move {
+                    // An agent that names sessions itself often does it just after the turn.
+                    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+                    if state.code.titles.agent_titled(&id) {
+                        return;
+                    }
+                    let Ok(Some(session)) = state.db.get_code_session(&id) else { return };
+                    if session.title_manual {
+                        return;
+                    }
+                    match code::titles::generate(&state.db, &session, convo).await {
+                        Ok(t) => set_auto_title(&state, &id, &t),
+                        Err(e) => tracing::warn!("session title: {e:#}"),
+                    }
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Name a session automatically, unless someone named it, and show the name everywhere.
+fn set_auto_title(state: &AppState, id: &str, title: &str) {
+    let title = chat::clip(title, 80);
+    match state.db.set_code_session_title(id, &title, false) {
+        Ok(true) => on_code_event(
+            state,
+            code::acp::Envelope { code_session_id: id.to_owned(), event: code::acp::CodeEvent::Title { title } },
+        ),
+        Ok(false) => {}
+        Err(e) => tracing::warn!("session title: {e:#}"),
+    }
+}
+
+/// Name a session from its whole conversation, unpinning a title someone typed.
+async fn code_auto_title_local(state: &AppState, id: &str) -> anyhow::Result<String> {
+    let session = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("code session not found"))?;
+    let convo = code::titles::transcript_context(state.db.code_transcript(id)?.as_deref())
+        .ok_or_else(|| anyhow::anyhow!("nothing to name it from yet: send it a message first"))?;
+    let title = code::titles::generate(&state.db, &session, convo).await?;
+    state.db.unpin_code_session_title(id)?;
+    set_auto_title(state, id, &title);
+    Ok(chat::clip(&title, 80))
+}
+
+#[tauri::command]
+async fn code_auto_title(state: State<'_, AppState>, id: String) -> CmdResult<String> {
+    // The host names it, so the new title reaches viewers in the session's own event stream.
+    if let Some(host) = remote_host(&state, &id)? {
+        let t = state.mesh.rpc(&host, "code.auto_title", serde_json::json!({ "id": id })).await?;
+        return Ok(t.as_str().unwrap_or_default().to_owned());
+    }
+    Ok(code_auto_title_local(&state, &id).await?)
 }
 
 async fn code_start_local(state: &AppState, id: String) -> anyhow::Result<()> {
@@ -735,6 +823,12 @@ async fn code_prompt_local(
     }
     // Bumps updated_at so the session sorts to the top of the sidebar.
     state.db.update_code_session(&id, None, None, None)?;
+    if let Some(s) = state.db.get_code_session(&id)?
+        && let Some(t) = code::titles::first_line_title(&s, if text.trim().is_empty() { atts.first().map_or("", |a| a.name.as_str()) } else { &text })
+    {
+        set_auto_title(state, &id, &t);
+    }
+    state.code.titles.on_prompt(&id, &text, || state.db.code_transcript(&id).ok().flatten());
     state.code.send(&id, AgentCmd::Prompt { blocks })?;
     state.code.set_busy(&id, true);
     if state.db.get_setting(&note_key)?.is_some() {
@@ -1192,6 +1286,7 @@ impl mesh::RpcHandler for MeshRpc {
                 state.code.respond_permission(param(&p, "requestId")?, opt);
                 Ok(Value::Null)
             }
+            "code.auto_title" => Ok(json!(code_auto_title_local(state, &id()?).await?)),
             "code.files" => {
                 let s = state.db.get_code_session(&id()?)?.ok_or_else(|| anyhow::anyhow!("no such session"))?;
                 let files = tokio::task::spawn_blocking(move || files::list(std::path::Path::new(&s.cwd))).await??;
@@ -1691,6 +1786,7 @@ pub fn run() {
             list_code_sessions,
             create_code_session,
             update_code_session,
+            code_auto_title,
             delete_code_session,
             code_start,
             code_is_running,

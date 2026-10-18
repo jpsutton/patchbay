@@ -536,6 +536,12 @@ async fn update_code_session(
     Ok(())
 }
 
+#[tauri::command]
+async fn code_auto_title(r: Shared<'_>, id: String) -> CmdResult<Value> {
+    *r.index.lock().unwrap() = None;
+    r.code("code.auto_title", json!({ "id": id })).await
+}
+
 /// The agents installed on `host`, the computer running a session; a phone runs none itself.
 #[tauri::command]
 async fn list_agents(r: Shared<'_>, host: Option<String>) -> CmdResult<Value> {
@@ -786,6 +792,7 @@ pub fn run() {
             attachment_thumbnail,
             list_code_sessions,
             update_code_session,
+            code_auto_title,
             list_agents,
             get_code_transcript,
             save_code_transcript,

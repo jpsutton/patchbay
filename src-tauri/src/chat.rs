@@ -379,7 +379,7 @@ pub async fn send(
     Ok(())
 }
 
-fn clip(s: &str, max: usize) -> String {
+pub(crate) fn clip(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_owned();
     }
@@ -435,9 +435,18 @@ pub(crate) async fn generate_title(
         clip(user_text, 2000),
         clip(reply, 2000)
     );
+    name_with(resolved, TITLE_PROMPT, convo).await
+}
+
+/// One model call that names `convo` as `system_prompt` asks; `None` if the reply has no usable title.
+pub(crate) async fn name_with(
+    resolved: &providers::Resolved,
+    system_prompt: &str,
+    convo: String,
+) -> Result<Option<String>> {
     let raw = complete_text(
         resolved,
-        vec![ConversationItem::system(TITLE_PROMPT), ConversationItem::user(convo)],
+        vec![ConversationItem::system(system_prompt), ConversationItem::user(convo)],
     )
     .await?;
     Ok(clean_title(&raw))
