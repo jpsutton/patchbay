@@ -570,13 +570,17 @@ async fn run(
     let conn = Rc::new(conn);
     let io_task = tokio::task::spawn_local(io);
 
+    // `terminal_output` (the convention Zed uses): command output comes as `_meta.terminal_output`
+    // and `terminal_exit` on the tool call. An agent that backgrounds a command sends its
+    // `terminal_exit` only when the command ends, which is how the UI knows it still runs.
     let mut client_caps = json!({
         "fs": { "readTextFile": false, "writeTextFile": false },
         "terminal": false,
+        "_meta": { "terminal_output": true },
     });
     if extensions.status_line {
         // Ask Grok Build for `session_status` updates (context fill, session token totals).
-        client_caps["_meta"] = json!({ "x.ai/statusLine": true });
+        client_caps["_meta"]["x.ai/statusLine"] = json!(true);
     }
     let init: acp::InitializeRequest = from_json(json!({
         "protocolVersion": 1,

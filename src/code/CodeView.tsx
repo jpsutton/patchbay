@@ -376,6 +376,13 @@ function PlanPanel({ plan }: { plan: NonNullable<CodeState["plan"]> }) {
   );
 }
 
+/** What a backgrounded command is doing: the agent's description of it, else its title. */
+function backgroundLabel(tc: AcpToolCall): string {
+  const raw = (tc.rawInput ?? {}) as Record<string, unknown>;
+  const label = typeof raw.description === "string" && raw.description.trim() ? raw.description : tc.title;
+  return (label || "a command").split("\n")[0];
+}
+
 type Run = { i: number; e: Entry } | { tools: { i: number; e: Entry }[] };
 
 /**
@@ -581,6 +588,9 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const hostOffline = !!host && !memberOnline(mesh, host);
   const ready = status === "ready";
   const busy = !!s?.busy;
+  // Commands the agent backgrounded: its turn is over, but they still run (and it resumes when
+  // they end).
+  const background = Object.values(s?.toolCalls ?? {}).filter((tc) => tc.background);
   // What the session is waiting on, said plainly. A phone reaches it through a gateway, so it
   // can be reconnecting, or catching up on a session whose agent already runs.
   const reconnecting = remote && !!mesh?.phase && mesh.phase !== "online";
@@ -972,6 +982,16 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                 {busy && s?.permissions.length === 0 && (
                   <div className="flex items-center gap-2 text-xs text-muted">
                     <span className="signal-pulse h-1.5 w-1.5 rounded-full bg-live" /> Working…
+                  </div>
+                )}
+                {background.length > 0 && (
+                  <div className="flex items-center gap-2 text-xs text-muted" title={background.map(backgroundLabel).join("\n")}>
+                    <span className="signal-pulse h-1.5 w-1.5 shrink-0 rounded-full bg-live" />
+                    <span className="min-w-0 truncate">
+                      {background.length === 1
+                        ? `Running in the background: ${backgroundLabel(background[0])}`
+                        : `${background.length} commands running in the background`}
+                    </span>
                   </div>
                 )}
                 {status === "exited" && !hostOffline && (

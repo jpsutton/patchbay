@@ -421,6 +421,17 @@ export interface AcpToolCall {
   locations?: { path: string; line?: number | null }[] | null;
   rawInput?: unknown;
   rawOutput?: unknown;
+  /** Patchbay's own, from `_meta.terminal_*`: the command's output so far. */
+  terminalOutput?: string;
+  /** Patchbay's own: the command has a terminal (`_meta.terminal_info`). */
+  terminal?: boolean;
+  /** Patchbay's own: the command ended (`_meta.terminal_exit`); `exitCode` null when unknown. */
+  terminalExit?: { exitCode: number | null };
+  /**
+   * Patchbay's own: the tool call finished but its command still runs, backgrounded by the agent
+   * (a terminal with no exit yet). Cleared by its `terminal_exit` or when the agent stops.
+   */
+  background?: boolean;
 }
 
 export interface AcpCommand {
