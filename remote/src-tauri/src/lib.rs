@@ -590,7 +590,7 @@ async fn code_set_mode(r: Shared<'_>, id: String, mode_id: String) -> CmdResult<
 
 #[tauri::command]
 async fn code_set_permission_mode(r: Shared<'_>, id: String, mode: String) -> CmdResult<()> {
-    r.code("code.set_permission_mode", json!({ "id": id, "mode" })).await?;
+    r.code("code.set_permission_mode", json!({ "id": id, "mode": mode })).await?;
     Ok(())
 }
 

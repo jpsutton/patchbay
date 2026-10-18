@@ -991,9 +991,10 @@ impl Db {
         if !PERMISSION_MODES.contains(&mode) {
             anyhow::bail!("unknown permission mode {mode:?}");
         }
+        // Like activity: a setting change shouldn't move the session to the top of the list.
         self.conn().execute(
-            "UPDATE code_sessions SET permission_mode = ?2, updated_at = ?3 WHERE id = ?1",
-            params![id, mode, now_ms()],
+            "UPDATE code_sessions SET permission_mode = ?2 WHERE id = ?1",
+            params![id, mode],
         )?;
         Ok(())
     }
@@ -1398,10 +1399,9 @@ mod tests {
         let s = db.create_code_session("/tmp", None, "grok", "auto").unwrap();
         assert_eq!(s.permission_mode, "auto");
         db.set_code_session_permission_mode(&s.id, "always-approve").unwrap();
-        assert_eq!(
-            db.get_code_session(&s.id).unwrap().unwrap().permission_mode,
-            "always-approve"
-        );
+        let got = db.get_code_session(&s.id).unwrap().unwrap();
+        assert_eq!(got.permission_mode, "always-approve");
+        assert_eq!(got.updated_at, s.updated_at);
         assert!(db.set_code_session_permission_mode(&s.id, "yolo").is_err());
     }
 

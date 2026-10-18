@@ -557,6 +557,7 @@ export function install() {
               const grok = (db.code.find((c) => c.id === csid)?.agent ?? "grok") === "grok";
               codeEmit(csid, {
                 type: "sessionReady", acpSessionId: "acp-" + csid, loaded: false,
+                approvalGaps: grok ? [] : ["This agent edits files in this project without asking, in every mode."],
                 capabilities: { loadSession: true, promptCapabilities: { image: false, embeddedContext: true }, mcpCapabilities: { http: true, sse: true } },
                 agentInfo: { name: "fake-agent" },
                 models: grok

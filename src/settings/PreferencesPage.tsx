@@ -295,21 +295,22 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
     return (
       <div className="flex max-w-xl flex-col">
         <p className="pb-2 text-xs text-muted">
-          Default for new Code sessions. Each session can change Ask / Auto / Always in its header; Patchbay applies
-          that for every coding agent. Grok Build also gets this as its starting config. Custom instructions reach Claude
-          Code too. MCP servers and always-allow rules (under Coding agents) apply to every agent.
+          The approval mode applies to every coding agent; each session can change it in its header. The other
+          settings here are for Grok Build. Custom instructions reach Claude Code too. MCP servers and always-allow rules
+          (under Coding agents) apply to every agent.
         </p>
         <Row
-          label="Default permission mode"
+          label="Default approval mode"
           hint={
             prefs.permissionMode === "always-approve" ? (
               <span className="text-danger">
-                New sessions approve edits and commands without asking. Deny rules still apply.
+                New sessions run edits, commands and network access without asking. Plans and questions still reach you,
+                and deny rules in an agent's own config still apply.
               </span>
             ) : prefs.permissionMode === "auto" ? (
-              "New sessions run routine local actions without a prompt; shell still asks."
+              "New sessions read and edit inside the project without asking; deletes, shell, network and anything outside the project still ask."
             ) : (
-              "New sessions ask before edits and non-read-only commands."
+              "New sessions ask before anything the agent asks permission for."
             )
           }
         >
@@ -317,9 +318,9 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
             value={prefs.permissionMode}
             onChange={(v) => set("permissionMode", v)}
             options={[
-              { value: "default", label: "Ask" },
-              { value: "auto", label: "Auto" },
-              { value: "always-approve", label: "Always approve" },
+              { value: "default", label: "Ask first" },
+              { value: "auto", label: "Auto edits" },
+              { value: "always-approve", label: "Approve all" },
             ]}
           />
         </Row>

@@ -349,6 +349,8 @@ export type CodeEvent =
       agentInfo: { name?: string; title?: string; version?: string } | null;
       configOptions: AcpConfigOption[] | null;
       extensions: AgentExtensions;
+      /** What this agent does without asking, whatever the session's approval mode. */
+      approvalGaps?: string[];
     }
   | { type: "config"; models: AcpModels | null; modes: AcpModes | null; configOptions: AcpConfigOption[] | null }
   | { type: "autoApproved"; toolCallId: string; description: string }

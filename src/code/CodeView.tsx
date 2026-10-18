@@ -603,11 +603,17 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   };
   const modes = s?.modes?.availableModes ?? [];
   const approval = session.permissionMode || "default";
+  // Not "Ask / Auto": Cursor has an agent mode called Ask right next to this control.
   const approvalOpts: { id: CodeSession["permissionMode"]; name: string; title: string }[] = [
-    { id: "default", name: "Ask", title: "Ask before edits and commands" },
-    { id: "auto", name: "Auto", title: "Routine local actions run without a prompt; shell still asks" },
-    { id: "always-approve", name: "Always", title: "Approve every tool call without asking" },
+    { id: "default", name: "Ask first", title: "Ask before anything the agent asks permission for" },
+    {
+      id: "auto",
+      name: "Auto edits",
+      title: "Reads and edits inside the project run without asking; deletes, shell, network and anything outside the project still ask",
+    },
+    { id: "always-approve", name: "Approve all", title: "Approve everything except plans and questions, without asking" },
   ];
+  const gaps = s?.approvalGaps ?? [];
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
@@ -667,30 +673,56 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             ))}
           </ChipSelect>
         )}
-        <div
-          role="radiogroup"
-          aria-label="Approvals"
-          title="How Patchbay answers tool permission prompts"
-          className="mr-1 flex gap-0.5 rounded-[9px] border border-line bg-panel p-0.5 text-[12px]"
-        >
-          {approvalOpts.map((m) => {
-            const on = m.id === approval;
-            return (
-              <button
-                key={m.id}
-                role="radio"
-                aria-checked={on}
-                title={m.title}
-                className={`h-[26px] rounded-[7px] px-2.5 ${on ? "bg-panel-2 text-fg" : "text-muted hover:text-fg"} ${
-                  m.id === "always-approve" && on ? "text-danger" : ""
-                }`}
-                onClick={() => !on && setApprovals(m.id)}
-              >
+        {remote ? (
+          // Two segmented controls don't fit a phone's header.
+          <ChipSelect
+            className={`mr-1 max-w-32 ${approval === "always-approve" ? "text-danger" : ""}`}
+            value={approval}
+            title="Approvals"
+            aria-label="Approvals"
+            onChange={(e) => setApprovals(e.target.value as CodeSession["permissionMode"])}
+          >
+            {approvalOpts.map((m) => (
+              <option key={m.id} value={m.id}>
                 {m.name}
-              </button>
-            );
-          })}
-        </div>
+              </option>
+            ))}
+          </ChipSelect>
+        ) : (
+          <div
+            role="radiogroup"
+            aria-label="Approvals"
+            title="What runs without asking you"
+            className="mr-1 flex gap-0.5 rounded-[9px] border border-line bg-panel p-0.5 text-[12px]"
+          >
+            {approvalOpts.map((m) => {
+              const on = m.id === approval;
+              const tone = on ? (m.id === "always-approve" ? "bg-panel-2 text-danger" : "bg-panel-2 text-fg") : "text-muted hover:text-fg";
+              return (
+                <button
+                  key={m.id}
+                  role="radio"
+                  aria-checked={on}
+                  title={m.title}
+                  className={`h-[26px] whitespace-nowrap rounded-[7px] px-2.5 ${tone}`}
+                  onClick={() => !on && setApprovals(m.id)}
+                >
+                  {m.name}
+                </button>
+              );
+            })}
+          </div>
+        )}
+        {gaps.length > 0 && (
+          <button
+            className="mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border font-mono text-[11px] text-muted hover:text-fg"
+            title={`Runs without asking, whatever the approval mode:\n${gaps.join("\n")}`}
+            aria-label="What this agent runs without asking"
+            onClick={() => setToast(gaps.join(" "))}
+          >
+            i
+          </button>
+        )}
         <div className="mx-1 h-5 w-px bg-line" />
         {!remote && (
           <ExportMenu
