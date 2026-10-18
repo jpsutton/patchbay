@@ -1301,6 +1301,12 @@ impl mesh::RpcHandler for MeshRpc {
                 state.chat.cancel(param(&p, "conversationId")?);
                 Ok(Value::Null)
             }
+            // A phone's chat turn, passed on by its gateway because the phone picked this computer.
+            "chat.run" => {
+                let phone = param(&p, "phone")?;
+                gateway::run_chat_local(state, phone, param(&p, "kind")? == "send", &p).await?;
+                Ok(Value::Null)
+            }
             "code.package" => {
                 let have: Vec<String> = serde_json::from_value(p["have"].clone()).unwrap_or_default();
                 package_local(state, &id()?, param(&p, "kind")?, have).await
