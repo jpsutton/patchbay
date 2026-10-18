@@ -323,13 +323,42 @@ function appendText(entries: Entry[], kind: "agent" | "thought" | "user", text: 
   return [...entries, { kind, text } as Entry];
 }
 
+type TerminalMeta = {
+  terminal_info?: { terminal_id?: string };
+  terminal_output?: { data?: string };
+  terminal_output_delta?: { data?: string };
+  terminal_exit?: { exit_code?: number | null };
+};
+
 function mergeToolCall(prev: AcpToolCall | undefined, upd: AcpToolCall): AcpToolCall {
   const out: AcpToolCall = { ...(prev ?? { toolCallId: upd.toolCallId }) };
   for (const [k, v] of Object.entries(upd)) {
-    if (k === "sessionUpdate" || v === undefined || v === null) continue;
+    if (k === "sessionUpdate" || k === "_meta" || v === undefined || v === null) continue;
     (out as unknown as Record<string, unknown>)[k] = v;
   }
+  // The terminal channel (`terminal_output` client capability, see acp.rs): output arrives in
+  // chunks, the exit separately; a call that completed with its terminal still open was
+  // backgrounded and runs on until its exit arrives.
+  const meta = (upd as { _meta?: TerminalMeta | null })._meta;
+  if (meta) {
+    if (meta.terminal_info) out.terminal = true;
+    const chunk = meta.terminal_output?.data ?? meta.terminal_output_delta?.data;
+    if (chunk) out.terminalOutput = (out.terminalOutput ?? "") + chunk;
+    if (meta.terminal_exit) {
+      out.terminalExit = { exitCode: meta.terminal_exit.exit_code ?? null };
+      out.background = false;
+    }
+  }
+  if (out.terminal && !out.terminalExit && out.status === "completed") out.background = true;
   return out;
+}
+
+/** Tool calls with their backgrounded commands marked ended: the agent that ran them is gone. */
+function endBackground(calls: Record<string, AcpToolCall>): Record<string, AcpToolCall> {
+  if (!Object.values(calls).some((tc) => tc.background)) return calls;
+  return Object.fromEntries(
+    Object.entries(calls).map(([k, tc]) => [k, tc.background ? { ...tc, background: false } : tc]),
+  );
 }
 
 function reduceUpdate(s: CodeState, u: AcpUpdate): CodeState {
@@ -411,7 +440,8 @@ export const useStore = create<Store>((set, get) => ({
     const catalogRev = get().catalogRev;
     const prev = get().code[id];
     // Keep what is on screen as the placeholder; otherwise use the cached transcript.
-    const shown = prev && prev.entries.length ? { entries: prev.entries, toolCalls: prev.toolCalls } : null;
+    // A new agent process: whatever the old one ran in the background is gone.
+    const shown = prev && prev.entries.length ? { entries: prev.entries, toolCalls: endBackground(prev.toolCalls) } : null;
     const earlier = prev?.earlier ?? null;
     set((st) => ({ code: { ...st.code, [id]: { ...emptyCode(), configRev: rev, catalogRev, history: shown, earlier } } }));
     if (!shown || !earlier) {
@@ -420,7 +450,9 @@ export const useStore = create<Store>((set, get) => ({
         if (!cur) return;
         const patch: Partial<CodeState> = {};
         if (!cur.earlier && saved.earlier) patch.earlier = saved.earlier;
-        if (!cur.history && saved.history && cur.status !== "ready" && cur.entries.length === 0) patch.history = saved.history;
+        if (!cur.history && saved.history && cur.status !== "ready" && cur.entries.length === 0) {
+          patch.history = { ...saved.history, toolCalls: endBackground(saved.history.toolCalls) };
+        }
         if (Object.keys(patch).length) set((st) => ({ code: { ...st.code, [id]: { ...st.code[id], ...patch } } }));
       });
     }
@@ -586,6 +618,8 @@ export const useStore = create<Store>((set, get) => ({
           status: e.state,
           busy: e.state === "exited" ? false : s.busy,
           permissions: e.state === "exited" ? [] : s.permissions,
+          // Commands an agent backgrounded end with it.
+          toolCalls: e.state === "exited" ? endBackground(s.toolCalls) : s.toolCalls,
         };
         break;
       case "sessionReady": {
