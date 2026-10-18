@@ -54,6 +54,9 @@ pub(crate) async fn call(state: &AppState, from: &str, method: &str, p: &Value) 
             if let Some(pinned) = p["pinned"].as_bool() {
                 db.set_conversation_pinned(&id, pinned)?;
             }
+            if let Some(archived) = p["archived"].as_bool() {
+                db.set_conversation_archived(&id, archived)?;
+            }
             db.update_conversation(&id, p["title"].as_str(), p["modelRef"].as_str(), p["systemPrompt"].as_str())?;
             Value::Null
         }
@@ -93,8 +96,15 @@ pub(crate) async fn call(state: &AppState, from: &str, method: &str, p: &Value) 
         "remote.code" => forward_code(state, from, p).await?,
         "remote.usage" => json!(db.code_usage(&s("id")?)?.view()),
         "remote.update_code_session" => {
+            let id = s("id")?;
             if let Some(t) = p["title"].as_str() {
-                db.update_code_session(&s("id")?, None, Some(t), None)?;
+                db.update_code_session(&id, None, Some(t), None)?;
+            }
+            if let Some(pinned) = p["pinned"].as_bool() {
+                db.set_code_session_pinned(&id, pinned)?;
+            }
+            if let Some(archived) = p["archived"].as_bool() {
+                crate::archive_code_session(state, &id, archived).await?;
             }
             Value::Null
         }

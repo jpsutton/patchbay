@@ -449,6 +449,7 @@ export function install() {
           if (a.modelRef != null) c.modelRef = a.modelRef as string;
           if (a.systemPrompt != null) c.systemPrompt = (a.systemPrompt as string) || null;
           if (a.pinned != null) c.pinned = a.pinned as boolean;
+          if (a.archived != null) c.archivedAt = a.archived ? now() : null;
           return null;
         }
         case "delete_conversation":
@@ -523,6 +524,7 @@ export function install() {
           if (a.title != null) s.title = a.title as string;
           if (a.pinned != null) s.pinned = a.pinned as boolean;
           if (a.activity != null) s.activity = a.activity as CodeSession["activity"];
+          if (a.archived != null) s.archivedAt = a.archived ? now() : null;
           return null;
         }
         case "delete_code_session": db.code = db.code.filter((x) => x.id !== a.id); return null;

@@ -4,9 +4,11 @@ import { useStore } from "../lib/store";
 export function ConfirmDialog() {
   const req = useStore((s) => s.confirm);
   const [checked, setChecked] = useState(false);
+  const [text, setText] = useState("");
 
   useEffect(() => {
     setChecked(req?.checkbox?.checked ?? false);
+    setText(req?.input?.value ?? "");
     if (!req) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") req.resolve({ ok: false, checked: false });
@@ -32,6 +34,18 @@ export function ConfirmDialog() {
           {req.title}
         </div>
         <div className="mb-4 whitespace-pre-wrap text-xs leading-5 text-muted">{req.body}</div>
+        {req.input && (
+          <input
+            autoFocus
+            aria-label={req.input.label}
+            className="mb-4 h-9 w-full rounded-lg border border-border bg-bg px-3 text-sm outline-none focus:border-accent"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && text.trim()) req.resolve({ ok: true, checked, text: text.trim() });
+            }}
+          />
+        )}
         {req.checkbox && (
           <label className="mb-4 flex items-start gap-2 text-xs">
             <input
@@ -51,11 +65,12 @@ export function ConfirmDialog() {
             Cancel
           </button>
           <button
-            autoFocus
-            className={`h-[34px] rounded-lg px-3.5 text-xs font-semibold ${
+            autoFocus={!req.input}
+            disabled={!!req.input && !text.trim()}
+            className={`h-[34px] rounded-lg px-3.5 text-xs font-semibold disabled:opacity-50 ${
               req.danger ? "bg-danger text-bg" : "bg-accent text-accent-fg"
             }`}
-            onClick={() => req.resolve({ ok: true, checked })}
+            onClick={() => req.resolve({ ok: true, checked, text: req.input ? text.trim() : undefined })}
           >
             {req.confirmLabel ?? "Continue"}
           </button>

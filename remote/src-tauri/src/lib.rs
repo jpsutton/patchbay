@@ -353,9 +353,12 @@ async fn update_conversation(
     model_ref: Option<String>,
     system_prompt: Option<String>,
     pinned: Option<bool>,
+    archived: Option<bool>,
 ) -> CmdResult<()> {
     *r.index.lock().unwrap() = None;
-    let p = json!({ "id": id, "title": title, "modelRef": model_ref, "systemPrompt": system_prompt, "pinned": pinned });
+    let p = json!({
+        "id": id, "title": title, "modelRef": model_ref, "systemPrompt": system_prompt, "pinned": pinned, "archived": archived,
+    });
     r.client.rpc("remote.update_conversation", p).await?;
     Ok(())
 }
@@ -493,10 +496,17 @@ async fn remote_live(r: Shared<'_>) -> CmdResult<Value> {
 }
 
 #[tauri::command]
-async fn update_code_session(r: Shared<'_>, id: String, title: Option<String>) -> CmdResult<()> {
-    if title.is_some() {
+async fn update_code_session(
+    r: Shared<'_>,
+    id: String,
+    title: Option<String>,
+    pinned: Option<bool>,
+    archived: Option<bool>,
+) -> CmdResult<()> {
+    if title.is_some() || pinned.is_some() || archived.is_some() {
         *r.index.lock().unwrap() = None;
-        r.client.rpc("remote.update_code_session", json!({ "id": id, "title": title })).await?;
+        let p = json!({ "id": id, "title": title, "pinned": pinned, "archived": archived });
+        r.client.rpc("remote.update_code_session", p).await?;
     }
     Ok(())
 }

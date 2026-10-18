@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from "react";
+import { ContextMenu, type ItemAction } from "./ItemMenu";
 import type { Activity } from "../lib/activity";
 import {
   ChatIcon,
@@ -14,6 +15,21 @@ import {
 export function SectionLabel({ children }: { children: ReactNode }) {
   return (
     <div className="px-4 pb-1.5 pt-3 font-mono text-[11px] uppercase tracking-[0.06em] text-faint">{children}</div>
+  );
+}
+
+/** The collapsed "Archived" heading at the end of a sidebar list. */
+export function ArchivedToggle({ count, open, onToggle }: { count: number; open: boolean; onToggle: () => void }) {
+  if (count === 0) return null;
+  return (
+    <button
+      className="mx-2 mt-2 flex items-center gap-1.5 rounded-lg px-2 pb-1.5 pt-3 text-left font-mono text-[11px] uppercase tracking-[0.06em] text-faint hover:text-muted"
+      aria-expanded={open}
+      onClick={onToggle}
+    >
+      <span className={`inline-block transition-transform ${open ? "rotate-90" : ""}`}>›</span>
+      Archived · {count}
+    </button>
   );
 }
 
@@ -33,6 +49,7 @@ export function SidebarItem({
   onRename,
   onDelete,
   onTogglePin,
+  menu,
 }: {
   title: string;
   subtitle?: string;
@@ -54,9 +71,16 @@ export function SidebarItem({
   onRename: (t: string) => void;
   onDelete: () => void;
   onTogglePin?: () => void;
+  /** Right-click actions; `rename` starts this row's inline editor. */
+  menu?: (rename: () => void) => ItemAction[];
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(title);
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
+  const rename = () => {
+    setDraft(title);
+    setEditing(true);
+  };
   if (editing) {
     return (
       <input
@@ -84,12 +108,17 @@ export function SidebarItem({
         active ? "bg-panel-2 font-medium text-fg" : "text-fg/75 hover:bg-panel-2/50 hover:text-fg"
       } ${subtitle ? "h-auto py-1.5" : ""}`}
       onClick={onSelect}
-      onDoubleClick={() => {
-        setDraft(title);
-        setEditing(true);
+      onDoubleClick={rename}
+      onContextMenu={(e) => {
+        if (!menu) return;
+        e.preventDefault();
+        setMenuAt({ x: e.clientX, y: e.clientY });
       }}
-      title="Double-click to rename"
+      title={menu ? "Double-click to rename, right-click for more" : "Double-click to rename"}
     >
+      {menuAt && menu && (
+        <ContextMenu x={menuAt.x} y={menuAt.y} title={title} actions={menu(rename)} onClose={() => setMenuAt(null)} />
+      )}
       {ring ? (
         <span className={`flex w-4 shrink-0 justify-center ${busy ? "signal-pulse" : ""}`}>{ring}</span>
       ) : (

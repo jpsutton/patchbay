@@ -162,11 +162,14 @@ export interface ConfirmRequest {
   confirmLabel?: string;
   danger?: boolean;
   checkbox?: { label: string; checked: boolean };
+  /** A text field, e.g. for renaming; its value comes back in `text`. */
+  input?: { value: string; label: string };
 }
 
 export interface ConfirmResult {
   ok: boolean;
   checked: boolean;
+  text?: string;
 }
 
 interface Store {

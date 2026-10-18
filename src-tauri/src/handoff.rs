@@ -443,6 +443,7 @@ mod tests {
             agent_model: None,
             host_node: None,
             epoch: 0,
+            archived_at: None,
         }
     }
 

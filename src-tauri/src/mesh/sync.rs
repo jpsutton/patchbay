@@ -32,7 +32,7 @@ pub const TABLES: &[Table] = &[
     Table {
         name: "conversations",
         pk: &["id"],
-        cols: &["title", "model_ref", "system_prompt", "created_at", "updated_at", "pinned", "active_leaf_id"],
+        cols: &["title", "model_ref", "system_prompt", "created_at", "updated_at", "pinned", "active_leaf_id", "archived_at"],
     },
     Table {
         name: "messages",
@@ -70,6 +70,7 @@ pub const TABLES: &[Table] = &[
             "epoch",
             "agent",
             "agent_model",
+            "archived_at",
         ],
     },
     Table { name: "mcp_servers", pk: &["id"], cols: &["name", "config_json", "enabled", "created_at"] },
