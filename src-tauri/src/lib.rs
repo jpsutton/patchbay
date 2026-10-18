@@ -500,11 +500,17 @@ fn create_code_session_local(
     state.db.create_code_session(cwd, model_ref, &agent, &prefs.permission_mode)
 }
 
-/// The coding agents Patchbay can drive, and whether each is installed.
+/// The coding agents Patchbay can drive, and whether each is installed here or, with `host`, on
+/// that computer.
 #[tauri::command]
-async fn list_agents(state: State<'_, AppState>) -> CmdResult<Vec<code::agents::AgentInfo>> {
+async fn list_agents(state: State<'_, AppState>, host: Option<String>) -> CmdResult<serde_json::Value> {
+    if let Some(h) = host.filter(|h| h != state.mesh.node_id()) {
+        let options = state.mesh.rpc(&h, "code.new_options", serde_json::json!({})).await?;
+        return Ok(options["agents"].clone());
+    }
     let paths = prefs::load(&state.db).agent_paths;
-    Ok(tokio::task::spawn_blocking(move || code::agents::detect_all(&paths)).await?)
+    let agents = tokio::task::spawn_blocking(move || code::agents::detect_all(&paths)).await?;
+    Ok(serde_json::to_value(agents)?)
 }
 
 #[tauri::command]

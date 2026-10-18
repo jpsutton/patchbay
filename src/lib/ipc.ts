@@ -603,7 +603,8 @@ export const api = {
   listCodeSessions: () => invoke<CodeSession[]>("list_code_sessions"),
   createCodeSession: (cwd: string, modelRef: string | null, agent?: AgentId) =>
     invoke<CodeSession>("create_code_session", { cwd, modelRef, agent: agent ?? null }),
-  listAgents: () => invoke<AgentInfo[]>("list_agents"),
+  /** With `host`, the agents installed on that computer. */
+  listAgents: (host?: string | null) => invoke<AgentInfo[]>("list_agents", { host: host ?? null }),
   updateCodeSession: (
     id: string,
     patch: { title?: string; modelRef?: string; pinned?: boolean; activity?: Activity; archived?: boolean },

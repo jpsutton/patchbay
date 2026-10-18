@@ -30,7 +30,7 @@ All five speak ACP over stdio, so one client (`code/acp.rs`) drives them all. Pe
   - Normalizes session config (next section).
   - Folds standard ACP usage (`usage_update`, `PromptResponse.usage`) into the same `Usage` event as Grok's status line.
   - Turns ACP `auth_required` (-32000) into a message that tells the user how to sign in.
-- DB: `code_sessions.agent` (default `grok`) and `code_sessions.agent_model`. A session keeps its agent, because ACP session ids only mean something to the agent that made them.
+- DB: `code_sessions.agent` (default `grok`) and `code_sessions.agent_model`. ACP session ids only mean something to the agent that made them, so switching agents starts a new ACP session (next section).
 - Preferences: `defaultAgent` and `agentPaths` (id -> executable). Changing `agentPaths` restarts idle sessions, like the other agent settings.
 
 ## Models, modes and config options
@@ -44,6 +44,19 @@ Agents report these three ways:
 `SessionConfig` in `acp.rs` derives `models` / `modes` from the `model` and `mode` config options when present, so the UI keeps one model picker and one mode switch. It flattens option groups. It remembers which option ids carry model and mode, so `SetModel` / `SetMode` go through `session/set_config_option` for those agents and through `session/set_model` / `set_mode` for the others. The remaining options (reasoning effort and the like) reach the UI as `configOptions` and render as extra chips in the composer footer. Each `config_option_update`, and each `set_config_option` response, sends a `config` event with the full new state.
 
 Models are the one place where agent identity shows in the logic. Grok runs on Patchbay's models (`pb-<model id>`, with pricing, vision and context window from Settings). The other agents bring their own model ids. For those, the chosen model is saved in `agent_model` and reselected after `session/new` or `session/load` when the agent comes back on a different one. `AgentKind::uses_patchbay_models` gates this.
+
+## Switching agents mid-session
+
+The composer's agent picker works at any point in a session, on the desktop and on the phone. It lists the agents installed on the computer that runs the session: `list_agents` takes a `host`, and asks that computer through `code.new_options`. While the agent is mid-turn, the switch is refused.
+
+Before the first message, a switch only changes `agent`. After it, the new agent can't load the old agent's session, so `code_set_agent_local` hands over the conversation as text:
+
+- `handoff::fold_for_switch` moves the saved transcript into its `earlier` part and ends it with a "Switched from X to Y" divider. The new agent's own turns start empty.
+- `handoff::switch_prompt` writes a note with the whole conversation, with a `Tool: …` line for each tool call. It goes in `mesh.handoff.{id}`, the same slot a move between computers uses, and the next prompt carries it once.
+- Notes are wrapped in `<patchbay-handoff>…</patchbay-handoff>`. The store drops that wrapper from replayed user messages, so the note doesn't appear in the transcript.
+- The UI shows `earlier` dimmed, above the current agent's turns. Those turns can't be edited or rewound.
+
+Switching back to an agent the session had before also starts a fresh ACP session with the note. It does not resume that agent's old session.
 
 ## Custom instructions
 

@@ -369,6 +369,14 @@ async fn phone_starts_a_session_on_another_computer() {
     let opts = p.client.rpc("remote.new_session_options", json!({ "host": bn })).await.unwrap();
     assert_eq!(opts["recent"][0], cwd.as_str());
 
+    // The phone switches it to another agent mid-session; B folds the transcript and seeds the note.
+    b.state.db.set_code_transcript(&id, r#"{"v":1,"entries":[{"kind":"user","text":"fix it"}],"toolCalls":{}}"#).unwrap();
+    let p_switch = json!({ "method": "code.set_agent", "params": { "id": id, "agent": "claude-code" } });
+    p.client.rpc("remote.code", p_switch).await.unwrap();
+    assert_eq!(b.state.db.get_code_session(&id).unwrap().unwrap().agent, "claude-code");
+    let note = b.state.db.get_setting(&format!("mesh.handoff.{id}")).unwrap().unwrap();
+    assert!(note.contains("from another agent, Grok Build") && note.contains("User: fix it"), "{note}");
+
     // A folder that isn't there is refused; so is a computer that's gone.
     let err = p
         .client

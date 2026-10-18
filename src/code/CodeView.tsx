@@ -72,14 +72,19 @@ function configChoices(o: AcpConfigOption) {
   return o.options.flatMap((c) => ("options" in c ? c.options : [c]));
 }
 
-/** Installed agents, asked once per window. */
-let agentList: Promise<AgentInfo[]> | null = null;
-export function installedAgents(): Promise<AgentInfo[]> {
-  agentList ??= api.listAgents().catch(() => {
-    agentList = null;
-    return [];
-  });
-  return agentList;
+/** Agents installed here, or on computer `host`; asked once per window and computer. */
+const agentLists = new Map<string, Promise<AgentInfo[]>>();
+export function installedAgents(host?: string | null): Promise<AgentInfo[]> {
+  const key = host ?? "";
+  let list = agentLists.get(key);
+  if (!list) {
+    list = api.listAgents(host).catch(() => {
+      agentLists.delete(key);
+      return [];
+    });
+    agentLists.set(key, list);
+  }
+  return list;
 }
 
 /**
@@ -87,11 +92,26 @@ export function installedAgents(): Promise<AgentInfo[]> {
  * starts fresh with the conversation so far as context (`handoff::switch_prompt`), so it asks
  * first. The default isn't touched.
  */
-function SessionAgentPicker({ session, started, disabled }: { session: CodeSession; started: boolean; disabled: boolean }) {
+function SessionAgentPicker({
+  session,
+  host,
+  started,
+  disabled,
+}: {
+  session: CodeSession;
+  /** The computer running the session, when that isn't this device (always, on a phone). */
+  host: string | null;
+  started: boolean;
+  disabled: boolean;
+}) {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   useEffect(() => {
-    installedAgents().then(setAgents);
-  }, []);
+    let live = true;
+    installedAgents(host).then((a) => live && setAgents(a));
+    return () => {
+      live = false;
+    };
+  }, [host]);
   const usable = agents.filter((a) => a.available || a.id === session.agent);
   if (usable.length < 2) return null;
   const label = (id: string) => agents.find((a) => a.id === id)?.label ?? id;
@@ -121,7 +141,8 @@ function SessionAgentPicker({ session, started, disabled }: { session: CodeSessi
           // The transcript was folded into earlier history: show it from the saved copy.
           if (started) st.resetCode(session.id);
           await st.refreshCodeSessions();
-          await st.startAgent(session.id);
+          // Another computer runs it: attach, which starts the new agent there and follows it.
+          await (host ? st.attachAgent(session.id) : st.startAgent(session.id));
         } catch (err) {
           st.setToast(errorText(err));
         }
@@ -1007,13 +1028,12 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
               warnNoVision={model ? !model.vision : false}
               footer={
                 <>
-                {!remoteHost(session, mesh) && (
-                  <SessionAgentPicker
-                    session={session}
-                    started={[s?.earlier, s?.history, s].some((p) => (p?.entries ?? []).some((x) => x.kind === "user"))}
-                    disabled={busy || status === "starting"}
-                  />
-                )}
+                <SessionAgentPicker
+                  session={session}
+                  host={host}
+                  started={[s?.earlier, s?.history, s].some((p) => (p?.entries ?? []).some((x) => x.kind === "user"))}
+                  disabled={busy || status === "starting" || hostOffline || !!reconnecting}
+                />
                 {acpModels && acpModels.availableModels.length > 0 ? (
                   <ChipSelect
                     lead={<ModelRing id={currentModelRef} />}
