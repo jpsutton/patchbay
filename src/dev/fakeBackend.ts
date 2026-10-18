@@ -209,6 +209,24 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
     }
   };
   codeEmit(csid, { type: "update", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Planning the change." } } });
+  // A plan document written as a tool call, the way Cursor's plan mode does it.
+  if (text.startsWith("/plan")) {
+    const plan = `# Tidy the README\n\n## Problem\n\nThe intro is out of date.\n\n## Steps\n\n1. Read \`README.md\`.\n2. Rewrite the intro.\n3. Check the links still work.\n`;
+    codeEmit(csid, {
+      type: "update",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: id(),
+        title: "Create Plan: Tidy the README",
+        status: "completed",
+        rawInput: { _toolName: "createPlan", name: "Tidy the README", plan },
+        content: [{ type: "content", content: { type: "text", text: "Plan saved to file:///tmp/tidy-the-readme.plan.md" } }],
+      },
+    });
+    await say("The plan is ready. Say the word and I'll start.");
+    codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
   codeEmit(csid, {
     type: "update",
     update: {
@@ -303,6 +321,18 @@ function meshMember() {
       { nodeId: ME, name: mesh.name, state: "self", via: null, viaName: null, rttMs: null, url: null, admittedAt: now() - 9e8, approver: ME },
       { nodeId: "n-studio", name: "studio", state: "direct", via: null, viaName: null, rttMs: 4, url: "ws://100.64.0.7:41890", admittedAt: now() - 8e8, approver: ME },
       { nodeId: "n-nas", name: "nas", state: "relay", via: "n-studio", viaName: "studio", rttMs: null, url: null, admittedAt: now() - 7e8, approver: "n-studio" },
+      {
+        nodeId: "n-phone",
+        name: "pocket",
+        state: "relay",
+        via: "n-studio",
+        viaName: "studio",
+        rttMs: null,
+        url: null,
+        admittedAt: now() - 6.5e8,
+        approver: "n-studio",
+        role: "remote",
+      },
       { nodeId: "n-old", name: "old-desktop", state: "offline", via: null, viaName: null, rttMs: null, url: null, admittedAt: now() - 6e8, approver: ME },
     ],
   } satisfies Partial<MeshStatus>);
@@ -379,7 +409,7 @@ export function install() {
   db.models.push({ id: "m1", providerId: "p1", modelId: "demo-model", displayName: "Demo model", vision: true, contextWindow: 128000, params: { ...emptyParams(), pricing: { input: 3, cachedInput: 0.3, cacheWrite: 3.75, output: 15 } } });
   db.models.push({ id: "m2", providerId: "p1", modelId: "demo-mini", displayName: "Demo mini", vision: false, contextWindow: 32000, params: emptyParams() });
   const seed = (cwd: string, title: string, ago: number, activity: CodeSession["activity"], hostNode = ME) =>
-    db.code.push({ id: id(), cwd, acpSessionId: null, title, modelRef: "m1", pinned: false, createdAt: now() - ago, updatedAt: now() - ago, activity, hostNode, epoch: 0, agent: "grok", agentModel: null });
+    db.code.push({ id: id(), cwd, acpSessionId: null, title, modelRef: "m1", pinned: false, createdAt: now() - ago, updatedAt: now() - ago, activity, hostNode, epoch: 0, agent: "grok", agentModel: null, permissionMode: "default" });
   seed("/home/demo/Projects/nulamp", "Windows installer testing", 1000, "edit");
   seed("/home/demo/Projects/nulamp", "Release to staging", 5000, "pr");
   seed("/home/demo/Projects/omnimark", "Interactive document controls", 3000, "branch", meshDemo ? "n-studio" : ME);
@@ -514,9 +544,31 @@ export function install() {
 
         case "list_code_sessions": return [...db.code].sort((x, y) => y.updatedAt - x.updatedAt);
         case "create_code_session": {
-          const s: CodeSession = { id: id(), cwd: a.cwd as string, acpSessionId: null, title: "New session", modelRef: (a.modelRef as string) ?? null, pinned: false, createdAt: now(), updatedAt: now(), activity: null, agent: ((a.agent as AgentId | null) ?? (JSON.parse(db.settings.preferences ?? "{}").defaultAgent as AgentId | undefined) ?? "grok"), agentModel: null, hostNode: ME, epoch: 0 };
+          const prefs = JSON.parse(db.settings.preferences ?? "{}") as { defaultAgent?: AgentId; permissionMode?: CodeSession["permissionMode"] };
+          const s: CodeSession = {
+            id: id(),
+            cwd: a.cwd as string,
+            acpSessionId: null,
+            title: "New session",
+            modelRef: (a.modelRef as string) ?? null,
+            pinned: false,
+            createdAt: now(),
+            updatedAt: now(),
+            activity: null,
+            agent: ((a.agent as AgentId | null) ?? prefs.defaultAgent ?? "grok"),
+            agentModel: null,
+            hostNode: ME,
+            epoch: 0,
+            permissionMode: prefs.permissionMode ?? "default",
+          };
           db.code.push(s);
           return s;
+        }
+        case "code_set_permission_mode": {
+          const s = db.code.find((x) => x.id === a.id)!;
+          s.permissionMode = a.mode as CodeSession["permissionMode"];
+          s.updatedAt = now();
+          return null;
         }
         case "update_code_session": {
           const s = db.code.find((x) => x.id === a.id)!;
@@ -535,6 +587,7 @@ export function install() {
               const grok = (db.code.find((c) => c.id === csid)?.agent ?? "grok") === "grok";
               codeEmit(csid, {
                 type: "sessionReady", acpSessionId: "acp-" + csid, loaded: false,
+                approvalGaps: grok ? [] : ["This agent edits files in this project without asking, in every mode."],
                 capabilities: { loadSession: true, promptCapabilities: { image: false, embeddedContext: true }, mcpCapabilities: { http: true, sse: true } },
                 agentInfo: { name: "fake-agent" },
                 models: grok
@@ -750,7 +803,7 @@ export function install() {
           const s: CodeSession = {
             id: id(), cwd: a.cwd as string, acpSessionId: null, title: "New session", modelRef: (a.modelRef as string) ?? null,
             pinned: false, createdAt: now(), updatedAt: now(), activity: null, agent: (a.agent as AgentId) ?? "grok",
-            agentModel: null, hostNode: a.host as string, epoch: 0,
+            agentModel: null, hostNode: a.host as string, epoch: 0, permissionMode: "default",
           };
           db.code.push(s);
           return s;

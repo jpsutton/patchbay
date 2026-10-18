@@ -28,6 +28,8 @@ const STATE_DOT: Record<MeshMember["state"], string> = {
 };
 
 function MemberRow({ m, onRemove }: { m: MeshMember; onRemove?: () => void }) {
+  const phone = m.role === "remote";
+  const label = phone && m.state === "relay" ? "Relayed" : STATE_LABEL[m.state];
   const detail =
     m.state === "relay"
       ? `through ${m.viaName || "another computer"}`
@@ -40,8 +42,8 @@ function MemberRow({ m, onRemove }: { m: MeshMember; onRemove?: () => void }) {
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm">{m.name}</div>
         <div className="text-[12px] text-muted">
-          {m.role === "remote" && <span className="text-faint">Phone · </span>}
-          {STATE_LABEL[m.state]}
+          {phone && <span className="text-faint">Phone · </span>}
+          {label}
           {detail && <span className="text-faint"> · {detail}</span>}
         </div>
       </div>

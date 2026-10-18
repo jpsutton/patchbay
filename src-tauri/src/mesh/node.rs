@@ -501,8 +501,14 @@ impl Mesh {
     /// Cut a phone's connection, as a network change would (tests).
     #[cfg(test)]
     pub fn drop_remote(&self, node: &str) {
-        if let Some(r) = self.0.st.lock().unwrap().remotes.remove(node) {
-            r.kill.cancel();
+        let kill = {
+            let mut st = self.0.st.lock().unwrap();
+            st.remotes.remove(node).map(|r| r.kill)
+        };
+        if let Some(kill) = kill {
+            kill.cancel();
+            self.0.emit_status();
+            self.0.send_links();
         }
     }
 
@@ -682,20 +688,30 @@ impl Inner {
             .filter(|m| Some(&m.mesh_id) == mesh_id.as_ref())
             .map(|m| {
                 let sess = st.sessions.get(&m.node_id);
-                let state = if m.node_id == self.me {
-                    "self"
+                let (state, via) = if m.node_id == self.me {
+                    ("self", None)
                 } else if m.is_removed() {
-                    "removed"
+                    ("removed", None)
                 } else if m.is_remote() {
-                    if st.remotes.contains_key(&m.node_id) { "direct" } else { "offline" }
+                    if st.remotes.contains_key(&m.node_id) {
+                        ("direct", None)
+                    } else if let Some(gw) = st
+                        .links
+                        .iter()
+                        .find(|(_, r)| r.remotes.iter().any(|id| id == &m.node_id))
+                        .map(|(o, _)| o.clone())
+                    {
+                        ("relay", Some(gw))
+                    } else {
+                        ("offline", None)
+                    }
                 } else {
                     match sess {
-                        Some(s) if s.via.is_some() => "relay",
-                        Some(_) => "direct",
-                        None => "offline",
+                        Some(s) if s.via.is_some() => ("relay", s.via.clone()),
+                        Some(_) => ("direct", None),
+                        None => ("offline", None),
                     }
                 };
-                let via = sess.and_then(|s| s.via.clone());
                 json!({
                     "nodeId": m.node_id,
                     "name": m.name,
@@ -1534,13 +1550,24 @@ impl Inner {
                 }
             }
             Msg::Links(r) => {
-                let newer = {
+                let (newer, remotes_changed) = {
                     let mut st = self.st.lock().unwrap();
                     let newer = r.origin != self.me && st.links.get(&r.origin).is_none_or(|old| old.ver < r.ver);
+                    let remotes_changed = newer
+                        && st
+                            .links
+                            .get(&r.origin)
+                            .is_none_or(|old| {
+                                let mut a = old.remotes.clone();
+                                let mut b = r.remotes.clone();
+                                a.sort();
+                                b.sort();
+                                a != b
+                            });
                     if newer {
                         st.links.insert(r.origin.clone(), r.clone());
                     }
-                    newer
+                    (newer, remotes_changed)
                 };
                 if newer {
                     self.learn_addrs(&r.origin, r.addrs.clone());
@@ -1553,6 +1580,10 @@ impl Inner {
                         if n != from {
                             let _ = s.tx.send(Msg::Links(r.clone()));
                         }
+                    }
+                    drop(st);
+                    if remotes_changed {
+                        self.emit_status();
                     }
                 }
             }
@@ -1682,6 +1713,7 @@ impl Inner {
                     .filter(|(_, s)| s.via.is_none())
                     .filter_map(|(n, s)| s.url.clone().map(|u| (n.clone(), u)))
                     .collect(),
+                remotes: st.remotes.keys().cloned().collect(),
             }
         };
         self.broadcast(Msg::Links(report));
@@ -1869,6 +1901,7 @@ impl Inner {
         }
         tracing::info!("mesh: phone {name} connected");
         self.emit_status();
+        self.send_links();
         let ticket = self.issue_ticket(&node, sec.remote_static);
         send(&mut sec, &link, &ticket)?;
         let mut changed = self.changed.subscribe();
@@ -1932,6 +1965,7 @@ impl Inner {
         if mine {
             tracing::info!("mesh: phone {name} disconnected");
             self.emit_status();
+            self.send_links();
         }
         res
     }
