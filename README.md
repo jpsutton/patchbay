@@ -60,13 +60,13 @@ Download Patchbay from the [Releases page](https://github.com/jpsutton/patchbay/
 
 | Platform | Packages |
 | --- | --- |
-| Linux | `.deb` (Ubuntu 24.04 or newer, Debian 13), `.rpm` (Fedora, openSUSE), AppImage, and an Arch Linux package repository. Needs glibc 2.39 or newer. Headless: a `patchbayd` tarball. |
+| Linux | `.deb` (Ubuntu 24.04 or newer, Debian 13), `.rpm` (Fedora, openSUSE), AppImage, and an Arch Linux package repository. Needs glibc 2.39 or newer. |
 | Windows | Installer (`.exe`) and `.msi` |
 | macOS | `.dmg` (Apple silicon) |
 
 Windows and macOS builds aren't signed by Microsoft or Apple yet, so your system will warn you the first time you open them.
 
-For a computer without a display, `patchbayd` runs Patchbay headless and serves the same UI to a browser. See [docs/headless.md](docs/headless.md).
+For a computer without a display, `patchbayd` runs Patchbay headless and serves the same UI to a browser. It comes in the same formats (`.deb`, `.rpm`, the Arch repository, plus archives for any Linux, Windows and macOS), with systemd units on Linux. See [docs/headless.md](docs/headless.md).
 
 ### Arch Linux
 

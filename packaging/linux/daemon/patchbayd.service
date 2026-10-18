@@ -1,16 +1,14 @@
-# systemd user unit for patchbayd. Install:
-#   cp patchbayd.service ~/.config/systemd/user/
-#   systemctl --user daemon-reload
+# systemd user unit for patchbayd, headless Patchbay. To run it as yourself:
 #   systemctl --user enable --now patchbayd
-#   loginctl enable-linger "$USER"   # keep it running while you're logged out
-# Assumes the tarball was unpacked into ~/.local/opt/patchbayd; edit ExecStart otherwise.
+#   loginctl enable-linger "$USER"   # keeps it running while you're logged out
+# To run it for a user at boot without them logging in, use patchbayd@.service instead.
 [Unit]
 Description=Patchbay, headless (chats, Code sessions and the mesh, with a browser UI)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=%h/.local/opt/patchbayd/bin/patchbayd
+ExecStart=/usr/bin/patchbayd
 Restart=on-failure
 RestartSec=5
 

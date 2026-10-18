@@ -4,19 +4,30 @@
 
 ## Install
 
-Download `patchbayd-<version>-linux-x86_64.tar.gz` from the [Releases page](https://github.com/jpsutton/patchbay/releases/latest). It's signed like every release file (see "Checking a download" in the main README). Unpack it into `~/.local/opt/patchbayd`:
+Download it from the [Releases page](https://github.com/jpsutton/patchbay/releases/latest). Every file is signed like the rest of the release (see "Checking a download" in the main README).
+
+| Platform | Package |
+| --- | --- |
+| Debian, Ubuntu | `patchbayd_<version>_amd64.deb` (Ubuntu 24.04 or newer, Debian 13) |
+| Fedora, openSUSE | `patchbayd-<version>-1.x86_64.rpm` |
+| Arch Linux | `patchbayd` in the Patchbay package repository (set it up as in the main README, then `sudo pacman -Sy patchbayd`) |
+| Any Linux | `patchbayd-<version>-linux-x86_64.tar.gz` (glibc 2.39 or newer) |
+| Windows | `patchbayd-<version>-windows-x86_64.zip` |
+| macOS | `patchbayd-<version>-macos-aarch64.tar.gz` (Apple silicon) |
+
+The packages install `patchbayd`, its own copy of `grok` (the Grok Build agent) and the web UI under `/usr/lib/patchbayd`, with `patchbayd` on your `PATH` and two systemd units (see below). They don't conflict with the desktop app's packages. Other coding agents (Claude Code, OpenCode and so on) are found on `PATH` as in the desktop app.
+
+The archives hold the same three pieces. Keep them together, because the daemon finds `grok` and the UI relative to its own binary. On Linux, unpack the tarball into `~/.local/opt/patchbayd`, where its systemd unit expects it:
 
 ```bash
 mkdir -p ~/.local/opt/patchbayd
 tar -xzf patchbayd-*-linux-x86_64.tar.gz -C ~/.local/opt/patchbayd --strip-components=1
 ```
 
-The folder holds `bin/patchbayd`, `bin/grok` (the Grok Build agent) and `share/patchbay/web` (the UI it serves). Keep them together: the daemon finds the other two relative to its own binary. Other coding agents (Claude Code, OpenCode and so on) are found on `PATH` as in the desktop app.
-
 ## Run
 
 ```bash
-~/.local/opt/patchbayd/bin/patchbayd
+patchbayd        # ~/.local/opt/patchbayd/bin/patchbayd from the tarball
 ```
 
 It prints the address of the web UI with its access token:
@@ -27,15 +38,35 @@ Patchbay web UI: http://127.0.0.1:4420/#token=…
 
 Open that address in a browser. The token is saved in the browser, so after the first visit `http://127.0.0.1:4420/` is enough. Run `patchbayd token` to print the address again, or `patchbayd token --rotate` to replace the token, which signs out every browser.
 
-To keep it running, install the systemd user unit:
+## Keep it running (systemd)
+
+The Linux packages include two units:
+
+- **`patchbayd.service`**, a user unit: Patchbay runs as you, with your data.
+
+  ```bash
+  systemctl --user enable --now patchbayd
+  loginctl enable-linger "$USER"   # keeps it running while you're logged out
+  ```
+
+- **`patchbayd@.service`**, a system unit that starts at boot as the user named after the `@`, without anyone logging in:
+
+  ```bash
+  sudo systemctl enable --now patchbayd@alice
+  ```
+
+Pick one per user. Both use the same data folder, and only one Patchbay may use it at a time.
+
+The tarball ships the user unit in `share/patchbay/patchbayd.service`, pointed at `~/.local/opt/patchbayd`:
 
 ```bash
 mkdir -p ~/.config/systemd/user
 cp ~/.local/opt/patchbayd/share/patchbay/patchbayd.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now patchbayd
-loginctl enable-linger "$USER"   # keeps it running while you're logged out
 ```
+
+Logs go to the journal: `journalctl --user -u patchbayd`, or `journalctl -u patchbayd@alice`. On first start the address with the token is logged there too, and `patchbayd token` prints it any time.
 
 ## Reaching it from another computer
 
@@ -78,7 +109,7 @@ Use **Settings → Mesh** in the web UI to create a mesh, or to join one with an
 ```bash
 pnpm install && pnpm build
 PROFILE=release scripts/build-sidecar.sh
-scripts/package-daemon.sh       # -> src-tauri/target/release/bundle/daemon/patchbayd-*.tar.gz
+scripts/package-daemon.sh       # -> src-tauri/target/release/bundle/daemon/ (tar, deb, rpm on Linux)
 ```
 
 For development, `cargo build --bin patchbayd --no-default-features --features web` in `src-tauri` builds it without Tauri, so a server doesn't need WebKitGTK or GTK. Without `--features web` you get a daemon with no browser UI.
