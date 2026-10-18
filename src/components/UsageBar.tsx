@@ -70,7 +70,7 @@ export function UsageBar({
 
   return (
     <div className="meta mt-1.5 flex h-5 items-center gap-3 px-1.5 text-faint" aria-label="Token usage">
-      {/* On a narrow screen the counts stay whole and the context label gives way instead. */}
+      {/* Narrow screens (phones) show only In, Out and the context share; the rest is in the tooltips. */}
       {hasTotals && totals && (
         <div className="flex shrink-0 items-center gap-2 whitespace-nowrap" title={detail}>
           <span>
@@ -82,25 +82,29 @@ export function UsageBar({
             Out <span className="text-muted">{fmtTokens(totals.output)}</span>
           </span>
           {cost != null && (
-            <>
+            <span className="hidden items-center gap-2 sm:flex">
               <span>·</span>
               <span>{reported != null ? fmtCost(cost) : `~${fmtCost(cost)}`}</span>
-            </>
+            </span>
           )}
         </div>
       )}
       <div className="flex-1" />
-      <div className="flex min-w-0 items-center gap-2" title={ctxTitle}>
-        <span className="min-w-0 truncate">
-          Context{" "}
+      <div className="flex shrink-0 items-center gap-2 whitespace-nowrap" title={ctxTitle}>
+        <span>
+          {/* Next to its meter a bare percentage reads as context; a bare count wouldn't. */}
+          <span className={pct != null ? "hidden sm:inline" : ""}>Context </span>
           {contextTokens == null ? (
             "—"
-          ) : (
+          ) : pct != null ? (
             <>
-              <span className="text-muted">{fmtTokens(contextTokens)}</span>
-              {contextWindow ? <> / {fmtTokens(contextWindow)}</> : null}
-              {pct != null && <> · {Math.round(pct)}%</>}
+              <span className="hidden sm:inline">
+                <span className="text-muted">{fmtTokens(contextTokens)}</span> / {fmtTokens(contextWindow!)} ·{" "}
+              </span>
+              <span className="text-muted">{Math.round(pct)}%</span>
             </>
+          ) : (
+            <span className="text-muted">{fmtTokens(contextTokens)}</span>
           )}
         </span>
         {contextWindow ? (
