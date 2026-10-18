@@ -71,40 +71,77 @@ function configChoices(o: AcpConfigOption) {
   return o.options.flatMap((c) => ("options" in c ? c.options : [c]));
 }
 
-/** Installed agents, asked once per window. */
-let agentList: Promise<AgentInfo[]> | null = null;
-export function installedAgents(): Promise<AgentInfo[]> {
-  agentList ??= api.listAgents().catch(() => {
-    agentList = null;
-    return [];
-  });
-  return agentList;
+/** Agents installed here, or on computer `host`; asked once per window and computer. */
+const agentLists = new Map<string, Promise<AgentInfo[]>>();
+export function installedAgents(host?: string | null): Promise<AgentInfo[]> {
+  const key = host ?? "";
+  let list = agentLists.get(key);
+  if (!list) {
+    list = api.listAgents(host).catch(() => {
+      agentLists.delete(key);
+      return [];
+    });
+    agentLists.set(key, list);
+  }
+  return list;
 }
 
 /**
- * The agent of a session that has no messages yet, switchable in its composer. Once a message is
- * sent the agent holds the conversation, so the choice goes away. The default isn't touched.
+ * The agent of a session, switchable in its composer. Once the session has messages, the new agent
+ * starts fresh with the conversation so far as context (`handoff::switch_prompt`), so it asks
+ * first. The default isn't touched.
  */
-function SessionAgentPicker({ session, disabled }: { session: CodeSession; disabled: boolean }) {
+function SessionAgentPicker({
+  session,
+  host,
+  started,
+  disabled,
+}: {
+  session: CodeSession;
+  /** The computer running the session, when that isn't this device (always, on a phone). */
+  host: string | null;
+  started: boolean;
+  disabled: boolean;
+}) {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   useEffect(() => {
-    installedAgents().then(setAgents);
-  }, []);
+    let live = true;
+    installedAgents(host).then((a) => live && setAgents(a));
+    return () => {
+      live = false;
+    };
+  }, [host]);
   const usable = agents.filter((a) => a.available || a.id === session.agent);
   if (usable.length < 2) return null;
+  const label = (id: string) => agents.find((a) => a.id === id)?.label ?? id;
   return (
     <ChipSelect
       className="max-w-44"
       value={session.agent}
       disabled={disabled}
-      title="Agent for this session (until its first message)"
+      title="Agent for this session"
       aria-label="Agent for this session"
       onChange={async (e) => {
         const st = useStore.getState();
+        const next = e.target.value as AgentId;
+        if (started) {
+          const { ok } = await st.askConfirm({
+            title: `Switch to ${label(next)}?`,
+            body:
+              `${label(next)} starts fresh and gets this conversation as text, with the tools ` +
+              `${label(session.agent)} used. It doesn't get ${label(session.agent)}'s internal state, and ` +
+              "earlier messages can't be edited or rewound afterwards. Files aren't touched.",
+            confirmLabel: "Switch agent",
+          });
+          if (!ok) return;
+        }
         try {
-          await api.codeSetAgent(session.id, e.target.value as AgentId, st.defaultModelRef);
+          await api.codeSetAgent(session.id, next, st.defaultModelRef);
+          // The transcript was folded into earlier history: show it from the saved copy.
+          if (started) st.resetCode(session.id);
           await st.refreshCodeSessions();
-          await st.startAgent(session.id);
+          // Another computer runs it: attach, which starts the new agent there and follows it.
+          await (host ? st.attachAgent(session.id) : st.startAgent(session.id));
         } catch (err) {
           st.setToast(errorText(err));
         }
@@ -869,6 +906,24 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     {waiting}
                   </div>
                 )}
+                {s?.earlier && (
+                  <div className="flex flex-col gap-4 opacity-70">
+                    <div className="text-center text-[12px] text-faint">
+                      Earlier in this session. The current agent has it only as context, so it can't be edited or rewound.
+                    </div>
+                    {renderRuns(runsOf(s.earlier.entries, { toolCalls: s.earlier.toolCalls, permissions: [] }), (e, i) => (
+                      <EntryView
+                        key={`e${i}`}
+                        e={e}
+                        s={{ toolCalls: s.earlier!.toolCalls, permissions: [], autoApproved: {} }}
+                        cwd={session.cwd}
+                        editing={false}
+                        setEditing={() => {}}
+                      />
+                    ))}
+                    <div className="border-t border-line" />
+                  </div>
+                )}
                 {s?.history && (
                   <div className={ready ? "flex flex-col gap-4 opacity-70" : "flex flex-col gap-4"}>
                     {ready && (
@@ -889,7 +944,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     {ready && <div className="border-t border-line" />}
                   </div>
                 )}
-                {ready && (s?.entries.length ?? 0) === 0 && !s?.history && (
+                {ready && (s?.entries.length ?? 0) === 0 && !s?.history && !s?.earlier && (
                   <div className="mt-16 text-center text-muted">
                     Ask the agent to read, change, or run things in{" "}
                     <span className="font-mono text-[13px] text-fg/80">{session.cwd}</span>.
@@ -963,10 +1018,12 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
               warnNoVision={model ? !model.vision : false}
               footer={
                 <>
-                {!remoteHost(session, mesh) && !(s?.entries ?? []).some((x) => x.kind === "user") &&
-                  !(s?.history?.entries ?? []).some((x) => x.kind === "user") && (
-                    <SessionAgentPicker session={session} disabled={busy || status === "starting"} />
-                  )}
+                <SessionAgentPicker
+                  session={session}
+                  host={host}
+                  started={[s?.earlier, s?.history, s].some((p) => (p?.entries ?? []).some((x) => x.kind === "user"))}
+                  disabled={busy || status === "starting" || hostOffline || !!reconnecting}
+                />
                 {acpModels && acpModels.availableModels.length > 0 ? (
                   <ChipSelect
                     lead={<ModelRing id={currentModelRef} />}

@@ -542,9 +542,12 @@ async fn code_auto_title(r: Shared<'_>, id: String) -> CmdResult<Value> {
     r.code("code.auto_title", json!({ "id": id })).await
 }
 
+/// The agents installed on `host`, the computer running a session; a phone runs none itself.
 #[tauri::command]
-fn list_agents() -> Vec<Value> {
-    Vec::new()
+async fn list_agents(r: Shared<'_>, host: Option<String>) -> CmdResult<Value> {
+    let Some(host) = host else { return Ok(json!([])) };
+    let options = r.client.rpc("remote.new_session_options", json!({ "host": host })).await?;
+    Ok(options["agents"].clone())
 }
 
 #[tauri::command]

@@ -713,8 +713,22 @@ export function install() {
         case "list_agents": return FAKE_AGENTS;
         case "code_set_agent": {
           const s = db.code.find((x) => x.id === a.id)!;
-          const said = (db.transcripts[s.id] ?? "").includes('"kind":"user"');
-          if (said) throw "this session already has messages; start a new session to use another agent";
+          const saved = db.transcripts[s.id];
+          if (s.agent !== a.agent && saved?.includes('"kind":"user"')) {
+            // Like `handoff::fold_for_switch`: the old turns become earlier history.
+            const v = JSON.parse(saved);
+            const name = (id: string) => ({ grok: "Grok Build", "claude-code": "Claude Code" })[id] ?? id;
+            const divider = `Switched from ${name(s.agent)} to ${name(a.agent as string)}. It got the conversation so far as context.`;
+            db.transcripts[s.id] = JSON.stringify({
+              v: 1,
+              earlier: {
+                entries: [...(v.earlier?.entries ?? []), ...(v.entries ?? []), { kind: "info", text: divider }],
+                toolCalls: { ...v.earlier?.toolCalls, ...v.toolCalls },
+              },
+              entries: [],
+              toolCalls: {},
+            });
+          }
           s.agent = a.agent as AgentId;
           s.agentModel = null;
           s.acpSessionId = null;

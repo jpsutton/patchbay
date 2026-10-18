@@ -153,10 +153,15 @@ async fn remote_session_commands_and_terminal() {
     assert_eq!(got.model_ref.as_deref(), Some("m-x"));
     let err = b.state.mesh.rpc(&an, "code.set_agent", json!({ "id": s.id, "agent": "nope" })).await.unwrap_err();
     assert!(err.to_string().contains("unknown coding agent"), "{err}");
-    // After one, it can't: that agent holds the conversation.
+    // After one, the old turns become earlier history and the next prompt carries them.
     a.state.db.set_code_transcript(&s.id, r#"{"v":1,"entries":[{"kind":"user","text":"hi"}],"toolCalls":{}}"#).unwrap();
-    let err = b.state.mesh.rpc(&an, "code.set_agent", json!({ "id": s.id, "agent": "grok" })).await.unwrap_err();
-    assert!(err.to_string().contains("already has messages"), "{err}");
+    b.state.mesh.rpc(&an, "code.set_agent", json!({ "id": s.id, "agent": "grok" })).await.unwrap();
+    assert_eq!(a.state.db.get_code_session(&s.id).unwrap().unwrap().agent, "grok");
+    let t: serde_json::Value = serde_json::from_str(&a.state.db.code_transcript(&s.id).unwrap().unwrap()).unwrap();
+    assert_eq!(t["entries"], json!([]));
+    assert_eq!(t["earlier"]["entries"][0]["text"], "hi");
+    let note = a.state.db.get_setting(&format!("mesh.handoff.{}", s.id)).unwrap().unwrap();
+    assert!(note.contains("taking over") && note.contains("User: hi"), "{note}");
 
     // A shell on A, driven from B.
     let p = json!({ "termId": "t1", "sessionId": s.id, "cols": 80, "rows": 24 });
@@ -363,6 +368,14 @@ async fn phone_starts_a_session_on_another_computer() {
     // And the next start offers that folder as recent.
     let opts = p.client.rpc("remote.new_session_options", json!({ "host": bn })).await.unwrap();
     assert_eq!(opts["recent"][0], cwd.as_str());
+
+    // The phone switches it to another agent mid-session; B folds the transcript and seeds the note.
+    b.state.db.set_code_transcript(&id, r#"{"v":1,"entries":[{"kind":"user","text":"fix it"}],"toolCalls":{}}"#).unwrap();
+    let p_switch = json!({ "method": "code.set_agent", "params": { "id": id, "agent": "claude-code" } });
+    p.client.rpc("remote.code", p_switch).await.unwrap();
+    assert_eq!(b.state.db.get_code_session(&id).unwrap().unwrap().agent, "claude-code");
+    let note = b.state.db.get_setting(&format!("mesh.handoff.{id}")).unwrap().unwrap();
+    assert!(note.contains("from another agent, Grok Build") && note.contains("User: fix it"), "{note}");
 
     // A folder that isn't there is refused; so is a computer that's gone.
     let err = p

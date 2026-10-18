@@ -46,7 +46,7 @@ impl Titles {
     pub fn on_prompt(&self, id: &str, text: &str, transcript: impl FnOnce() -> Option<String>) {
         let mut all = self.0.lock().unwrap();
         let t = all.entry(id.to_owned()).or_insert_with(|| {
-            let lines = transcript_lines(transcript().as_deref());
+            let lines = transcript_lines(transcript().as_deref(), false);
             let turns = lines.iter().filter(|l| l.starts_with("User: ")).count();
             Track { turns, lines: lines.iter().map(|l| crate::chat::clip(l, MAX_LINE)).collect(), ..Default::default() }
         });
@@ -132,7 +132,7 @@ pub async fn generate(db: &Db, session: &CodeSession, convo: String) -> Result<S
 
 /// The whole saved conversation, for naming a session on request.
 pub fn transcript_context(transcript_json: Option<&str>) -> Option<String> {
-    let lines: Vec<String> = transcript_lines(transcript_json)
+    let lines: Vec<String> = transcript_lines(transcript_json, false)
         .iter()
         .map(|l| crate::chat::clip(l, MAX_LINE))
         .collect();
