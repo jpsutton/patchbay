@@ -209,6 +209,24 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
     }
   };
   codeEmit(csid, { type: "update", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Planning the change." } } });
+  // A plan document written as a tool call, the way Cursor's plan mode does it.
+  if (text.startsWith("/plan")) {
+    const plan = `# Tidy the README\n\n## Problem\n\nThe intro is out of date.\n\n## Steps\n\n1. Read \`README.md\`.\n2. Rewrite the intro.\n3. Check the links still work.\n`;
+    codeEmit(csid, {
+      type: "update",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: id(),
+        title: "Create Plan: Tidy the README",
+        status: "completed",
+        rawInput: { _toolName: "createPlan", name: "Tidy the README", plan },
+        content: [{ type: "content", content: { type: "text", text: "Plan saved to file:///tmp/tidy-the-readme.plan.md" } }],
+      },
+    });
+    await say("The plan is ready. Say the word and I'll start.");
+    codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
   codeEmit(csid, {
     type: "update",
     update: {
