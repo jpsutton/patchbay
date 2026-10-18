@@ -345,6 +345,31 @@ async fn create_conversation(r: Shared<'_>, model_ref: Option<String>) -> CmdRes
     Ok(r.client.rpc("remote.create_conversation", json!({ "modelRef": model_ref })).await?)
 }
 
+/// Starting a Code session on a chosen computer: its agents, default agent and recent folders.
+#[tauri::command]
+async fn remote_new_session_options(r: Shared<'_>, host: String) -> CmdResult<Value> {
+    Ok(r.client.rpc("remote.new_session_options", json!({ "host": host })).await?)
+}
+
+/// The folders in `path` on `host` (its home folder when `path` is missing).
+#[tauri::command]
+async fn remote_list_dirs(r: Shared<'_>, host: String, path: Option<String>) -> CmdResult<Value> {
+    Ok(r.client.rpc("remote.list_dirs", json!({ "host": host, "path": path })).await?)
+}
+
+#[tauri::command]
+async fn remote_create_code_session(
+    r: Shared<'_>,
+    host: String,
+    cwd: String,
+    model_ref: Option<String>,
+    agent: Option<String>,
+) -> CmdResult<Value> {
+    *r.index.lock().unwrap() = None;
+    let p = json!({ "host": host, "cwd": cwd, "modelRef": model_ref, "agent": agent });
+    Ok(r.client.rpc("remote.create_code_session", p).await?)
+}
+
 #[tauri::command]
 async fn update_conversation(
     r: Shared<'_>,
@@ -606,6 +631,12 @@ async fn code_set_mode(r: Shared<'_>, id: String, mode_id: String) -> CmdResult<
 }
 
 #[tauri::command]
+async fn code_set_permission_mode(r: Shared<'_>, id: String, mode: String) -> CmdResult<()> {
+    r.code("code.set_permission_mode", json!({ "id": id, "mode": mode })).await?;
+    Ok(())
+}
+
+#[tauri::command]
 async fn code_set_config_option(r: Shared<'_>, id: String, config_id: String, value: String) -> CmdResult<()> {
     r.code("code.set_config_option", json!({ "id": id, "configId": config_id, "value": value })).await?;
     Ok(())
@@ -735,6 +766,9 @@ pub fn run() {
             set_preferences,
             list_conversations,
             create_conversation,
+            remote_new_session_options,
+            remote_list_dirs,
+            remote_create_code_session,
             update_conversation,
             delete_conversation,
             list_messages,
@@ -762,6 +796,7 @@ pub fn run() {
             code_cancel,
             code_set_model,
             code_set_mode,
+            code_set_permission_mode,
             code_set_config_option,
             code_rewind,
             code_permission_respond,

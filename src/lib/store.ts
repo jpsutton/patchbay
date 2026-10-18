@@ -56,7 +56,9 @@ export interface CodeState {
   configOptions: AcpConfigOption[];
   /** Non-standard extensions the agent understands; gates rewind and the like. */
   extensions: AgentExtensions;
-  /** Tool call id -> why a saved rule approved it. */
+  /** What the agent does without asking, whatever the session's approval mode. */
+  approvalGaps: string[];
+  /** Tool call id -> why a saved rule or the approval mode approved it. */
   autoApproved: Record<string, string>;
   /** Cached transcript from a previous run, shown until (or unless) the agent replays it. */
   history: { entries: Entry[]; toolCalls: Record<string, AcpToolCall> } | null;
@@ -89,13 +91,14 @@ const emptyCode = (): CodeState => ({
   capabilities: null,
   configOptions: [],
   extensions: { statusLine: false, rewind: false },
+  approvalGaps: [],
   autoApproved: {},
   history: null,
   configRev: 0,
 });
 
+// The default permission mode isn't here: it only seeds new sessions, and agents always ask.
 const AGENT_PREF_KEYS: (keyof Preferences)[] = [
-  "permissionMode",
   "agentInstructions",
   "webFetch",
   "autoCompactPercent",
@@ -538,6 +541,7 @@ export const useStore = create<Store>((set, get) => ({
           capabilities: e.capabilities ?? null,
           configOptions: e.configOptions ?? [],
           extensions: e.extensions ?? { statusLine: false, rewind: false },
+          approvalGaps: e.approvalGaps ?? [],
         };
         break;
       }

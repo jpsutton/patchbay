@@ -39,7 +39,7 @@ impl Run {
         std::fs::write(proj.join("README.md"), "# live test\n").unwrap();
         let db = Arc::new(Db::open(&data_dir.join("db.sqlite")).unwrap());
         let session = db
-            .create_code_session(proj.to_str().unwrap(), None, kind.id())
+            .create_code_session(proj.to_str().unwrap(), None, kind.id(), "default")
             .unwrap();
         Run {
             db,

@@ -211,6 +211,8 @@ export interface CodeSession {
   hostNode: string | null;
   /** Bumped on every move between nodes. */
   epoch: number;
+  /** Ask / auto / always-approve: Patchbay answers ACP permission prompts for this session. */
+  permissionMode: "default" | "auto" | "always-approve";
   /** When it was archived (unix ms): its agent stopped, out of the lists until restored. */
   archivedAt?: number | null;
 }
@@ -351,6 +353,8 @@ export type CodeEvent =
       agentInfo: { name?: string; title?: string; version?: string } | null;
       configOptions: AcpConfigOption[] | null;
       extensions: AgentExtensions;
+      /** What this agent does without asking, whatever the session's approval mode. */
+      approvalGaps?: string[];
     }
   | { type: "config"; models: AcpModels | null; modes: AcpModes | null; configOptions: AcpConfigOption[] | null }
   | { type: "autoApproved"; toolCallId: string; description: string }
@@ -632,6 +636,8 @@ export const api = {
   codeCancel: (id: string) => invoke<void>("code_cancel", { id }),
   codeSetModel: (id: string, modelId: string) => invoke<void>("code_set_model", { id, modelId }),
   codeSetMode: (id: string, modeId: string) => invoke<void>("code_set_mode", { id, modeId }),
+  codeSetPermissionMode: (id: string, mode: "default" | "auto" | "always-approve") =>
+    invoke<void>("code_set_permission_mode", { id, mode }),
   codeSetAgent: (id: string, agent: AgentId, modelRef: string | null) =>
     invoke<void>("code_set_agent", { id, agent, modelRef }),
   codeSetConfigOption: (id: string, configId: string, value: string) =>

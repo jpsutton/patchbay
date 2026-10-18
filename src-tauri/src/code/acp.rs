@@ -20,7 +20,7 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-use super::agents::{Extensions, Launch};
+use super::agents::{ApprovalSetup, Extensions, Launch};
 
 pub const EVENT: &str = "code://event";
 
@@ -43,6 +43,8 @@ pub enum CodeEvent {
         /// Session config options other than model and mode (e.g. reasoning effort).
         config_options: Value,
         extensions: Extensions,
+        /// What this agent does without asking, whatever the session's approval mode.
+        approval_gaps: &'static [&'static str],
     },
     /// The agent's session config changed (`config_option_update`, or after setting one).
     #[serde(rename_all = "camelCase")]
@@ -174,6 +176,10 @@ struct UiClient {
     tool_calls: RefCell<HashMap<String, Value>>,
     /// Which config options stand for model and mode, shared with the command loop.
     config_ids: Rc<RefCell<ConfigIds>>,
+    approvals: ApprovalSetup,
+    /// The command loop, to put the agent back in `approvals.select_mode`. Weak, so the loop
+    /// still ends when its owner drops the sender.
+    cmds: mpsc::WeakUnboundedSender<AgentCmd>,
 }
 
 /// Config option ids that carry the model and mode, when the agent uses `configOptions`
@@ -290,12 +296,40 @@ fn select_values(options: &Value) -> Vec<(Value, Value, Value)> {
     out
 }
 
+/// Drop the agent's own approval-policy modes from what the UI offers.
+fn hide_modes(modes: &mut Value, hide: &[&str]) {
+    if let Some(list) = modes["availableModes"].as_array_mut() {
+        list.retain(|m| !m["id"].as_str().is_some_and(|id| hide.contains(&id)));
+    }
+}
+
 impl UiClient {
     fn merged_tool_call(&self, tc: &Value) -> Value {
         let id = tc["toolCallId"].as_str().unwrap_or_default();
         let mut out = self.tool_calls.borrow().get(id).cloned().unwrap_or_else(|| json!({}));
         merge_fields(&mut out, tc);
         out
+    }
+
+    /// The agent switched itself into one of its own approval policies (Claude does when a plan
+    /// is approved with "auto-accept edits"): put it back, so the session's mode still decides.
+    fn keep_mode(&self, current: Option<&str>) {
+        let (Some(current), Some(want)) = (current, self.approvals.select_mode.as_ref()) else { return };
+        if !self.approvals.hide_modes.contains(&current) {
+            return;
+        }
+        let Some(cmds) = self.cmds.upgrade() else { return };
+        let (reply, _) = oneshot::channel();
+        let _ = cmds.send(AgentCmd::SetMode { mode_id: want.clone(), reply });
+        emit(
+            &self.sink,
+            &self.code_session_id,
+            CodeEvent::Notice {
+                message: format!(
+                    "The agent switched to its \"{current}\" mode; Patchbay switched it back. This session's approval mode decides what runs without asking."
+                ),
+            },
+        );
     }
 }
 
@@ -372,10 +406,16 @@ impl acp::Client for UiClient {
         match update["sessionUpdate"].as_str() {
             Some("config_option_update") => {
                 if update["configOptions"].is_array() {
-                    let cfg = SessionConfig::from_options(&update["configOptions"]);
+                    let mut cfg = SessionConfig::from_options(&update["configOptions"]);
                     self.config_ids.borrow_mut().update(cfg.ids());
+                    self.keep_mode(cfg.modes["currentModeId"].as_str());
+                    hide_modes(&mut cfg.modes, self.approvals.hide_modes);
                     emit(&self.sink, &self.code_session_id, cfg.event());
                 }
+            }
+            Some("current_mode_update") => {
+                self.keep_mode(update["currentModeId"].as_str());
+                emit(&self.sink, &self.code_session_id, CodeEvent::Update { update });
             }
             Some("usage_update") => {
                 emit(&self.sink, &self.code_session_id, CodeEvent::ContextUsage { update });
@@ -410,6 +450,7 @@ fn from_json<T: serde::de::DeserializeOwned>(v: Value) -> Result<T> {
 /// Start the agent thread. Returns the command sender and the thread handle.
 pub fn spawn(spec: SpawnSpec) -> (mpsc::UnboundedSender<AgentCmd>, std::thread::JoinHandle<()>) {
     let (tx, rx) = mpsc::unbounded_channel();
+    let cmds = tx.downgrade();
     let sink = spec.sink.clone();
     let csid = spec.code_session_id.clone();
     let thread = std::thread::Builder::new()
@@ -423,7 +464,7 @@ pub fn spawn(spec: SpawnSpec) -> (mpsc::UnboundedSender<AgentCmd>, std::thread::
                 }
             };
             let local = tokio::task::LocalSet::new();
-            let result = local.block_on(&rt, run(spec, rx));
+            let result = local.block_on(&rt, run(spec, rx, cmds));
             if let Err(e) = result {
                 emit(&sink, &csid, CodeEvent::Error { message: format!("{e:#}") });
             }
@@ -437,7 +478,11 @@ pub fn spawn(spec: SpawnSpec) -> (mpsc::UnboundedSender<AgentCmd>, std::thread::
     (tx, thread)
 }
 
-async fn run(spec: SpawnSpec, mut rx: mpsc::UnboundedReceiver<AgentCmd>) -> Result<()> {
+async fn run(
+    spec: SpawnSpec,
+    mut rx: mpsc::UnboundedReceiver<AgentCmd>,
+    cmds: mpsc::WeakUnboundedSender<AgentCmd>,
+) -> Result<()> {
     let SpawnSpec {
         sink,
         code_session_id: csid,
@@ -458,6 +503,7 @@ async fn run(spec: SpawnSpec, mut rx: mpsc::UnboundedReceiver<AgentCmd>) -> Resu
         session_meta,
         initial_model,
         login_hint,
+        approvals,
     } = launch;
     emit(&sink, &csid, CodeEvent::Status { state: "starting".into(), message: None });
 
@@ -506,6 +552,8 @@ async fn run(spec: SpawnSpec, mut rx: mpsc::UnboundedReceiver<AgentCmd>) -> Resu
         auto_approve,
         tool_calls: RefCell::default(),
         config_ids: config_ids.clone(),
+        approvals: approvals.clone(),
+        cmds,
     };
     let (conn, io) = acp::ClientSideConnection::new(
         client,
@@ -601,6 +649,22 @@ async fn run(spec: SpawnSpec, mut rx: mpsc::UnboundedReceiver<AgentCmd>) -> Resu
         *config_ids.borrow_mut() = cfg.ids();
     }
 
+    // Agents with approval policies of their own: start in the one that asks.
+    if let Some(want) = approvals.select_mode.as_ref().filter(|m| {
+        cfg.modes["currentModeId"].as_str() != Some(m.as_str())
+            && cfg.modes["availableModes"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|x| x["id"].as_str() == Some(m.as_str())))
+    }) {
+        match set_mode(&conn, &session_id, &cfg.ids(), want).await {
+            Ok(Some(updated)) => cfg = merge_config(cfg, updated),
+            Ok(None) => cfg.modes["currentModeId"] = json!(want),
+            Err(e) => tracing::warn!("could not select mode {want}: {e:#}"),
+        }
+        *config_ids.borrow_mut() = cfg.ids();
+    }
+    hide_modes(&mut cfg.modes, approvals.hide_modes);
+
     emit(
         &sink,
         &csid,
@@ -613,6 +677,7 @@ async fn run(spec: SpawnSpec, mut rx: mpsc::UnboundedReceiver<AgentCmd>) -> Resu
             agent_info: init_v["agentInfo"].clone(),
             config_options: cfg.extra.clone(),
             extensions,
+            approval_gaps: approvals.gaps,
         },
     );
     if init_commands.is_array() {
@@ -644,8 +709,9 @@ async fn run(spec: SpawnSpec, mut rx: mpsc::UnboundedReceiver<AgentCmd>) -> Resu
         if !options.is_array() {
             return;
         }
-        let cfg = SessionConfig::from_options(&options);
+        let mut cfg = SessionConfig::from_options(&options);
         config_ids.borrow_mut().update(cfg.ids());
+        hide_modes(&mut cfg.modes, approvals.hide_modes);
         emit(&sink, &csid, cfg.event());
     };
 
@@ -697,19 +763,9 @@ async fn run(spec: SpawnSpec, mut rx: mpsc::UnboundedReceiver<AgentCmd>) -> Resu
                         let _ = reply.send(r.map(|updated| updated.map(apply_config).unwrap_or(())));
                     }
                     AgentCmd::SetMode { mode_id, reply } => {
-                        let mode_opt = config_ids.borrow().mode.clone();
-                        let r = match mode_opt {
-                            Some(config_id) => set_config_option(&conn, &session_id, &config_id, &mode_id)
-                                .await
-                                .map(apply_config),
-                            None => match from_json::<acp::SetSessionModeRequest>(
-                                json!({ "sessionId": session_id, "modeId": mode_id }),
-                            ) {
-                                Ok(req) => conn.set_session_mode(req).await.map(|_| ()).map_err(|e| anyhow!("{e}")),
-                                Err(e) => Err(e),
-                            },
-                        };
-                        let _ = reply.send(r);
+                        let ids = config_ids.borrow().clone();
+                        let r = set_mode(&conn, &session_id, &ids, &mode_id).await;
+                        let _ = reply.send(r.map(|updated| updated.map(apply_config).unwrap_or(())));
                     }
                     AgentCmd::SetConfigOption { config_id, value, reply } => {
                         let r = set_config_option(&conn, &session_id, &config_id, &value)
@@ -796,6 +852,22 @@ async fn set_model(
     let req: acp::SetSessionModelRequest =
         from_json(json!({ "sessionId": session_id, "modelId": model_id }))?;
     conn.set_session_model(req).await.map_err(|e| anyhow!("{e}"))?;
+    Ok(None)
+}
+
+/// Select a mode through the config option when the agent has one, else `session/set_mode`.
+/// Returns the agent's full option list when it sent one back.
+async fn set_mode(
+    conn: &acp::ClientSideConnection,
+    session_id: &str,
+    ids: &ConfigIds,
+    mode_id: &str,
+) -> Result<Option<Value>> {
+    if let Some(config_id) = &ids.mode {
+        return set_config_option(conn, session_id, config_id, mode_id).await.map(Some);
+    }
+    let req: acp::SetSessionModeRequest = from_json(json!({ "sessionId": session_id, "modeId": mode_id }))?;
+    conn.set_session_mode(req).await.map_err(|e| anyhow!("{e}"))?;
     Ok(None)
 }
 

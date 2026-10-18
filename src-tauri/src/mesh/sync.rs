@@ -70,6 +70,7 @@ pub const TABLES: &[Table] = &[
             "epoch",
             "agent",
             "agent_model",
+            "permission_mode",
             "archived_at",
         ],
     },

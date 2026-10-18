@@ -50,10 +50,9 @@ pub fn render(db: &Db, default_model_ref: Option<&str>) -> Result<Rendered> {
             ("title_refresh", Value::Boolean(prefs.background_summaries)),
         ]),
     );
-    root.insert(
-        "ui".into(),
-        table(&[("permission_mode", s(&prefs.permission_mode))]),
-    );
+    // Grok always asks, and Patchbay answers from each session's approval mode
+    // (code/permissions.rs). This file is shared by every session, so it can't hold theirs.
+    root.insert("ui".into(), table(&[("permission_mode", s("default"))]));
     if let Some(p) = prefs.auto_compact_percent {
         root.insert(
             "session".into(),
@@ -254,7 +253,8 @@ mod tests {
         let t = super::render(&db, Some("m")).unwrap().toml;
         let _ = std::fs::remove_dir_all(&dir);
         let cfg: toml::Table = toml::from_str(&t).unwrap();
-        assert_eq!(cfg["ui"]["permission_mode"].as_str(), Some("auto"));
+        // The preference is only new sessions' default; Grok itself always asks.
+        assert_eq!(cfg["ui"]["permission_mode"].as_str(), Some("default"));
         assert_eq!(cfg["features"]["web_fetch"].as_bool(), Some(true));
         assert_eq!(cfg["features"]["session_recap"].as_bool(), Some(false));
         assert_eq!(cfg["compat"]["claude"]["skills"].as_bool(), Some(true));
