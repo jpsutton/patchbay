@@ -113,6 +113,7 @@ export function Composer({
   disabled,
   placeholder,
   footer,
+  footerLabel = "Model and options",
   warnNoVision,
   commands,
   mentionFiles,
@@ -125,6 +126,8 @@ export function Composer({
   disabled?: boolean;
   placeholder?: string;
   footer?: ReactNode;
+  /** Names the phone's button and sheet that hold the footer. */
+  footerLabel?: string;
   warnNoVision?: boolean;
   /** Slash commands the agent advertises (Code tab). */
   commands?: AcpCommand[];
@@ -432,8 +435,8 @@ export function Composer({
             <button
               className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] border border-border text-muted hover:bg-panel-2/60 hover:text-fg"
               onClick={() => setOptionsOpen(true)}
-              title="Model and options"
-              aria-label="Model and options"
+              title={footerLabel}
+              aria-label={footerLabel}
               aria-haspopup="dialog"
             >
               <SlidersIcon size={16} />
@@ -470,11 +473,11 @@ export function Composer({
           <div className="fixed inset-0 z-[60] flex flex-col justify-end bg-black/45" onClick={() => setOptionsOpen(false)}>
             <div
               role="dialog"
-              aria-label="Model and options"
+              aria-label={footerLabel}
               className="rounded-t-2xl border-t border-border bg-raised px-2 pb-[calc(env(safe-area-inset-bottom)+8px)] pt-2"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="px-3 pb-1 pt-1 text-[13px] text-muted">Model and options</div>
+              <div className="px-3 pb-1 pt-1 text-[13px] text-muted">{footerLabel}</div>
               <ChipRows.Provider value={true}>
                 <div className="flex flex-col divide-y divide-line">{footer}</div>
               </ChipRows.Provider>

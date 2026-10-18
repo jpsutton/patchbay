@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   AGENT_LABELS,
@@ -42,7 +42,7 @@ import {
   TerminalIcon,
   XIcon,
 } from "../components/icons";
-import { ChipSelect, ChipText } from "../components/ChipSelect";
+import { ChipRows, ChipSelect, ChipText } from "../components/ChipSelect";
 import { ModelRing } from "../lib/cable";
 import { JumpToBottom, ScrollFade, useStickyScroll } from "../lib/useStickyScroll";
 
@@ -112,8 +112,9 @@ function SessionAgentPicker({
     };
   }, [host]);
   const usable = agents.filter((a) => a.available || a.id === session.agent);
-  if (usable.length < 2) return null;
-  const label = (id: string) => agents.find((a) => a.id === id)?.label ?? id;
+  const rows = useContext(ChipRows);
+  const label = (id: string) => agents.find((a) => a.id === id)?.label ?? AGENT_LABELS[id as AgentId] ?? id;
+  if (usable.length < 2) return rows ? <ChipText label="Agent">{label(session.agent)}</ChipText> : null;
   return (
     <ChipSelect
       className="max-w-44"
@@ -744,6 +745,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
           disabled={!ready}
           title="Agent mode"
           aria-label="Agent mode"
+          label="Mode"
           onChange={(e) => setAcpMode(e.target.value)}
         >
           {modes.map((m) => (
@@ -806,7 +808,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
-      <header {...drag} className={`flex h-12 shrink-0 items-center gap-1 ${remote ? "" : "border-b border-line"} pr-3 ${leading ? "pl-1" : "pl-6"}`}>
+      <header {...drag} className={`flex h-12 shrink-0 items-center gap-1 border-b border-line pr-3 ${leading ? "pl-1" : "pl-6"}`}>
         {leading}
         <span className={`h-2 w-2 shrink-0 rounded-full ${dot}`} title={dotLabel} role="img" aria-label={`Agent ${dotLabel}`} />
         <div {...drag} className="mx-2.5 flex min-w-0 flex-1 items-baseline gap-2.5">
@@ -875,20 +877,6 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
         </HeaderButton>
         <WindowControls />
       </header>
-      {remote && (
-        // The phone's second row: everything about how the agent runs, in one line that scrolls
-        // sideways rather than crowding the title.
-        <div
-          aria-label="Session settings"
-          className="flex h-11 shrink-0 items-center gap-2 overflow-x-auto whitespace-nowrap border-b border-line px-4 [scrollbar-width:none]"
-        >
-          <HostBadge session={session} />
-          {agentLabel}
-          {modeControl}
-          {approvalControl}
-          {gapsButton}
-        </div>
-      )}
 
       <div className="flex min-h-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col">
@@ -1017,8 +1005,10 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     : (waiting ?? "Agent not running")
               }
               warnNoVision={model ? !model.vision : false}
+              footerLabel="Session settings"
               footer={
                 <>
+                {remote && <HostBadge session={session} />}
                 <SessionAgentPicker
                   session={session}
                   host={host}
@@ -1081,6 +1071,19 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     ))}
                   </ChipSelect>
                 ))}
+                {remote && (
+                  <>
+                    {modeControl}
+                    <div>
+                      {approvalControl}
+                      {gaps.length > 0 && (
+                        <div className="px-3 pb-3 text-[12.5px] leading-5 text-muted">
+                          Runs without asking, whatever the approval mode: {gaps.join(" ")}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
                 </>
               }
             />
