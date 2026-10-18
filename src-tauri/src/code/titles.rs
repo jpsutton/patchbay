@@ -1,7 +1,8 @@
 //! Code session titles. A new session takes its first prompt's first line at once. After that it
 //! takes the agent's own titles (ACP `session_info_update`), or, from agents that send none, a
 //! Patchbay model call after the first and third turns. A title someone typed pins the session
-//! until they ask for an automatic one again.
+//! until they ask for an automatic one again. A handoff to another agent or computer keeps the
+//! title: the agent that takes over sees only the handoff note.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -35,6 +36,8 @@ struct Track {
     reply: String,
     /// The agent sent its own title: Patchbay doesn't make one too.
     agent_titled: bool,
+    /// The agent took the session over from a handoff note, so its title would name the note.
+    handed_off: bool,
 }
 
 /// What each session's conversation has been, for naming it. Kept on the node running its agent.
@@ -67,8 +70,18 @@ impl Titles {
         }
     }
 
-    pub fn on_agent_title(&self, id: &str) {
-        self.0.lock().unwrap().entry(id.to_owned()).or_default().agent_titled = true;
+    /// The prompt just sent carried a handoff note (another agent or computer ran the session).
+    pub fn on_handoff(&self, id: &str) {
+        self.0.lock().unwrap().entry(id.to_owned()).or_default().handed_off = true;
+    }
+
+    /// The agent named the session. Returns whether to use its title: not after a handoff, when
+    /// the session already has its name and the agent only saw the note.
+    pub fn on_agent_title(&self, id: &str) -> bool {
+        let mut all = self.0.lock().unwrap();
+        let t = all.entry(id.to_owned()).or_default();
+        t.agent_titled = true;
+        !t.handed_off
     }
 
     pub fn agent_titled(&self, id: &str) -> bool {
@@ -83,7 +96,7 @@ impl Titles {
         if !reply.trim().is_empty() {
             t.lines.push(crate::chat::clip(&format!("Assistant: {}", reply.trim()), MAX_LINE));
         }
-        (completed && !t.agent_titled && TITLE_TURNS.contains(&t.turns)).then(|| context(&t.lines))
+        (completed && !t.agent_titled && !t.handed_off && TITLE_TURNS.contains(&t.turns)).then(|| context(&t.lines))
     }
 
     pub fn forget(&self, id: &str) {
@@ -196,8 +209,17 @@ mod tests {
         assert_eq!(titles.on_turn_end("s", false), None, "cancelled");
         let titles = Titles::default();
         titles.on_prompt("s", "fix it", || None);
-        titles.on_agent_title("s");
+        assert!(titles.on_agent_title("s"));
         assert_eq!(titles.on_turn_end("s", true), None);
+    }
+
+    #[test]
+    fn handed_off_sessions_keep_their_title() {
+        let titles = Titles::default();
+        titles.on_prompt("s", "carry on", || None);
+        titles.on_handoff("s");
+        assert_eq!(titles.on_turn_end("s", true), None, "no Patchbay title");
+        assert!(!titles.on_agent_title("s"), "agent title ignored");
     }
 
     #[test]
