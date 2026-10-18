@@ -1060,6 +1060,16 @@ impl Db {
         Ok(())
     }
 
+    /// Give a session another agent. Its agent model and ACP session id only meant something to
+    /// the old agent, so both go.
+    pub fn set_code_session_agent(&self, id: &str, agent: &str) -> Result<()> {
+        self.conn().execute(
+            "UPDATE code_sessions SET agent = ?2, agent_model = NULL, acp_session_id = NULL WHERE id = ?1",
+            params![id, agent],
+        )?;
+        Ok(())
+    }
+
     pub fn set_code_session_agent_model(&self, id: &str, model: &str) -> Result<()> {
         self.conn().execute(
             "UPDATE code_sessions SET agent_model = ?2 WHERE id = ?1",

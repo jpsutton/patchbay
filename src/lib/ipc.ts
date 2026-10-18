@@ -638,6 +638,8 @@ export const api = {
   codeSetMode: (id: string, modeId: string) => invoke<void>("code_set_mode", { id, modeId }),
   codeSetPermissionMode: (id: string, mode: "default" | "auto" | "always-approve") =>
     invoke<void>("code_set_permission_mode", { id, mode }),
+  codeSetAgent: (id: string, agent: AgentId, modelRef: string | null) =>
+    invoke<void>("code_set_agent", { id, agent, modelRef }),
   codeSetConfigOption: (id: string, configId: string, value: string) =>
     invoke<void>("code_set_config_option", { id, configId, value }),
   codeRewind: (id: string, ordinal: number, preview: string, revertFiles: boolean) =>

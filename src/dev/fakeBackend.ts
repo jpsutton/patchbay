@@ -686,6 +686,15 @@ export function install() {
           return null;
         }
         case "list_agents": return FAKE_AGENTS;
+        case "code_set_agent": {
+          const s = db.code.find((x) => x.id === a.id)!;
+          const said = (db.transcripts[s.id] ?? "").includes('"kind":"user"');
+          if (said) throw "this session already has messages; start a new session to use another agent";
+          s.agent = a.agent as AgentId;
+          s.agentModel = null;
+          s.acpSessionId = null;
+          return null;
+        }
         case "code_rewind": await sleep(150); return null;
         case "code_usage": return { totals: { ...fakeUsage }, contextTokens: null, contextWindow: 128000, autoCompactPercent: 85 };
         case "code_permission_respond": {

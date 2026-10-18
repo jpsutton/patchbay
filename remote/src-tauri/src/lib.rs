@@ -587,6 +587,13 @@ async fn code_is_running(r: Shared<'_>, id: String) -> CmdResult<bool> {
 }
 
 #[tauri::command]
+async fn code_set_agent(r: Shared<'_>, id: String, agent: String, model_ref: Option<String>) -> CmdResult<()> {
+    *r.index.lock().unwrap() = None;
+    r.code("code.set_agent", json!({ "id": id, "agent": agent, "modelRef": model_ref })).await?;
+    Ok(())
+}
+
+#[tauri::command]
 async fn code_stop(r: Shared<'_>, id: String) -> CmdResult<()> {
     r.code("code.stop", json!({ "id": id })).await?;
     Ok(())
@@ -784,6 +791,7 @@ pub fn run() {
             code_start,
             code_is_running,
             code_stop,
+            code_set_agent,
             code_prompt,
             code_cancel,
             code_set_model,
