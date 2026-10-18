@@ -646,8 +646,9 @@ fn track_titles(state: &AppState, env: &code::acp::Envelope) {
             }
             // Agents that name their sessions (Grok Build does) send it as session info.
             Some("session_info_update") => {
-                if let Some(t) = update["title"].as_str().map(str::trim).filter(|t| !t.is_empty()) {
-                    state.code.titles.on_agent_title(id);
+                if let Some(t) = update["title"].as_str().map(str::trim).filter(|t| !t.is_empty())
+                    && state.code.titles.on_agent_title(id)
+                {
                     set_auto_title(state, id, t);
                 }
             }
@@ -818,7 +819,8 @@ async fn code_prompt_local(
     }
     // A session that moved without its agent state gets the earlier conversation once.
     let note_key = format!("mesh.handoff.{id}");
-    if let Some(note) = state.db.get_setting(&note_key)? {
+    let note = state.db.get_setting(&note_key)?;
+    if let Some(note) = &note {
         blocks.insert(0, serde_json::json!({ "type": "text", "text": note }));
     }
     // Bumps updated_at so the session sorts to the top of the sidebar.
@@ -829,9 +831,12 @@ async fn code_prompt_local(
         set_auto_title(state, &id, &t);
     }
     state.code.titles.on_prompt(&id, &text, || state.db.code_transcript(&id).ok().flatten());
+    if note.is_some() {
+        state.code.titles.on_handoff(&id);
+    }
     state.code.send(&id, AgentCmd::Prompt { blocks })?;
     state.code.set_busy(&id, true);
-    if state.db.get_setting(&note_key)?.is_some() {
+    if note.is_some() {
         state.db.with_conn(|c| c.execute("DELETE FROM settings WHERE key = ?1", [&note_key]))?;
     }
     // Every viewer shows the prompt; the window that sent it already has.
