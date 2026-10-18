@@ -369,15 +369,29 @@ fn version_of(program: &Path) -> Option<String> {
 /// Instructions appended to the system prompt, in the form this agent reads them.
 fn session_meta(kind: AgentKind, rules: &str) -> Value {
     let rules = rules.trim();
-    if rules.is_empty() {
-        return json!({});
+    let mut meta = serde_json::Map::new();
+    if !rules.is_empty() {
+        match kind {
+            AgentKind::Grok => {
+                meta.insert("rules".into(), json!(rules));
+            }
+            // claude-agent-acp merges this into the SDK's `claude_code` preset prompt.
+            AgentKind::ClaudeCode => {
+                meta.insert("systemPrompt".into(), json!({ "append": rules }));
+            }
+            _ => {}
+        }
     }
-    match kind {
-        AgentKind::Grok => json!({ "rules": rules }),
-        // claude-agent-acp merges this into the SDK's `claude_code` preset prompt.
-        AgentKind::ClaudeCode => json!({ "systemPrompt": { "append": rules } }),
-        _ => json!({}),
+    if kind == AgentKind::ClaudeCode {
+        // The Claude Agent SDK streams signature-only thinking by default, so thought
+        // chunks arrive with empty text and the ACP adapter drops them. Asking for
+        // summarized display makes live `agent_thought_chunk` text reach the UI.
+        meta.insert(
+            "claudeCode".into(),
+            json!({ "options": { "thinking": { "type": "adaptive", "display": "summarized" } } }),
+        );
     }
+    Value::Object(meta)
 }
 
 /// True when this agent receives Settings → Code → custom instructions.
@@ -484,12 +498,18 @@ mod tests {
     #[test]
     fn instructions_reach_agents_that_read_them() {
         assert_eq!(session_meta(AgentKind::Grok, " be terse "), json!({ "rules": "be terse" }));
+        let claude = session_meta(AgentKind::ClaudeCode, "be terse");
+        assert_eq!(claude["systemPrompt"], json!({ "append": "be terse" }));
         assert_eq!(
-            session_meta(AgentKind::ClaudeCode, "be terse"),
-            json!({ "systemPrompt": { "append": "be terse" } })
+            claude["claudeCode"]["options"]["thinking"],
+            json!({ "type": "adaptive", "display": "summarized" })
         );
         assert_eq!(session_meta(AgentKind::Opencode, "be terse"), json!({}));
-        assert_eq!(session_meta(AgentKind::ClaudeCode, "  "), json!({}));
+        // Thinking display rides every Claude Code session, instructions or not.
+        assert_eq!(
+            session_meta(AgentKind::ClaudeCode, "  ")["claudeCode"]["options"]["thinking"],
+            json!({ "type": "adaptive", "display": "summarized" })
+        );
     }
 
     #[test]
