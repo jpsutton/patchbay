@@ -25,6 +25,9 @@ export function useStickyScroll(deps: DependencyList) {
   }, deps);
 
   // Content also grows after a render (highlighting, diagrams, images); follow it while pinned.
+  // The scroller itself shrinks when a phone's keyboard opens (the app is padded by the keyboard)
+  // and grows as the composer resizes: stay at the bottom then too, or the latest messages slip
+  // out of view behind the keyboard.
   useEffect(() => {
     const content = el?.firstElementChild;
     if (!el || !content) return;
@@ -32,6 +35,7 @@ export function useStickyScroll(deps: DependencyList) {
       if (stick.current) el.scrollTop = el.scrollHeight;
     });
     ro.observe(content);
+    ro.observe(el);
     return () => ro.disconnect();
   }, [el]);
 
@@ -47,18 +51,19 @@ export function useStickyScroll(deps: DependencyList) {
     setAtTop(node.scrollTop < 1);
   };
 
+  /** Re-attach and go to the bottom now and once the layout settles (composer clearing etc.). */
   const pin = () => {
     stick.current = true;
     setAtBottom(true);
-  };
-
-  const toBottom = () => {
-    pin();
     const node = elRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
+    if (!node) return;
+    node.scrollTop = node.scrollHeight;
+    requestAnimationFrame(() => {
+      if (stick.current) node.scrollTop = node.scrollHeight;
+    });
   };
 
-  return { ref, onScroll, atBottom, atTop, pin, toBottom };
+  return { ref, onScroll, atBottom, atTop, pin, toBottom: pin };
 }
 
 export function JumpToBottom({ show, onClick }: { show: boolean; onClick: () => void }) {

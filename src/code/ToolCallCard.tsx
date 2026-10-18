@@ -5,6 +5,7 @@ import { useStore } from "../lib/store";
 import { DiffView, diffStats } from "./DiffView";
 import { Markdown } from "../components/Markdown";
 import { CopyButton } from "../components/CopyButton";
+import { AgentImage } from "../components/AgentImage";
 import {
   ArrowRightIcon,
   BrainIcon,
@@ -66,6 +67,26 @@ function textOfContent(c: AcpToolCallContent): string | null {
   return null;
 }
 
+type ImageBlock = { data: string; mimeType: string };
+
+/** Images in a tool's output, e.g. a screenshot an agent read back to look at. */
+function imagesOf(tc: AcpToolCall): ImageBlock[] {
+  return (tc.content ?? []).flatMap((c) =>
+    c.type === "content" && c.content.type === "image" && c.content.data ? [c.content] : [],
+  );
+}
+
+/** A tool's images, each opening full size. */
+function ToolImages({ images, label }: { images: ImageBlock[]; label: string }) {
+  return (
+    <div className="flex flex-col gap-2">
+      {images.map((im, i) => (
+        <AgentImage key={i} data={im.data} mimeType={im.mimeType} alt={label} />
+      ))}
+    </div>
+  );
+}
+
 function inputSummary(raw: unknown): string | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
@@ -89,15 +110,18 @@ function rawOutputText(raw: unknown): string | null {
   return json === "{}" ? null : json;
 }
 
-export function ToolCallBody({ tc }: { tc: AcpToolCall }) {
+export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withImages?: boolean }) {
   const content = tc.content ?? [];
+  const images = imagesOf(tc);
   const diffs = content.filter((c): c is Extract<AcpToolCallContent, { type: "diff" }> => c.type === "diff");
   const terminals = content.filter((c): c is Extract<AcpToolCallContent, { type: "terminal" }> => c.type === "terminal");
   const texts = content.map(textOfContent).filter((t): t is string => !!t);
   // Patchbay doesn't host ACP terminals, so their output only reaches us as raw tool output.
-  const output = texts.length === 0 && diffs.length === 0 ? rawOutputText(tc.rawOutput) : null;
+  // A tool that returned an image has it in rawOutput too, as base64: never show that as text.
+  const output = texts.length === 0 && diffs.length === 0 && images.length === 0 ? rawOutputText(tc.rawOutput) : null;
   return (
     <div className="flex flex-col gap-2">
+      {withImages && images.length > 0 && <ToolImages images={images} label={tc.title || "Tool output"} />}
       {diffs.map((d, i) => (
         <DiffView key={i} path={d.path} oldText={d.oldText} newText={d.newText} />
       ))}
@@ -115,7 +139,7 @@ export function ToolCallBody({ tc }: { tc: AcpToolCall }) {
           {texts.length > 0 ? texts.join("\n") : output}
         </pre>
       )}
-      {diffs.length === 0 && texts.length === 0 && !output && tc.rawInput != null && (
+      {diffs.length === 0 && texts.length === 0 && images.length === 0 && !output && tc.rawInput != null && (
         <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12.5px] leading-5 text-muted">
           {JSON.stringify(tc.rawInput, null, 2)}
         </pre>
@@ -130,6 +154,8 @@ export function ToolCallCard({ tc, autoApproved }: { tc: AcpToolCall; autoApprov
   const [open, setOpen] = useState(hasDiff);
   const summary = inputSummary(tc.rawInput);
   const Icon = KIND_ICON[tc.kind ?? "other"] ?? DotIcon;
+  // Images show without opening the row: they're usually what the agent wanted you to see.
+  const images = imagesOf(tc);
   const stats = (tc.content ?? [])
     .filter((c): c is Extract<AcpToolCallContent, { type: "diff" }> => c.type === "diff")
     .map((d) => diffStats(d.oldText, d.newText))
@@ -163,9 +189,14 @@ export function ToolCallCard({ tc, autoApproved }: { tc: AcpToolCall; autoApprov
           <ChevronRightIcon size={12} />
         </span>
       </button>
+      {images.length > 0 && (
+        <div className="border-t border-line px-3 py-2.5">
+          <ToolImages images={images} label={tc.title || "Tool output"} />
+        </div>
+      )}
       {open && (
         <div className="border-t border-line px-3 py-2.5">
-          <ToolCallBody tc={tc} />
+          <ToolCallBody tc={tc} withImages={false} />
         </div>
       )}
     </div>
