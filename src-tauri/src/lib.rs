@@ -1657,6 +1657,27 @@ async fn usage_report(state: &AppState, days: u32) -> CmdResult<UsageReport> {
     })
 }
 
+/// Where the desktop app keeps its data (Tauri's `app_data_dir` for `dev.patchbay.app`), so the
+/// daemon can take over a computer's existing setup. Its mesh secrets use the keyring's unscoped
+/// names (see `OsKeyStore`).
+pub fn default_data_dir() -> anyhow::Result<PathBuf> {
+    use anyhow::Context as _;
+    const ID: &str = "dev.patchbay.app";
+    let home = || std::env::var_os("HOME").map(PathBuf::from).context("HOME is not set");
+    if cfg!(target_os = "macos") {
+        return Ok(home()?.join("Library/Application Support").join(ID));
+    }
+    if cfg!(windows) {
+        let appdata = std::env::var_os("APPDATA").context("APPDATA is not set")?;
+        return Ok(PathBuf::from(appdata).join(ID));
+    }
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .map_or_else(|| home().map(|h| h.join(".local/share")), Ok)?;
+    Ok(base.join(ID))
+}
+
 /// Opens the database and mesh under `data_dir` and wires them into a fresh `AppState`. Both
 /// the desktop app and the daemon start here; `emit` reaches their windows or web clients.
 pub fn open_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow::Result<AppState> {
