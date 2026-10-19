@@ -2,6 +2,7 @@
 // the phone's hold-to-open sheet share these lists.
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import type { ItemAction } from "../components/ItemMenu";
+import { isWeb } from "./platform";
 import { copyText } from "../components/CopyButton";
 import { api, errorText, type CodeSession, type Conversation } from "./ipc";
 import { useStore } from "./store";
@@ -120,7 +121,7 @@ export function sessionActions(
       if (await copyText(s.cwd)) st().setToast("Copied the folder path");
     }),
   });
-  if (desktop && local) {
+  if (desktop && local && !isWeb()) {
     actions.push({ label: "Show in file manager", onSelect: attempt(() => revealItemInDir(s.cwd)) });
   }
   if (desktop) {

@@ -165,3 +165,192 @@ pub fn build_tray(app: &AppHandle) -> Result<()> {
     builder.build(app)?;
     Ok(())
 }
+
+/// `DesktopHooks` for the native app.
+struct Hooks(AppHandle);
+
+impl crate::DesktopHooks for Hooks {
+    fn validate_shortcut(&self, accel: &str) -> std::result::Result<(), String> {
+        validate_shortcut(accel)
+    }
+
+    fn set_quick_shortcut(&self, accel: &str) -> Result<()> {
+        set_quick_shortcut(&self.0, accel)
+    }
+
+    fn apply_title_bar(&self, title_bar: &str) {
+        apply_title_bar(&self.0, title_bar)
+    }
+}
+
+// ---------------- desktop-only commands ----------------
+
+/// From the quick-entry window: hand the text to the main window as a new chat.
+#[tauri::command]
+fn quick_submit(app: AppHandle, text: String) -> crate::CmdResult<()> {
+    hide_quick(&app);
+    show_main(&app);
+    app.emit_to("main", EV_QUICK_PROMPT, text)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn quick_dismiss(app: AppHandle) {
+    hide_quick(&app);
+}
+
+/// Write a user-chosen export (the path comes from the native save dialog).
+#[tauri::command]
+fn write_text_file(path: String, contents: String) -> crate::CmdResult<()> {
+    Ok(std::fs::write(&path, contents)?)
+}
+
+/// Serve an invoke from the window. Shared commands go through `api::call`, the same dispatcher
+/// the daemon's web clients use; the rest are the desktop-only commands above.
+fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
+    let desktop_only: Box<dyn Fn(tauri::ipc::Invoke) -> bool + Send + Sync> =
+        Box::new(tauri::generate_handler![quick_submit, quick_dismiss, write_text_file]);
+    move |invoke| {
+        if crate::api::COMMANDS.contains(&invoke.message.command()) {
+            dispatch(invoke);
+            true
+        } else {
+            desktop_only(invoke)
+        }
+    }
+}
+
+/// Run a shared command for the window, answering through the invoke's resolver.
+fn dispatch<R: tauri::Runtime>(invoke: tauri::ipc::Invoke<R>) {
+    let cmd = invoke.message.command().to_owned();
+    let webview = invoke.message.webview();
+    let state = webview.state::<crate::AppState>().inner().clone();
+    let args = match invoke.message.payload() {
+        tauri::ipc::InvokeBody::Json(v) => v.clone(),
+        tauri::ipc::InvokeBody::Raw(_) => serde_json::Value::Null,
+    };
+    let chans: crate::api::ChanFactory = std::sync::Arc::new(move |id: &str| {
+        let id: tauri::ipc::JavaScriptChannelId = id.parse().ok()?;
+        let ch = id.channel_on::<_, serde_json::Value>(webview.clone());
+        Some(std::sync::Arc::new(move |v| ch.send(v).is_ok()) as crate::api::ChanSend)
+    });
+    let resolver = invoke.resolver;
+    tauri::async_runtime::spawn(async move {
+        match crate::api::call(&state, &cmd, args, &chans).await {
+            Ok(v) => resolver.resolve(v),
+            Err(e) => resolver.reject(e.0),
+        }
+    });
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    crate::init_tracing();
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .setup(|app| {
+            let emit: crate::mesh::node::UiSink = {
+                let h = app.handle().clone();
+                std::sync::Arc::new(move |name: &str, payload: serde_json::Value| {
+                    let _ = h.emit(name, payload);
+                })
+            };
+            let state = match crate::open_state(app.path().app_data_dir()?, emit) {
+                Ok(s) => s,
+                Err(e) => {
+                    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                    app.dialog()
+                        .message(format!("{e:#}"))
+                        .title("Patchbay can't start")
+                        .kind(MessageDialogKind::Error)
+                        .blocking_show();
+                    std::process::exit(1);
+                }
+            };
+            let handle = app.handle().clone();
+            let _ = state.desktop.set(std::sync::Arc::new(Hooks(handle.clone())));
+            let p = crate::prefs::load(&state.db);
+            app.manage(state);
+            // A tray needs a StatusNotifier host on Linux; never let its absence stop the app.
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_tray(&handle))) {
+                Ok(Err(e)) => tracing::warn!("tray icon unavailable: {e:#}"),
+                Err(_) => tracing::warn!("tray icon unavailable"),
+                Ok(Ok(())) => {}
+            }
+            if p.title_bar != "system" {
+                apply_title_bar(&handle, &p.title_bar);
+            }
+            if let Err(e) = set_quick_shortcut(&handle, &p.quick_entry_shortcut) {
+                tracing::warn!("quick entry shortcut: {e:#}");
+            }
+            Ok(())
+        })
+        .on_window_event(|w, ev| {
+            // The hidden quick-entry window must not keep the app alive after the main one closes.
+            if w.label() == "main" && matches!(ev, tauri::WindowEvent::Destroyed) {
+                w.app_handle().exit(0);
+            }
+        })
+        .invoke_handler(invoke_handler())
+        .build(tauri::generate_context!())
+        .expect("error while building Patchbay")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event
+                && let Some(state) = app.try_state::<crate::AppState>()
+            {
+                state.shutdown();
+            }
+        });
+}
+
+/// The window's IPC path, on Tauri's mock runtime: `cargo test --lib --features ipc-test`.
+#[cfg(all(test, feature = "ipc-test"))]
+mod ipc_tests {
+    use serde_json::{Value, json};
+    use tauri::Manager;
+    use tauri::ipc::{CallbackFn, InvokeBody};
+    use tauri::test::{INVOKE_KEY, get_ipc_response, mock_builder, mock_context, noop_assets};
+    use tauri::webview::InvokeRequest;
+
+    fn invoke(w: &tauri::WebviewWindow<tauri::test::MockRuntime>, cmd: &str, args: Value) -> Result<Value, Value> {
+        let req = InvokeRequest {
+            cmd: cmd.into(),
+            callback: CallbackFn(0),
+            error: CallbackFn(1),
+            url: "tauri://localhost".parse().unwrap(),
+            body: InvokeBody::Json(args),
+            headers: Default::default(),
+            invoke_key: INVOKE_KEY.to_string(),
+        };
+        get_ipc_response(w, req).map(|b| b.deserialize::<Value>().unwrap())
+    }
+
+    #[test]
+    fn window_commands_go_through_the_dispatcher() {
+        let dir = std::env::temp_dir().join(format!("pb-ipc-{}", crate::db::new_id()));
+        let app = mock_builder()
+            .invoke_handler(|i| {
+                super::dispatch(i);
+                true
+            })
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        let emit: crate::mesh::node::UiSink = std::sync::Arc::new(|_: &str, _: Value| {});
+        app.manage(crate::open_state(dir.clone(), emit).unwrap());
+        let w = tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
+
+        let p = invoke(&w, "save_prompt", json!({ "name": "Greet", "content": "Say hi" })).unwrap();
+        assert_eq!(p["name"], "Greet");
+        let list = invoke(&w, "list_prompts", json!({})).unwrap();
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        let err = invoke(&w, "list_messages", json!({})).unwrap_err();
+        assert!(err.as_str().unwrap().contains("conversationId"), "{err}");
+        let err = invoke(&w, "save_prompt", json!({ "name": " ", "content": "" })).unwrap_err();
+        assert_eq!(err, "name is required");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

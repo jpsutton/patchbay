@@ -28,7 +28,8 @@ import { codeToJson, codeToMarkdown, saveExport } from "../lib/export";
 import { useViewAction } from "../lib/shortcuts";
 import { HeaderButton } from "../components/HeaderButton";
 import { useDragRegion, WindowControls } from "../components/WindowControls";
-import { isRemoteApp } from "../lib/platform";
+import { isRemoteApp, isWeb } from "../lib/platform";
+import { pickFolder } from "../components/FolderPicker";
 import {
   CheckIcon,
   ChevronRightIcon,
@@ -62,7 +63,9 @@ export async function newSessionIn(dir: string, agent?: AgentId) {
 }
 
 export async function openFolderAsSession(agent?: AgentId) {
-  const dir = await open({ directory: true, multiple: false, title: "Open project folder" });
+  const dir = isWeb()
+    ? await pickFolder("Open project folder")
+    : await open({ directory: true, multiple: false, title: "Open project folder" });
   if (!dir || Array.isArray(dir)) return;
   await newSessionIn(dir, agent);
 }

@@ -1,14 +1,14 @@
-# Builds Patchbay from this source checkout (with the vendor/grok-build
-# submodule checked out):
+# Builds Patchbay (the desktop app) and patchbayd (headless) from this source
+# checkout (with the vendor/grok-build submodule checked out):
 #   cd packaging/linux/arch && makepkg -si
-pkgname=patchbay
+pkgbase=patchbay
+pkgname=(patchbay patchbayd)
 pkgver=0.6.1
 pkgrel=1
 pkgdesc="Desktop LLM client with chat and a coding agent, for any provider"
 arch=(x86_64 aarch64)
 url="https://github.com/jpsutton/patchbay"
 license=(Apache-2.0)
-depends=(webkit2gtk-4.1 gtk3 libayatana-appindicator dbus xdotool hicolor-icon-theme)
 makedepends=(cargo git nodejs pnpm protobuf)
 options=(!debug !lto)
 
@@ -19,9 +19,19 @@ build() {
   PROFILE=release scripts/build-sidecar.sh
   pnpm install --frozen-lockfile
   pnpm tauri build --no-bundle
+  # patchbayd: the same app without Tauri, serving the UI pnpm built above.
+  (cd src-tauri && cargo build --release --locked --bin patchbayd --no-default-features --features web)
 }
 
-package() {
+_notices() {
+  local licenses="${pkgdir}/usr/share/licenses/${pkgname}"
+  install -Dm644 LICENSE NOTICE THIRD_PARTY_NOTICES.md -t "${licenses}"
+  install -Dm644 vendor/grok-build/THIRD-PARTY-NOTICES "${licenses}/GROK_BUILD_THIRD_PARTY_NOTICES"
+  install -Dm644 vendor/grok-build/third_party/NOTICE "${licenses}/GROK_BUILD_VENDORED_NOTICE"
+}
+
+package_patchbay() {
+  depends=(webkit2gtk-4.1 gtk3 libayatana-appindicator dbus xdotool hicolor-icon-theme)
   cd "${_srcroot}"
   # The app finds its grok sidecar next to its own executable.
   install -Dm755 src-tauri/target/release/patchbay "${pkgdir}/usr/lib/patchbay/patchbay"
@@ -37,8 +47,21 @@ package() {
   done
   install -Dm644 src-tauri/icons/128x128@2x.png "${pkgdir}/usr/share/icons/hicolor/256x256/apps/patchbay.png"
 
-  local licenses="${pkgdir}/usr/share/licenses/${pkgname}"
-  install -Dm644 LICENSE NOTICE THIRD_PARTY_NOTICES.md -t "${licenses}"
-  install -Dm644 vendor/grok-build/THIRD-PARTY-NOTICES "${licenses}/GROK_BUILD_THIRD_PARTY_NOTICES"
-  install -Dm644 vendor/grok-build/third_party/NOTICE "${licenses}/GROK_BUILD_VENDORED_NOTICE"
+  _notices
+}
+
+package_patchbayd() {
+  pkgdesc="Patchbay, headless: chats, Code sessions and the mesh, with a browser UI"
+  depends=(dbus glibc)
+  cd "${_srcroot}"
+  # Its own copy of the sidecar and the UI, found next to its executable.
+  install -Dm755 src-tauri/target/release/patchbayd "${pkgdir}/usr/lib/patchbayd/patchbayd"
+  install -Dm755 target/grok/release/xai-grok-pager "${pkgdir}/usr/lib/patchbayd/grok"
+  cp -r dist "${pkgdir}/usr/lib/patchbayd/web"
+  install -dm755 "${pkgdir}/usr/bin"
+  ln -s /usr/lib/patchbayd/patchbayd "${pkgdir}/usr/bin/patchbayd"
+  install -Dm644 packaging/linux/daemon/patchbayd.service "${pkgdir}/usr/lib/systemd/user/patchbayd.service"
+  install -Dm644 packaging/linux/daemon/patchbayd@.service "${pkgdir}/usr/lib/systemd/system/patchbayd@.service"
+  install -Dm644 docs/headless.md "${pkgdir}/usr/share/doc/patchbayd/README.md"
+  _notices
 }

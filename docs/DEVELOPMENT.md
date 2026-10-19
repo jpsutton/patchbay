@@ -51,6 +51,12 @@ The first sidecar build compiles about 800 crates and takes a few minutes. For a
 
 Open **Settings** to add a provider. Presets are available for OpenAI, Anthropic, OpenRouter, Ollama and LM Studio. Then fetch or type model ids, and pick a default model.
 
+### The headless daemon
+
+`cargo build --bin patchbayd --no-default-features --features web` builds `patchbayd` without Tauri. Commands are plain functions in `lib.rs`, listed once in `api.rs`. The window reaches them through a custom Tauri invoke handler, and browsers through the daemon's WebSocket, where `src/lib/webBackend.ts` stands in for Tauri's IPC. Desktop-only commands (quick entry, writing exports) stay `#[tauri::command]`s in `desktop.rs`. Views check `isWeb()` (`src/lib/platform.ts`) for what a browser lacks: native dialogs, local file paths, window controls.
+
+To try it, `pnpm build`, then `target/debug/patchbayd --data-dir /tmp/pb --listen 127.0.0.1:4477` from `src-tauri`, and open the printed address. Use a scratch `--data-dir`: only one Patchbay may use a data folder at a time.
+
 ## Testing without a real provider
 
 `scripts/mock-llm.py` is a mock server that speaks OpenAI Chat Completions and Anthropic Messages. It rejects non-standard per-message fields as strictly as Fireworks does, and echoes back what the model received: the text, the number of images and the names of attached files.
@@ -82,7 +88,10 @@ The mesh's end-to-end tests run real nodes over WebSocket on localhost: `cargo t
 
 ```
 src-tauri/src/
-  lib.rs            Tauri commands + state
+  lib.rs            commands + state, shared by the app and the daemon
+  api.rs            command dispatcher: name + JSON args, for Tauri IPC and the daemon's WebSocket
+  web.rs            patchbayd's HTTP/WebSocket server for the browser UI (feature `web`)
+  bin/patchbayd.rs  the headless daemon (docs/headless.md)
   db.rs             SQLite schema (providers, models, conversations, messages, attachments, code sessions)
   providers.rs      keyring secrets, /models discovery, SamplerConfig mapping
   chat.rs           Chat streaming over xai-grok-sampler
@@ -92,7 +101,7 @@ src-tauri/src/
   code/acp.rs       ACP client (one agent process per code session, LocalSet thread)
   code/mcp.rs       MCP server settings -> ACP `mcpServers` (secrets in the keyring)
   code/permissions.rs  "always allow" rules matched against ACP tool calls
-  desktop.rs        tray icon, quick-entry window and its global shortcut
+  desktop.rs        Tauri entry point, tray icon, quick-entry window and its global shortcut (feature `desktop`)
   files.rs          project file listing for @-mentions (honors .gitignore)
   terminal.rs       PTY shells (portable-pty)
 src/                React + TypeScript UI (Vite, Tailwind, zustand, react-markdown + shiki, xterm.js)

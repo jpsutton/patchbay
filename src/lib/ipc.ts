@@ -536,6 +536,15 @@ export type TermEvent = { type: "data"; data: string } | { type: "exit"; code: n
 
 // ---- commands ----
 
+/** One folder listing (gateway.rs, `list_dirs_local`). */
+export interface DirListing {
+  path: string;
+  parent: string | null;
+  home: string;
+  dirs: string[];
+  truncated: boolean;
+}
+
 export const api = {
   listProviders: () => invoke<Provider[]>("list_providers"),
   saveProvider: (input: {
@@ -704,6 +713,8 @@ export const api = {
   termClose: (id: string) => invoke<void>("term_close", { id }),
 
   writeTextFile: (path: string, contents: string) => invoke<void>("write_text_file", { path, contents }),
+  /** Folders under `path` (default: home) on this computer, for choosing one without a native dialog. */
+  listDirs: (path: string | null) => invoke<DirListing>("list_dirs", { path }),
 };
 
 export function errorText(e: unknown): string {

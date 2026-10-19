@@ -3,6 +3,7 @@ import { api, errorText, type AcpToolCall, type CodeSession, type Conversation, 
 import type { Entry } from "./store";
 import { useStore } from "./store";
 import { fmtDateTime } from "./format";
+import { isWeb } from "./platform";
 
 export type ExportFormat = "markdown" | "json";
 
@@ -14,6 +15,15 @@ function fileStem(title: string): string {
 /** Ask where to save, then write. Resolves true when a file was written. */
 export async function saveExport(title: string, format: ExportFormat, contents: string): Promise<boolean> {
   const ext = format === "markdown" ? "md" : "json";
+  if (isWeb()) {
+    // The browser saves it, to its downloads folder or wherever it asks.
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([contents], { type: format === "markdown" ? "text/markdown" : "application/json" }));
+    a.download = `${fileStem(title)}.${ext}`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+    return true;
+  }
   try {
     const path = await save({
       title: "Export",

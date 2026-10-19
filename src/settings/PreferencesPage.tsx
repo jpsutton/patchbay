@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import type { Preferences } from "../lib/ipc";
 import { useStore } from "../lib/store";
+import { isWeb } from "../lib/platform";
 import { input } from "./ProviderPage";
 import { AgentsPage } from "./AgentsPage";
 import { McpPage } from "./McpPage";
@@ -216,6 +217,8 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
             ]}
           />
         </Row>
+        {/* The browser draws its own frame. */}
+        {!isWeb() && (
         <Row
           label="Title bar"
           hint={
@@ -233,9 +236,12 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
             ]}
           />
         </Row>
+        )}
         <Row label="Notifications" hint="When a reply or agent turn finishes, or the agent needs approval, while Patchbay is in the background.">
           <Toggle label="Notifications" checked={prefs.notifications} onChange={(v) => set("notifications", v)} />
         </Row>
+        {/* Global shortcuts belong to the desktop app. */}
+        {!isWeb() && (
         <Row
           label="Quick entry shortcut"
           hint={
@@ -254,6 +260,7 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
             onCommit={(v) => update({ quickEntryShortcut: v.trim() })}
           />
         </Row>
+        )}
       </div>
     );
   }
