@@ -64,7 +64,17 @@ Download Patchbay from the [Releases page](https://github.com/jpsutton/patchbay/
 | Windows | Installer (`.exe`) and `.msi` |
 | macOS | `.dmg` (Apple silicon) |
 
-Windows and macOS builds aren't signed by Microsoft or Apple yet, so your system will warn you the first time you open them.
+Windows and macOS builds aren't signed by Microsoft or Apple yet, so your system will warn you the first time you open them. On macOS (Sonoma, Sequoia), Gatekeeper flags un-notarized downloads as damaged. After dragging `Patchbay.app` into `/Applications`, run:
+
+```bash
+xattr -cr /Applications/Patchbay.app
+```
+
+or run the setup script:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jpsutton/patchbay/staging/scripts/macos-setup.sh | bash
+```
 
 For a computer without a display, `patchbayd` runs Patchbay headless and serves the same UI to a browser. It comes in the same formats (`.deb`, `.rpm`, the Arch repository, plus archives for any Linux, Windows and macOS), with systemd units on Linux. See [docs/headless.md](docs/headless.md).
 
