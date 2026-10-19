@@ -571,6 +571,15 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     }
   });
 
+  // Re-render once foreground tools have been quiet long enough to stop showing Working….
+  useEffect(() => {
+    if (!state || state.busy || hasActiveForegroundTools(state.toolCalls) || state.lastForegroundAt == null) return;
+    const left = FOREGROUND_IDLE_MS - (Date.now() - state.lastForegroundAt);
+    if (left <= 0) return;
+    const id = window.setTimeout(() => setIdleTick((n) => n + 1), left + 1);
+    return () => clearTimeout(id);
+  }, [state?.busy, state?.lastForegroundAt, state?.toolCalls]);
+
   if (!session) {
     return (
       <div className="flex min-w-0 flex-1 flex-col">
@@ -608,13 +617,6 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   // they end).
   const background = Object.values(s?.toolCalls ?? {}).filter((tc) => tc.background);
 
-  useEffect(() => {
-    if (!s || s.busy || hasActiveForegroundTools(s.toolCalls) || s.lastForegroundAt == null) return;
-    const left = FOREGROUND_IDLE_MS - (Date.now() - s.lastForegroundAt);
-    if (left <= 0) return;
-    const id = window.setTimeout(() => setIdleTick((n) => n + 1), left + 1);
-    return () => clearTimeout(id);
-  }, [s?.busy, s?.lastForegroundAt, s?.toolCalls]);
   // What the session is waiting on, said plainly. A phone reaches it through a gateway, so it
   // can be reconnecting, or catching up on a session whose agent already runs.
   const reconnecting = remote && !!mesh?.phase && mesh.phase !== "online";

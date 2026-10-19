@@ -62,25 +62,6 @@ fn parse_args() -> Result<Args> {
     Ok(a)
 }
 
-/// Where the desktop app keeps its data (Tauri's `app_data_dir` for `dev.patchbay.app`), so the
-/// daemon can take over a computer's existing setup.
-fn default_data_dir() -> Result<PathBuf> {
-    const ID: &str = "dev.patchbay.app";
-    let home = || std::env::var_os("HOME").map(PathBuf::from).context("HOME is not set");
-    if cfg!(target_os = "macos") {
-        return Ok(home()?.join("Library/Application Support").join(ID));
-    }
-    if cfg!(windows) {
-        let appdata = std::env::var_os("APPDATA").context("APPDATA is not set")?;
-        return Ok(PathBuf::from(appdata).join(ID));
-    }
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .map_or_else(|| home().map(|h| h.join(".local/share")), Ok)?;
-    Ok(base.join(ID))
-}
-
 /// The web UI's access token, created on first use (readable by this user only).
 fn load_token(data_dir: &std::path::Path, rotate: bool) -> Result<String> {
     let path = data_dir.join("web-token");
@@ -128,7 +109,7 @@ fn main() -> Result<()> {
     let args = parse_args()?;
     let data_dir = match args.data_dir.clone() {
         Some(d) => d,
-        None => default_data_dir()?,
+        None => patchbay_lib::default_data_dir()?,
     };
     let listen = args.listen.clone().unwrap_or_else(|| "127.0.0.1:4420".into());
 
