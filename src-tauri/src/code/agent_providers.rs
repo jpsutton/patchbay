@@ -138,7 +138,7 @@ mod tests {
             ("fw", ProviderKind::OpenaiChat, "https://api.fireworks.ai/inference/v1/"),
             ("ant", ProviderKind::Anthropic, "https://api.anthropic.com/v1"),
         ] {
-            let p = Provider { id: id.into(), name: id.to_uppercase(), kind, base_url: url.into(), has_key: true };
+            let p = Provider { id: id.into(), name: id.to_uppercase(), kind, base_url: url.into(), has_key: true, auth_mode: Default::default(), };
             db.upsert_provider(&p, Some(&format!("key-{id}"))).unwrap();
         }
         for (id, provider, model, cw, out) in [

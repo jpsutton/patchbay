@@ -5,10 +5,11 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use xai_grok_sampler::{ApiBackend, AuthScheme, SamplerConfig};
 
-use crate::db::{Db, Model, Provider, ProviderKind};
+use crate::db::{AuthMode, Db, Model, Provider, ProviderKind};
 
 const KEYRING_SERVICE: &str = "dev.patchbay.app";
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
+pub const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
 
 /// Store a provider API key in the OS keyring. Falls back to the DB when no keyring service is
 /// available (e.g. headless Linux without a Secret Service daemon).
@@ -85,11 +86,19 @@ pub fn backend_for(kind: &ProviderKind) -> ApiBackend {
     }
 }
 
+/// How a resolved provider authenticates for sampling / discovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Auth {
+    Key,
+    ClaudeLogin,
+}
+
 /// Resolved model + provider + key, ready to sample.
 pub struct Resolved {
     pub provider: Provider,
     pub model: Model,
     pub key: Option<String>,
+    pub auth: Auth,
 }
 
 pub fn resolve(db: &Db, model_ref: &str) -> Result<Resolved> {
@@ -99,12 +108,29 @@ pub fn resolve(db: &Db, model_ref: &str) -> Result<Resolved> {
     let (provider, inline) = db
         .get_provider(&model.provider_id)?
         .ok_or_else(|| anyhow!("provider for model {} missing", model.display_name))?;
-    let key = load_key(&provider.id, inline.as_deref());
+    let auth = match provider.auth_mode {
+        AuthMode::ClaudeLogin => Auth::ClaudeLogin,
+        AuthMode::ApiKey => Auth::Key,
+    };
+    let key = match auth {
+        Auth::ClaudeLogin => None,
+        Auth::Key => load_key(&provider.id, inline.as_deref()),
+    };
     Ok(Resolved {
         provider,
         model,
         key,
+        auth,
     })
+}
+
+/// Fill `resolved.key` for Claude login providers (no-op for API-key auth).
+pub async fn ensure_token(resolved: &mut Resolved) -> Result<()> {
+    if resolved.auth != Auth::ClaudeLogin {
+        return Ok(());
+    }
+    resolved.key = Some(crate::claude_auth::access_token().await?);
+    Ok(())
 }
 
 pub fn sampler_config(r: &Resolved) -> SamplerConfig {
@@ -112,7 +138,15 @@ pub fn sampler_config(r: &Resolved) -> SamplerConfig {
     let mut auth_scheme = AuthScheme::Bearer;
     if r.provider.kind == ProviderKind::Anthropic {
         extra_headers.insert("anthropic-version".into(), ANTHROPIC_VERSION.into());
-        auth_scheme = AuthScheme::XApiKey;
+        match r.auth {
+            Auth::ClaudeLogin => {
+                extra_headers.insert("anthropic-beta".into(), ANTHROPIC_OAUTH_BETA.into());
+                auth_scheme = AuthScheme::Bearer;
+            }
+            Auth::Key => {
+                auth_scheme = AuthScheme::XApiKey;
+            }
+        }
     }
     SamplerConfig {
         api_key: r.key.clone(),
@@ -185,23 +219,33 @@ pub async fn discover_models(
     kind: &ProviderKind,
     base_url: &str,
     key: Option<&str>,
+    auth: Auth,
 ) -> Result<Vec<DiscoveredModel>> {
     let url = format!("{}/models", normalize_base_url(base_url));
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()?;
     let mut req = client.get(&url);
-    match (kind, key) {
-        (ProviderKind::Anthropic, Some(k)) => {
+    match (kind, auth, key) {
+        (ProviderKind::Anthropic, Auth::ClaudeLogin, Some(k)) => {
+            req = req
+                .bearer_auth(k)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .header("anthropic-beta", ANTHROPIC_OAUTH_BETA);
+        }
+        (ProviderKind::Anthropic, Auth::ClaudeLogin, None) => {
+            return Err(anyhow!("Claude Code login required to discover models"));
+        }
+        (ProviderKind::Anthropic, Auth::Key, Some(k)) => {
             req = req
                 .header("x-api-key", k)
                 .header("anthropic-version", ANTHROPIC_VERSION);
         }
-        (ProviderKind::Anthropic, None) => {
+        (ProviderKind::Anthropic, Auth::Key, None) => {
             req = req.header("anthropic-version", ANTHROPIC_VERSION);
         }
-        (_, Some(k)) => req = req.bearer_auth(k),
-        (_, None) => {}
+        (_, _, Some(k)) => req = req.bearer_auth(k),
+        (_, _, None) => {}
     }
     let resp = req.send().await.with_context(|| format!("GET {url}"))?;
     let status = resp.status();

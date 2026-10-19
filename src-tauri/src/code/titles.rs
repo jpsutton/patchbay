@@ -136,8 +136,9 @@ fn title_model(db: &Db, session: &CodeSession) -> Option<providers::Resolved> {
 
 /// Name `session` from `convo` with a Patchbay model.
 pub async fn generate(db: &Db, session: &CodeSession, convo: String) -> Result<String> {
-    let resolved = title_model(db, session)
+    let mut resolved = title_model(db, session)
         .ok_or_else(|| anyhow!("no model to name it with: choose a default model in Settings"))?;
+    providers::ensure_token(&mut resolved).await?;
     crate::chat::name_with(&resolved, TITLE_PROMPT, convo)
         .await?
         .ok_or_else(|| anyhow!("the model didn't suggest a title"))
