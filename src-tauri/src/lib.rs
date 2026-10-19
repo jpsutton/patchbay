@@ -489,13 +489,29 @@ async fn list_code_sessions(state: &AppState) -> CmdResult<Vec<CodeSession>> {
     Ok(state.db.list_code_sessions()?)
 }
 
+/// A new Code session in `cwd`, here or, with `host`, on that computer.
 async fn create_code_session(
     state: &AppState,
     cwd: String,
     model_ref: Option<String>,
     agent: Option<String>,
+    host: Option<String>,
 ) -> CmdResult<CodeSession> {
-    Ok(create_code_session_local(state, &cwd, model_ref.as_deref(), agent)?)
+    let Some(host) = host.filter(|h| h != state.mesh.node_id()) else {
+        return Ok(create_code_session_local(state, &cwd, model_ref.as_deref(), agent)?);
+    };
+    let p = serde_json::json!({ "host": host, "cwd": cwd, "modelRef": model_ref, "agent": agent });
+    let created = gateway::on_host(state, &p, "code.create").await?;
+    let id = created["id"].as_str().ok_or_else(|| CmdError("the host returned no session".into()))?;
+    // The host's new row reaches this computer through mesh sync; wait for it, so the caller
+    // can open the session from its list.
+    for _ in 0..100 {
+        if let Some(s) = state.db.get_code_session(id)? {
+            return Ok(s);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    Err(CmdError(format!("the session started on {}, but hasn't reached this computer yet", state.mesh.member_name(&host))))
 }
 
 /// A new Code session hosted here, in `cwd` on this computer.

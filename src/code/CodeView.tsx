@@ -60,11 +60,15 @@ import { ModelRing } from "../lib/cable";
 import { JumpToBottom, ScrollFade, useStickyScroll } from "../lib/useStickyScroll";
 
 
-/** Start a Code session in `dir` with `agent`, or the default agent from Settings. */
-export async function newSessionIn(dir: string, agent?: AgentId) {
+/**
+ * Start a Code session in `dir` with `agent`, or the default agent from Settings; with `host`,
+ * in that computer's folder `dir`.
+ */
+export async function newSessionIn(dir: string, agent?: AgentId, host?: string | null) {
   const st = useStore.getState();
   try {
-    const s = await api.createCodeSession(dir, st.defaultModelRef, agent ?? st.prefs.defaultAgent);
+    // Another computer starts its own default agent: this one's may not be installed there.
+    const s = await api.createCodeSession(dir, st.defaultModelRef, agent ?? (host ? undefined : st.prefs.defaultAgent), host);
     await st.refreshCodeSessions();
     st.setMode("code");
     st.selectCodeSession(s.id);

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, errorText, type CodeEnvelope, type Conversation, type MeshChatEvent, type MeshProblem } from "./lib/ipc";
-import { codeEventArrived, useStore, type Mode } from "./lib/store";
+import { codeEventArrived, remoteHost, useStore, type Mode } from "./lib/store";
 import { goBack, goForward, resetHistory, useHistory } from "./lib/history";
 import { initZoom, zoomIn, zoomOut, zoomReset } from "./lib/zoom";
 import { ChatView } from "./chat/ChatView";
@@ -131,7 +131,7 @@ function newThing() {
     return;
   }
   const cur = st.codeSessions.find((s) => s.id === st.activeCodeSessionId);
-  if (cur) newSessionIn(cur.cwd, cur.agent);
+  if (cur) newSessionIn(cur.cwd, cur.agent, remoteHost(cur, st.mesh));
   else openFolderAsSession();
 }
 

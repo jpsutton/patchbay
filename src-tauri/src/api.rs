@@ -126,7 +126,7 @@ commands! {
     add_attachment_bytes(name, data_base64);
     attachment_thumbnail(id);
     list_code_sessions();
-    create_code_session(cwd, model_ref, agent);
+    create_code_session(cwd, model_ref, agent, host);
     list_agents(host);
     update_code_session(id, title, model_ref, pinned, activity, archived);
     delete_code_session(id);

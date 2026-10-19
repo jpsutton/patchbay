@@ -130,7 +130,7 @@ pub(crate) async fn call(state: &AppState, from: &str, method: &str, p: &Value) 
 }
 
 /// Answer a request about the computer named in `host`: here, or passed to it.
-async fn on_host(state: &AppState, p: &Value, method: &str) -> Result<Value> {
+pub(crate) async fn on_host(state: &AppState, p: &Value, method: &str) -> Result<Value> {
     let host = p["host"].as_str().ok_or_else(|| anyhow!("missing host"))?;
     if host == state.mesh.node_id() {
         return match method {

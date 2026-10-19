@@ -662,7 +662,7 @@ export function install() {
             activity: null,
             agent: ((a.agent as AgentId | null) ?? prefs.defaultAgent ?? "grok"),
             agentModel: null,
-            hostNode: ME,
+            hostNode: (a.host as string | null) ?? ME,
             epoch: 0,
             permissionMode: prefs.permissionMode ?? "default",
           };
