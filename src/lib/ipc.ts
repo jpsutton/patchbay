@@ -238,6 +238,15 @@ export interface MeshMember {
   approver: string;
   /** "remote" for a phone that only drives other members' work. */
   role?: string | null;
+  /** Its handshake with this computer failed on the passphrase. */
+  authFailed?: boolean;
+}
+
+/** Something wrong with this computer's mesh that the user has to fix. */
+export interface MeshProblem {
+  kind: "listen" | "passphrase" | "auth";
+  title: string;
+  message: string;
 }
 
 export interface MeshStatus {
@@ -259,6 +268,7 @@ export interface MeshStatus {
   } | null;
   members: MeshMember[];
   pending: { nodeId: string; name: string; code: string; role?: string | null }[];
+  problem?: MeshProblem | null;
 }
 
 /** A chat reply streaming on another node. */
@@ -723,6 +733,7 @@ export const api = {
   meshRemove: (nodeId: string) => invoke<void>("mesh_remove", { nodeId }),
   meshLeave: () => invoke<void>("mesh_leave"),
   meshSetConfig: (cfg: { name?: string; listen?: string; advertise?: string[] }) => invoke<void>("mesh_set_config", cfg),
+  meshSetPassphrase: (passphrase: string) => invoke<void>("mesh_set_passphrase", { passphrase }),
   meshAddAddress: (url: string) => invoke<void>("mesh_add_address", { url }),
   meshChatStreams: () => invoke<RemoteStream[]>("mesh_chat_streams"),
 
