@@ -541,9 +541,10 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     if (cur && cur.status !== "idle") return;
     const sess = useStore.getState().codeSessions.find((x) => x.id === activeId);
     // Until the mesh state is known, a session might be running on another computer.
-    if (sess?.hostNode && !meshLoaded) return;
+    if (sess?.hostNode && !meshLoaded && !remote) return;
     // Running on another computer: watch it there, never restart it just because we looked.
-    if (remoteHost(sess, useStore.getState().mesh)) {
+    // A phone hosts no session, so it always watches, even one its list hasn't caught up on yet.
+    if (remote || remoteHost(sess, useStore.getState().mesh)) {
       attach(activeId);
       return;
     }
