@@ -19,11 +19,13 @@ import { emitViewAction, focusComposer, focusSidebarSearch, isMac, isMod, keyLab
 import { ScrollFade } from "./lib/useStickyScroll";
 import { notifyInBackground } from "./lib/notify";
 import { useDragRegion, useRoundedWindow } from "./components/WindowControls";
+import { installUpdate, useUpdate, useUpdateChecks } from "./lib/update";
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
   ChatsIcon,
   CodeIcon,
+  DownloadIcon,
   FolderPlusIcon,
   KeyboardIcon,
   MenuIcon,
@@ -535,6 +537,7 @@ function SidebarList() {
 function CollapsedRail() {
   const { setSidebarCollapsed, setSettingsOpen, setShortcutsOpen } = useStore.getState();
   const mode = useStore((s) => s.mode);
+  const { available: update, installing } = useUpdate();
   const drag = useDragRegion();
   return (
     <aside {...drag} className="flex w-14 shrink-0 flex-col items-center gap-1 border-r border-line bg-panel py-2">
@@ -552,6 +555,13 @@ function CollapsedRail() {
         <SearchIcon />
       </IconButton>
       <div {...drag} className="flex-1 self-stretch" />
+      {update && (
+        <IconButton label={`Update to ${update.version}`} onClick={installUpdate} disabled={installing}>
+          <span className="flex text-accent-ink">
+            <DownloadIcon />
+          </span>
+        </IconButton>
+      )}
       <IconButton label={`Keyboard shortcuts (${keyLabel("Mod+/")})`} onClick={() => setShortcutsOpen(true)}>
         <KeyboardIcon />
       </IconButton>
@@ -581,6 +591,8 @@ export default function App() {
 
   useGlobalShortcuts();
   useRoundedWindow();
+  useUpdateChecks();
+  const { available: update, installing } = useUpdate();
   useEffect(() => initZoom(isMod), []);
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const drag = useDragRegion();
@@ -695,7 +707,19 @@ export default function App() {
           </div>
           <SidebarSearch />
           <SidebarList key={mode} />
-          <div className="flex items-center gap-1 border-t border-line p-2">
+          {update && (
+            <div className="border-t border-line px-2 pt-2">
+              <button
+                className="flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[14px] text-accent-ink hover:bg-panel-2 disabled:opacity-60"
+                onClick={installUpdate}
+                disabled={installing}
+              >
+                <DownloadIcon size={17} />
+                {installing ? "Updating…" : `Update to ${update.version}`}
+              </button>
+            </div>
+          )}
+          <div className={`flex items-center gap-1 p-2 ${update ? "" : "border-t border-line"}`}>
             <button
               className="flex h-9 flex-1 items-center gap-2.5 rounded-lg px-2.5 text-left text-[14px] text-muted hover:bg-panel-2 hover:text-fg"
               onClick={() => setSettingsOpen(true)}

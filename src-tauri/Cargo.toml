@@ -30,6 +30,7 @@ desktop = [
     "dep:tauri-plugin-opener",
     "dep:tauri-plugin-notification",
     "dep:tauri-plugin-global-shortcut",
+    "dep:tauri-plugin-updater",
     "dep:gtk",
     "dep:gdkwayland-sys",
 ]
@@ -57,6 +58,7 @@ tauri-plugin-dialog = { version = "2", default-features = false, features = ["xd
 tauri-plugin-opener = { version = "2", optional = true }
 tauri-plugin-notification = { version = "2", optional = true }
 tauri-plugin-global-shortcut = { version = "2", optional = true }
+tauri-plugin-updater = { version = "2", optional = true }
 
 patchbay-mesh = { path = "../crates/patchbay-mesh" }
 anyhow = "1"

@@ -549,6 +549,13 @@ export function install() {
           console.info("fake backend: write", a.path, String(a.contents).length, "chars");
           (window as unknown as Record<string, unknown>).__lastExport = { path: a.path, contents: a.contents };
           return null;
+        // Set window.__fakeUpdate = { version, notes } before the first check to see the update button.
+        case "update_check":
+          return (window as unknown as Record<string, unknown>).__fakeUpdate ?? null;
+        case "update_install":
+          console.info("fake backend: install update");
+          await new Promise((r) => setTimeout(r, 1500));
+          return null;
         case "plugin:opener|open_url":
           console.info("fake backend: open url", a.url);
           (window as unknown as Record<string, unknown>).__lastOpenedUrl = a.url;
