@@ -30,6 +30,9 @@ import {
 import { notifyInBackground } from "./notify";
 import { activityOf, strongest, type Activity } from "./activity";
 import { isRemoteApp } from "./platform";
+import { isForegroundUpdate } from "./codeWorking";
+
+export { codeWorking, FOREGROUND_IDLE_MS, hasActiveForegroundTools } from "./codeWorking";
 
 export type Mode = "chat" | "code";
 
@@ -76,6 +79,11 @@ export interface CodeState {
   configRev: number;
   /** `catalogRev` this agent was started with, for agents that run on Patchbay's models. */
   catalogRev: number;
+  /**
+   * Last time a foreground session update arrived (agent text, thoughts, tools — not
+   * background terminal streaming alone). Used with {@link codeWorking}.
+   */
+  lastForegroundAt: number | null;
 }
 
 export interface ChatStream {
@@ -109,6 +117,7 @@ const emptyCode = (): CodeState => ({
   earlier: null,
   configRev: 0,
   catalogRev: 0,
+  lastForegroundAt: null,
 });
 
 // The default permission mode isn't here: it only seeds new sessions, and agents always ask.
@@ -363,6 +372,13 @@ function endBackground(calls: Record<string, AcpToolCall>): Record<string, AcpTo
 }
 
 function reduceUpdate(s: CodeState, u: AcpUpdate): CodeState {
+  const stamp = (next: CodeState): CodeState => {
+    const prev =
+      u.sessionUpdate === "tool_call_update"
+        ? s.toolCalls[(u as unknown as AcpToolCall).toolCallId]
+        : undefined;
+    return isForegroundUpdate(u, prev) ? { ...next, lastForegroundAt: Date.now() } : next;
+  };
   switch (u.sessionUpdate) {
     case "user_message_chunk":
       // Live prompts are echoed locally; only replayed history (session/load) adds user entries.
@@ -374,24 +390,27 @@ function reduceUpdate(s: CodeState, u: AcpUpdate): CodeState {
     case "agent_message_chunk": {
       const c = (u as unknown as { content: { type: string; text?: string; data?: string; mimeType?: string } }).content;
       if (c?.type === "image" && c.data && c.mimeType) {
-        return { ...s, entries: [...s.entries, { kind: "image", data: c.data, mimeType: c.mimeType }] };
+        return stamp({ ...s, entries: [...s.entries, { kind: "image", data: c.data, mimeType: c.mimeType }] });
       }
-      return { ...s, entries: appendText(s.entries, "agent", textOf(c)) };
+      return stamp({ ...s, entries: appendText(s.entries, "agent", textOf(c)) });
     }
     case "agent_thought_chunk":
-      return { ...s, entries: appendText(s.entries, "thought", textOf((u as unknown as { content: { type: string; text?: string } }).content)) };
+      return stamp({
+        ...s,
+        entries: appendText(s.entries, "thought", textOf((u as unknown as { content: { type: string; text?: string } }).content)),
+      });
     case "tool_call":
     case "tool_call_update": {
       const tc = u as unknown as AcpToolCall;
       const exists = !!s.toolCalls[tc.toolCallId];
-      return {
+      return stamp({
         ...s,
         toolCalls: { ...s.toolCalls, [tc.toolCallId]: mergeToolCall(s.toolCalls[tc.toolCallId], tc) },
         entries: exists ? s.entries : [...s.entries, { kind: "tool", id: tc.toolCallId }],
-      };
+      });
     }
     case "plan":
-      return { ...s, plan: (u as { entries: AcpPlanEntry[] }).entries };
+      return stamp({ ...s, plan: (u as { entries: AcpPlanEntry[] }).entries });
     case "available_commands_update": {
       const cmds = (u as { availableCommands?: AcpCommand[] }).availableCommands;
       return Array.isArray(cmds) ? { ...s, commands: cmds } : s;
