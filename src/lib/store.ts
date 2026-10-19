@@ -219,6 +219,14 @@ export interface ConfirmResult {
   text?: string;
 }
 
+export interface Alert {
+  title: string;
+  body: string;
+  actions: { label: string; primary?: boolean; run: () => void }[];
+  /** A mesh problem kind: the alert goes away once the mesh no longer reports it. */
+  meshKind?: string;
+}
+
 interface Store {
   mode: Mode;
   paletteOpen: boolean;
@@ -258,6 +266,9 @@ interface Store {
   code: Record<string, CodeState>;
   chatStreams: Record<string, ChatStream>;
   toast: string | null;
+  /** A problem toast: stays until dismissed or fixed. */
+  alert: Alert | null;
+  meshPopoverOpen: boolean;
   prefs: Preferences;
   loadPrefs: () => Promise<void>;
   /** Persist a change; resolves to an error message when the backend rejects it. */
@@ -272,6 +283,8 @@ interface Store {
   setShortcutsOpen: (o: boolean) => void;
   setSidebarQuery: (q: string) => void;
   setToast: (t: string | null) => void;
+  setAlert: (a: Alert | null) => void;
+  setMeshPopoverOpen: (o: boolean) => void;
   refreshCatalog: () => Promise<void>;
   setDefaultModel: (ref: string) => Promise<void>;
   refreshConversations: () => Promise<void>;
@@ -515,6 +528,8 @@ export const useStore = create<Store>((set, get) => ({
   code: {},
   chatStreams: {},
   toast: null,
+  alert: null,
+  meshPopoverOpen: false,
   confirm: null,
   prefs: defaultPreferences,
   loadPrefs: async () => {
@@ -572,6 +587,8 @@ export const useStore = create<Store>((set, get) => ({
   setShortcutsOpen: (shortcutsOpen) => set({ shortcutsOpen }),
   setSidebarQuery: (sidebarQuery) => set({ sidebarQuery }),
   setToast: (toast) => set({ toast }),
+  setAlert: (alert) => set({ alert }),
+  setMeshPopoverOpen: (meshPopoverOpen) => set({ meshPopoverOpen }),
 
   refreshCatalog: async () => {
     const [providers, models, def] = await Promise.all([
