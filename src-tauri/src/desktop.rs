@@ -22,6 +22,18 @@ pub fn show_main(app: &AppHandle) {
     }
 }
 
+/// Tray icon left click: hide the main window when it is on screen, otherwise bring it back.
+pub fn toggle_main(app: &AppHandle) {
+    let Some(w) = app.get_webview_window("main") else {
+        return;
+    };
+    if w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false) {
+        let _ = w.hide();
+    } else {
+        show_main(app);
+    }
+}
+
 /// `title_bar` preference: "system" keeps the window manager's title bar; "app" removes it and
 /// the UI draws its own window controls.
 pub fn apply_title_bar(app: &AppHandle, title_bar: &str) {
@@ -156,7 +168,7 @@ pub fn build_tray(app: &AppHandle) -> Result<()> {
         })
         .on_tray_icon_event(|tray, ev| {
             if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = ev {
-                show_main(tray.app_handle());
+                toggle_main(tray.app_handle());
             }
         });
     if let Some(icon) = app.default_window_icon() {
