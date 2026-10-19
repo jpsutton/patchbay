@@ -1,6 +1,7 @@
 pub mod api;
 mod attachments;
 mod chat;
+mod claude_auth;
 mod code;
 mod db;
 #[cfg(feature = "desktop")]
@@ -132,6 +133,8 @@ struct ProviderInput {
     base_url: String,
     /// `None` keeps the stored key; `Some("")` clears it.
     api_key: Option<String>,
+    #[serde(default)]
+    auth_mode: db::AuthMode,
 }
 
 async fn list_providers(state: &AppState) -> CmdResult<Vec<Provider>> {
@@ -139,24 +142,34 @@ async fn list_providers(state: &AppState) -> CmdResult<Vec<Provider>> {
 }
 
 async fn save_provider(state: &AppState, input: ProviderInput) -> CmdResult<Provider> {
+    let auth_mode = match (&input.kind, input.auth_mode) {
+        (db::ProviderKind::Anthropic, db::AuthMode::ClaudeLogin) => db::AuthMode::ClaudeLogin,
+        _ => db::AuthMode::ApiKey,
+    };
     let p = Provider {
         id: input.id.unwrap_or_else(new_id),
         name: input.name.trim().to_owned(),
         kind: input.kind,
         base_url: providers::normalize_base_url(&input.base_url),
         has_key: false,
+        auth_mode,
     };
     if p.name.is_empty() || p.base_url.is_empty() {
         return Err(CmdError("name and base URL are required".into()));
     }
     state.db.upsert_provider(&p, None)?;
-    match input.api_key.as_deref() {
-        Some("") => {
-            providers::delete_key(&p.id);
-            state.db.clear_inline_key(&p.id)?;
+    if p.auth_mode == db::AuthMode::ClaudeLogin {
+        providers::delete_key(&p.id);
+        state.db.clear_inline_key(&p.id)?;
+    } else {
+        match input.api_key.as_deref() {
+            Some("") => {
+                providers::delete_key(&p.id);
+                state.db.clear_inline_key(&p.id)?;
+            }
+            Some(k) => providers::store_key(&state.db, &p, k.trim())?,
+            None => {}
         }
-        Some(k) => providers::store_key(&state.db, &p, k.trim())?,
-        None => {}
     }
     state.mesh.secrets_changed();
     let saved = providers::list_with_key_flag(&state.db)?
@@ -181,8 +194,15 @@ async fn discover_models(
         .db
         .get_provider(&provider_id)?
         .ok_or_else(|| CmdError("provider not found".into()))?;
-    let key = providers::load_key(&p.id, inline.as_deref());
-    Ok(providers::discover_models(&p.kind, &p.base_url, key.as_deref()).await?)
+    let auth = match p.auth_mode {
+        db::AuthMode::ClaudeLogin => providers::Auth::ClaudeLogin,
+        db::AuthMode::ApiKey => providers::Auth::Key,
+    };
+    let key = match auth {
+        providers::Auth::ClaudeLogin => Some(claude_auth::access_token().await?),
+        providers::Auth::Key => providers::load_key(&p.id, inline.as_deref()),
+    };
+    Ok(providers::discover_models(&p.kind, &p.base_url, key.as_deref(), auth).await?)
 }
 
 async fn list_models(state: &AppState) -> CmdResult<Vec<Model>> {

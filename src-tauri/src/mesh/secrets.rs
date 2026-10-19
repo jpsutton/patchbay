@@ -224,6 +224,7 @@ mod tests {
             kind: crate::db::ProviderKind::OpenaiChat,
             base_url: "http://x".into(),
             has_key: false,
+            auth_mode: Default::default(),
         };
         a.upsert_provider(&p, None).unwrap();
         ka.set("prov1", "sk-secret");

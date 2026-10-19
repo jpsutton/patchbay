@@ -93,7 +93,8 @@ async fn join_sync_relay_and_rpc() {
         kind: crate::db::ProviderKind::Anthropic,
         base_url: "http://example".into(),
         has_key: false,
-    };
+            auth_mode: Default::default(),
+        };
     a.db.upsert_provider(&p, None).unwrap();
     a.keys.set("prov-a", "sk-alpha");
 

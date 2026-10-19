@@ -217,7 +217,8 @@ mod tests {
                 kind: ProviderKind::OpenaiResponses,
                 base_url: "http://x/v1".into(),
                 has_key: false,
-            },
+            auth_mode: Default::default(),
+        },
             None,
         )
         .unwrap();

@@ -408,7 +408,7 @@ export function install() {
   mockWindows("main");
   if (phoneApp) phoneMesh();
   // Seed one provider + model so the UI starts usable.
-  const p: Provider = { id: "p1", name: "Demo provider", kind: "openai_chat", baseUrl: "http://localhost:8765/v1", hasKey: true };
+  const p: Provider = { id: "p1", name: "Demo provider", kind: "openai_chat", baseUrl: "http://localhost:8765/v1", hasKey: true, authMode: "api_key" };
   db.providers.push(p);
   db.models.push({ id: "m1", providerId: "p1", modelId: "demo-model", displayName: "Demo model", vision: true, contextWindow: 128000, params: { ...emptyParams(), pricing: { input: 3, cachedInput: 0.3, cacheWrite: 3.75, output: 15 } } });
   db.models.push({ id: "m2", providerId: "p1", modelId: "demo-mini", displayName: "Demo mini", vision: false, contextWindow: 32000, params: emptyParams() });
@@ -437,11 +437,23 @@ export function install() {
       switch (cmd) {
         case "list_providers": return db.providers.map(({ key: _k, ...x }) => x);
         case "save_provider": {
-          const i = a.input as { id?: string; name: string; kind: Provider["kind"]; baseUrl: string; apiKey?: string };
+          const i = a.input as {
+            id?: string;
+            name: string;
+            kind: Provider["kind"];
+            baseUrl: string;
+            apiKey?: string;
+            authMode?: Provider["authMode"];
+          };
           let x = db.providers.find((q) => q.id === i.id);
-          if (!x) { x = { id: id(), name: "", kind: i.kind, baseUrl: "", hasKey: false }; db.providers.push(x); }
-          Object.assign(x, { name: i.name, kind: i.kind, baseUrl: i.baseUrl });
-          if (i.apiKey !== undefined) x.hasKey = i.apiKey !== "";
+          if (!x) {
+            x = { id: id(), name: "", kind: i.kind, baseUrl: "", hasKey: false, authMode: "api_key" };
+            db.providers.push(x);
+          }
+          const authMode = i.kind === "anthropic" && i.authMode === "claude_login" ? "claude_login" : "api_key";
+          Object.assign(x, { name: i.name, kind: i.kind, baseUrl: i.baseUrl, authMode });
+          if (authMode === "claude_login") x.hasKey = false;
+          else if (i.apiKey !== undefined) x.hasKey = i.apiKey !== "";
           return { ...x };
         }
         case "delete_provider":
