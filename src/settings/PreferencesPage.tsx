@@ -196,7 +196,10 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
             ]}
           />
         </Row>
-        <Row label="Send messages with" hint="The other key combination inserts a new line.">
+        <Row
+          label="Send messages with"
+          hint="The other combination (and Shift+Enter) inserts a new line. On the phone app, Enter always inserts a line — send with the button."
+        >
           <Choice
             value={prefs.sendKey}
             onChange={(v) => set("sendKey", v)}

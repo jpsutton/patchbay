@@ -22,7 +22,7 @@ export function ShortcutsDialog() {
   if (!open) return null;
   const rows = [
     { keys: sendKey === "mod-enter" ? "Mod+Enter" : "Enter", label: "Send message" },
-    { keys: sendKey === "mod-enter" ? "Enter" : "Shift+Enter", label: "New line" },
+    { keys: sendKey === "mod-enter" ? "Enter" : "Mod+Enter / Shift+Enter", label: "New line" },
     { keys: "/", label: "Slash commands (Code, at the start of a message)" },
     ...SHORTCUTS,
   ];

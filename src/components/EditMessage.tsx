@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Attachment } from "../lib/ipc";
 import { AttachmentChip } from "./Composer";
-import { isSendKey, useStore } from "../lib/store";
+import { insertNewlineAtCaret, isSendKey, needsExplicitNewline, useStore } from "../lib/store";
 
 /** Inline editor for a previously sent user message. */
 export function EditMessage({
@@ -50,9 +50,20 @@ export function EditMessage({
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Escape") onCancel();
-          if (isSendKey(e, sendKey) && !e.nativeEvent.isComposing && canSend) {
+          if (e.nativeEvent.isComposing) return;
+          if (isSendKey(e, sendKey) && canSend) {
             e.preventDefault();
             onSubmit(draft, atts);
+            return;
+          }
+          if (needsExplicitNewline(e, sendKey)) {
+            e.preventDefault();
+            const el = e.currentTarget;
+            const start = el.selectionStart ?? draft.length;
+            const end = el.selectionEnd ?? start;
+            const next = insertNewlineAtCaret(draft, start, end);
+            setDraft(next.value);
+            requestAnimationFrame(() => el.setSelectionRange(next.caret, next.caret));
           }
         }}
       />
