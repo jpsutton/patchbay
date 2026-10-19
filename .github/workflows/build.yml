@@ -208,6 +208,10 @@ jobs:
         run: PROFILE=release scripts/build-sidecar.sh
       - name: Build and bundle
         run: pnpm tauri build --bundles dmg
+      # tauri.conf.json ad-hoc signs the bundle (signingIdentity "-"). Without a sealed
+      # bundle, a downloaded copy fails Gatekeeper as "damaged" instead of "unverified".
+      - name: Verify the bundle signature
+        run: codesign --verify --deep --strict --verbose=2 src-tauri/target/release/bundle/macos/Patchbay.app
       # Best effort within a best-effort job: the desktop installers ship even if this fails.
       - name: Build and pack patchbayd
         continue-on-error: true
