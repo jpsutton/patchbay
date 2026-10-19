@@ -1,0 +1,18 @@
+# systemd system unit: runs patchbayd at boot as the user named after the @, e.g.
+#   sudo systemctl enable --now patchbayd@alice
+# It uses that user's data folder (~/.local/share/dev.patchbay.app) and runs agents and
+# terminals as them. Don't also enable the user unit for the same user: only one Patchbay
+# may use a data folder at a time.
+[Unit]
+Description=Patchbay, headless, for %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=%i
+ExecStart=/usr/bin/patchbayd
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

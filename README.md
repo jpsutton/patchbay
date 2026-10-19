@@ -66,6 +66,8 @@ Download Patchbay from the [Releases page](https://github.com/jpsutton/patchbay/
 
 Windows and macOS builds aren't signed by Microsoft or Apple yet, so your system will warn you the first time you open them.
 
+For a computer without a display, `patchbayd` runs Patchbay headless and serves the same UI to a browser. It comes in the same formats (`.deb`, `.rpm`, the Arch repository, plus archives for any Linux, Windows and macOS), with systemd units on Linux. See [docs/headless.md](docs/headless.md).
+
 ### Arch Linux
 
 Add the signed package repository to `/etc/pacman.conf`:

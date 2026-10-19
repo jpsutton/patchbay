@@ -13,7 +13,17 @@ import {
   type Attachment,
   type CodeSession,
 } from "../lib/ipc";
-import { memberName, memberOnline, remoteHost, useStore, type CodeState, type Entry } from "../lib/store";
+import {
+  codeWorking,
+  FOREGROUND_IDLE_MS,
+  hasActiveForegroundTools,
+  memberName,
+  memberOnline,
+  remoteHost,
+  useStore,
+  type CodeState,
+  type Entry,
+} from "../lib/store";
 import { HostBadge, MoveDialog, OfflineHostBanner } from "./HostControls";
 import { Composer } from "../components/Composer";
 import { Markdown } from "../components/Markdown";
@@ -28,7 +38,8 @@ import { codeToJson, codeToMarkdown, saveExport } from "../lib/export";
 import { useViewAction } from "../lib/shortcuts";
 import { HeaderButton } from "../components/HeaderButton";
 import { useDragRegion, WindowControls } from "../components/WindowControls";
-import { isRemoteApp } from "../lib/platform";
+import { isRemoteApp, isWeb } from "../lib/platform";
+import { pickFolder } from "../components/FolderPicker";
 import {
   CheckIcon,
   ChevronRightIcon,
@@ -62,7 +73,9 @@ export async function newSessionIn(dir: string, agent?: AgentId) {
 }
 
 export async function openFolderAsSession(agent?: AgentId) {
-  const dir = await open({ directory: true, multiple: false, title: "Open project folder" });
+  const dir = isWeb()
+    ? await pickFolder("Open project folder")
+    : await open({ directory: true, multiple: false, title: "Open project folder" });
   if (!dir || Array.isArray(dir)) return;
   await newSessionIn(dir, agent);
 }
@@ -511,6 +524,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const [termMounted, setTermMounted] = useState<Record<string, boolean>>({});
   const [editingIdx, setEditingIdx] = useState<number | null>(null);
   const [moving, setMoving] = useState<"move" | "takeOver" | null>(null);
+  /** Forces a re-render when the post-foreground idle window expires. */
+  const [, setIdleTick] = useState(0);
   const sticky = useStickyScroll([state?.entries, state?.toolCalls, state?.permissions]);
   const mesh = useStore((st) => st.mesh);
   const meshLoaded = !!mesh;
@@ -587,10 +602,19 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   // The offline banner offers the way forward instead of a restart that can't work.
   const hostOffline = !!host && !memberOnline(mesh, host);
   const ready = status === "ready";
-  const busy = !!s?.busy;
+  // Broader than prompt-RPC `s.busy`: Claude (and similar) keep streaming after PromptDone.
+  const working = s ? codeWorking(s) : false;
   // Commands the agent backgrounded: its turn is over, but they still run (and it resumes when
   // they end).
   const background = Object.values(s?.toolCalls ?? {}).filter((tc) => tc.background);
+
+  useEffect(() => {
+    if (!s || s.busy || hasActiveForegroundTools(s.toolCalls) || s.lastForegroundAt == null) return;
+    const left = FOREGROUND_IDLE_MS - (Date.now() - s.lastForegroundAt);
+    if (left <= 0) return;
+    const id = window.setTimeout(() => setIdleTick((n) => n + 1), left + 1);
+    return () => clearTimeout(id);
+  }, [s?.busy, s?.lastForegroundAt, s?.toolCalls]);
   // What the session is waiting on, said plainly. A phone reaches it through a gateway, so it
   // can be reconnecting, or catching up on a session whose agent already runs.
   const reconnecting = remote && !!mesh?.phase && mesh.phase !== "online";
@@ -672,7 +696,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   // The status light: amber = needs you, blue = working, green = ready, red = stopped.
   const dot = needsYou
     ? "bg-accent signal-pulse shadow-[0_0_0_3px_rgb(242_165_65/0.18)]"
-    : busy
+    : working
       ? "bg-live shadow-[0_0_0_3px_rgb(110_168_254/0.15)]"
       : status === "ready"
         ? "bg-ok shadow-[0_0_0_3px_rgb(91_208_138/0.15)]"
@@ -681,7 +705,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
           : status === "exited"
             ? "bg-danger"
             : "bg-faint";
-  const dotLabel = needsYou ? "needs you" : busy ? "working" : status;
+  const dotLabel = needsYou ? "needs you" : working ? "working" : status;
 
   const setAcpMode = async (id: string) => {
     if (!s?.modes) return;
@@ -868,7 +892,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
           <FileDiffIcon />
         </HeaderButton>
         {!remote && mesh?.member && mesh.members.filter((m) => m.state !== "removed").length > 1 && (
-          <HeaderButton label="Move to another computer" disabled={busy} onClick={() => setMoving("move")}>
+          <HeaderButton label="Move to another computer" disabled={working} onClick={() => setMoving("move")}>
             <MonitorUpIcon />
           </HeaderButton>
         )}
@@ -962,7 +986,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     editing={editingIdx === i}
                     setEditing={(on) => setEditingIdx(on ? i : null)}
                     onEdit={
-                      ready && !busy && e.kind === "user" && s.extensions.rewind
+                      ready && !working && e.kind === "user" && s.extensions.rewind
                         ? (t, a) => editAndResend(i, t, a)
                         : undefined
                     }
@@ -979,7 +1003,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     cwd={session.cwd}
                   />
                 ))}
-                {busy && s?.permissions.length === 0 && (
+                {working && s?.permissions.length === 0 && (
                   <div className="flex items-center gap-2 text-xs text-muted">
                     <span className="signal-pulse h-1.5 w-1.5 rounded-full bg-live" /> Working…
                   </div>
@@ -1008,12 +1032,12 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
           </div>
           <div className="mx-auto w-full max-w-3xl px-6 pb-3 pt-2">
             <Composer
-              busy={busy}
+              busy={working}
               disabled={!ready}
               commands={s?.commands}
               mentionFiles={() => api.listProjectFiles(session.cwd, session.id)}
               onEditLast={() => {
-                if (!ready || busy || !s) return;
+                if (!ready || working || !s) return;
                 for (let i = s.entries.length - 1; i >= 0; i--) {
                   if (s.entries[i].kind === "user") return setEditingIdx(i);
                 }
@@ -1036,7 +1060,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                   session={session}
                   host={host}
                   started={[s?.earlier, s?.history, s].some((p) => (p?.entries ?? []).some((x) => x.kind === "user"))}
-                  disabled={busy || status === "starting" || hostOffline || !!reconnecting}
+                  disabled={working || status === "starting" || hostOffline || !!reconnecting}
                 />
                 {acpModels && acpModels.availableModels.length > 0 ? (
                   <ChipSelect
@@ -1044,7 +1068,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     mono
                     className="max-w-60"
                     value={acpModels.currentModelId}
-                    disabled={!ready || busy}
+                    disabled={!ready || working}
                     aria-label="Agent model"
                     label="Model"
                     onChange={async (e) => {
@@ -1082,7 +1106,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     key={o.id}
                     className="max-w-40"
                     value={o.currentValue}
-                    disabled={!ready || busy}
+                    disabled={!ready || working}
                     title={o.description ?? o.name}
                     aria-label={o.name}
                     onChange={(e) => setConfigOption(o, e.target.value)}

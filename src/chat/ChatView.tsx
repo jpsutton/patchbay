@@ -242,8 +242,9 @@ function MessageRow({
   );
 }
 
-/** `leading`: something before the title (the phone app's back button). */
-export function ChatView({ leading }: { leading?: ReactNode } = {}) {
+/** `leading`: something before the title (the phone app's back button). `controls`: more
+ * composer controls (the phone app's computer picker). */
+export function ChatView({ leading, controls }: { leading?: ReactNode; controls?: ReactNode } = {}) {
   const drag = useDragRegion();
   const activeId = useStore((s) => s.activeConversationId);
   const conversations = useStore((s) => s.conversations);
@@ -568,6 +569,7 @@ export function ChatView({ leading }: { leading?: ReactNode } = {}) {
                 modelDefault={model?.params.reasoningEffort ?? null}
                 onChange={(v) => setChatEffort(activeId ?? "new", v)}
               />
+              {controls}
             </>
           }
         />

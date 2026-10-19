@@ -41,6 +41,10 @@ pub struct Preferences {
     pub default_agent: String,
     /// Executable overrides, agent id -> path; agents not listed are looked up on PATH.
     pub agent_paths: crate::code::agents::AgentPaths,
+    /// Agents set to run on Patchbay's providers instead of their own sign-in: agent id ->
+    /// Patchbay model ref. Claude Code uses that model; OpenCode and Kilo get every Patchbay
+    /// model, with that one as their default. Agents not listed keep their own setup.
+    pub agent_providers: std::collections::BTreeMap<String, String>,
 
     // ---- Grok Build ----
     /// default | auto | always-approve
@@ -100,6 +104,7 @@ impl Default for Preferences {
             generate_titles: true,
             default_agent: "grok".into(),
             agent_paths: Default::default(),
+            agent_providers: Default::default(),
             permission_mode: "default".into(),
             agent_instructions: String::new(),
             web_fetch: false,

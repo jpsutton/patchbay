@@ -1,5 +1,6 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useStore } from "./store";
+import { isWeb } from "./platform";
 
 /** Whole-UI zoom, like a browser's: Ctrl/⌘ +, −, 0 and Ctrl/⌘ + scroll wheel. */
 const KEY = "patchbay.zoom";
@@ -17,6 +18,11 @@ function load(): number {
 }
 
 function apply(z: number) {
+  if (isWeb()) {
+    // No webview zoom in a browser tab; CSS zoom scales the page the same way.
+    document.documentElement.style.zoom = z === 1 ? "" : String(z);
+    return;
+  }
   getCurrentWebview()
     .setZoom(z)
     .catch((e) => console.warn("zoom:", e));

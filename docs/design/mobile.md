@@ -56,7 +56,7 @@ All are `Rpc` messages from the phone to its gateway (`src-tauri/src/gateway.rs`
 | `remote.members` | Member records, known addresses of full members, and which of them this gateway reaches. |
 | `remote.messages`, `remote.switch_branch` | A conversation's visible branch, and switching branches. |
 | `remote.create_conversation`, `remote.update_conversation` | New chats; title, model, system prompt and pin. |
-| `remote.chat_send`, `remote.chat_regenerate`, `remote.chat_cancel` | Chat turns, run by the gateway (section 4). |
+| `remote.chat_send`, `remote.chat_regenerate`, `remote.chat_cancel` | Chat turns, run by the gateway or the computer the phone picked (section 4). |
 | `remote.streams` | Replies streaming anywhere, for a chat opened mid-reply. |
 | `remote.code` | A Code command (`code.prompt`, `code.permission`, `code.cancel`, …) run on the session's host. |
 | `remote.transcript`, `remote.usage`, `remote.update_code_session` | The transcript cache, usage, and the title. |
@@ -108,6 +108,8 @@ After each connect, the gateway gives the phone a **resume ticket**: a random 16
 ## 4. Chats from a phone
 
 The phone has no provider keys, so the gateway makes the LLM call. `remote.chat_send` carries the conversation, the model, the text, attachment ids and the parent (absent: after the visible branch; empty: a new first message). The gateway runs the turn as the streamer, and its own window shows it too, credited to the phone. From there it is an ordinary mesh chat: the stream goes to every member, the finished message syncs, and stop works from any node.
+
+The phone can pick another computer to run a chat, for its provider keys or its network: the "Runs on" control in the composer. The phone keeps the pick per chat and sends it as `node`. The gateway passes the turn to that computer as `chat.run`, which waits briefly for the new conversation and attachments to sync there, then runs the turn as the streamer, credited to the phone in its own window. A picked computer that is offline is refused with an error, not silently replaced by the gateway.
 
 If the gateway drops mid-reply, the reply keeps going there. The phone's new gateway receives the stream like any member, and the phone resumes the `chat:<id>` topic. A phone network change never interrupts a reply.
 

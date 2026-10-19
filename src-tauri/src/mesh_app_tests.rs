@@ -390,6 +390,70 @@ async fn phone_starts_a_session_on_another_computer() {
     assert!(format!("{err:#}").contains("offline"), "{err:#}");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn phone_chat_runs_on_the_picked_computer() {
+    let (a, b) = (node("alpha5"), node("bravo5"));
+    link(&a, &b).await;
+    // A provider that refuses connections: the turn starts on B, then fails there.
+    let db = &b.state.db;
+    let prov = db::Provider {
+        id: "dead".into(),
+        name: "Dead".into(),
+        kind: db::ProviderKind::OpenaiChat,
+        base_url: "http://127.0.0.1:9/v1".into(),
+        has_key: true,
+    };
+    db.upsert_provider(&prov, Some("k")).unwrap();
+    let model = db::Model {
+        id: "m".into(),
+        provider_id: "dead".into(),
+        model_id: "m".into(),
+        display_name: "m".into(),
+        vision: false,
+        context_window: None,
+        params: Default::default(),
+    };
+    db.upsert_model(&model).unwrap();
+
+    let p = phone();
+    let url = format!("127.0.0.1:{}", a.state.mesh.bound_port().unwrap());
+    p.client.join(&url, PASS, "pocket").unwrap();
+    let pid = p.client.node_id();
+    until("phone's join request", 10, || {
+        a.state.mesh.status()["pending"].as_array().unwrap().iter().any(|r| r["nodeId"] == pid)
+    })
+    .await;
+    a.state.mesh.approve(&pid).unwrap();
+    until("phone online", 10, || p.client.status()["phase"] == "online").await;
+    let bn = b.state.mesh.node_id().to_owned();
+
+    // A new chat, made on the gateway and sent at once: B waits for it to sync, then runs it.
+    let conv = p.client.rpc("remote.create_conversation", json!({ "modelRef": "m" })).await.unwrap();
+    let cid = conv["id"].as_str().unwrap().to_owned();
+    p.client.subscribe(&patchbay_mesh::remote::chat_topic(&cid), true).await.unwrap();
+    let send = json!({ "conversationId": cid, "modelRef": "m", "text": "hello", "node": bn });
+    p.client.rpc("remote.chat_send", send).await.unwrap();
+    until("B streams the reply to the phone", 15, || {
+        p.count(|n, e| n == patchbay_mesh::remote::EV_CHAT && e["streamer"] == bn.as_str() && e["event"]["type"] == "started") == 1
+    })
+    .await;
+    until("B's window credits the phone", 10, || {
+        b.events.lock().unwrap().iter().any(|(n, e)| {
+            n == patchbay_mesh::remote::EV_CHAT && e["streamer"] == pid.as_str() && e["conversationId"] == cid.as_str()
+        })
+    })
+    .await;
+    assert!(!a.events.lock().unwrap().iter().any(|(n, e)| n == patchbay_mesh::remote::EV_CHAT && e["streamer"] == pid.as_str()));
+    until("the message syncs to A", 10, || a.state.db.list_messages(&cid).unwrap().iter().any(|m| m.content == "hello")).await;
+
+    // A computer that's gone is refused.
+    b.state.mesh.stop();
+    until("B gone from A", 15, || !a.state.mesh.connected(&bn)).await;
+    let send = json!({ "conversationId": cid, "modelRef": "m", "text": "again", "node": bn });
+    let err = p.client.rpc("remote.chat_send", send).await.unwrap_err();
+    assert!(format!("{err:#}").contains("offline"), "{err:#}");
+}
+
 /// A gateway for trying the phone app by hand (an emulator reaches the host at 10.0.2.2):
 /// a mesh on `0.0.0.0:41890` whose passphrase is `PASS`, with a provider pointing at
 /// `scripts/mock-llm.py` (start it first) and a Grok Build session using it. Every phone that

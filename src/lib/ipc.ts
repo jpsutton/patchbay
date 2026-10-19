@@ -304,6 +304,8 @@ export interface AgentInfo {
   installHint: string;
   usesPatchbayModels: boolean;
   supportsInstructions: boolean;
+  /** Can be set to run on Patchbay's providers instead of its own sign-in. */
+  takesProviders: boolean;
 }
 
 /** Labels for agent ids, for places that don't load the full list. */
@@ -494,6 +496,8 @@ export interface Preferences {
   defaultAgent: AgentId;
   /** Executable overrides: agent id -> path. */
   agentPaths: Partial<Record<AgentId, string>>;
+  /** Agents set to run on Patchbay's providers: agent id -> Patchbay model ref. */
+  agentProviders: Partial<Record<AgentId, string>>;
   permissionMode: "default" | "auto" | "always-approve";
   agentInstructions: string;
   webFetch: boolean;
@@ -517,6 +521,7 @@ export const defaultPreferences: Preferences = {
   generateTitles: true,
   defaultAgent: "grok",
   agentPaths: {},
+  agentProviders: {},
   permissionMode: "default",
   agentInstructions: "",
   webFetch: false,
@@ -530,6 +535,15 @@ export const defaultPreferences: Preferences = {
 export type TermEvent = { type: "data"; data: string } | { type: "exit"; code: number | null };
 
 // ---- commands ----
+
+/** One folder listing (gateway.rs, `list_dirs_local`). */
+export interface DirListing {
+  path: string;
+  parent: string | null;
+  home: string;
+  dirs: string[];
+  truncated: boolean;
+}
 
 export const api = {
   listProviders: () => invoke<Provider[]>("list_providers"),
@@ -699,6 +713,8 @@ export const api = {
   termClose: (id: string) => invoke<void>("term_close", { id }),
 
   writeTextFile: (path: string, contents: string) => invoke<void>("write_text_file", { path, contents }),
+  /** Folders under `path` (default: home) on this computer, for choosing one without a native dialog. */
+  listDirs: (path: string | null) => invoke<DirListing>("list_dirs", { path }),
 };
 
 export function errorText(e: unknown): string {

@@ -7,9 +7,10 @@ import "@fontsource-variable/geist-mono";
 import "./index.css";
 
 async function boot() {
-  // In a plain browser during development, stand in for the Rust backend.
-  if (import.meta.env.DEV && !("__TAURI_INTERNALS__" in window)) {
-    (await import("./dev/fakeBackend")).install();
+  // Outside Tauri: a fake backend during development, else patchbayd serving this page.
+  if (!("__TAURI_INTERNALS__" in window)) {
+    if (import.meta.env.DEV) (await import("./dev/fakeBackend")).install();
+    else await (await import("./lib/webBackend")).install();
   }
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>

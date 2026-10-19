@@ -1,6 +1,6 @@
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { useStore } from "./store";
-import { isRemoteApp } from "./platform";
+import { isRemoteApp, isWeb } from "./platform";
 
 let allowed: boolean | null = null;
 
@@ -9,6 +9,12 @@ export async function notifyInBackground(title: string, body: string) {
   // The phone app's backend raises these itself, also while the web view is paused.
   if (isRemoteApp()) return;
   if (!useStore.getState().prefs.notifications || document.hasFocus()) return;
+  if (isWeb()) {
+    if (typeof Notification === "undefined") return;
+    if (Notification.permission === "default") await Notification.requestPermission();
+    if (Notification.permission === "granted") new Notification(title, { body });
+    return;
+  }
   try {
     if (allowed === null) {
       allowed = await isPermissionGranted();

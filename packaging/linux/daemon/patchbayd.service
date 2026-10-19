@@ -1,0 +1,16 @@
+# systemd user unit for patchbayd, headless Patchbay. To run it as yourself:
+#   systemctl --user enable --now patchbayd
+#   loginctl enable-linger "$USER"   # keeps it running while you're logged out
+# To run it for a user at boot without them logging in, use patchbayd@.service instead.
+[Unit]
+Description=Patchbay, headless (chats, Code sessions and the mesh, with a browser UI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/patchbayd
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

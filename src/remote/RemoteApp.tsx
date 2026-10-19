@@ -10,6 +10,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ActionSheet, useHold, type ItemAction } from "../components/ItemMenu";
 import { chatActions, promptRename, sessionActions } from "../lib/itemActions";
 import { NewSessionSheet } from "./NewSession";
+import { ChatNodePicker } from "./ChatNodePicker";
 import { fmtShort } from "../lib/format";
 import { ChatIcon, ChevronLeftIcon, CodeIcon, MonitorIcon, PlusIcon, SettingsIcon, StarIcon, XIcon } from "../components/icons";
 
@@ -337,7 +338,14 @@ function Main({ status, onLock }: { status: RemoteStatus; onLock: () => void }) 
     <div className="flex h-full flex-col bg-bg">
       {view.kind !== "home" && (
         <div className="flex min-h-0 flex-1 flex-col pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
-          {view.kind === "chat" ? <ChatView leading={backButton} /> : <CodeView leading={backButton} />}
+          {view.kind === "chat" ? (
+            <ChatView
+              leading={backButton}
+              controls={<ChatNodePicker members={status.members} gateway={status.gateway} />}
+            />
+          ) : (
+            <CodeView leading={backButton} />
+          )}
         </div>
       )}
       {view.kind === "home" && (
