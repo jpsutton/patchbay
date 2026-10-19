@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, errorText, type DiscoveredModel, type Provider, type ProviderKind } from "../lib/ipc";
+import { api, errorText, type AuthMode, type DiscoveredModel, type Provider, type ProviderKind } from "../lib/ipc";
 import { useStore } from "../lib/store";
 
 const PRESETS: { label: string; kind: ProviderKind; baseUrl: string }[] = [
@@ -24,13 +24,16 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
   const [kind, setKind] = useState<ProviderKind>(provider?.kind ?? "openai_chat");
   const [baseUrl, setBaseUrl] = useState(provider?.baseUrl ?? "");
   const [key, setKey] = useState("");
+  const [authMode, setAuthMode] = useState<AuthMode>(provider?.authMode ?? "api_key");
   const [busy, setBusy] = useState(false);
   const setToast = useStore((s) => s.setToast);
+  const useClaudeLogin = kind === "anthropic" && authMode === "claude_login";
 
   useEffect(() => {
     setName(provider?.name ?? "");
     setKind(provider?.kind ?? "openai_chat");
     setBaseUrl(provider?.baseUrl ?? "");
+    setAuthMode(provider?.authMode ?? "api_key");
     setKey("");
   }, [provider?.id]);
 
@@ -46,6 +49,7 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
                 setName(p.label);
                 setKind(p.kind);
                 setBaseUrl(p.baseUrl);
+                setAuthMode("api_key");
               }}
             >
               {p.label}
@@ -59,7 +63,15 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
       </label>
       <label className="flex flex-col gap-1 text-xs text-muted">
         API type
-        <select className={input} value={kind} onChange={(e) => setKind(e.target.value as ProviderKind)}>
+        <select
+          className={input}
+          value={kind}
+          onChange={(e) => {
+            const next = e.target.value as ProviderKind;
+            setKind(next);
+            if (next !== "anthropic") setAuthMode("api_key");
+          }}
+        >
           {(Object.keys(KIND_LABEL) as ProviderKind[]).map((k) => (
             <option key={k} value={k}>
               {KIND_LABEL[k]}
@@ -76,17 +88,37 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
           placeholder="https://api.example.com/v1"
         />
       </label>
-      <label className="flex flex-col gap-1 text-xs text-muted">
-        API key {provider?.hasKey && <span className="text-ok">(stored — leave blank to keep)</span>}
-        <input
-          className={`${input} font-mono`}
-          type="password"
-          value={key}
-          onChange={(e) => setKey(e.target.value)}
-          placeholder={provider?.hasKey ? "••••••••" : "optional for local servers"}
-          autoComplete="off"
-        />
-      </label>
+      {kind === "anthropic" && (
+        <label className="flex items-start gap-2 text-xs text-muted">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={useClaudeLogin}
+            onChange={(e) => setAuthMode(e.target.checked ? "claude_login" : "api_key")}
+          />
+          <span>
+            Use Claude Code login (subscription)
+            <span className="mt-0.5 block text-muted">
+              Reuses the login from claude on this machine. Uses your Max/Pro usage, not an API key.
+            </span>
+          </span>
+        </label>
+      )}
+      {useClaudeLogin ? (
+        <p className="text-xs text-ok">Signed in via Claude Code on this machine — no API key stored.</p>
+      ) : (
+        <label className="flex flex-col gap-1 text-xs text-muted">
+          API key {provider?.hasKey && <span className="text-ok">(stored — leave blank to keep)</span>}
+          <input
+            className={`${input} font-mono`}
+            type="password"
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+            placeholder={provider?.hasKey ? "••••••••" : "optional for local servers"}
+            autoComplete="off"
+          />
+        </label>
+      )}
       <div className="flex gap-2">
         <button
           className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg disabled:opacity-50"
@@ -99,7 +131,8 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
                 name,
                 kind,
                 baseUrl,
-                apiKey: key ? key : undefined,
+                authMode: kind === "anthropic" ? authMode : "api_key",
+                apiKey: useClaudeLogin ? "" : key ? key : undefined,
               });
               setKey("");
               onSaved(p);
@@ -112,11 +145,18 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
         >
           {provider ? "Save" : "Add provider"}
         </button>
-        {provider?.hasKey && (
+        {provider?.hasKey && !useClaudeLogin && (
           <button
             className="rounded-md px-3 py-1.5 text-xs text-muted hover:text-danger"
             onClick={async () => {
-              const p = await api.saveProvider({ id: provider.id, name, kind, baseUrl, apiKey: "" });
+              const p = await api.saveProvider({
+                id: provider.id,
+                name,
+                kind,
+                baseUrl,
+                authMode: "api_key",
+                apiKey: "",
+              });
               onSaved(p);
             }}
           >

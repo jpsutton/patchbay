@@ -169,6 +169,7 @@ pub async fn send(
         .get_conversation(&conversation_id)?
         .ok_or_else(|| anyhow!("conversation not found"))?;
     let mut resolved = providers::resolve(&db, &model_ref)?;
+    providers::ensure_token(&mut resolved).await?;
     if let Some(e) = reasoning_effort.filter(|e| !e.is_empty() && e != "default") {
         resolved.model.params.reasoning_effort = Some(e);
         if resolved.model.params.reasoning_effort().is_none() {

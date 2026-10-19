@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, errorText, type AcpCommand, type Attachment } from "../lib/ipc";
-import { isSendKey, useStore } from "../lib/store";
+import { insertNewlineAtCaret, isSendKey, needsExplicitNewline, useStore } from "../lib/store";
 import { ViewActive } from "../lib/shortcuts";
 import { fuzzyPaths } from "../lib/fuzzy";
 import { ArrowUpIcon, PaperclipIcon, SlidersIcon } from "./icons";
@@ -388,7 +388,13 @@ export function Composer({
         disabled={disabled}
         data-composer
         placeholder={placeholder ?? "Message"}
-        title={sendKey === "mod-enter" ? "Ctrl+Enter to send" : "Enter to send, Shift+Enter for a new line"}
+        title={
+          isRemoteApp()
+            ? "Enter for a new line; send with the button"
+            : sendKey === "mod-enter"
+              ? "Ctrl+Enter to send, Enter for a new line"
+              : "Enter to send, Ctrl+Enter or Shift+Enter for a new line"
+        }
         className="block w-full resize-none bg-transparent px-4 pb-2 pt-3.5 text-[15px] leading-6 text-fg outline-none placeholder:text-faint"
         onChange={(e) => {
           setText(e.target.value);
@@ -419,9 +425,21 @@ export function Composer({
             onEditLast();
             return;
           }
-          if (isSendKey(e, sendKey) && !e.nativeEvent.isComposing) {
+          if (e.nativeEvent.isComposing) return;
+          if (isSendKey(e, sendKey)) {
             e.preventDefault();
             submit();
+            return;
+          }
+          if (needsExplicitNewline(e, sendKey)) {
+            e.preventDefault();
+            const el = e.currentTarget;
+            const start = el.selectionStart ?? text.length;
+            const end = el.selectionEnd ?? start;
+            const next = insertNewlineAtCaret(text, start, end);
+            setText(next.value);
+            setCaret(next.caret);
+            requestAnimationFrame(() => el.setSelectionRange(next.caret, next.caret));
           }
         }}
         onPaste={(e) => {

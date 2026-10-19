@@ -213,6 +213,9 @@ ALTER TABLE code_sessions ADD COLUMN archived_at INTEGER;
 "#, r#"
 -- 1 once someone named a Code session themselves: automatic titles leave it alone.
 ALTER TABLE code_sessions ADD COLUMN title_manual INTEGER NOT NULL DEFAULT 0;
+"#, r#"
+-- How an Anthropic provider authenticates: stored API key, or Claude Code's subscription login.
+ALTER TABLE providers ADD COLUMN auth_mode TEXT NOT NULL DEFAULT 'api_key';
 "#];
 
 pub fn now_ms() -> i64 {
@@ -249,6 +252,32 @@ impl ProviderKind {
     }
 }
 
+/// How a provider supplies credentials for Chat sampling.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMode {
+    #[default]
+    ApiKey,
+    /// Reuse Claude Code's subscription OAuth token from `~/.claude/.credentials.json`.
+    ClaudeLogin,
+}
+
+impl AuthMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ApiKey => "api_key",
+            Self::ClaudeLogin => "claude_login",
+        }
+    }
+
+    fn parse(s: &str) -> Self {
+        match s {
+            "claude_login" => Self::ClaudeLogin,
+            _ => Self::ApiKey,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Provider {
@@ -259,6 +288,8 @@ pub struct Provider {
     /// True when an API key is stored (keyring or inline fallback). The key itself never leaves Rust.
     #[serde(default)]
     pub has_key: bool,
+    #[serde(default)]
+    pub auth_mode: AuthMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -530,7 +561,7 @@ impl Db {
     pub fn list_providers(&self) -> Result<Vec<(Provider, Option<String>)>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, name, kind, base_url, inline_key FROM providers ORDER BY created_at",
+            "SELECT id, name, kind, base_url, inline_key, auth_mode FROM providers ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -540,6 +571,7 @@ impl Db {
                     kind: ProviderKind::parse(&r.get::<_, String>(2)?),
                     base_url: r.get(3)?,
                     has_key: false,
+                    auth_mode: AuthMode::parse(&r.get::<_, String>(5)?),
                 },
                 r.get::<_, Option<String>>(4)?,
             ))
@@ -553,11 +585,19 @@ impl Db {
 
     pub fn upsert_provider(&self, p: &Provider, inline_key: Option<&str>) -> Result<()> {
         self.conn().execute(
-            "INSERT INTO providers (id, name, kind, base_url, inline_key, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO providers (id, name, kind, base_url, inline_key, created_at, auth_mode)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(id) DO UPDATE SET name = ?2, kind = ?3, base_url = ?4,
-               inline_key = COALESCE(?5, inline_key)",
-            params![p.id, p.name, p.kind.as_str(), p.base_url, inline_key, now_ms()],
+               inline_key = COALESCE(?5, inline_key), auth_mode = ?7",
+            params![
+                p.id,
+                p.name,
+                p.kind.as_str(),
+                p.base_url,
+                inline_key,
+                now_ms(),
+                p.auth_mode.as_str()
+            ],
         )?;
         Ok(())
     }

@@ -2,6 +2,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import type { Activity } from "./activity";
 
 export type ProviderKind = "openai_chat" | "openai_responses" | "anthropic";
+export type AuthMode = "api_key" | "claude_login";
 
 export interface Provider {
   id: string;
@@ -9,6 +10,7 @@ export interface Provider {
   kind: ProviderKind;
   baseUrl: string;
   hasKey: boolean;
+  authMode: AuthMode;
 }
 
 /** USD per 1M tokens. */
@@ -553,6 +555,7 @@ export const api = {
     kind: ProviderKind;
     baseUrl: string;
     apiKey?: string;
+    authMode?: AuthMode;
   }) => invoke<Provider>("save_provider", { input }),
   deleteProvider: (id: string) => invoke<void>("delete_provider", { id }),
   discoverModels: (providerId: string) => invoke<DiscoveredModel[]>("discover_models", { providerId }),

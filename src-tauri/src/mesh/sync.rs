@@ -23,7 +23,7 @@ pub struct Table {
 }
 
 pub const TABLES: &[Table] = &[
-    Table { name: "providers", pk: &["id"], cols: &["name", "kind", "base_url", "created_at"] },
+    Table { name: "providers", pk: &["id"], cols: &["name", "kind", "base_url", "created_at", "auth_mode"] },
     Table {
         name: "models",
         pk: &["id"],

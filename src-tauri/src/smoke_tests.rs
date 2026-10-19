@@ -21,6 +21,7 @@ fn mock_resolved(kind: ProviderKind) -> Resolved {
             kind,
             base_url: mock_url(),
             has_key: true,
+            auth_mode: Default::default(),
         },
         model: Model {
             id: "m".into(),
@@ -32,6 +33,7 @@ fn mock_resolved(kind: ProviderKind) -> Resolved {
             params: Default::default(),
         },
         key: Some("test-key".into()),
+        auth: providers::Auth::Key,
     }
 }
 
@@ -129,6 +131,7 @@ fn smoke_render_grok_config() {
             kind,
             base_url: mock_url(),
             has_key: false,
+            auth_mode: Default::default(),
         };
         db.upsert_provider(&p, Some("test-key")).unwrap();
         db.upsert_model(&Model {
@@ -181,6 +184,7 @@ fn smoke_code_agent_edit_with_permission() {
             kind,
             base_url: mock_url(),
             has_key: false,
+            auth_mode: Default::default(),
         },
         Some("test-key"),
     )
@@ -377,6 +381,7 @@ fn smoke_code_rewind() {
             kind: ProviderKind::OpenaiChat,
             base_url: mock_url(),
             has_key: false,
+            auth_mode: Default::default(),
         },
         Some("test-key"),
     )
@@ -486,7 +491,7 @@ fn smoke_code_rules_and_mcp() {
     std::fs::create_dir_all(&proj).unwrap();
     let db = Arc::new(Db::open(&data_dir.join("db.sqlite")).unwrap());
     db.upsert_provider(
-        &Provider { id: "p".into(), name: "mock".into(), kind: ProviderKind::OpenaiChat, base_url: mock_url(), has_key: false },
+        &Provider { id: "p".into(), name: "mock".into(), kind: ProviderKind::OpenaiChat, base_url: mock_url(), has_key: false, auth_mode: Default::default(), },
         Some("test-key"),
     )
     .unwrap();
@@ -618,7 +623,7 @@ fn smoke_claude_config_toggle() {
         std::fs::create_dir_all(&proj).unwrap();
         let db = Arc::new(Db::open(&data_dir.join("db.sqlite")).unwrap());
         db.upsert_provider(
-            &Provider { id: "p".into(), name: "mock".into(), kind: ProviderKind::OpenaiChat, base_url: mock_url(), has_key: false },
+            &Provider { id: "p".into(), name: "mock".into(), kind: ProviderKind::OpenaiChat, base_url: mock_url(), has_key: false, auth_mode: Default::default(), },
             Some("test-key"),
         )
         .unwrap();
