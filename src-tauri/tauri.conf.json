@@ -48,5 +48,14 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUxRjlFMkVCODM0NTFBQjQKUldTMEdrV0Q2K0w1VWFncjE0OFREUThQcnFGZ2FRZWZNaWZqTEpJWXhraERmWU53NHR5dTJ2SXAK",
+      "endpoints": ["https://github.com/jpsutton/patchbay/releases/latest/download/latest.json"],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

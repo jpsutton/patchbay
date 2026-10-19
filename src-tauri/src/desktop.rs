@@ -217,11 +217,57 @@ fn write_text_file(path: String, contents: String) -> crate::CmdResult<()> {
     Ok(std::fs::write(&path, contents)?)
 }
 
+// ---------------- updates ----------------
+
+/// A newer release, found by `update_check` and kept until `update_install` applies it.
+#[derive(Default)]
+struct PendingUpdate(tokio::sync::Mutex<Option<tauri_plugin_updater::Update>>);
+
+#[derive(serde::Serialize)]
+struct UpdateInfo {
+    version: String,
+    notes: Option<String>,
+}
+
+/// Ask the release feed (`plugins.updater` in tauri.conf.json) for a newer version. Only builds
+/// that can replace themselves look: the macOS app, the Windows installers and the AppImage.
+/// .deb, .rpm and Arch installs update through their package manager.
+#[tauri::command]
+async fn update_check(
+    app: AppHandle,
+    pending: tauri::State<'_, PendingUpdate>,
+) -> crate::CmdResult<Option<UpdateInfo>> {
+    use tauri_plugin_updater::UpdaterExt;
+    if cfg!(target_os = "linux") && std::env::var_os("APPIMAGE").is_none() {
+        return Ok(None);
+    }
+    let update = app.updater()?.check().await?;
+    let info = update.as_ref().map(|u| UpdateInfo { version: u.version.clone(), notes: u.body.clone() });
+    *pending.0.lock().await = update;
+    Ok(info)
+}
+
+/// Download and install the update `update_check` found, then restart into it. The Windows
+/// installer exits the app itself.
+#[tauri::command]
+async fn update_install(app: AppHandle, pending: tauri::State<'_, PendingUpdate>) -> crate::CmdResult<()> {
+    let update = pending.0.lock().await.take().ok_or_else(|| anyhow!("no update to install"))?;
+    update.download_and_install(|_, _| {}, || {}).await?;
+    app.request_restart();
+    Ok(())
+}
+
 /// Serve an invoke from the window. Shared commands go through `api::call`, the same dispatcher
 /// the daemon's web clients use; the rest are the desktop-only commands above.
 fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     let desktop_only: Box<dyn Fn(tauri::ipc::Invoke) -> bool + Send + Sync> =
-        Box::new(tauri::generate_handler![quick_submit, quick_dismiss, write_text_file]);
+        Box::new(tauri::generate_handler![
+            quick_submit,
+            quick_dismiss,
+            write_text_file,
+            update_check,
+            update_install
+        ]);
     move |invoke| {
         if crate::api::COMMANDS.contains(&invoke.message.command()) {
             dispatch(invoke);
@@ -264,6 +310,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(PendingUpdate::default())
         .setup(|app| {
             let emit: crate::mesh::node::UiSink = {
                 let h = app.handle().clone();

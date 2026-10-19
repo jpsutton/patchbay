@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type { Activity } from "./activity";
+import type { UpdateInfo } from "./update";
 
 export type ProviderKind = "openai_chat" | "openai_responses" | "anthropic";
 export type AuthMode = "api_key" | "claude_login";
@@ -757,6 +758,10 @@ export const api = {
   termClose: (id: string) => invoke<void>("term_close", { id }),
 
   writeTextFile: (path: string, contents: string) => invoke<void>("write_text_file", { path, contents }),
+  /** Native app only: a newer release it can install itself, or null. */
+  updateCheck: () => invoke<UpdateInfo | null>("update_check"),
+  /** Native app only: install what `updateCheck` found and restart. */
+  updateInstall: () => invoke<void>("update_install"),
   /** Folders under `path` (default: home) on this computer, for choosing one without a native dialog. */
   listDirs: (path: string | null) => invoke<DirListing>("list_dirs", { path }),
 };

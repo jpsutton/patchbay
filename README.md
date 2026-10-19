@@ -66,6 +66,8 @@ Download Patchbay from the [Releases page](https://github.com/jpsutton/patchbay/
 
 Windows and macOS builds aren't signed by Microsoft or Apple yet, so your system will warn you the first time you open them.
 
+The macOS app, the Windows installers and the AppImage update themselves. When a new release is out, an **Update** button appears above **Settings** in the sidebar. The `.deb`, `.rpm` and Arch packages update through your package manager instead.
+
 ### macOS
 
 The easiest way to install or update is the install script. It downloads the latest `.dmg`, checks it against the release's `SHA256SUMS`, and copies Patchbay into `/Applications`:
