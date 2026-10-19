@@ -126,7 +126,7 @@ pub fn mode_allows(mode: &str, class: Class) -> bool {
 
 /// Inside the project, but git internals, the agents' own config and secrets still ask.
 fn protected(rel: &Path) -> bool {
-    const DIRS: &[&str] = &[".git", ".claude", ".cursor", ".grok", ".opencode", ".kilocode"];
+    const DIRS: &[&str] = &[".git", ".claude", ".cursor", ".grok", ".opencode", ".kilocode", ".codex", ".gemini"];
     let comps: Vec<&str> = rel.iter().filter_map(|c| c.to_str()).collect();
     if comps.iter().any(|c| DIRS.contains(c)) {
         return true;

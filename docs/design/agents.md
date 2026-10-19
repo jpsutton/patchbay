@@ -13,14 +13,17 @@ A Code session runs one coding agent. Grok Build ships with Patchbay and stays t
 | OpenCode | `opencode` | `opencode acp` | `opencode auth login` and its own config |
 | Cursor CLI | `cursor` | `cursor-agent acp` | `cursor-agent login` |
 | Kilo Code | `kilo` | `kilo acp` (npm `@kilocode/cli`) | `kilo auth login` and its own config |
+| Codex | `codex` | `codex-acp`, or `npx -y @agentclientprotocol/codex-acp@<pinned>` | `codex login`, or `OPENAI_API_KEY` / `CODEX_API_KEY` |
+| Gemini CLI | `gemini` | `gemini --acp`, or `npx -y @google/gemini-cli@<pinned> --acp` | `gemini` sign-in, or `GEMINI_API_KEY` |
+| Antigravity | `antigravity` | `agy_acp_server [--uid=]` (Google's archive from the ACP registry; path set in Settings) | `auth.type` in `~/.gemini/antigravity-acp/settings.json` |
 
-All five speak ACP over stdio, so one client (`code/acp.rs`) drives them all. Per-agent differences live in `code/agents.rs`. The UI branches on what the agent advertises, never on which agent it is. The one exception is model handling, below.
+All eight speak ACP over stdio, so one client (`code/acp.rs`) drives them all. Per-agent differences live in `code/agents.rs`. The UI branches on what the agent advertises, never on which agent it is. The one exception is model handling, below.
 
 ## Shape
 
 - `code/agents.rs`
   - `AgentKind`: the ids above, labels, install and sign-in hints.
-  - `resolve()`: finds the executable. It checks the Settings override first, then the bundled sidecar (Grok), then PATH, then the user bin directories that a desktop launch can leave out of PATH (`~/.local/bin`, `~/.npm-global/bin`, `~/.bun/bin`, `~/.opencode/bin` and others). Last comes `npx` for Claude Code.
+  - `resolve()`: finds the executable. It checks the Settings override first, then the bundled sidecar (Grok), then PATH, then the user bin directories that a desktop launch can leave out of PATH (`~/.local/bin`, `~/.npm-global/bin`, `~/.bun/bin`, `~/.opencode/bin` and others). Last comes `npx` for Claude Code, Codex and Gemini CLI (`AgentKind::npx_package`).
   - `prepare()`: builds a `Launch` with the program, arguments, environment, `Extensions`, session `_meta`, the model to reselect, and the sign-in hint. The Grok-only steps moved here from `CodeManager::start` and `acp::run`: `GROK_HOME`, `config.toml`, telemetry env and the `-m pb-…` model key.
   - `detect_all()`: backs Settings → Coding agents. It runs `--version` on each agent it finds, but never through npx, which would download the adapter.
 - `code/acp.rs`
@@ -62,6 +65,9 @@ Switching back to an agent the session had before also starts a fresh ACP sessio
 
 - Grok: `_meta.rules` on `session/new` / `session/load`.
 - Claude Code: `_meta.systemPrompt.append`. The adapter merges it into the `claude_code` preset prompt.
+- Antigravity: `_meta.antigravity.systemPrompt.append`, which the server advertises in `initialize` (`agentCapabilities._meta.antigravity.systemPrompt`).
+- Codex: `CODEX_CONFIG={"developer_instructions": …}`. The adapter merges `CODEX_CONFIG` into every thread's config. Not yet checked against a real turn.
+- Gemini CLI: no append. `GEMINI_SYSTEM_MD` replaces the whole system prompt, so it isn't used.
 - OpenCode, Cursor, Kilo: no way in today. Settings says so. ACP has a `systemPrompt` RFD (Claude's adapter advertises `sessionCapabilities.systemPrompt`), but `agent-client-protocol` 0.10.4 has no field for it yet.
 
 ## Verified (2026-10-17, this machine)
@@ -74,11 +80,25 @@ Observed quirks:
 - Cursor sends no usage. Claude sends `usage_update` with context size and cumulative cost.
 - Each agent writes its sessions to its own store (`~/.claude`, `~/.local/share/opencode`, `~/.cursor`, Kilo's data dir). Patchbay keeps only the ACP session id.
 
+## Codex, Gemini CLI and Antigravity (2026-10-19)
+
+Probed from Patchbay's own launch path (`cargo test --lib agents_live -- --ignored`) with codex-acp 2.2.2, Gemini CLI 0.64.0 and the Antigravity ACP server 1.4.1. The machine had no sign-in for any of them, so the runs used placeholder API keys under a throwaway `HOME`. Start, model list, model switch, restart and model restore pass for all three. No prompt has gone end to end yet.
+
+- **Codex** (`@agentclientprotocol/codex-acp`, the adapter the ACP registry lists; it bundles the Codex binary). It reports both legacy `modes` and config options: `mode`, `model`, `reasoning_effort`, `collaboration_mode` (Default / Plan) and `fast-mode`. Its modes are approval and sandbox presets. Patchbay starts it in `read-only` (`INITIAL_AGENT_MODE`, then `set_mode`) and hides `workspace-write`, `agent` ("Auto review", the adapter's default) and `agent-full-access`. `read-only` asks before every edit and network use, but its sandbox runs shell commands without asking; that is listed as a gap. The adapter reads an API key from the environment only when told to sign in with one, so Patchbay sets `DEFAULT_AUTH_REQUEST={"methodId":"api-key"}` when `OPENAI_API_KEY` or `CODEX_API_KEY` is set. `session/load` of a session that never got a prompt fails, and Patchbay falls back to a new session.
+- **Gemini CLI** (`gemini --acp`). Legacy `modes` and `models` only. Patchbay selects `default` and hides `autoEdit` and `yolo`; `plan` stays. Its built-in policy allows read-only tools (read, glob, grep, list, web search) without asking, which is listed as a gap. An empty session doesn't `session/load` either. Google moved unpaid and Google One users from Gemini CLI to Antigravity in June 2026; Gemini CLI still serves API-key, Vertex and paid users.
+- **Antigravity** (Google's `agy_acp_server`, a ~930 MB Python archive plus `localharness_external`, from `dl.google.com/agy-extensions/…` as listed in the ACP registry). Not on npm, so there is no npx fallback; the user unpacks it and sets the path in Settings, or puts it on PATH. It reports `model`, `mode` and `thought_level` config options plus legacy fields. Patchbay selects `default` and hides `auto_edit` and `yolo`. `session/load` works even for an empty session. It refuses `session/new` until `auth.type` is set in `$GEMINI_HOME/antigravity-acp/settings.json` or a client calls `authenticate`. It keeps a per-workspace trust list (`trusted_workspaces.json`); how an untrusted workspace prompts over ACP is unverified.
+- `.codex/` and `.gemini/` joined the protected paths in `permissions.rs`.
+
 ## Open items
+
+- **Sign-in for Codex, Gemini CLI and Antigravity.** Patchbay never calls ACP `authenticate`; it shows a hint instead. All three advertise browser OAuth as an auth method, and Antigravity has no terminal login of its own. A "Sign in" button that calls `authenticate` with a chosen method would cover them all.
+- **Antigravity install.** A one-click install from the ACP registry (download, unpack under the data dir, record the path) would spare the manual step. The archive is large and proprietary, so it should stay opt-in.
+- **Patchbay providers for Codex.** `CODEX_CONFIG` takes `model_provider` and `model_providers` (OpenAI-compatible `base_url`, `env_key`), so Codex could run on Patchbay's OpenAI-kind providers the way OpenCode does. Untested.
+- **A real turn on each of the three**, with instructions, approvals and usage, once someone signs in.
 
 - **Patchbay providers for OpenCode, Kilo and Claude Code.** I tried injecting a Patchbay provider into OpenCode 2.0.29 through `OPENCODE_CONFIG_CONTENT`, with and without `enabled_providers`. `opencode acp` ignored it: the model list and default stayed those from `~/.config/opencode/opencode.jsonc`. The next things to try are a private config dir (`OPENCODE_CONFIG_DIR`, or `XDG_CONFIG_HOME` pointed at a Patchbay-owned directory) or OpenCode's `serve` API. A private dir would also hide the user's own OpenCode setup, so it should be opt-in. Claude Code could run on an Anthropic-kind provider through `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`. That is also opt-in and untested.
 - **OpenCode retries.** When its provider is unreachable, OpenCode retries for minutes and reports each attempt only in `session_info_update._meta["opencode/retry"]`. Patchbay shows "Working…" the whole time. A generic "agent is retrying" hint would need either that meta key or a timeout.
 - **Mesh.** `CodeSession` gained `agent` and `agent_model`. Mesh sync and session migration need to carry them. Migrating a session to a node without that agent installed should fail cleanly. The mesh branch adds DB migrations too, so whichever branch merges second renumbers its migration.
 - **Rewind for other agents.** Only Grok has it (`x.ai/rewind/*`). Claude's adapter and OpenCode advertise `sessionCapabilities.fork`, which could support "edit and resend" by forking at a message. Today the UI hides edit-and-resend unless `extensions.rewind` is set.
-- **Gemini CLI, Codex and other ACP agents** need only a new `AgentKind` arm.
+- **Other ACP agents** in the registry (Goose, Qwen Code, GitHub Copilot CLI and others) need only a new `AgentKind` arm.
 - **The npx pin** (`CLAUDE_ACP_PACKAGE`) needs a bump now and then. A global install of `claude-agent-acp` overrides it.

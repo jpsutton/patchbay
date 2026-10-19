@@ -37,7 +37,7 @@ const fakeAgent = (id: AgentId, label: string, program: string | null, extra: Pa
   error: program ? null : `${label} not found.`,
   installHint: `Install ${label}, then sign in from a terminal.`,
   usesPatchbayModels: id === "grok",
-  supportsInstructions: id === "grok" || id === "claude-code",
+  supportsInstructions: id === "grok" || id === "claude-code" || id === "codex" || id === "antigravity",
   takesProviders: id === "claude-code" || id === "opencode" || id === "kilo",
   ...extra,
 });
@@ -50,6 +50,9 @@ const FAKE_AGENTS: AgentInfo[] = [
   fakeAgent("opencode", "OpenCode", "/usr/bin/opencode"),
   fakeAgent("cursor", "Cursor CLI", "/usr/bin/cursor-agent"),
   fakeAgent("kilo", "Kilo Code", null),
+  fakeAgent("codex", "Codex", "/usr/bin/npx", { source: "npx", version: null }),
+  fakeAgent("gemini", "Gemini CLI", "/usr/bin/gemini"),
+  fakeAgent("antigravity", "Antigravity", null),
 ];
 /** Reasoning effort per fake session, for agents that report it as a config option. */
 const fakeConfig: Record<string, string> = {};
