@@ -13,7 +13,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 
 ## Rust crates
 
-995 crates, built for every platform Patchbay supports. Each is used unmodified.
+998 crates, built for every platform Patchbay supports. Each is used unmodified.
 
 | Package | Version | License | Texts |
 |---|---|---|---|
@@ -415,6 +415,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | keyboard-types | 0.7.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [31dbbab009f1](#text-31dbbab009f1) |
 | keyboard-types | 0.8.3 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [31dbbab009f1](#text-31dbbab009f1) |
 | keyring | 3.6.3 | MIT OR Apache-2.0 | [6205fe4502da](#text-6205fe4502da) [b5e6923cd7c0](#text-b5e6923cd7c0) |
+| ksni | 0.3.6 | Unlicense | [ca2abdf69588](#text-ca2abdf69588) |
 | kurbo | 0.12.0 | Apache-2.0 OR MIT | [283ea6cc2997](#text-283ea6cc2997) [0e297345cbd9](#text-0e297345cbd9) |
 | lazy_static | 1.5.0 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [9e0027807b0c](#text-9e0027807b0c) |
 | lazy_static | 1.5.1 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) |
@@ -514,6 +515,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | parking | 2.2.1 | Apache-2.0 OR MIT | [954f335b8baf](#text-954f335b8baf) [30fefc3a7d6a](#text-30fefc3a7d6a) [c43e20176655](#text-c43e20176655) |
 | parking_lot | 0.12.5 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [8d1f81ea4e87](#text-8d1f81ea4e87) |
 | parking_lot_core | 0.9.12 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [8d1f81ea4e87](#text-8d1f81ea4e87) |
+| pastey | 0.2.3 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [30fefc3a7d6a](#text-30fefc3a7d6a) |
 | pdf_oxide | 0.3.74 | MIT OR Apache-2.0 | [85ad950cce87](#text-85ad950cce87) [8a7a9dc34a93](#text-8a7a9dc34a93) |
 | percent-encoding | 2.3.2 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [7a8093fb4a93](#text-7a8093fb4a93) |
 | phf | 0.13.1 | MIT | [ec5d7c323662](#text-ec5d7c323662) |
@@ -731,6 +733,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | tao-macros | 0.1.4 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [26e6f69cf1f6](#text-26e6f69cf1f6) [1d5680a70055](#text-1d5680a70055) |
 | tar | 0.4.46 | MIT OR Apache-2.0 | [954f335b8baf](#text-954f335b8baf) [e6e853531994](#text-e6e853531994) |
 | target-lexicon | 0.12.16 | Apache-2.0 WITH LLVM-exception | [2f213ec6b135](#text-2f213ec6b135) |
+| task-local | 0.1.1 | MIT OR Apache-2.0 | [ae76d9b2393b](#text-ae76d9b2393b) [212ec8eb1afb](#text-212ec8eb1afb) [889eb4892770](#text-889eb4892770) |
 | tauri | 2.12.4 | Apache-2.0 OR MIT | [4bf96504d6e8](#text-4bf96504d6e8) [89ff9689dcf9](#text-89ff9689dcf9) |
 | tauri-build | 2.7.3 | Apache-2.0 OR MIT | [4bf96504d6e8](#text-4bf96504d6e8) [89ff9689dcf9](#text-89ff9689dcf9) |
 | tauri-codegen | 2.7.3 | Apache-2.0 OR MIT | [4bf96504d6e8](#text-4bf96504d6e8) [89ff9689dcf9](#text-89ff9689dcf9) |
@@ -1522,7 +1525,7 @@ limitations under the License.
 
 ### <a id="text-30fefc3a7d6a"></a>30fefc3a7d6a
 
-Used by: adler2@2.0.1, anyhow@1.0.104, async-channel@2.5.0, async-executor@1.14.0, async-io@2.6.0, async-lock@3.4.1, async-lock@3.4.2, async-process@2.5.0, async-recursion@1.1.1, async-recursion@1.2.0, async-signal@0.2.13, async-signal@0.2.14, async-task@4.7.1, async-trait@0.1.89, async-trait@0.1.92, atomic-waker@1.1.2, blocking@1.6.2, blocking@1.7.0, camino@1.2.1, camino@1.2.6, cargo_metadata@0.19.2, cargo-platform@0.1.9, concurrent-queue@2.5.0, curve25519-dalek-derive@0.1.1, displaydoc@0.2.5, displaydoc@0.2.7, dtoa@1.0.10, dtoa@1.0.11, dyn-clone@1.0.20, endi@1.1.1, erased-serde@0.4.10, event-listener@5.4.1, event-listener@5.4.2, event-listener-strategy@0.5.4, fast-float2@0.2.3, fastrand@2.3.0, fastrand@2.5.0, futures-lite@2.6.1, hermit-abi@0.5.2, hermit-abi@0.5.3, itoa@1.0.17, itoa@1.0.18, lazy_static@1.5.1, leb128fmt@0.1.0, linux-raw-sys@0.12.1, minimal-lexical@0.2.1, num_enum@0.7.5, num_enum@0.7.6, num_enum_derive@0.7.5, num_enum_derive@0.7.6, once_cell@1.21.3, once_cell@1.21.4, ordered-stream@0.2.0, parking@2.2.1, pin-project-lite@0.2.16, pin-project-lite@0.2.17, piper@0.2.4, piper@0.2.5, polling@3.11.0, portable-atomic@1.11.1, portable-atomic@1.15.0, portable-atomic-util@0.2.4, portable-atomic-util@0.2.8, prettyplease@0.2.37, proc-macro-crate@1.3.1, proc-macro-crate@2.0.2, proc-macro-crate@3.4.0, proc-macro-crate@3.5.0, proc-macro2@1.0.106, proc-macro2@1.0.107, quote@1.0.45, quote@1.0.47, ref-cast@1.0.25, ref-cast@1.0.27, ref-cast-impl@1.0.25, ref-cast-impl@1.0.27, rustc-hash@2.1.1, rustc-hash@2.1.3, rustix@1.1.4, rustix@1.1.5, rustversion@1.0.22, rustversion@1.0.23, semver@1.0.28, serde@1.0.228, serde@1.0.229, serde_core@1.0.228, serde_core@1.0.229, serde_derive@1.0.228, serde_derive@1.0.229, serde_derive_internals@0.29.1, serde_json@1.0.149, serde_json@1.0.154, serde_path_to_error@0.1.20, serde_repr@0.1.20, serde_repr@0.1.21, serde-untagged@0.1.9, servo_arc@0.4.3, simd_cesu8@1.2.0, syn@1.0.109, syn@2.0.117, syn@2.0.119, syn@3.0.4, syn@3.0.9, system-deps@6.2.2, thiserror@1.0.69, thiserror@2.0.18, thiserror@2.0.21, thiserror-impl@1.0.69, thiserror-impl@2.0.18, thiserror-impl@2.0.21, typed-path@0.12.3, typeid@1.0.3, unicode-ident@1.0.24, unicode-ident@1.0.27, utf-8@0.7.6, wasi@0.11.1+wasi-snapshot-preview1, wasip2@1.0.4+wasi-0.2.12, wasm-streams@0.4.2, wasm-streams@0.5.0, wit-bindgen@0.46.0, wit-bindgen@0.51.0, wit-bindgen@0.57.1, wit-bindgen-core@0.51.0, wit-bindgen-rust@0.51.0, wit-bindgen-rust-macro@0.51.0, x11@2.21.0, x11-dl@2.21.0, xdg-home@1.3.0, zbus_names@3.0.0, zmij@1.0.19, zmij@1.0.23, zvariant_utils@2.1.0, zvariant_utils@4.2.0
+Used by: adler2@2.0.1, anyhow@1.0.104, async-channel@2.5.0, async-executor@1.14.0, async-io@2.6.0, async-lock@3.4.1, async-lock@3.4.2, async-process@2.5.0, async-recursion@1.1.1, async-recursion@1.2.0, async-signal@0.2.13, async-signal@0.2.14, async-task@4.7.1, async-trait@0.1.89, async-trait@0.1.92, atomic-waker@1.1.2, blocking@1.6.2, blocking@1.7.0, camino@1.2.1, camino@1.2.6, cargo_metadata@0.19.2, cargo-platform@0.1.9, concurrent-queue@2.5.0, curve25519-dalek-derive@0.1.1, displaydoc@0.2.5, displaydoc@0.2.7, dtoa@1.0.10, dtoa@1.0.11, dyn-clone@1.0.20, endi@1.1.1, erased-serde@0.4.10, event-listener@5.4.1, event-listener@5.4.2, event-listener-strategy@0.5.4, fast-float2@0.2.3, fastrand@2.3.0, fastrand@2.5.0, futures-lite@2.6.1, hermit-abi@0.5.2, hermit-abi@0.5.3, itoa@1.0.17, itoa@1.0.18, lazy_static@1.5.1, leb128fmt@0.1.0, linux-raw-sys@0.12.1, minimal-lexical@0.2.1, num_enum@0.7.5, num_enum@0.7.6, num_enum_derive@0.7.5, num_enum_derive@0.7.6, once_cell@1.21.3, once_cell@1.21.4, ordered-stream@0.2.0, parking@2.2.1, pastey@0.2.3, pin-project-lite@0.2.16, pin-project-lite@0.2.17, piper@0.2.4, piper@0.2.5, polling@3.11.0, portable-atomic@1.11.1, portable-atomic@1.15.0, portable-atomic-util@0.2.4, portable-atomic-util@0.2.8, prettyplease@0.2.37, proc-macro-crate@1.3.1, proc-macro-crate@2.0.2, proc-macro-crate@3.4.0, proc-macro-crate@3.5.0, proc-macro2@1.0.106, proc-macro2@1.0.107, quote@1.0.45, quote@1.0.47, ref-cast@1.0.25, ref-cast@1.0.27, ref-cast-impl@1.0.25, ref-cast-impl@1.0.27, rustc-hash@2.1.1, rustc-hash@2.1.3, rustix@1.1.4, rustix@1.1.5, rustversion@1.0.22, rustversion@1.0.23, semver@1.0.28, serde@1.0.228, serde@1.0.229, serde_core@1.0.228, serde_core@1.0.229, serde_derive@1.0.228, serde_derive@1.0.229, serde_derive_internals@0.29.1, serde_json@1.0.149, serde_json@1.0.154, serde_path_to_error@0.1.20, serde_repr@0.1.20, serde_repr@0.1.21, serde-untagged@0.1.9, servo_arc@0.4.3, simd_cesu8@1.2.0, syn@1.0.109, syn@2.0.117, syn@2.0.119, syn@3.0.4, syn@3.0.9, system-deps@6.2.2, thiserror@1.0.69, thiserror@2.0.18, thiserror@2.0.21, thiserror-impl@1.0.69, thiserror-impl@2.0.18, thiserror-impl@2.0.21, typed-path@0.12.3, typeid@1.0.3, unicode-ident@1.0.24, unicode-ident@1.0.27, utf-8@0.7.6, wasi@0.11.1+wasi-snapshot-preview1, wasip2@1.0.4+wasi-0.2.12, wasm-streams@0.4.2, wasm-streams@0.5.0, wit-bindgen@0.46.0, wit-bindgen@0.51.0, wit-bindgen@0.57.1, wit-bindgen-core@0.51.0, wit-bindgen-rust@0.51.0, wit-bindgen-rust-macro@0.51.0, x11@2.21.0, x11-dl@2.21.0, xdg-home@1.3.0, zbus_names@3.0.0, zmij@1.0.19, zmij@1.0.23, zvariant_utils@2.1.0, zvariant_utils@4.2.0
 
 ```text
 Permission is hereby granted, free of charge, to any
@@ -2125,7 +2128,7 @@ THE SOFTWARE.
 
 ### <a id="text-ca2abdf69588"></a>ca2abdf69588
 
-Used by: aho-corasick@1.1.3, aho-corasick@1.1.5, byteorder@1.5.0, byteorder-lite@0.1.0, globset@0.4.19, ignore@0.4.32, jiff@0.2.28, jiff@0.2.38, jiff-core@0.1.1, jiff-static@0.2.28, jiff-static@0.2.38, jiff-tzdb@0.1.4, jiff-tzdb@0.1.9, jiff-tzdb-platform@0.1.3, memchr@2.8.2, memchr@2.8.3, same-file@1.0.6, walkdir@2.5.0, winapi-util@0.1.11
+Used by: aho-corasick@1.1.3, aho-corasick@1.1.5, byteorder@1.5.0, byteorder-lite@0.1.0, globset@0.4.19, ignore@0.4.32, jiff@0.2.28, jiff@0.2.38, jiff-core@0.1.1, jiff-static@0.2.28, jiff-static@0.2.38, jiff-tzdb@0.1.4, jiff-tzdb@0.1.9, jiff-tzdb-platform@0.1.3, ksni@0.3.6, memchr@2.8.2, memchr@2.8.3, same-file@1.0.6, walkdir@2.5.0, winapi-util@0.1.11
 
 ```text
 This is free and unencumbered software released into the public domain.
@@ -2456,7 +2459,7 @@ SOFTWARE.
 
 ### <a id="text-85ad950cce87"></a>85ad950cce87
 
-Used by: anyhow@1.0.104, async-trait@0.1.89, async-trait@0.1.92, constant_time_eq@0.3.1, dtoa@1.0.10, dtoa@1.0.11, dyn-clone@1.0.20, erased-serde@0.4.10, itoa@1.0.17, itoa@1.0.18, libc@0.2.186, libc@0.2.191, litrs@1.0.0, num_enum@0.7.5, num_enum@0.7.6, num_enum_derive@0.7.5, num_enum_derive@0.7.6, office_oxide@0.1.9, osakit@0.3.1, pdf_oxide@0.3.74, prettyplease@0.2.37, proc-macro2@1.0.106, proc-macro2@1.0.107, quote@1.0.45, quote@1.0.47, ref-cast@1.0.25, ref-cast@1.0.27, ref-cast-impl@1.0.25, ref-cast-impl@1.0.27, rustc-hash@2.1.1, rustc-hash@2.1.3, rustversion@1.0.22, rustversion@1.0.23, ryu@1.0.20, semver@1.0.28, serde@1.0.228, serde@1.0.229, serde_core@1.0.228, serde_core@1.0.229, serde_derive@1.0.228, serde_derive@1.0.229, serde_derive_internals@0.29.1, serde_json@1.0.149, serde_json@1.0.154, serde_path_to_error@0.1.20, serde_repr@0.1.20, serde_repr@0.1.21, serde_urlencoded@0.7.1, serde-untagged@0.1.9, subsetter@0.2.3, syn@2.0.117, syn@2.0.119, syn@3.0.4, syn@3.0.9, thiserror@1.0.69, thiserror@2.0.18, thiserror@2.0.21, thiserror-impl@1.0.69, thiserror-impl@2.0.18, thiserror-impl@2.0.21, typed-path@0.12.3, typeid@1.0.3, unicode-ident@1.0.24, unicode-ident@1.0.27, utf-8@0.7.6, utf8parse@0.2.2, wasm-streams@0.4.2, wasm-streams@0.5.0
+Used by: anyhow@1.0.104, async-trait@0.1.89, async-trait@0.1.92, constant_time_eq@0.3.1, dtoa@1.0.10, dtoa@1.0.11, dyn-clone@1.0.20, erased-serde@0.4.10, itoa@1.0.17, itoa@1.0.18, libc@0.2.186, libc@0.2.191, litrs@1.0.0, num_enum@0.7.5, num_enum@0.7.6, num_enum_derive@0.7.5, num_enum_derive@0.7.6, office_oxide@0.1.9, osakit@0.3.1, pastey@0.2.3, pdf_oxide@0.3.74, prettyplease@0.2.37, proc-macro2@1.0.106, proc-macro2@1.0.107, quote@1.0.45, quote@1.0.47, ref-cast@1.0.25, ref-cast@1.0.27, ref-cast-impl@1.0.25, ref-cast-impl@1.0.27, rustc-hash@2.1.1, rustc-hash@2.1.3, rustversion@1.0.22, rustversion@1.0.23, ryu@1.0.20, semver@1.0.28, serde@1.0.228, serde@1.0.229, serde_core@1.0.228, serde_core@1.0.229, serde_derive@1.0.228, serde_derive@1.0.229, serde_derive_internals@0.29.1, serde_json@1.0.149, serde_json@1.0.154, serde_path_to_error@0.1.20, serde_repr@0.1.20, serde_repr@0.1.21, serde_urlencoded@0.7.1, serde-untagged@0.1.9, subsetter@0.2.3, syn@2.0.117, syn@2.0.119, syn@3.0.4, syn@3.0.9, thiserror@1.0.69, thiserror@2.0.18, thiserror@2.0.21, thiserror-impl@1.0.69, thiserror-impl@2.0.18, thiserror-impl@2.0.21, typed-path@0.12.3, typeid@1.0.3, unicode-ident@1.0.24, unicode-ident@1.0.27, utf-8@0.7.6, utf8parse@0.2.2, wasm-streams@0.4.2, wasm-streams@0.5.0
 
 ```text
 Apache License
@@ -23124,6 +23127,71 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+```
+
+### <a id="text-ae76d9b2393b"></a>ae76d9b2393b
+
+Used by: task-local@0.1.1
+
+```text
+This project is licensed under either of
+
+ * Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+ * MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.
+```
+
+### <a id="text-212ec8eb1afb"></a>212ec8eb1afb
+
+Used by: task-local@0.1.1
+
+```text
+Apache License
+                        Version 2.0, January 2004
+                     http://www.apache.org/licenses/
+
+Copyright 2025 Bugen Zhao
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+### <a id="text-889eb4892770"></a>889eb4892770
+
+Used by: task-local@0.1.1
+
+```text
+MIT License
+
+Copyright (c) 2025 Bugen Zhao
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### <a id="text-89ff9689dcf9"></a>89ff9689dcf9

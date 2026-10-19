@@ -392,6 +392,14 @@ export const TrashIcon = icon(
   </>,
 );
 
+export const ArchiveIcon = icon(
+  <>
+    <rect x="2" y="3" width="20" height="5" rx="1" />
+    <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" />
+    <path d="M10 12h4" />
+  </>,
+);
+
 export const MoveIcon = icon(
   <>
     <path d="M8 3 4 7l4 4" />
@@ -446,5 +454,25 @@ export const MonitorUpIcon = icon(
     <rect width="16" height="12" x="1" y="1" rx="2" />
     <path d="M9 13v4" />
     <path d="M5 17h8" />
+  </>,
+);
+
+export const TriangleAlertIcon = icon(
+  <>
+    <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
+    <path d="M12 9v4" />
+    <path d="M12 17h.01" />
+  </>,
+);
+
+/** Three linked computers: the mesh. */
+export const MeshIcon = icon(
+  <>
+    <circle cx="5" cy="6" r="2" />
+    <circle cx="19" cy="6" r="2" />
+    <circle cx="12" cy="18" r="2" />
+    <path d="M7 6h10" />
+    <path d="m6 8 5 8.3" />
+    <path d="m18 8-5 8.3" />
   </>,
 );

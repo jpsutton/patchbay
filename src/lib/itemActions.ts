@@ -72,6 +72,19 @@ export function chatActions(
   return actions;
 }
 
+/** Archive a Code session, or restore it if it's archived. */
+export function toggleSessionArchive(s: CodeSession): () => void {
+  const st = useStore.getState;
+  const archived = s.archivedAt != null;
+  return attempt(async () => {
+    // Archiving stops the agent too, wherever it runs.
+    await api.updateCodeSession(s.id, { archived: !archived });
+    if (!archived && st().activeCodeSessionId === s.id) st().selectCodeSession(null);
+    await st().refreshCodeSessions();
+    st().setToast(archived ? `Restored "${s.title}"` : `Archived "${s.title}"`);
+  });
+}
+
 export function sessionActions(
   s: CodeSession,
   { rename, desktop, running, local }: { rename: () => void; desktop: boolean; running: boolean; local: boolean },
@@ -105,16 +118,7 @@ export function sessionActions(
       }),
     });
   }
-  actions.push({
-    label: archived ? "Restore from archive" : "Archive",
-    onSelect: attempt(async () => {
-      // Archiving stops the agent too, wherever it runs.
-      await api.updateCodeSession(s.id, { archived: !archived });
-      if (!archived && st().activeCodeSessionId === s.id) st().selectCodeSession(null);
-      await st().refreshCodeSessions();
-      st().setToast(archived ? `Restored "${s.title}"` : `Archived "${s.title}"`);
-    }),
-  });
+  actions.push({ label: archived ? "Restore from archive" : "Archive", onSelect: toggleSessionArchive(s) });
   actions.push({
     label: "Copy folder path",
     onSelect: attempt(async () => {

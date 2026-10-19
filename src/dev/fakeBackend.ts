@@ -37,7 +37,7 @@ const fakeAgent = (id: AgentId, label: string, program: string | null, extra: Pa
   error: program ? null : `${label} not found.`,
   installHint: `Install ${label}, then sign in from a terminal.`,
   usesPatchbayModels: id === "grok",
-  supportsInstructions: id === "grok" || id === "claude-code",
+  supportsInstructions: id === "grok" || id === "claude-code" || id === "codex" || id === "antigravity",
   takesProviders: id === "claude-code" || id === "opencode" || id === "kilo",
   ...extra,
 });
@@ -50,6 +50,9 @@ const FAKE_AGENTS: AgentInfo[] = [
   fakeAgent("opencode", "OpenCode", "/usr/bin/opencode"),
   fakeAgent("cursor", "Cursor CLI", "/usr/bin/cursor-agent"),
   fakeAgent("kilo", "Kilo Code", null),
+  fakeAgent("codex", "Codex", "/usr/bin/npx", { source: "npx", version: null }),
+  fakeAgent("gemini", "Gemini CLI", "/usr/bin/gemini"),
+  fakeAgent("antigravity", "Antigravity", null),
 ];
 /** Reasoning effort per fake session, for agents that report it as a config option. */
 const fakeConfig: Record<string, string> = {};
@@ -422,6 +425,23 @@ export function install() {
     meshMember();
     mesh.pending = [{ nodeId: "n-new", name: "travel-pc", code: "482 913" }];
     setTimeout(fakeRemoteStream, 2500);
+  }
+  // `?mesh=1&meshError=1`: studio rejects this computer's passphrase, so nothing else is reachable.
+  if (meshDemo && new URLSearchParams(location.search).has("meshError")) {
+    mesh.pending = [];
+    for (const m of mesh.members) {
+      if (m.state === "self") continue;
+      Object.assign(m, { state: "offline", via: null, viaName: null, rttMs: null, authFailed: m.nodeId === "n-studio" });
+    }
+    mesh.problem = {
+      kind: "auth",
+      title: "studio rejected this computer's passphrase",
+      message: "This computer can't sync with it until the passphrases match. Re-enter the passphrase in Settings → Mesh.",
+    };
+    setTimeout(() => {
+      emit("mesh://error", mesh.problem);
+      meshStatusChanged();
+    }, 800);
   }
   const conv = (title: string, agoDays: number, pinned = false) =>
     db.conversations.push({ id: id(), title, modelRef: "m1", systemPrompt: null, pinned, createdAt: now() - agoDays * 86_400_000, updatedAt: now() - agoDays * 86_400_000 });
@@ -830,6 +850,13 @@ export function install() {
           return null;
         }
         case "mesh_add_address": return null;
+        case "mesh_set_passphrase": {
+          if (((a.passphrase as string) ?? "").length < 8) throw "use a passphrase of at least 8 characters";
+          mesh.problem = null;
+          meshMember();
+          meshStatusChanged();
+          return null;
+        }
         case "mesh_chat_streams": return [];
 
         case "remote_status": return structuredClone(phone);

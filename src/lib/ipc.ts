@@ -239,6 +239,15 @@ export interface MeshMember {
   approver: string;
   /** "remote" for a phone that only drives other members' work. */
   role?: string | null;
+  /** Its handshake with this computer failed on the passphrase. */
+  authFailed?: boolean;
+}
+
+/** Something wrong with this computer's mesh that the user has to fix. */
+export interface MeshProblem {
+  kind: "listen" | "passphrase" | "auth";
+  title: string;
+  message: string;
 }
 
 export interface MeshStatus {
@@ -260,6 +269,7 @@ export interface MeshStatus {
   } | null;
   members: MeshMember[];
   pending: { nodeId: string; name: string; code: string; role?: string | null }[];
+  problem?: MeshProblem | null;
 }
 
 /** A chat reply streaming on another node. */
@@ -293,7 +303,7 @@ export interface CodeAttach {
   point?: EventPoint | null;
 }
 
-export type AgentId = "grok" | "claude-code" | "opencode" | "cursor" | "kilo";
+export type AgentId = "grok" | "claude-code" | "opencode" | "cursor" | "kilo" | "codex" | "gemini" | "antigravity";
 
 /** One coding agent backend, as the Agents settings page lists it. */
 export interface AgentInfo {
@@ -318,6 +328,9 @@ export const AGENT_LABELS: Record<AgentId, string> = {
   opencode: "OpenCode",
   cursor: "Cursor CLI",
   kilo: "Kilo Code",
+  codex: "Codex",
+  gemini: "Gemini CLI",
+  antigravity: "Antigravity",
 };
 
 /** Non-standard ACP extensions the session's agent understands. */
@@ -703,6 +716,7 @@ export const api = {
   meshRemove: (nodeId: string) => invoke<void>("mesh_remove", { nodeId }),
   meshLeave: () => invoke<void>("mesh_leave"),
   meshSetConfig: (cfg: { name?: string; listen?: string; advertise?: string[] }) => invoke<void>("mesh_set_config", cfg),
+  meshSetPassphrase: (passphrase: string) => invoke<void>("mesh_set_passphrase", { passphrase }),
   meshAddAddress: (url: string) => invoke<void>("mesh_add_address", { url }),
   meshChatStreams: () => invoke<RemoteStream[]>("mesh_chat_streams"),
 

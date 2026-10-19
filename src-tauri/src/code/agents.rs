@@ -23,18 +23,27 @@ pub enum AgentKind {
     Opencode,
     Cursor,
     Kilo,
+    Codex,
+    Gemini,
+    Antigravity,
 }
 
 /// The Claude Code ACP adapter, run through `npx` when it isn't installed.
 pub const CLAUDE_ACP_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp@0.93.0";
+/// The Codex ACP adapter, which brings its own Codex binary.
+pub const CODEX_ACP_PACKAGE: &str = "@agentclientprotocol/codex-acp@2.2.2";
+pub const GEMINI_CLI_PACKAGE: &str = "@google/gemini-cli@0.64.0";
 
 impl AgentKind {
-    pub const ALL: [AgentKind; 5] = [
+    pub const ALL: [AgentKind; 8] = [
         AgentKind::Grok,
         AgentKind::ClaudeCode,
         AgentKind::Opencode,
         AgentKind::Cursor,
         AgentKind::Kilo,
+        AgentKind::Codex,
+        AgentKind::Gemini,
+        AgentKind::Antigravity,
     ];
 
     /// The id stored in `code_sessions.agent` and preferences.
@@ -45,6 +54,9 @@ impl AgentKind {
             AgentKind::Opencode => "opencode",
             AgentKind::Cursor => "cursor",
             AgentKind::Kilo => "kilo",
+            AgentKind::Codex => "codex",
+            AgentKind::Gemini => "gemini",
+            AgentKind::Antigravity => "antigravity",
         }
     }
 
@@ -59,6 +71,9 @@ impl AgentKind {
             AgentKind::Opencode => "OpenCode",
             AgentKind::Cursor => "Cursor CLI",
             AgentKind::Kilo => "Kilo Code",
+            AgentKind::Codex => "Codex",
+            AgentKind::Gemini => "Gemini CLI",
+            AgentKind::Antigravity => "Antigravity",
         }
     }
 
@@ -70,6 +85,24 @@ impl AgentKind {
             AgentKind::Opencode => (&["opencode"], &["acp"]),
             AgentKind::Cursor => (&["cursor-agent"], &["acp"]),
             AgentKind::Kilo => (&["kilo", "kilocode"], &["acp"]),
+            AgentKind::Codex => (&["codex-acp"], &[]),
+            AgentKind::Gemini => (&["gemini"], &["--acp"]),
+            // Google ships the ACP server only as an archive (see the ACP registry), so it is
+            // rarely on PATH; Settings takes its path. The registry passes `--uid=` on Linux.
+            AgentKind::Antigravity => (
+                &["agy_acp_server", "agy_acp_server.par", "agy-acp-server"],
+                if cfg!(target_os = "linux") { &["--uid="] } else { &[] },
+            ),
+        }
+    }
+
+    /// The npm package `resolve` falls back to through `npx`, with its ACP arguments.
+    fn npx_package(self) -> Option<(&'static str, &'static [&'static str])> {
+        match self {
+            AgentKind::ClaudeCode => Some((CLAUDE_ACP_PACKAGE, &[])),
+            AgentKind::Codex => Some((CODEX_ACP_PACKAGE, &[])),
+            AgentKind::Gemini => Some((GEMINI_CLI_PACKAGE, &["--acp"])),
+            _ => None,
         }
     }
 
@@ -88,6 +121,15 @@ impl AgentKind {
             AgentKind::Opencode => "Install from https://opencode.ai, then run `opencode auth login`.",
             AgentKind::Cursor => "Install from https://cursor.com/cli, then run `cursor-agent login`.",
             AgentKind::Kilo => "`npm install -g @kilocode/cli`, then run `kilo auth login`.",
+            AgentKind::Codex => {
+                "Install Node.js (Patchbay then runs the adapter through npx), or `npm install -g @agentclientprotocol/codex-acp`. Sign in with `codex login`, or set OPENAI_API_KEY."
+            }
+            AgentKind::Gemini => {
+                "Install Node.js (Patchbay then runs it through npx), or `npm install -g @google/gemini-cli`. Sign in by running `gemini`, or set GEMINI_API_KEY."
+            }
+            AgentKind::Antigravity => {
+                "Download Google's Antigravity ACP server for your platform (listed in the ACP registry at agentclientprotocol.com), unpack it, and set the path to agy_acp_server in Settings."
+            }
         }
     }
 
@@ -99,6 +141,11 @@ impl AgentKind {
             AgentKind::Opencode => "Run `opencode auth login` in a terminal.",
             AgentKind::Cursor => "Run `cursor-agent login` in a terminal.",
             AgentKind::Kilo => "Run `kilo auth login` in a terminal.",
+            AgentKind::Codex => "Run `codex login` in a terminal (`npm install -g @openai/codex` gets it), or set OPENAI_API_KEY.",
+            AgentKind::Gemini => "Run `gemini` in a terminal and choose a sign-in method, or set GEMINI_API_KEY.",
+            AgentKind::Antigravity => {
+                "Set `auth.type` in ~/.gemini/antigravity-acp/settings.json (for example `gemini-api-key` with GEMINI_API_KEY set), or sign in from an editor that runs the Antigravity ACP server."
+            }
         }
     }
 }
@@ -138,6 +185,29 @@ impl ApprovalSetup {
                 hide_modes: &["acceptEdits", "auto", "bypassPermissions", "dontAsk"],
                 gaps: &["Rules in your own Claude Code settings (permissions.allow) run without asking."],
             },
+            // Codex's modes are approval and sandbox presets. Read-only asks before every edit
+            // and network use; its sandbox still runs shell commands without asking.
+            AgentKind::Codex => Self {
+                select_mode: Some(CODEX_ASKING_MODE.into()),
+                hide_modes: &["workspace-write", "agent", "agent-full-access"],
+                gaps: &[
+                    "Codex runs shell commands inside its read-only sandbox without asking.",
+                    "Rules in your own Codex config (~/.codex) may let more run without asking.",
+                ],
+            },
+            AgentKind::Gemini => Self {
+                select_mode: Some("default".into()),
+                hide_modes: &["autoEdit", "yolo"],
+                gaps: &[
+                    "Gemini CLI reads, lists and searches files, and searches the web, without asking.",
+                    "Allow rules in your own Gemini CLI settings and policies run without asking.",
+                ],
+            },
+            AgentKind::Antigravity => Self {
+                select_mode: Some("default".into()),
+                hide_modes: &["auto_edit", "yolo"],
+                gaps: &["Antigravity reads and searches files without asking."],
+            },
             // Cursor has no per-session approval control over ACP.
             AgentKind::Cursor => Self {
                 select_mode: None,
@@ -150,6 +220,9 @@ impl ApprovalSetup {
         }
     }
 }
+
+/// Codex mode that asks before edits; also its starting mode (`INITIAL_AGENT_MODE`).
+const CODEX_ASKING_MODE: &str = "read-only";
 
 /// Config that makes OpenCode and Kilo ask over ACP for every tool. Both read inline config
 /// from an env var; deny rules in the user's own config still apply.
@@ -260,7 +333,7 @@ fn is_executable(p: &Path) -> bool {
 }
 
 /// Find the agent's executable: the Settings override, then the bundled copy (Grok), PATH, and
-/// for Claude Code a fallback to `npx`.
+/// for the agents published on npm a fallback to `npx`.
 pub fn resolve(kind: AgentKind, overrides: &AgentPaths) -> Result<Resolved> {
     let (names, acp_args) = kind.program();
     let args: Vec<String> = acp_args.iter().map(|s| (*s).to_owned()).collect();
@@ -277,14 +350,12 @@ pub fn resolve(kind: AgentKind, overrides: &AgentPaths) -> Result<Resolved> {
     if let Some(program) = names.iter().find_map(|n| which(n)) {
         return Ok(Resolved { program, args, source: Source::Path });
     }
-    if kind == AgentKind::ClaudeCode
+    if let Some((package, acp_args)) = kind.npx_package()
         && let Some(npx) = which("npx")
     {
-        return Ok(Resolved {
-            program: npx,
-            args: vec!["-y".into(), CLAUDE_ACP_PACKAGE.into()],
-            source: Source::Npx,
-        });
+        let mut args = vec!["-y".to_owned(), package.to_owned()];
+        args.extend(acp_args.iter().map(|s| (*s).to_owned()));
+        return Ok(Resolved { program: npx, args, source: Source::Npx });
     }
     Err(anyhow!("{} not found. {}", kind.label(), kind.install_hint()))
 }
@@ -384,6 +455,11 @@ fn session_meta(kind: AgentKind, rules: &str) -> Value {
             AgentKind::ClaudeCode => {
                 meta.insert("systemPrompt".into(), json!({ "append": rules }));
             }
+            // The server advertises `_meta.antigravity.systemPrompt.append` in `initialize`.
+            AgentKind::Antigravity => {
+                meta.insert("antigravity".into(), json!({ "systemPrompt": { "append": rules } }));
+            }
+            // Codex takes them through `CODEX_CONFIG` (see `prepare`).
             _ => {}
         }
     }
@@ -401,7 +477,7 @@ fn session_meta(kind: AgentKind, rules: &str) -> Value {
 
 /// True when this agent receives Settings → Code → custom instructions.
 pub fn supports_instructions(kind: AgentKind) -> bool {
-    matches!(kind, AgentKind::Grok | AgentKind::ClaudeCode)
+    matches!(kind, AgentKind::Grok | AgentKind::ClaudeCode | AgentKind::Codex | AgentKind::Antigravity)
 }
 
 /// Build the launch for a session's agent: executable, arguments, environment and config.
@@ -432,6 +508,22 @@ pub fn prepare(db: &Db, data_dir: &Path, session: &CodeSession) -> Result<Launch
             env.push(("OPENCODE_CONFIG_CONTENT".to_owned(), config));
         }
         AgentKind::Kilo => env.push(("KILO_CONFIG_CONTENT".to_owned(), config)),
+        AgentKind::Codex => {
+            env.push(("INITIAL_AGENT_MODE".to_owned(), CODEX_ASKING_MODE.to_owned()));
+            // The adapter reads an API key from the environment only when told to sign in with
+            // one; without a login it otherwise stops at `auth_required`.
+            if ["CODEX_API_KEY", "OPENAI_API_KEY"]
+                .iter()
+                .any(|v| std::env::var(v).is_ok_and(|k| !k.trim().is_empty()))
+            {
+                env.push(("DEFAULT_AUTH_REQUEST".to_owned(), json!({ "methodId": "api-key" }).to_string()));
+            }
+            // Merged into every thread's config; `developer_instructions` joins Codex's prompt.
+            let rules = prefs.agent_instructions.trim();
+            if !rules.is_empty() {
+                env.push(("CODEX_CONFIG".to_owned(), json!({ "developer_instructions": rules }).to_string()));
+            }
+        }
         _ => {}
     }
     env.extend(providers.env);
@@ -519,6 +611,11 @@ mod tests {
             json!({ "type": "adaptive", "display": "summarized" })
         );
         assert_eq!(session_meta(AgentKind::Opencode, "be terse"), json!({}));
+        assert_eq!(
+            session_meta(AgentKind::Antigravity, "be terse"),
+            json!({ "antigravity": { "systemPrompt": { "append": "be terse" } } })
+        );
+        assert_eq!(session_meta(AgentKind::Codex, "be terse"), json!({}));
         // Thinking display rides every Claude Code session, instructions or not.
         assert_eq!(
             session_meta(AgentKind::ClaudeCode, "  ")["claudeCode"]["options"]["thinking"],
@@ -573,6 +670,49 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Codex starts in the mode that asks, and gets custom instructions through `CODEX_CONFIG`.
+    #[test]
+    fn codex_launch_asks_and_carries_instructions() {
+        let dir = std::env::temp_dir().join(format!("pb-ag-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("db.sqlite")).unwrap();
+        let mut o = AgentPaths::new();
+        o.insert("codex".into(), std::env::current_exe().unwrap().to_string_lossy().into_owned());
+        let mut prefs = crate::prefs::Preferences { agent_paths: o, ..Default::default() };
+        crate::prefs::save(&db, &prefs).unwrap();
+        let session = db.create_code_session(&dir.to_string_lossy(), None, "codex", "default").unwrap();
+        let env = |l: &Launch, k: &str| l.env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+
+        let l = prepare(&db, &dir, &session).unwrap();
+        assert_eq!(env(&l, "INITIAL_AGENT_MODE").as_deref(), Some("read-only"));
+        assert_eq!(env(&l, "CODEX_CONFIG"), None);
+        assert_eq!(l.approvals.select_mode.as_deref(), Some("read-only"));
+
+        prefs.agent_instructions = "be terse".into();
+        crate::prefs::save(&db, &prefs).unwrap();
+        let l = prepare(&db, &dir, &session).unwrap();
+        let config: Value = serde_json::from_str(&env(&l, "CODEX_CONFIG").unwrap()).unwrap();
+        assert_eq!(config, json!({ "developer_instructions": "be terse" }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn acp_arguments_per_agent() {
+        let exe = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        let args = |kind: AgentKind| {
+            let mut o = AgentPaths::new();
+            o.insert(kind.id().into(), exe.clone());
+            resolve(kind, &o).unwrap().args
+        };
+        assert_eq!(args(AgentKind::Codex), Vec::<String>::new());
+        assert_eq!(args(AgentKind::Gemini), vec!["--acp".to_owned()]);
+        let agy = args(AgentKind::Antigravity);
+        assert_eq!(agy, if cfg!(target_os = "linux") { vec!["--uid=".to_owned()] } else { vec![] });
+        // Through npx, the ACP arguments follow the package.
+        assert_eq!(AgentKind::Gemini.npx_package(), Some((GEMINI_CLI_PACKAGE, &["--acp"][..])));
+        assert_eq!(AgentKind::Antigravity.npx_package(), None);
     }
 
     #[test]
