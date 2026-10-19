@@ -449,6 +449,8 @@ function loadSidebarCollapsed(): boolean {
 
 /** The catalog last loaded, to tell a real change from a reload. */
 let catalogKey: string | null = null;
+/** Counts session-list loads, so only the latest one's answer is kept. */
+let codeSessionsSeq = 0;
 
 export const useStore = create<Store>((set, get) => ({
   mode: "chat",
@@ -616,7 +618,11 @@ export const useStore = create<Store>((set, get) => ({
   selectConversation: (id) => set({ activeConversationId: id }),
 
   refreshCodeSessions: async () => {
-    set({ codeSessions: await api.listCodeSessions() });
+    // Calls can overlap (a sync event during a create): a slower, older answer must not win.
+    const seq = ++codeSessionsSeq;
+    const list = await api.listCodeSessions();
+    if (seq !== codeSessionsSeq) return;
+    set({ codeSessions: list });
     backfillActivity();
   },
   selectCodeSession: (id) => set({ activeCodeSessionId: id }),
