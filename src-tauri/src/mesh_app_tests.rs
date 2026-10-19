@@ -543,11 +543,16 @@ async fn sign_in_command_and_pending_auth() {
     assert!(err.0.contains("agent is not running"), "{}", err.0);
 
     let auth = || a.state.live.lock().unwrap().get(&s.id).and_then(|l| l.auth.clone());
-    let methods = vec![AuthChoice { id: "chat-gpt".into(), name: "ChatGPT".into(), description: None, api_key: false }];
+    let methods = vec![AuthChoice { id: "chat-gpt".into(), name: "ChatGPT".into(), description: None, api_key: false, terminal: false }];
     emit(&a, &s.id, CodeEvent::AuthRequired { message: "Codex needs you to sign in first.".into(), methods });
     let ev = auth().expect("kept for late viewers");
     assert_eq!(ev["type"], "authRequired");
     assert_eq!(ev["methods"][0]["id"], "chat-gpt");
+    // A sign-in mid-session clears it without a new `sessionReady`.
+    emit(&a, &s.id, CodeEvent::AuthResolved);
+    assert!(auth().is_none());
+    emit(&a, &s.id, CodeEvent::AuthRequired { message: "again".into(), methods: Vec::new() });
+    assert!(auth().is_some());
     assert!(a.events.lock().unwrap().iter().any(|(n, p)| n == code::acp::EVENT && p["event"]["type"] == "authRequired"));
     emit(&a, &s.id, CodeEvent::SessionReady {
         acp_session_id: "acp".into(),

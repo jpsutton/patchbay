@@ -290,6 +290,13 @@ impl CodeManager {
         rx.await.map_err(|_| anyhow!("agent stopped"))?
     }
 
+    /// The login command of the agent's terminal sign-in method `method_id`.
+    pub async fn terminal_auth(&self, code_session_id: &str, method_id: String) -> Result<crate::terminal::Program> {
+        let (reply, rx) = oneshot::channel();
+        self.send(code_session_id, AgentCmd::TerminalAuth { method_id, reply })?;
+        rx.await.map_err(|_| anyhow!("agent stopped"))?
+    }
+
     pub fn respond_permission(&self, request_id: &str, option_id: Option<String>) {
         if let Some((_, tx)) = self.pending.lock().unwrap().remove(request_id) {
             let _ = tx.send(option_id);

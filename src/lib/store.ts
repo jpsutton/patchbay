@@ -70,7 +70,7 @@ export interface CodeState {
   extensions: AgentExtensions;
   /** What the agent does without asking, whatever the session's approval mode. */
   approvalGaps: string[];
-  /** The agent waits for a sign-in before it starts a session. */
+  /** The agent waits for a sign-in: before it starts a session, or mid-session. */
   auth: { message: string; methods: AuthChoice[] } | null;
   /** Tool call id -> why a saved rule or the approval mode approved it. */
   autoApproved: Record<string, string>;
@@ -706,6 +706,9 @@ export const useStore = create<Store>((set, get) => ({
       case "authRequired":
         next = { ...s, auth: { message: e.message, methods: e.methods } };
         notifyCode(id, "needs you to sign in");
+        break;
+      case "authResolved":
+        next = { ...s, auth: null };
         break;
       case "config":
         // Options-based agents resend their full config; legacy model/mode lists stay as they are.

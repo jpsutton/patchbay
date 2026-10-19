@@ -1,4 +1,5 @@
-//! Embedded terminal: one PTY-backed user shell per terminal id.
+//! Embedded terminal: one PTY-backed user shell per terminal id, or one program (an agent's
+//! sign-in command).
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -17,6 +18,15 @@ pub enum TermEvent {
     /// Base64-encoded output bytes.
     Data { data: String },
     Exit { code: Option<u32> },
+}
+
+/// A program for a terminal to run in place of the user's shell.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Program {
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub env_remove: Vec<String>,
 }
 
 /// Where a terminal's output goes (this window, or another mesh node); false once nobody listens.
@@ -43,6 +53,35 @@ impl TerminalManager {
         rows: u16,
         sink: TermSink,
     ) -> Result<()> {
+        let cmd = match shell.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(sh) => CommandBuilder::new(sh),
+            None => CommandBuilder::new_default_prog(),
+        };
+        self.spawn(id, cmd, cwd, cols, rows, sink)
+    }
+
+    /// Like `open`, but runs `program`; the terminal ends when it exits.
+    pub fn open_program(
+        &self,
+        id: &str,
+        cwd: &str,
+        program: &Program,
+        cols: u16,
+        rows: u16,
+        sink: TermSink,
+    ) -> Result<()> {
+        let mut cmd = CommandBuilder::new(&program.program);
+        cmd.args(&program.args);
+        for k in &program.env_remove {
+            cmd.env_remove(k);
+        }
+        for (k, v) in &program.env {
+            cmd.env(k, v);
+        }
+        self.spawn(id, cmd, cwd, cols, rows, sink)
+    }
+
+    fn spawn(&self, id: &str, mut cmd: CommandBuilder, cwd: &str, cols: u16, rows: u16, sink: TermSink) -> Result<()> {
         self.close(id);
         let pty = native_pty_system().openpty(PtySize {
             rows,
@@ -50,10 +89,6 @@ impl TerminalManager {
             pixel_width: 0,
             pixel_height: 0,
         })?;
-        let mut cmd = match shell.map(str::trim).filter(|s| !s.is_empty()) {
-            Some(sh) => CommandBuilder::new(sh),
-            None => CommandBuilder::new_default_prog(),
-        };
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");

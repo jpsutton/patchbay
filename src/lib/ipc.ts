@@ -371,6 +371,8 @@ export interface AuthChoice {
   description: string | null;
   /** The method takes an API key the user types in. */
   apiKey: boolean;
+  /** The user signs in in a terminal running the agent's login command. */
+  terminal: boolean;
 }
 
 export type CodeEvent =
@@ -402,8 +404,10 @@ export type CodeEvent =
   | { type: "userPrompt"; text: string; origin: string; attachments: Attachment[]; replay?: boolean }
   /** The session was renamed automatically. */
   | { type: "title"; title: string }
-  /** The agent won't start a session until the user signs in with one of `methods`. */
-  | { type: "authRequired"; message: string; methods: AuthChoice[] };
+  /** The agent wants a sign-in with one of `methods`: before its session starts, or mid-session. */
+  | { type: "authRequired"; message: string; methods: AuthChoice[] }
+  /** A mid-session sign-in worked; the session goes on. */
+  | { type: "authResolved" };
 
 /** Where a live event sits in its topic's stream (see docs/design/mobile.md, section 3). */
 export interface EventPoint {
@@ -734,10 +738,19 @@ export const api = {
   meshChatStreams: () => invoke<RemoteStream[]>("mesh_chat_streams"),
 
   /** With `sessionId`, the shell runs on the computer hosting that session. */
-  termOpen: (id: string, cwd: string, cols: number, rows: number, onEvent: (e: TermEvent) => void, sessionId?: string) => {
+  /** With `authMethod`, the terminal runs the session's agent's sign-in command for that method. */
+  termOpen: (
+    id: string,
+    cwd: string,
+    cols: number,
+    rows: number,
+    onEvent: (e: TermEvent) => void,
+    sessionId?: string,
+    authMethod?: string,
+  ) => {
     const ch = new Channel<TermEvent>();
     ch.onmessage = onEvent;
-    return invoke<void>("term_open", { id, cwd, cols, rows, onEvent: ch, sessionId });
+    return invoke<void>("term_open", { id, cwd, cols, rows, onEvent: ch, sessionId, authMethod: authMethod ?? null });
   },
   termWrite: (id: string, data: string) => invoke<void>("term_write", { id, data }),
   termResize: (id: string, cols: number, rows: number) => invoke<void>("term_resize", { id, cols, rows }),
