@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { AGENT_LABELS, api, type AgentInfo, type CodeSession } from "../lib/ipc";
 import { remoteHost, useStore } from "../lib/store";
 import { ArchivedToggle, SectionLabel, SidebarItem } from "../components/SidebarItem";
-import { sessionActions } from "../lib/itemActions";
+import { sessionActions, toggleSessionArchive } from "../lib/itemActions";
 import { fmtShort, matchesQuery } from "../lib/format";
 import { ChevronRightIcon, PlusIcon } from "../components/icons";
 import { activityOf, strongest } from "../lib/activity";
@@ -144,6 +144,7 @@ export function CodeSidebar() {
           await api.updateCodeSession(s.id, { title: t });
           refresh();
         }}
+        onArchive={s.archivedAt == null ? toggleSessionArchive(s) : undefined}
         onDelete={async () => {
           const { ok } = await askConfirm({
             title: "Remove session?",
