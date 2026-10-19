@@ -1,5 +1,4 @@
 import { useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
 import {
   AGENT_LABELS,
   api,
@@ -39,17 +38,16 @@ import { codeToJson, codeToMarkdown, saveExport } from "../lib/export";
 import { useViewAction } from "../lib/shortcuts";
 import { HeaderButton } from "../components/HeaderButton";
 import { useDragRegion, WindowControls } from "../components/WindowControls";
-import { isRemoteApp, isWeb } from "../lib/platform";
-import { pickFolder } from "../components/FolderPicker";
+import { isRemoteApp } from "../lib/platform";
 import {
   CheckIcon,
   ChevronRightIcon,
   CopyIcon,
   FileDiffIcon,
-  FolderPlusIcon,
   MonitorUpIcon,
   PaperclipIcon,
   PencilIcon,
+  PlusIcon,
   RestartIcon,
   TerminalIcon,
   XIcon,
@@ -75,14 +73,6 @@ export async function newSessionIn(dir: string, agent?: AgentId, host?: string |
   } catch (e) {
     st.setToast(errorText(e));
   }
-}
-
-export async function openFolderAsSession(agent?: AgentId) {
-  const dir = isWeb()
-    ? await pickFolder("Open project folder")
-    : await open({ directory: true, multiple: false, title: "Open project folder" });
-  if (!dir || Array.isArray(dir)) return;
-  await newSessionIn(dir, agent);
 }
 
 /** Choices of a select config option, flattening groups. */
@@ -600,10 +590,10 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
         <div>It reads, edits and runs things there, and asks before anything risky.</div>
         <button
           className="mt-4 flex h-10 items-center gap-2 rounded-[10px] bg-accent px-4 text-sm font-semibold text-accent-fg hover:brightness-105"
-          onClick={() => openFolderAsSession()}
+          onClick={() => useStore.getState().setNewSessionOpen(true)}
         >
-          <FolderPlusIcon size={17} />
-          Open folder…
+          <PlusIcon size={17} />
+          New session…
         </button>
         <AgentPicker />
       </div>

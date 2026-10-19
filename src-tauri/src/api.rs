@@ -178,12 +178,26 @@ commands! {
     save_prompt(id, name, content);
     delete_prompt(id);
     usage_report(days);
-    list_dirs(path);
+    list_dirs(path, host);
+    new_session_options(host);
 }
 
-/// Folders under `path` (default: home), for choosing a project folder without a native dialog.
-async fn list_dirs(_state: &AppState, path: Option<String>) -> CmdResult<Value> {
-    Ok(gateway::list_dirs_local(path.as_deref())?)
+/// Folders under `path` (default: home), for choosing a project folder without a native dialog;
+/// with `host`, on that computer.
+async fn list_dirs(state: &AppState, path: Option<String>, host: Option<String>) -> CmdResult<Value> {
+    match host.filter(|h| h != state.mesh.node_id()) {
+        Some(h) => Ok(gateway::on_host(state, &serde_json::json!({ "host": h, "path": path }), "fs.dirs").await?),
+        None => Ok(gateway::list_dirs_local(path.as_deref())?),
+    }
+}
+
+/// What starting a Code session here, or with `host` on that computer, offers: its installed
+/// agents, default agent, home folder and recent folders.
+async fn new_session_options(state: &AppState, host: Option<String>) -> CmdResult<Value> {
+    match host.filter(|h| h != state.mesh.node_id()) {
+        Some(h) => Ok(gateway::on_host(state, &serde_json::json!({ "host": h }), "code.new_options").await?),
+        None => Ok(gateway::new_session_options_local(state).await?),
+    }
 }
 
 /// The runtime background work runs on; the daemon sets it at startup.

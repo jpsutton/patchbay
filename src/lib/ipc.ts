@@ -576,6 +576,15 @@ export interface DirListing {
   truncated: boolean;
 }
 
+/** What a computer offers for a new Code session (gateway.rs, `new_session_options_local`). */
+export interface NewSessionOptions {
+  agents: AgentInfo[];
+  defaultAgent: AgentId;
+  home: string | null;
+  /** Folders of its recent sessions, newest first. */
+  recent: string[];
+}
+
 export const api = {
   listProviders: () => invoke<Provider[]>("list_providers"),
   saveProvider: (input: {
@@ -764,7 +773,10 @@ export const api = {
   /** Native app only: install what `updateCheck` found and restart. */
   updateInstall: () => invoke<void>("update_install"),
   /** Folders under `path` (default: home) on this computer, for choosing one without a native dialog. */
-  listDirs: (path: string | null) => invoke<DirListing>("list_dirs", { path }),
+  /** With `host`, the folders on that computer. */
+  listDirs: (path: string | null, host?: string | null) => invoke<DirListing>("list_dirs", { path, host: host ?? null }),
+  /** With `host`, what that computer offers. */
+  newSessionOptions: (host?: string | null) => invoke<NewSessionOptions>("new_session_options", { host: host ?? null }),
 };
 
 export function errorText(e: unknown): string {

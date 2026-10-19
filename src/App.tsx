@@ -5,7 +5,8 @@ import { codeEventArrived, remoteHost, useStore, type Mode } from "./lib/store";
 import { goBack, goForward, resetHistory, useHistory } from "./lib/history";
 import { initZoom, zoomIn, zoomOut, zoomReset } from "./lib/zoom";
 import { ChatView } from "./chat/ChatView";
-import { CodeView, newSessionIn, openFolderAsSession } from "./code/CodeView";
+import { CodeView, newSessionIn } from "./code/CodeView";
+import { NewSessionDialog } from "./code/NewSessionDialog";
 import { Settings } from "./settings/Settings";
 import { CodeSidebar } from "./code/CodeSidebar";
 import { ConfirmDialog } from "./components/ConfirmDialog";
@@ -27,7 +28,6 @@ import {
   ChatsIcon,
   CodeIcon,
   DownloadIcon,
-  FolderPlusIcon,
   KeyboardIcon,
   MenuIcon,
   PanelLeftIcon,
@@ -132,7 +132,7 @@ function newThing() {
   }
   const cur = st.codeSessions.find((s) => s.id === st.activeCodeSessionId);
   if (cur) newSessionIn(cur.cwd, cur.agent, remoteHost(cur, st.mesh));
-  else openFolderAsSession();
+  else st.setNewSessionOpen(true);
 }
 
 function useGlobalShortcuts() {
@@ -140,7 +140,7 @@ function useGlobalShortcuts() {
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.isComposing) return;
       const st = useStore.getState();
-      const modal = st.settingsOpen || !!st.confirm || st.shortcutsOpen || st.paletteOpen;
+      const modal = st.settingsOpen || !!st.confirm || st.shortcutsOpen || st.paletteOpen || st.newSessionOpen;
       // Back/forward: ⌘[ and ⌘] on macOS (Option+arrows move by word there), Alt+arrows elsewhere.
       const navBack = isMac ? isMod(e) && e.key === "[" : e.altKey && !e.ctrlKey && !e.metaKey && e.key === "ArrowLeft";
       const navFwd = isMac ? isMod(e) && e.key === "]" : e.altKey && !e.ctrlKey && !e.metaKey && e.key === "ArrowRight";
@@ -199,7 +199,7 @@ function useGlobalShortcuts() {
     const onMouse = (e: MouseEvent) => {
       if (e.button !== 3 && e.button !== 4) return;
       const st = useStore.getState();
-      if (st.settingsOpen || st.confirm || st.shortcutsOpen || st.paletteOpen) return;
+      if (st.settingsOpen || st.confirm || st.shortcutsOpen || st.paletteOpen || st.newSessionOpen) return;
       e.preventDefault();
       if (e.button === 3) goBack();
       else goForward();
@@ -483,13 +483,7 @@ function AppMenu() {
               focusComposer();
             })}
           />
-          <MenuItem
-            label="Open folder…"
-            onClick={run(() => {
-              st.setMode("code");
-              openFolderAsSession();
-            })}
-          />
+          <MenuItem label="New Code session…" onClick={run(() => st.setNewSessionOpen(true))} />
           <MenuItem label="Search…" keys="Mod+K" onClick={run(() => st.setPaletteOpen(true))} />
           <div className="my-1 border-t border-line" />
           <MenuItem label="Settings" keys="Mod+," onClick={run(() => st.setSettingsOpen(true))} />
@@ -723,13 +717,13 @@ export default function App() {
           <div className="px-2 pb-0.5 pt-2">
             <button
               className="flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[14px] font-medium text-fg hover:bg-panel-2/60"
-              onClick={() => (mode === "chat" ? newThing() : openFolderAsSession())}
-              title={mode === "chat" ? `New chat (${keyLabel("Mod+N")})` : undefined}
+              onClick={() => (mode === "chat" ? newThing() : useStore.getState().setNewSessionOpen(true))}
+              title={mode === "chat" ? `New chat (${keyLabel("Mod+N")})` : "Choose a computer, agent and folder"}
             >
               <span className="flex text-accent-ink">
-                {mode === "chat" ? <PlusIcon size={17} /> : <FolderPlusIcon size={17} />}
+                <PlusIcon size={17} />
               </span>
-              <span className="flex-1">{mode === "chat" ? "New chat" : "Open folder…"}</span>
+              <span className="flex-1">{mode === "chat" ? "New chat" : "New session"}</span>
               {mode === "chat" && <Kbd>{keyLabel("Mod+N")}</Kbd>}
             </button>
           </div>
@@ -774,6 +768,7 @@ export default function App() {
       {settingsOpen && <Settings />}
       <ConfirmDialog />
       <ShortcutsDialog />
+      <NewSessionDialog />
       <CommandPalette />
       <div className="fixed bottom-4 right-4 z-50 flex flex-col items-end gap-2">
         {toast && (
