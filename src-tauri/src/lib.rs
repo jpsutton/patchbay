@@ -1472,6 +1472,10 @@ async fn mesh_set_config(
     Ok(state.mesh.set_config(name.as_deref(), listen.as_deref(), advertise)?)
 }
 
+async fn mesh_set_passphrase(state: &AppState, passphrase: String) -> CmdResult<()> {
+    Ok(state.mesh.set_passphrase(&passphrase)?)
+}
+
 async fn mesh_add_address(state: &AppState, url: String) -> CmdResult<()> {
     Ok(state.mesh.add_address(&url)?)
 }
