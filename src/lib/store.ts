@@ -12,6 +12,7 @@ import {
   type AcpPlanEntry,
   type AcpToolCall,
   type AcpUpdate,
+  type AuthChoice,
   type CodeEvent,
   type CodeEnvelope,
   type EventPoint,
@@ -69,6 +70,8 @@ export interface CodeState {
   extensions: AgentExtensions;
   /** What the agent does without asking, whatever the session's approval mode. */
   approvalGaps: string[];
+  /** The agent waits for a sign-in: before it starts a session, or mid-session. */
+  auth: { message: string; methods: AuthChoice[] } | null;
   /** Tool call id -> why a saved rule or the approval mode approved it. */
   autoApproved: Record<string, string>;
   /** Cached transcript from a previous run, shown until (or unless) the agent replays it. */
@@ -112,6 +115,7 @@ const emptyCode = (): CodeState => ({
   configOptions: [],
   extensions: { statusLine: false, rewind: false },
   approvalGaps: [],
+  auth: null,
   autoApproved: {},
   history: null,
   earlier: null,
@@ -219,6 +223,14 @@ export interface ConfirmResult {
   text?: string;
 }
 
+export interface Alert {
+  title: string;
+  body: string;
+  actions: { label: string; primary?: boolean; run: () => void }[];
+  /** A mesh problem kind: the alert goes away once the mesh no longer reports it. */
+  meshKind?: string;
+}
+
 interface Store {
   mode: Mode;
   paletteOpen: boolean;
@@ -258,6 +270,9 @@ interface Store {
   code: Record<string, CodeState>;
   chatStreams: Record<string, ChatStream>;
   toast: string | null;
+  /** A problem toast: stays until dismissed or fixed. */
+  alert: Alert | null;
+  meshPopoverOpen: boolean;
   prefs: Preferences;
   loadPrefs: () => Promise<void>;
   /** Persist a change; resolves to an error message when the backend rejects it. */
@@ -272,6 +287,8 @@ interface Store {
   setShortcutsOpen: (o: boolean) => void;
   setSidebarQuery: (q: string) => void;
   setToast: (t: string | null) => void;
+  setAlert: (a: Alert | null) => void;
+  setMeshPopoverOpen: (o: boolean) => void;
   refreshCatalog: () => Promise<void>;
   setDefaultModel: (ref: string) => Promise<void>;
   refreshConversations: () => Promise<void>;
@@ -436,6 +453,8 @@ function loadSidebarCollapsed(): boolean {
 
 /** The catalog last loaded, to tell a real change from a reload. */
 let catalogKey: string | null = null;
+/** Counts session-list loads, so only the latest one's answer is kept. */
+let codeSessionsSeq = 0;
 
 export const useStore = create<Store>((set, get) => ({
   mode: "chat",
@@ -515,6 +534,8 @@ export const useStore = create<Store>((set, get) => ({
   code: {},
   chatStreams: {},
   toast: null,
+  alert: null,
+  meshPopoverOpen: false,
   confirm: null,
   prefs: defaultPreferences,
   loadPrefs: async () => {
@@ -572,6 +593,8 @@ export const useStore = create<Store>((set, get) => ({
   setShortcutsOpen: (shortcutsOpen) => set({ shortcutsOpen }),
   setSidebarQuery: (sidebarQuery) => set({ sidebarQuery }),
   setToast: (toast) => set({ toast }),
+  setAlert: (alert) => set({ alert }),
+  setMeshPopoverOpen: (meshPopoverOpen) => set({ meshPopoverOpen }),
 
   refreshCatalog: async () => {
     const [providers, models, def] = await Promise.all([
@@ -599,7 +622,11 @@ export const useStore = create<Store>((set, get) => ({
   selectConversation: (id) => set({ activeConversationId: id }),
 
   refreshCodeSessions: async () => {
-    set({ codeSessions: await api.listCodeSessions() });
+    // Calls can overlap (a sync event during a create): a slower, older answer must not win.
+    const seq = ++codeSessionsSeq;
+    const list = await api.listCodeSessions();
+    if (seq !== codeSessionsSeq) return;
+    set({ codeSessions: list });
     backfillActivity();
   },
   selectCodeSession: (id) => set({ activeCodeSessionId: id }),
@@ -638,6 +665,7 @@ export const useStore = create<Store>((set, get) => ({
           status: e.state,
           busy: e.state === "exited" ? false : s.busy,
           permissions: e.state === "exited" ? [] : s.permissions,
+          auth: e.state === "exited" ? null : s.auth,
           // Commands an agent backgrounded end with it.
           toolCalls: e.state === "exited" ? endBackground(s.toolCalls) : s.toolCalls,
         };
@@ -671,9 +699,17 @@ export const useStore = create<Store>((set, get) => ({
           configOptions: e.configOptions ?? [],
           extensions: e.extensions ?? { statusLine: false, rewind: false },
           approvalGaps: e.approvalGaps ?? [],
+          auth: null,
         };
         break;
       }
+      case "authRequired":
+        next = { ...s, auth: { message: e.message, methods: e.methods } };
+        notifyCode(id, "needs you to sign in");
+        break;
+      case "authResolved":
+        next = { ...s, auth: null };
+        break;
       case "config":
         // Options-based agents resend their full config; legacy model/mode lists stay as they are.
         next = {

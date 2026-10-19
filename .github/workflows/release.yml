@@ -5,6 +5,8 @@
 # signatures and SHA256SUMS. The phone app's APK is signed with its own key
 # (PATCHBAY_APK_KEYSTORE) and published to the F-Droid repository on GitHub Pages
 # (PATCHBAY_FDROID_KEYSTORE); without those secrets the release goes out without it.
+# latest.json, the in-app updater's feed, is signed with the updater key
+# (TAURI_SIGNING_PRIVATE_KEY, scripts/ci/updater-manifest.sh).
 #
 # Merge staging -> release pull requests with "Create a merge commit": the PR's
 # head is then the merge commit's second parent, which is what this looks up.
@@ -123,6 +125,20 @@ jobs:
           "$tools/apksigner" verify "$out"
           rm -f "$RUNNER_TEMP/apk.p12" "$out.idsig"
           echo "apk=$out" >> "$GITHUB_OUTPUT"
+
+      # latest.json, the in-app updater's feed, signed with the updater key (minisign, not GPG).
+      # Without the key the release goes out without it, and installed apps don't see it.
+      - name: Updater feed
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY is not set; releasing without the updater feed"
+            exit 0
+          fi
+          scripts/ci/updater-manifest.sh dist "${{ steps.build.outputs.version }}"
 
       - name: Sign (archlinux container)
         env:

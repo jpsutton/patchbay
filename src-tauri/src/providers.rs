@@ -4,6 +4,7 @@ use anyhow::{Context, Result, anyhow};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use xai_grok_sampler::{ApiBackend, AuthScheme, SamplerConfig};
+use xai_grok_sampling_types::ConversationItem;
 
 use crate::db::{AuthMode, Db, Model, Provider, ProviderKind};
 
@@ -131,6 +132,19 @@ pub async fn ensure_token(resolved: &mut Resolved) -> Result<()> {
     }
     resolved.key = Some(crate::claude_auth::access_token().await?);
     Ok(())
+}
+
+/// Subscription OAuth tokens only serve requests whose first system block is exactly this line.
+/// Anything else (no system prompt, or this text merged into a longer block) gets a bare
+/// `429 rate_limit_error: Error`.
+pub const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+/// Make `items` acceptable to the provider before submitting them.
+pub fn prepare_items(r: &Resolved, items: &mut Vec<ConversationItem>) {
+    if r.auth == Auth::ClaudeLogin {
+        // Each system item becomes its own block, so the user's prompt follows untouched.
+        items.insert(0, ConversationItem::system(CLAUDE_CODE_IDENTITY));
+    }
 }
 
 pub fn sampler_config(r: &Resolved) -> SamplerConfig {
@@ -288,5 +302,51 @@ mod tests {
             Some(200000)
         );
         assert_eq!(context_window_of(&m(serde_json::json!({"owned_by": "x"}))), None);
+    }
+
+    #[test]
+    fn claude_login_leads_with_claude_code_identity() {
+        use super::*;
+        let resolved = |auth| Resolved {
+            provider: Provider {
+                id: "p".into(),
+                name: "Anthropic".into(),
+                kind: ProviderKind::Anthropic,
+                base_url: "https://api.anthropic.com/v1".into(),
+                has_key: false,
+                auth_mode: AuthMode::ClaudeLogin,
+            },
+            model: Model {
+                id: "m".into(),
+                provider_id: "p".into(),
+                model_id: "claude-opus-4-8".into(),
+                display_name: "Claude Opus 4.8".into(),
+                vision: true,
+                context_window: None,
+                params: Default::default(),
+            },
+            key: None,
+            auth,
+        };
+        let history = || vec![ConversationItem::system("be terse"), ConversationItem::user("hi")];
+        let systems = |items: &[ConversationItem]| -> Vec<String> {
+            items
+                .iter()
+                .filter_map(|i| match i {
+                    ConversationItem::System(s) => Some(s.content.as_ref().to_owned()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut items = history();
+        prepare_items(&resolved(Auth::ClaudeLogin), &mut items);
+        assert_eq!(items.len(), 3);
+        assert_eq!(systems(&items), [CLAUDE_CODE_IDENTITY, "be terse"]);
+
+        let mut items = history();
+        prepare_items(&resolved(Auth::Key), &mut items);
+        assert_eq!(items.len(), 2);
+        assert_eq!(systems(&items), ["be terse"]);
     }
 }

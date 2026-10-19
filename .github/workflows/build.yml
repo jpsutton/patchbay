@@ -208,6 +208,23 @@ jobs:
         run: PROFILE=release scripts/build-sidecar.sh
       - name: Build and bundle
         run: pnpm tauri build --bundles dmg
+      # tauri.conf.json ad-hoc signs the bundle (signingIdentity "-"). Without a sealed
+      # bundle, a downloaded copy fails Gatekeeper as "damaged" instead of "unverified".
+      - name: Verify the bundle signature
+        run: codesign --verify --deep --strict --verbose=2 src-tauri/target/release/bundle/macos/Patchbay.app
+      # The in-app updater's download: the .app as a tarball, named after the .dmg. release.yml
+      # signs it for the updater. COPYFILE_DISABLE keeps macOS's ._ metadata files out, which
+      # would land inside the bundle and break its seal. Checked by unpacking and verifying.
+      - name: Pack the updater tarball
+        run: |
+          set -euo pipefail
+          bundle=src-tauri/target/release/bundle
+          dmg=$(basename "$(ls "$bundle"/dmg/*.dmg)")
+          out="$bundle/macos/${dmg%.dmg}.app.tar.gz"
+          COPYFILE_DISABLE=1 tar -czf "$out" -C "$bundle/macos" Patchbay.app
+          check=$(mktemp -d)
+          tar -xzf "$out" -C "$check"
+          codesign --verify --deep --strict "$check/Patchbay.app"
       # Best effort within a best-effort job: the desktop installers ship even if this fails.
       - name: Build and pack patchbayd
         continue-on-error: true
@@ -217,6 +234,7 @@ jobs:
           name: patchbay-macos
           path: |
             src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/macos/*.app.tar.gz
             src-tauri/target/release/bundle/daemon/*.tar.gz
           if-no-files-found: error
           retention-days: 14

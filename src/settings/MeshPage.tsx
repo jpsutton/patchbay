@@ -29,7 +29,7 @@ const STATE_DOT: Record<MeshMember["state"], string> = {
 
 function MemberRow({ m, onRemove }: { m: MeshMember; onRemove?: () => void }) {
   const phone = m.role === "remote";
-  const label = phone && m.state === "relay" ? "Relayed" : STATE_LABEL[m.state];
+  const label = m.authFailed ? "Passphrase doesn't match" : phone && m.state === "relay" ? "Relayed" : STATE_LABEL[m.state];
   const detail =
     m.state === "relay"
       ? `through ${m.viaName || "another computer"}`
@@ -38,7 +38,7 @@ function MemberRow({ m, onRemove }: { m: MeshMember; onRemove?: () => void }) {
         : null;
   return (
     <div className="flex items-center gap-3 border-b border-border py-2.5 last:border-b-0">
-      <span className={`h-2 w-2 shrink-0 rounded-full ${STATE_DOT[m.state]}`} aria-hidden="true" />
+      <span className={`h-2 w-2 shrink-0 rounded-full ${m.authFailed ? "bg-danger" : STATE_DOT[m.state]}`} aria-hidden="true" />
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm">{m.name}</div>
         <div className="text-[12px] text-muted">
@@ -196,6 +196,54 @@ function Joining() {
   );
 }
 
+/** What's wrong, and for a passphrase problem, a place to enter it again. */
+function ProblemBox() {
+  const mesh = useStore((s) => s.mesh)!;
+  const refreshMesh = useStore((s) => s.refreshMesh);
+  const [pass, setPass] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const p = mesh.problem;
+  if (!p) return null;
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.meshSetPassphrase(pass);
+      setPass("");
+      await refreshMesh();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="flex flex-col gap-3 rounded-xl border border-danger/40 bg-danger/5 p-4" role="alert">
+      <div>
+        <div className="text-sm font-medium text-danger">{p.title}</div>
+        <p className="mt-0.5 text-[12px] leading-5 text-muted">{p.message}</p>
+      </div>
+      {(p.kind === "auth" || p.kind === "passphrase") && (
+        <div className="flex gap-2">
+          <input
+            className={`${input} min-w-0 flex-1`}
+            type="password"
+            placeholder="The mesh's passphrase"
+            value={pass}
+            onChange={(e) => setPass(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && pass.length >= 8 && !busy && save()}
+          />
+          <button className={`${primary} shrink-0 whitespace-nowrap`} disabled={busy || pass.length < 8} onClick={save}>
+            Save passphrase
+          </button>
+        </div>
+      )}
+      {error && <div className="text-xs text-danger">{error}</div>}
+    </section>
+  );
+}
+
 function Member() {
   const mesh = useStore((s) => s.mesh)!;
   const refreshMesh = useStore((s) => s.refreshMesh);
@@ -217,6 +265,7 @@ function Member() {
 
   return (
     <div className="flex max-w-2xl flex-col gap-5 pb-4">
+      <ProblemBox />
       {mesh.pending.map((p) => (
         <section
           key={p.nodeId}

@@ -139,6 +139,7 @@ commands! {
     code_cancel(id);
     code_set_model(id, model_id);
     code_set_config_option(id, config_id, value);
+    code_authenticate(id, method_id, api_key);
     code_set_agent(id, agent, model_ref);
     code_set_mode(id, mode_id);
     code_set_permission_mode(id, mode);
@@ -158,8 +159,9 @@ commands! {
     mesh_leave();
     mesh_set_config(name, listen, advertise);
     mesh_add_address(url);
+    mesh_set_passphrase(passphrase);
     mesh_chat_streams();
-    term_open(id, cwd, cols, rows, on_event, session_id);
+    term_open(id, cwd, cols, rows, on_event, session_id, auth_method);
     term_write(id, data);
     term_resize(id, cols, rows);
     term_close(id);

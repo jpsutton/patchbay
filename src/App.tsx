@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { api, errorText, type CodeEnvelope, type Conversation, type MeshChatEvent } from "./lib/ipc";
+import { api, errorText, type CodeEnvelope, type Conversation, type MeshChatEvent, type MeshProblem } from "./lib/ipc";
 import { codeEventArrived, useStore, type Mode } from "./lib/store";
 import { goBack, goForward, resetHistory, useHistory } from "./lib/history";
 import { initZoom, zoomIn, zoomOut, zoomReset } from "./lib/zoom";
@@ -19,11 +19,14 @@ import { emitViewAction, focusComposer, focusSidebarSearch, isMac, isMod, keyLab
 import { ScrollFade } from "./lib/useStickyScroll";
 import { notifyInBackground } from "./lib/notify";
 import { useDragRegion, useRoundedWindow } from "./components/WindowControls";
+import { installUpdate, useUpdate, useUpdateChecks } from "./lib/update";
+import { AlertToast, MeshChip, MeshPopover, MeshRailButton } from "./components/MeshStatus";
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
   ChatsIcon,
   CodeIcon,
+  DownloadIcon,
   FolderPlusIcon,
   KeyboardIcon,
   MenuIcon,
@@ -532,9 +535,26 @@ function SidebarList() {
   );
 }
 
+/** A mesh problem, as a toast that stays, and as an OS notification while Patchbay is in the background. */
+function meshAlert(p: Partial<MeshProblem> & { message: string }) {
+  const s = useStore.getState();
+  const title = `Mesh: ${p.title ?? "something went wrong"}`;
+  s.setAlert({
+    title,
+    body: p.message,
+    meshKind: p.kind,
+    actions: [
+      { label: "Open Mesh settings", primary: true, run: () => useStore.getState().openSettingsAt("mesh") },
+      { label: "Details", run: () => useStore.getState().setMeshPopoverOpen(true) },
+    ],
+  });
+  notifyInBackground(title, p.message);
+}
+
 function CollapsedRail() {
   const { setSidebarCollapsed, setSettingsOpen, setShortcutsOpen } = useStore.getState();
   const mode = useStore((s) => s.mode);
+  const { available: update, installing } = useUpdate();
   const drag = useDragRegion();
   return (
     <aside {...drag} className="flex w-14 shrink-0 flex-col items-center gap-1 border-r border-line bg-panel py-2">
@@ -552,12 +572,21 @@ function CollapsedRail() {
         <SearchIcon />
       </IconButton>
       <div {...drag} className="flex-1 self-stretch" />
+      {update && (
+        <IconButton label={`Update to ${update.version}`} onClick={installUpdate} disabled={installing}>
+          <span className="flex text-accent-ink">
+            <DownloadIcon />
+          </span>
+        </IconButton>
+      )}
+      <MeshRailButton />
       <IconButton label={`Keyboard shortcuts (${keyLabel("Mod+/")})`} onClick={() => setShortcutsOpen(true)}>
         <KeyboardIcon />
       </IconButton>
       <IconButton label="Settings" onClick={() => setSettingsOpen(true)}>
         <SettingsIcon />
       </IconButton>
+      <MeshPopover className="fixed bottom-2 left-16" />
     </aside>
   );
 }
@@ -581,6 +610,8 @@ export default function App() {
 
   useGlobalShortcuts();
   useRoundedWindow();
+  useUpdateChecks();
+  const { available: update, installing } = useUpdate();
   useEffect(() => initZoom(isMod), []);
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const drag = useDragRegion();
@@ -620,7 +651,7 @@ export default function App() {
         s.setToast(`${ev.payload.name} asks to join the mesh. Approve it in Settings → Mesh.`);
         notifyInBackground("Mesh join request", `${ev.payload.name} asks to join (code ${ev.payload.code})`);
       }),
-      listen<{ message: string }>("mesh://error", (ev) => useStore.getState().setToast(ev.payload.message)),
+      listen<Partial<MeshProblem> & { message: string }>("mesh://error", (ev) => meshAlert(ev.payload)),
       // From the tray menu and the quick-entry window (see src-tauri/src/desktop.rs).
       listen("tray://new-chat", () => {
         const s = useStore.getState();
@@ -654,6 +685,15 @@ export default function App() {
     const t = setTimeout(() => setToast(null), 6000);
     return () => clearTimeout(t);
   }, [toast, setToast]);
+
+  // A fixed mesh problem takes its alert with it.
+  const meshProblem = st.mesh?.problem?.kind;
+  useEffect(() => {
+    const { alert, setAlert } = useStore.getState();
+    if (alert?.meshKind && alert.meshKind !== meshProblem && ["listen", "passphrase", "auth"].includes(alert.meshKind)) {
+      setAlert(null);
+    }
+  }, [meshProblem]);
 
   return (
     <div className="flex h-full">
@@ -695,7 +735,19 @@ export default function App() {
           </div>
           <SidebarSearch />
           <SidebarList key={mode} />
-          <div className="flex items-center gap-1 border-t border-line p-2">
+          {update && (
+            <div className="border-t border-line px-2 pt-2">
+              <button
+                className="flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[14px] text-accent-ink hover:bg-panel-2 disabled:opacity-60"
+                onClick={installUpdate}
+                disabled={installing}
+              >
+                <DownloadIcon size={17} />
+                {installing ? "Updating…" : `Update to ${update.version}`}
+              </button>
+            </div>
+          )}
+          <div className={`flex items-center gap-1 p-2 ${update ? "" : "border-t border-line"}`}>
             <button
               className="flex h-9 flex-1 items-center gap-2.5 rounded-lg px-2.5 text-left text-[14px] text-muted hover:bg-panel-2 hover:text-fg"
               onClick={() => setSettingsOpen(true)}
@@ -703,10 +755,12 @@ export default function App() {
               <SettingsIcon size={17} />
               Settings
             </button>
+            <MeshChip />
             <IconButton label={`Keyboard shortcuts (${keyLabel("Mod+/")})`} onClick={() => setShortcutsOpen(true)}>
               <KeyboardIcon />
             </IconButton>
           </div>
+          <MeshPopover className="absolute bottom-14 left-2" />
         </aside>
       )}
       <main className="relative min-w-0 flex-1">
@@ -721,14 +775,17 @@ export default function App() {
       <ConfirmDialog />
       <ShortcutsDialog />
       <CommandPalette />
-      {toast && (
-        <div
-          className="fixed bottom-4 right-4 z-50 max-w-md rounded-xl border border-border bg-raised px-4 py-3 text-xs shadow-float"
-          onClick={() => setToast(null)}
-        >
-          {toast}
-        </div>
-      )}
+      <div className="fixed bottom-4 right-4 z-50 flex flex-col items-end gap-2">
+        {toast && (
+          <div
+            className="max-w-md rounded-xl border border-border bg-raised px-4 py-3 text-xs shadow-float"
+            onClick={() => setToast(null)}
+          >
+            {toast}
+          </div>
+        )}
+        <AlertToast />
+      </div>
     </div>
   );
 }

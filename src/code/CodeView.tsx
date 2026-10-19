@@ -31,6 +31,7 @@ import { EditMessage } from "../components/EditMessage";
 import { UsageBar } from "../components/UsageBar";
 import { TerminalPane } from "../terminal/TerminalPane";
 import { PermissionCard, PlanDocCard, planDocOf, ToolCallCard, ToolGroup } from "./ToolCallCard";
+import { SignInCard } from "./SignInCard";
 import { DiffView, diffStats } from "./DiffView";
 import { CopyButton, copyText } from "../components/CopyButton";
 import { ExportMenu } from "../components/ExportMenu";
@@ -526,7 +527,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const [moving, setMoving] = useState<"move" | "takeOver" | null>(null);
   /** Forces a re-render when the post-foreground idle window expires. */
   const [, setIdleTick] = useState(0);
-  const sticky = useStickyScroll([state?.entries, state?.toolCalls, state?.permissions]);
+  const sticky = useStickyScroll([state?.entries, state?.toolCalls, state?.permissions, state?.auth]);
   const mesh = useStore((st) => st.mesh);
   const meshLoaded = !!mesh;
 
@@ -541,9 +542,10 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     if (cur && cur.status !== "idle") return;
     const sess = useStore.getState().codeSessions.find((x) => x.id === activeId);
     // Until the mesh state is known, a session might be running on another computer.
-    if (sess?.hostNode && !meshLoaded) return;
+    if (sess?.hostNode && !meshLoaded && !remote) return;
     // Running on another computer: watch it there, never restart it just because we looked.
-    if (remoteHost(sess, useStore.getState().mesh)) {
+    // A phone hosts no session, so it always watches, even one its list hasn't caught up on yet.
+    if (remote || remoteHost(sess, useStore.getState().mesh)) {
       attach(activeId);
       return;
     }
@@ -624,7 +626,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     ? "Reconnecting…"
     : remote && status === "idle"
       ? "Loading session…"
-      : status === "starting"
+      : status === "starting" && !s?.auth
         ? s?.history
           ? "Resuming session…"
           : "Starting agent…"
@@ -694,7 +696,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     return true;
   };
 
-  const needsYou = (s?.permissions.length ?? 0) > 0;
+  const needsYou = (s?.permissions.length ?? 0) > 0 || !!s?.auth;
   // The status light: amber = needs you, blue = working, green = ready, red = stopped.
   const dot = needsYou
     ? "bg-accent signal-pulse shadow-[0_0_0_3px_rgb(242_165_65/0.18)]"
@@ -1005,6 +1007,16 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     cwd={session.cwd}
                   />
                 ))}
+                {s?.auth && (
+                  <SignInCard
+                    key={session.id}
+                    sessionId={session.id}
+                    cwd={session.cwd}
+                    message={s.auth.message}
+                    methods={s.auth.methods}
+                    again={status === "ready"}
+                  />
+                )}
                 {working && s?.permissions.length === 0 && (
                   <div className="flex items-center gap-2 text-xs text-muted">
                     <span className="signal-pulse h-1.5 w-1.5 rounded-full bg-live" /> Working…
@@ -1051,7 +1063,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                   ? "Reconnecting…"
                   : ready
                     ? `Ask the agent…${s?.commands?.length ? "  / for commands, @ for files" : "  @ for files"}`
-                    : (waiting ?? "Agent not running")
+                    : (waiting ?? (s?.auth ? "Sign in to start the agent" : "Agent not running"))
               }
               warnNoVision={model ? !model.vision : false}
               footerLabel="Session settings"
@@ -1062,7 +1074,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                   session={session}
                   host={host}
                   started={[s?.earlier, s?.history, s].some((p) => (p?.entries ?? []).some((x) => x.kind === "user"))}
-                  disabled={working || status === "starting" || hostOffline || !!reconnecting}
+                  // Waiting for a sign-in, the user may pick another agent instead.
+                  disabled={working || (status === "starting" && !s?.auth) || hostOffline || !!reconnecting}
                 />
                 {acpModels && acpModels.availableModels.length > 0 ? (
                   <ChipSelect

@@ -1,6 +1,6 @@
 [package]
 name = "patchbay"
-version = "0.7.2"
+version = "0.8.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Provider-agnostic desktop LLM client"
@@ -30,8 +30,10 @@ desktop = [
     "dep:tauri-plugin-opener",
     "dep:tauri-plugin-notification",
     "dep:tauri-plugin-global-shortcut",
+    "dep:tauri-plugin-updater",
     "dep:gtk",
     "dep:gdkwayland-sys",
+    "dep:tray-icon",
 ]
 # Builds patchbayd. A marker so `tauri build` (which enables only `desktop`, see
 # tauri.conf.json) leaves the daemon out of the app's bundles.
@@ -57,6 +59,7 @@ tauri-plugin-dialog = { version = "2", default-features = false, features = ["xd
 tauri-plugin-opener = { version = "2", optional = true }
 tauri-plugin-notification = { version = "2", optional = true }
 tauri-plugin-global-shortcut = { version = "2", optional = true }
+tauri-plugin-updater = { version = "2", optional = true }
 
 patchbay-mesh = { path = "../crates/patchbay-mesh" }
 anyhow = "1"
@@ -99,6 +102,10 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", optional = true }
 gdkwayland-sys = { version = "0.18", features = ["v3_24"], optional = true }
+# Tauri builds its tray on the AppIndicator backend, which never reports clicks on the icon.
+# Enabling `ksni` on the same tray-icon Tauri links switches it to the StatusNotifierItem
+# backend, which does, so a left click can show and hide the window.
+tray-icon = { version = "0.25", default-features = false, features = ["ksni"], optional = true }
 
 [patch.crates-io]
 # Same fork/rev grok-build pins; xai-grok-sampling-types needs its types.

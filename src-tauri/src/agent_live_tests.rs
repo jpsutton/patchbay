@@ -1,6 +1,6 @@
 //! Live checks against the third-party coding agents installed on this machine (Claude Code,
-//! OpenCode, Cursor CLI, Kilo Code). They use the agents' own sign-ins, so they are ignored by
-//! default and skip agents that aren't installed.
+//! OpenCode, Cursor CLI, Kilo Code, Codex, Gemini CLI, Antigravity). They use the agents' own
+//! sign-ins, so they are ignored by default and skip agents that aren't installed.
 //!
 //! Handshake only (start, models, switch model, resume):
 //!   `cargo test --lib agents_live -- --ignored --nocapture`
@@ -132,6 +132,21 @@ fn live(kind: AgentKind) {
     run.start();
     let (models, loaded) = run.ready();
     assert!(!loaded, "first start creates a session");
+    // The agent's own approval presets are hidden, so the mode it runs in must be a shown one.
+    let (modes, config_options) = run.wait_for("sessionReady", 5, |e| match e {
+        CodeEvent::SessionReady { modes, config_options, .. } => Some((modes.clone(), config_options.clone())),
+        _ => None,
+    });
+    let ids = |v: &serde_json::Value, list: &str, key: &str| -> Vec<String> {
+        v[list].as_array().into_iter().flatten().filter_map(|m| m[key].as_str().map(str::to_owned)).collect()
+    };
+    let shown = ids(&modes, "availableModes", "id");
+    let mode = modes["currentModeId"].as_str().unwrap_or_default();
+    let options: Vec<String> = config_options.as_array().into_iter().flatten().filter_map(|o| o["id"].as_str().map(str::to_owned)).collect();
+    eprintln!("{}: mode {mode} of {shown:?}, options {options:?}", kind.id());
+    if !shown.is_empty() {
+        assert!(shown.iter().any(|m| m == mode), "{}: runs in hidden mode {mode}", kind.id());
+    }
     let available: Vec<String> = models["availableModels"]
         .as_array()
         .unwrap_or_else(|| panic!("{}: no model list: {models}", kind.id()))
@@ -228,4 +243,22 @@ fn agents_live_cursor() {
 #[ignore]
 fn agents_live_kilo() {
     live(AgentKind::Kilo);
+}
+
+#[test]
+#[ignore]
+fn agents_live_codex() {
+    live(AgentKind::Codex);
+}
+
+#[test]
+#[ignore]
+fn agents_live_gemini() {
+    live(AgentKind::Gemini);
+}
+
+#[test]
+#[ignore]
+fn agents_live_antigravity() {
+    live(AgentKind::Antigravity);
 }

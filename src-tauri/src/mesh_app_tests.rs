@@ -140,6 +140,9 @@ async fn remote_session_commands_and_terminal() {
     assert!(files.iter().any(|f| f == "app.txt"), "{files:?}");
     let attach = b.state.mesh.rpc(&an, "code.attach", json!({ "id": s.id })).await.unwrap();
     assert_eq!(attach["running"], false);
+    // A sign-in from B goes to A, which has no agent running for the session yet.
+    let err = code_authenticate(&b.state, s.id.clone(), "oauth".into(), Some("k".into())).await.unwrap_err();
+    assert!(err.0.contains("agent is not running"), "{}", err.0);
     // A refuses commands for sessions it doesn't host.
     let err = a.state.mesh.rpc(b.state.mesh.node_id(), "code.start", json!({ "id": s.id })).await.unwrap_err();
     assert!(err.to_string().contains("runs on"), "{err}");
@@ -523,4 +526,44 @@ async fn serve_phones(n: &Node) {
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
+}
+
+/// The window's `code_authenticate` command, and an `authRequired` event kept for windows that
+/// attach while the agent waits for a sign-in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sign_in_command_and_pending_auth() {
+    use code::acp::{AuthChoice, CodeEvent};
+    let a = node("alpha-auth");
+    let s = a.state.db.create_code_session(&a.dir.to_string_lossy(), None, "codex", "default").unwrap();
+    let chans: crate::api::ChanFactory = Arc::new(|_| None);
+    let call = |args: Value| crate::api::call(&a.state, "code_authenticate", args, &chans);
+    let err = call(json!({ "id": s.id })).await.unwrap_err();
+    assert!(err.0.contains("methodId"), "{}", err.0);
+    let err = call(json!({ "id": s.id, "methodId": "chat-gpt" })).await.unwrap_err();
+    assert!(err.0.contains("agent is not running"), "{}", err.0);
+
+    let auth = || a.state.live.lock().unwrap().get(&s.id).and_then(|l| l.auth.clone());
+    let methods = vec![AuthChoice { id: "chat-gpt".into(), name: "ChatGPT".into(), description: None, api_key: false, terminal: false }];
+    emit(&a, &s.id, CodeEvent::AuthRequired { message: "Codex needs you to sign in first.".into(), methods });
+    let ev = auth().expect("kept for late viewers");
+    assert_eq!(ev["type"], "authRequired");
+    assert_eq!(ev["methods"][0]["id"], "chat-gpt");
+    // A sign-in mid-session clears it without a new `sessionReady`.
+    emit(&a, &s.id, CodeEvent::AuthResolved);
+    assert!(auth().is_none());
+    emit(&a, &s.id, CodeEvent::AuthRequired { message: "again".into(), methods: Vec::new() });
+    assert!(auth().is_some());
+    assert!(a.events.lock().unwrap().iter().any(|(n, p)| n == code::acp::EVENT && p["event"]["type"] == "authRequired"));
+    emit(&a, &s.id, CodeEvent::SessionReady {
+        acp_session_id: "acp".into(),
+        models: Value::Null,
+        modes: Value::Null,
+        loaded: false,
+        capabilities: Value::Null,
+        agent_info: Value::Null,
+        config_options: json!([]),
+        extensions: Default::default(),
+        approval_gaps: &[],
+    });
+    assert!(auth().is_none(), "signed in: nothing left to replay");
 }

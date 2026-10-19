@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type { Activity } from "./activity";
+import type { UpdateInfo } from "./update";
 
 export type ProviderKind = "openai_chat" | "openai_responses" | "anthropic";
 export type AuthMode = "api_key" | "claude_login";
@@ -238,6 +239,15 @@ export interface MeshMember {
   approver: string;
   /** "remote" for a phone that only drives other members' work. */
   role?: string | null;
+  /** Its handshake with this computer failed on the passphrase. */
+  authFailed?: boolean;
+}
+
+/** Something wrong with this computer's mesh that the user has to fix. */
+export interface MeshProblem {
+  kind: "listen" | "passphrase" | "auth";
+  title: string;
+  message: string;
 }
 
 export interface MeshStatus {
@@ -259,6 +269,7 @@ export interface MeshStatus {
   } | null;
   members: MeshMember[];
   pending: { nodeId: string; name: string; code: string; role?: string | null }[];
+  problem?: MeshProblem | null;
 }
 
 /** A chat reply streaming on another node. */
@@ -292,7 +303,7 @@ export interface CodeAttach {
   point?: EventPoint | null;
 }
 
-export type AgentId = "grok" | "claude-code" | "opencode" | "cursor" | "kilo";
+export type AgentId = "grok" | "claude-code" | "opencode" | "cursor" | "kilo" | "codex" | "gemini" | "antigravity";
 
 /** One coding agent backend, as the Agents settings page lists it. */
 export interface AgentInfo {
@@ -317,6 +328,9 @@ export const AGENT_LABELS: Record<AgentId, string> = {
   opencode: "OpenCode",
   cursor: "Cursor CLI",
   kilo: "Kilo Code",
+  codex: "Codex",
+  gemini: "Gemini CLI",
+  antigravity: "Antigravity",
 };
 
 /** Non-standard ACP extensions the session's agent understands. */
@@ -351,6 +365,17 @@ export type ChatEvent =
   | { type: "error"; message: string }
   | { type: "title"; title: string };
 
+/** A sign-in method the agent advertised, as Patchbay can run it (`acp::AuthChoice`). */
+export interface AuthChoice {
+  id: string;
+  name: string;
+  description: string | null;
+  /** The method takes an API key the user types in. */
+  apiKey: boolean;
+  /** The user signs in in a terminal running the agent's login command. */
+  terminal: boolean;
+}
+
 export type CodeEvent =
   | { type: "status"; state: "starting" | "ready" | "exited"; message: string | null }
   | {
@@ -379,7 +404,11 @@ export type CodeEvent =
   /** `replay`: part of a catch-up, so shown even in the window that sent it. */
   | { type: "userPrompt"; text: string; origin: string; attachments: Attachment[]; replay?: boolean }
   /** The session was renamed automatically. */
-  | { type: "title"; title: string };
+  | { type: "title"; title: string }
+  /** The agent wants a sign-in with one of `methods`: before its session starts, or mid-session. */
+  | { type: "authRequired"; message: string; methods: AuthChoice[] }
+  /** A mid-session sign-in worked; the session goes on. */
+  | { type: "authResolved" };
 
 /** Where a live event sits in its topic's stream (see docs/design/mobile.md, section 3). */
 export interface EventPoint {
@@ -681,6 +710,9 @@ export const api = {
     invoke<void>("code_set_agent", { id, agent, modelRef }),
   codeSetConfigOption: (id: string, configId: string, value: string) =>
     invoke<void>("code_set_config_option", { id, configId, value }),
+  /** Sign the agent in; resolves once its session is up. A browser sign-in can take minutes. */
+  codeAuthenticate: (id: string, methodId: string, apiKey?: string) =>
+    invoke<void>("code_authenticate", { id, methodId, apiKey: apiKey ?? null }),
   codeRewind: (id: string, ordinal: number, preview: string, revertFiles: boolean) =>
     invoke<void>("code_rewind", { id, ordinal, preview, revertFiles }),
   codeUsage: (id: string) => invoke<UsageView>("code_usage", { id }),
@@ -702,20 +734,34 @@ export const api = {
   meshRemove: (nodeId: string) => invoke<void>("mesh_remove", { nodeId }),
   meshLeave: () => invoke<void>("mesh_leave"),
   meshSetConfig: (cfg: { name?: string; listen?: string; advertise?: string[] }) => invoke<void>("mesh_set_config", cfg),
+  meshSetPassphrase: (passphrase: string) => invoke<void>("mesh_set_passphrase", { passphrase }),
   meshAddAddress: (url: string) => invoke<void>("mesh_add_address", { url }),
   meshChatStreams: () => invoke<RemoteStream[]>("mesh_chat_streams"),
 
   /** With `sessionId`, the shell runs on the computer hosting that session. */
-  termOpen: (id: string, cwd: string, cols: number, rows: number, onEvent: (e: TermEvent) => void, sessionId?: string) => {
+  /** With `authMethod`, the terminal runs the session's agent's sign-in command for that method. */
+  termOpen: (
+    id: string,
+    cwd: string,
+    cols: number,
+    rows: number,
+    onEvent: (e: TermEvent) => void,
+    sessionId?: string,
+    authMethod?: string,
+  ) => {
     const ch = new Channel<TermEvent>();
     ch.onmessage = onEvent;
-    return invoke<void>("term_open", { id, cwd, cols, rows, onEvent: ch, sessionId });
+    return invoke<void>("term_open", { id, cwd, cols, rows, onEvent: ch, sessionId, authMethod: authMethod ?? null });
   },
   termWrite: (id: string, data: string) => invoke<void>("term_write", { id, data }),
   termResize: (id: string, cols: number, rows: number) => invoke<void>("term_resize", { id, cols, rows }),
   termClose: (id: string) => invoke<void>("term_close", { id }),
 
   writeTextFile: (path: string, contents: string) => invoke<void>("write_text_file", { path, contents }),
+  /** Native app only: a newer release it can install itself, or null. */
+  updateCheck: () => invoke<UpdateInfo | null>("update_check"),
+  /** Native app only: install what `updateCheck` found and restart. */
+  updateInstall: () => invoke<void>("update_install"),
   /** Folders under `path` (default: home) on this computer, for choosing one without a native dialog. */
   listDirs: (path: string | null) => invoke<DirListing>("list_dirs", { path }),
 };

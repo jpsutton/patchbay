@@ -9,18 +9,21 @@ A Code session runs one coding agent. Grok Build ships with Patchbay and stays t
 | Agent | id | Launch | Sign-in |
 |---|---|---|---|
 | Grok Build | `grok` | bundled sidecar: `grok agent --no-leader [-m pb-<model>] stdio` | Patchbay's providers (rendered `config.toml`) |
-| Claude Code | `claude-code` | `claude-agent-acp`, or `npx -y @agentclientprotocol/claude-agent-acp@<pinned>` | the user's Claude Code login |
+| Claude Code | `claude-code` | `claude-agent-acp`, or `npx -y @agentclientprotocol/claude-agent-acp@<pinned>` | the user's Claude Code login, or its terminal sign-in from the Code tab |
 | OpenCode | `opencode` | `opencode acp` | `opencode auth login` and its own config |
 | Cursor CLI | `cursor` | `cursor-agent acp` | `cursor-agent login` |
 | Kilo Code | `kilo` | `kilo acp` (npm `@kilocode/cli`) | `kilo auth login` and its own config |
+| Codex | `codex` | `codex-acp`, or `npx -y @agentclientprotocol/codex-acp@<pinned>` | `codex login`, or `OPENAI_API_KEY` / `CODEX_API_KEY` |
+| Gemini CLI | `gemini` | `gemini --acp`, or `npx -y @google/gemini-cli@<pinned> --acp` | `gemini` sign-in, or `GEMINI_API_KEY` |
+| Antigravity | `antigravity` | `agy_acp_server [--uid=]` (Google's archive from the ACP registry; path set in Settings) | `auth.type` in `~/.gemini/antigravity-acp/settings.json` |
 
-All five speak ACP over stdio, so one client (`code/acp.rs`) drives them all. Per-agent differences live in `code/agents.rs`. The UI branches on what the agent advertises, never on which agent it is. The one exception is model handling, below.
+All eight speak ACP over stdio, so one client (`code/acp.rs`) drives them all. Per-agent differences live in `code/agents.rs`. The UI branches on what the agent advertises, never on which agent it is. The one exception is model handling, below.
 
 ## Shape
 
 - `code/agents.rs`
   - `AgentKind`: the ids above, labels, install and sign-in hints.
-  - `resolve()`: finds the executable. It checks the Settings override first, then the bundled sidecar (Grok), then PATH, then the user bin directories that a desktop launch can leave out of PATH (`~/.local/bin`, `~/.npm-global/bin`, `~/.bun/bin`, `~/.opencode/bin` and others). Last comes `npx` for Claude Code.
+  - `resolve()`: finds the executable. It checks the Settings override first, then the bundled sidecar (Grok), then PATH, then the user bin directories that a desktop launch can leave out of PATH (`~/.local/bin`, `~/.npm-global/bin`, `~/.bun/bin`, `~/.opencode/bin` and others). Last comes `npx` for Claude Code, Codex and Gemini CLI (`AgentKind::npx_package`).
   - `prepare()`: builds a `Launch` with the program, arguments, environment, `Extensions`, session `_meta`, the model to reselect, and the sign-in hint. The Grok-only steps moved here from `CodeManager::start` and `acp::run`: `GROK_HOME`, `config.toml`, telemetry env and the `-m pb-…` model key.
   - `detect_all()`: backs Settings → Coding agents. It runs `--version` on each agent it finds, but never through npx, which would download the adapter.
 - `code/acp.rs`
@@ -29,7 +32,7 @@ All five speak ACP over stdio, so one client (`code/acp.rs`) drives them all. Pe
   - Refuses `Rewind` unless `Extensions.rewind` is set.
   - Normalizes session config (next section).
   - Folds standard ACP usage (`usage_update`, `PromptResponse.usage`) into the same `Usage` event as Grok's status line.
-  - Turns ACP `auth_required` (-32000) into a message that tells the user how to sign in.
+  - Handles ACP `auth_required` (-32000) with a sign-in flow (see "Sign-in" below).
 - DB: `code_sessions.agent` (default `grok`) and `code_sessions.agent_model`. ACP session ids only mean something to the agent that made them, so switching agents starts a new ACP session (next section).
 - Preferences: `defaultAgent` and `agentPaths` (id -> executable). Changing `agentPaths` restarts idle sessions, like the other agent settings.
 
@@ -58,10 +61,71 @@ Before the first message, a switch only changes `agent`. After it, the new agent
 
 Switching back to an agent the session had before also starts a fresh ACP session with the note. It does not resume that agent's old session.
 
+## Sign-in
+
+An agent that isn't signed in refuses `session/new` (or `session/load`) with `auth_required` (-32000). Instead of failing, `acp::run` then:
+
+1. Picks the auth methods from `initialize` that Patchbay can run (`auth_choices`):
+   - Methods the agent carries out itself: no `type`, or `type: "agent"`. A method whose `_meta` has an `api-key` entry is marked `apiKey`, and the UI asks for a key.
+   - Terminal methods: `type: "terminal"`, or the older convention of a `_meta["terminal-auth"]` entry. These are marked `terminal` (see "Terminal sign-in" below).
+   - Methods of type `env_var` are left out, and so are custom gateways (`_meta.gateway`), which need a URL.
+2. Sends `authRequired { message, methods }`. The message is the old hint text: Patchbay's `login_hint`, or the methods' descriptions.
+3. Waits for `AgentCmd::Authenticate { method_id, api_key }` (the `code_authenticate` command). It also answers `AgentCmd::TerminalAuth`. Other commands get "the agent isn't signed in yet". `Shutdown` or a restart ends the wait cleanly.
+4. Calls ACP `authenticate`. A browser method can block for minutes while the user signs in, and the loop keeps serving `Shutdown` meanwhile. An API key goes in `_meta["api-key"]`. Gemini CLI reads that key as a string, and codex-acp reads it as `{ "apiKey": … }`. So Patchbay sends the string first and the object if that is refused.
+5. On success it retries opening the session, and the command resolves once the session is up. If the agent accepts the sign-in but still refuses the session, the command fails with the agent's message, and a new `authRequired` follows. With no method Patchbay can run, the hint becomes the start error, as before.
+
+Nothing here depends on which agent runs; it follows only the advertised methods. The agent stores whatever credentials it gets. Patchbay never saves the key and never logs it.
+
+### Signed out mid-session
+
+An agent can also lose its sign-in after the session started: a logout, or an expired Codex or Gemini token. Then `session/prompt` fails with `auth_required`. The prompt task runs beside the command loop, so it reports through events:
+
+- With methods Patchbay can run, it sends `authRequired` with "… needs you to sign in again", then `promptDone` with stop reason `error`. No error entry goes in the transcript.
+- With none, it sends an error with the `login_hint` ("… needs you to sign in again. Run `claude` …") in place of the bare "Authentication required".
+
+The main loop then accepts `AgentCmd::Authenticate` and runs ACP `authenticate` beside the loop, because a browser sign-in can take minutes. The session already exists, so nothing is retried. On success the agent thread sends `authResolved` and a notice, "Signed in. Send your message again.", and the user resends. A refused sign-in fails the command and leaves the card up. Outside such a loss, `Authenticate` still gets "the agent is already signed in", and a second sign-in while one runs gets "a sign-in is already in progress".
+
+### Terminal sign-in
+
+ACP's unstable `AuthMethodTerminal` (agent-client-protocol-schema 0.11.4) is a method the client carries out: it runs the agent's binary with the method's extra `args` and `env` in an interactive terminal, so the user signs in through the agent's own TUI. Agents offer such methods only to clients that say they can run them. Patchbay sends both forms of that capability in `initialize`: `clientCapabilities.auth.terminal = true` (ACP) and `clientCapabilities._meta["terminal-auth"] = true` (the older convention). Claude's adapter (claude-agent-acp 0.93) then offers `claude-ai-login` and `console-login`, `type: "terminal"`, with `args` such as `["--cli", "auth", "login", "--claudeai"]`. Before this, Patchbay sent neither form, so Claude Code advertised no methods and Patchbay fell back to its "Run `claude` … /login" hint.
+
+How Patchbay runs a terminal method:
+
+- The card's button opens a terminal inside the card. `term_open` (and the `term.open` mesh RPC, for a session on another computer) takes an `authMethod`. The UI never sends a command line. The host asks the agent thread (`AgentCmd::TerminalAuth`), and `terminal_auth_command` builds the command from the advertised method and from how Patchbay launched the agent:
+  - When the method has `_meta["terminal-auth"].command`, that command and its `args` run.
+  - Otherwise, ACP's form runs: the agent's own launch program and arguments, then the method's `args`. For the npx launch, that is `npx -y @agentclientprotocol/claude-agent-acp@<pinned> --cli auth login --claudeai`.
+  - The agent's launch environment applies, plus the method's `env`. A method id that isn't an advertised terminal method is refused.
+- The command runs in a PTY in the session's folder, on the computer that runs the agent, through `TerminalManager::open_program`.
+- When it exits 0, the card restarts the agent (`startAgent`), as its Cancel button does. A fresh process reads the new login, and the restart resumes the session (`session/load`) when the sign-in was mid-session. Patchbay doesn't call ACP `authenticate` after a terminal sign-in, because the spec doesn't ask for it and Claude's adapter rejects it for these methods. A non-zero exit shows the exit code on the card, and Back returns to the method list.
+
+### UI
+
+`CodeState.auth` holds the event. It is cleared by `sessionReady`, by `authResolved` and by the agent exiting. `SignInCard` shows one button per method: a password field for API-key methods, and an embedded terminal for terminal methods. Its title is "Sign in to start the agent" before the session starts and "Sign in to continue" mid-session. While an `authenticate` sign-in runs, it says to finish in the browser, and offers Cancel, which restarts the agent. The status light shows "needs you", and the agent picker stays usable, so the user can pick another agent instead. `LiveAgent.auth` keeps the event for windows and phones that attach later, and `authResolved` clears it. For a session on another computer, `code.authenticate` goes over the mesh with the long RPC timeout, and the browser opens on the computer that runs the agent. The phone app doesn't render the card yet.
+
+What each agent advertises (signed out, 2026-10-19):
+
+| Agent | Methods |
+|---|---|
+| Codex | `api-key` (key), `chat-gpt` (browser; left out when `NO_BROWSER` is set). `chat-gpt-device-code` only for clients with URL elicitation, which Patchbay lacks. |
+| Gemini CLI | `oauth-personal` (browser), `gemini-api-key` (key), `vertex-ai` (environment), `gateway` (left out) |
+| Antigravity | `oauth-personal`, `oauth-business`, `gemini-api-key` (from `GEMINI_API_KEY`, no key field), `agent-platform` |
+
+Tests in `acp.rs` drive a fake Python ACP agent:
+
+- `sign_in_then_start_the_session`: a refused key, the second key shape, and the session start. The agent lists its terminal method only because Patchbay advertised the capability.
+- `sign_in_again_when_a_prompt_is_refused`: the prompt `expire` signs the agent out. Then come the `authRequired` card, a refused and an accepted sign-in in the main loop, `authResolved`, and a prompt that works again.
+- `refused_prompt_without_methods_shows_the_login_hint`: the same loss with no methods shows the hint as an error.
+- `terminal_sign_in_then_restart`: runs the command `TerminalAuth` returns, and checks that a restarted agent starts its session without asking.
+
+`fakeBackend.ts` fakes the flow for Codex and Gemini CLI: the key `bad` is refused, and browser methods take 2.5 s. Claude Code gets the two terminal methods, whose fake login prints a few lines and exits 0 after 3 s. The prompt `/logout` signs the session's agent out, to show the mid-session card.
+
 ## Custom instructions
 
 - Grok: `_meta.rules` on `session/new` / `session/load`.
 - Claude Code: `_meta.systemPrompt.append`. The adapter merges it into the `claude_code` preset prompt.
+- Antigravity: `_meta.antigravity.systemPrompt.append`, which the server advertises in `initialize` (`agentCapabilities._meta.antigravity.systemPrompt`).
+- Codex: `CODEX_CONFIG={"developer_instructions": …}`. The adapter merges `CODEX_CONFIG` into every thread's config. Not yet checked against a real turn.
+- Gemini CLI: no append. `GEMINI_SYSTEM_MD` replaces the whole system prompt, so it isn't used.
 - OpenCode, Cursor, Kilo: no way in today. Settings says so. ACP has a `systemPrompt` RFD (Claude's adapter advertises `sessionCapabilities.systemPrompt`), but `agent-client-protocol` 0.10.4 has no field for it yet.
 
 ## Verified (2026-10-17, this machine)
@@ -74,11 +138,25 @@ Observed quirks:
 - Cursor sends no usage. Claude sends `usage_update` with context size and cumulative cost.
 - Each agent writes its sessions to its own store (`~/.claude`, `~/.local/share/opencode`, `~/.cursor`, Kilo's data dir). Patchbay keeps only the ACP session id.
 
+## Codex, Gemini CLI and Antigravity (2026-10-19)
+
+Probed from Patchbay's own launch path (`cargo test --lib agents_live -- --ignored`) with codex-acp 2.2.2, Gemini CLI 0.64.0 and the Antigravity ACP server 1.4.1. The machine had no sign-in for any of them, so the runs used placeholder API keys under a throwaway `HOME`. Start, model list, model switch, restart and model restore pass for all three. No prompt has gone end to end yet.
+
+- **Codex** (`@agentclientprotocol/codex-acp`, the adapter the ACP registry lists; it bundles the Codex binary). It reports both legacy `modes` and config options: `mode`, `model`, `reasoning_effort`, `collaboration_mode` (Default / Plan) and `fast-mode`. Its modes are approval and sandbox presets. Patchbay starts it in `read-only` (`INITIAL_AGENT_MODE`, then `set_mode`) and hides `workspace-write`, `agent` ("Auto review", the adapter's default) and `agent-full-access`. `read-only` asks before every edit and network use, but its sandbox runs shell commands without asking; that is listed as a gap. The adapter reads an API key from the environment only when told to sign in with one, so Patchbay sets `DEFAULT_AUTH_REQUEST={"methodId":"api-key"}` when `OPENAI_API_KEY` or `CODEX_API_KEY` is set. `session/load` of a session that never got a prompt fails, and Patchbay falls back to a new session.
+- **Gemini CLI** (`gemini --acp`). Legacy `modes` and `models` only. Patchbay selects `default` and hides `autoEdit` and `yolo`; `plan` stays. Its built-in policy allows read-only tools (read, glob, grep, list, web search) without asking, which is listed as a gap. An empty session doesn't `session/load` either. Google moved unpaid and Google One users from Gemini CLI to Antigravity in June 2026; Gemini CLI still serves API-key, Vertex and paid users.
+- **Antigravity** (Google's `agy_acp_server`, a ~930 MB Python archive plus `localharness_external`, from `dl.google.com/agy-extensions/…` as listed in the ACP registry). Not on npm, so there is no npx fallback; the user unpacks it and sets the path in Settings, or puts it on PATH. It reports `model`, `mode` and `thought_level` config options plus legacy fields. Patchbay selects `default` and hides `auto_edit` and `yolo`. `session/load` works even for an empty session. It refuses `session/new` until `auth.type` is set in `$GEMINI_HOME/antigravity-acp/settings.json` or a client calls `authenticate`. It keeps a per-workspace trust list (`trusted_workspaces.json`); how an untrusted workspace prompts over ACP is unverified.
+- `.codex/` and `.gemini/` joined the protected paths in `permissions.rs`.
+
 ## Open items
+
+- **Sign-in, not yet covered.** The phone app shows no sign-in card. `env_var` auth methods (ACP unstable), custom gateways, and URL elicitation (codex-acp's device-code sign-in) aren't supported. No real browser or terminal sign-in has been tried end to end, since nobody is signed in on this machine. A direct probe of claude-agent-acp 0.93 with Patchbay's capabilities does list `claude-ai-login` and `console-login`.
+- **Antigravity install.** A one-click install from the ACP registry (download, unpack under the data dir, record the path) would spare the manual step. The archive is large and proprietary, so it should stay opt-in.
+- **Patchbay providers for Codex.** `CODEX_CONFIG` takes `model_provider` and `model_providers` (OpenAI-compatible `base_url`, `env_key`), so Codex could run on Patchbay's OpenAI-kind providers the way OpenCode does. Untested.
+- **A real turn on each of the three**, with instructions, approvals and usage, once someone signs in.
 
 - **Patchbay providers for OpenCode, Kilo and Claude Code.** I tried injecting a Patchbay provider into OpenCode 2.0.29 through `OPENCODE_CONFIG_CONTENT`, with and without `enabled_providers`. `opencode acp` ignored it: the model list and default stayed those from `~/.config/opencode/opencode.jsonc`. The next things to try are a private config dir (`OPENCODE_CONFIG_DIR`, or `XDG_CONFIG_HOME` pointed at a Patchbay-owned directory) or OpenCode's `serve` API. A private dir would also hide the user's own OpenCode setup, so it should be opt-in. Claude Code could run on an Anthropic-kind provider through `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`. That is also opt-in and untested.
 - **OpenCode retries.** When its provider is unreachable, OpenCode retries for minutes and reports each attempt only in `session_info_update._meta["opencode/retry"]`. Patchbay shows "Working…" the whole time. A generic "agent is retrying" hint would need either that meta key or a timeout.
 - **Mesh.** `CodeSession` gained `agent` and `agent_model`. Mesh sync and session migration need to carry them. Migrating a session to a node without that agent installed should fail cleanly. The mesh branch adds DB migrations too, so whichever branch merges second renumbers its migration.
 - **Rewind for other agents.** Only Grok has it (`x.ai/rewind/*`). Claude's adapter and OpenCode advertise `sessionCapabilities.fork`, which could support "edit and resend" by forking at a message. Today the UI hides edit-and-resend unless `extensions.rewind` is set.
-- **Gemini CLI, Codex and other ACP agents** need only a new `AgentKind` arm.
+- **Other ACP agents** in the registry (Goose, Qwen Code, GitHub Copilot CLI and others) need only a new `AgentKind` arm.
 - **The npx pin** (`CLAUDE_ACP_PACKAGE`) needs a bump now and then. A global install of `claude-agent-acp` overrides it.

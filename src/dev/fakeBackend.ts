@@ -23,6 +23,7 @@ import type {
   AcpConfigOption,
   AgentId,
   AgentInfo,
+  AuthChoice,
 } from "../lib/ipc";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -37,7 +38,7 @@ const fakeAgent = (id: AgentId, label: string, program: string | null, extra: Pa
   error: program ? null : `${label} not found.`,
   installHint: `Install ${label}, then sign in from a terminal.`,
   usesPatchbayModels: id === "grok",
-  supportsInstructions: id === "grok" || id === "claude-code",
+  supportsInstructions: id === "grok" || id === "claude-code" || id === "codex" || id === "antigravity",
   takesProviders: id === "claude-code" || id === "opencode" || id === "kilo",
   ...extra,
 });
@@ -50,6 +51,9 @@ const FAKE_AGENTS: AgentInfo[] = [
   fakeAgent("opencode", "OpenCode", "/usr/bin/opencode"),
   fakeAgent("cursor", "Cursor CLI", "/usr/bin/cursor-agent"),
   fakeAgent("kilo", "Kilo Code", null),
+  fakeAgent("codex", "Codex", "/usr/bin/npx", { source: "npx", version: null }),
+  fakeAgent("gemini", "Gemini CLI", "/usr/bin/gemini"),
+  fakeAgent("antigravity", "Antigravity", null),
 ];
 /** Reasoning effort per fake session, for agents that report it as a config option. */
 const fakeConfig: Record<string, string> = {};
@@ -114,6 +118,66 @@ let clock = 0;
 const tick = () => (clock = Math.max(now(), clock + 1));
 
 const pending = new Map<string, (opt: string | null) => void>();
+
+/**
+ * Agents that want a sign-in first (as Codex, Gemini CLI and Antigravity do when signed out).
+ * Claude Code's methods are terminal ones: its login command runs in a terminal.
+ */
+const FAKE_AUTH: Partial<Record<AgentId, AuthChoice[]>> = {
+  "claude-code": [
+    { id: "claude-ai-login", name: "Claude Subscription", description: "Use Claude subscription", apiKey: false, terminal: true },
+    { id: "console-login", name: "Anthropic Console", description: "Use Anthropic Console (API usage billing)", apiKey: false, terminal: true },
+  ],
+  codex: [
+    { id: "chat-gpt", name: "ChatGPT", description: "Use ChatGPT to authenticate", apiKey: false, terminal: false },
+    { id: "api-key", name: "API Key", description: "Use an API key to authenticate", apiKey: true, terminal: false },
+  ],
+  gemini: [
+    { id: "oauth-personal", name: "Log in with Google", description: "Log in with your Google account", apiKey: false, terminal: false },
+    { id: "gemini-api-key", name: "Gemini API key", description: "Use an API key with Gemini Developer API", apiKey: true, terminal: false },
+    { id: "vertex-ai", name: "Vertex AI", description: "Use an API key with Vertex AI GenAI API", apiKey: false, terminal: false },
+  ],
+};
+/** Fake agents signed in during this page load. The prompt `/logout` signs one out again. */
+const fakeSignedIn = new Set<string>();
+/** Sessions whose fake agent has its session up. */
+const fakeLive = new Set<string>();
+const fakeLabel = (agent: string) => FAKE_AGENTS.find((x) => x.id === agent)?.label ?? agent;
+/** Agent starts per session, so a sign-in from before a restart is dropped as the real one is. */
+const fakeStarts: Record<string, number> = {};
+
+function fakeReady(csid: string) {
+  fakeLive.add(csid);
+  const grok = (db.code.find((c) => c.id === csid)?.agent ?? "grok") === "grok";
+  codeEmit(csid, {
+    type: "sessionReady", acpSessionId: "acp-" + csid, loaded: false,
+    approvalGaps: grok ? [] : ["This agent edits files in this project without asking, in every mode."],
+    capabilities: { loadSession: true, promptCapabilities: { image: false, embeddedContext: true }, mcpCapabilities: { http: true, sse: true } },
+    agentInfo: { name: "fake-agent" },
+    models: grok
+      ? { currentModelId: "pb-m1", availableModels: db.models.map((m) => ({ modelId: "pb-" + m.id, name: m.displayName })) }
+      : { currentModelId: "sonnet", availableModels: [{ modelId: "sonnet", name: "Sonnet" }, { modelId: "opus", name: "Opus" }] },
+    modes: grok
+      ? null
+      : { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] },
+    configOptions: grok ? [] : [fakeEffort(fakeConfig[csid] ?? "medium")],
+    extensions: { statusLine: grok, rewind: grok, patchbayModels: grok },
+  });
+  codeEmit(csid, {
+    type: "update",
+    update: {
+      sessionUpdate: "available_commands_update",
+      availableCommands: [
+        { name: "compact", description: "Summarize the conversation to free up context" },
+        { name: "context", description: "Show context window usage" },
+        { name: "model", description: "Switch model", input: { hint: "<model>" } },
+        { name: "review", description: "Review the current changes", input: { hint: "[focus]" } },
+      ],
+    },
+  });
+  codeEmit(csid, { type: "status", state: "ready", message: null });
+}
+
 const cancelled = new Set<string>();
 
 function send<T>(ch: unknown, msg: T) {
@@ -423,6 +487,23 @@ export function install() {
     mesh.pending = [{ nodeId: "n-new", name: "travel-pc", code: "482 913" }];
     setTimeout(fakeRemoteStream, 2500);
   }
+  // `?mesh=1&meshError=1`: studio rejects this computer's passphrase, so nothing else is reachable.
+  if (meshDemo && new URLSearchParams(location.search).has("meshError")) {
+    mesh.pending = [];
+    for (const m of mesh.members) {
+      if (m.state === "self") continue;
+      Object.assign(m, { state: "offline", via: null, viaName: null, rttMs: null, authFailed: m.nodeId === "n-studio" });
+    }
+    mesh.problem = {
+      kind: "auth",
+      title: "studio rejected this computer's passphrase",
+      message: "This computer can't sync with it until the passphrases match. Re-enter the passphrase in Settings → Mesh.",
+    };
+    setTimeout(() => {
+      emit("mesh://error", mesh.problem);
+      meshStatusChanged();
+    }, 800);
+  }
   const conv = (title: string, agoDays: number, pinned = false) =>
     db.conversations.push({ id: id(), title, modelRef: "m1", systemPrompt: null, pinned, createdAt: now() - agoDays * 86_400_000, updatedAt: now() - agoDays * 86_400_000 });
   conv("Trip planning", 0.01);
@@ -549,6 +630,13 @@ export function install() {
           console.info("fake backend: write", a.path, String(a.contents).length, "chars");
           (window as unknown as Record<string, unknown>).__lastExport = { path: a.path, contents: a.contents };
           return null;
+        // Set window.__fakeUpdate = { version, notes } before the first check to see the update button.
+        case "update_check":
+          return (window as unknown as Record<string, unknown>).__fakeUpdate ?? null;
+        case "update_install":
+          console.info("fake backend: install update");
+          await new Promise((r) => setTimeout(r, 1500));
+          return null;
         case "plugin:opener|open_url":
           console.info("fake backend: open url", a.url);
           (window as unknown as Record<string, unknown>).__lastOpenedUrl = a.url;
@@ -603,39 +691,38 @@ export function install() {
         case "code_start": {
           const csid = a.id as string;
           fakeRunning.add(csid);
+          fakeLive.delete(csid);
+          fakeStarts[csid] = (fakeStarts[csid] ?? 0) + 1;
           setTimeout(() => {
             codeEmit(csid, { type: "status", state: "starting", message: null });
             setTimeout(() => {
-              const grok = (db.code.find((c) => c.id === csid)?.agent ?? "grok") === "grok";
-              codeEmit(csid, {
-                type: "sessionReady", acpSessionId: "acp-" + csid, loaded: false,
-                approvalGaps: grok ? [] : ["This agent edits files in this project without asking, in every mode."],
-                capabilities: { loadSession: true, promptCapabilities: { image: false, embeddedContext: true }, mcpCapabilities: { http: true, sse: true } },
-                agentInfo: { name: "fake-agent" },
-                models: grok
-                  ? { currentModelId: "pb-m1", availableModels: db.models.map((m) => ({ modelId: "pb-" + m.id, name: m.displayName })) }
-                  : { currentModelId: "sonnet", availableModels: [{ modelId: "sonnet", name: "Sonnet" }, { modelId: "opus", name: "Opus" }] },
-                modes: grok
-                  ? null
-                  : { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] },
-                configOptions: grok ? [] : [fakeEffort(fakeConfig[csid] ?? "medium")],
-                extensions: { statusLine: grok, rewind: grok, patchbayModels: grok },
-              });
-              codeEmit(csid, {
-                type: "update",
-                update: {
-                  sessionUpdate: "available_commands_update",
-                  availableCommands: [
-                    { name: "compact", description: "Summarize the conversation to free up context" },
-                    { name: "context", description: "Show context window usage" },
-                    { name: "model", description: "Switch model", input: { hint: "<model>" } },
-                    { name: "review", description: "Review the current changes", input: { hint: "[focus]" } },
-                  ],
-                },
-              });
-              codeEmit(csid, { type: "status", state: "ready", message: null });
+              const agent = db.code.find((c) => c.id === csid)?.agent ?? "grok";
+              const methods = FAKE_AUTH[agent];
+              if (methods && !fakeSignedIn.has(agent)) {
+                codeEmit(csid, { type: "authRequired", message: `${fakeLabel(agent)} needs you to sign in first.`, methods });
+                return;
+              }
+              fakeReady(csid);
             }, 400);
           }, 10);
+          return null;
+        }
+        case "code_authenticate": {
+          const csid = a.id as string;
+          const agent = db.code.find((c) => c.id === csid)?.agent ?? "grok";
+          const m = FAKE_AUTH[agent]?.find((x) => x.id === a.methodId && !x.terminal);
+          if (!m) throw "agent is not running for this session";
+          // A browser sign-in takes a while; a key "bad" is refused.
+          const start = fakeStarts[csid];
+          await sleep(m.apiKey ? 400 : 2500);
+          if (fakeStarts[csid] !== start) throw "the agent stopped";
+          if (m.apiKey && a.apiKey === "bad") throw "Sign-in failed: Authentication required (API key not valid)";
+          fakeSignedIn.add(agent);
+          if (fakeLive.has(csid)) {
+            // Mid-session: the session goes on.
+            codeEmit(csid, { type: "authResolved" });
+            codeEmit(csid, { type: "notice", message: "Signed in. Send your message again." });
+          } else fakeReady(csid);
           return null;
         }
         case "code_stop": return null;
@@ -646,6 +733,16 @@ export function install() {
           if (line && !s.titleManual && s.title === "New session") {
             s.title = line.length > 60 ? `${line.slice(0, 60)}…` : line;
             codeEmit(s.id, { type: "title", title: s.title });
+          }
+          // Signed out mid-session (`/logout` fakes it): the prompt is refused for a sign-in.
+          const methods = FAKE_AUTH[s.agent];
+          if (methods && (a.text === "/logout" || !fakeSignedIn.has(s.agent))) {
+            fakeSignedIn.delete(s.agent);
+            setTimeout(() => {
+              codeEmit(s.id, { type: "authRequired", message: `${fakeLabel(s.agent)} needs you to sign in again.`, methods });
+              codeEmit(s.id, { type: "promptDone", stopReason: "error" });
+            }, 300);
+            return null;
           }
           fakeAgentTurn(a.id as string, a.text as string, (a.mentions as string[]) ?? []);
           return null;
@@ -757,6 +854,21 @@ export function install() {
         }
 
         case "term_open": {
+          if (a.authMethod) {
+            // A terminal sign-in: the agent's login command prints a little and exits 0.
+            const s = db.code.find((x) => x.id === a.sessionId);
+            const m = s && FAKE_AUTH[s.agent]?.find((x) => x.id === a.authMethod && x.terminal);
+            if (!s || !m) throw `the agent offers no terminal sign-in "${a.authMethod}"`;
+            const out = (t: string, ms: number) => setTimeout(() => send<TermEvent>(a.onEvent, { type: "data", data: btoa(t) }), ms);
+            out(`Opening browser to sign in (${m.name})...\r\n`, 100);
+            out("Waiting for the browser... ", 600);
+            out("\x1b[32mLogin successful.\x1b[0m\r\n", 2600);
+            setTimeout(() => {
+              fakeSignedIn.add(s.agent);
+              send<TermEvent>(a.onEvent, { type: "exit", code: 0 });
+            }, 3000);
+            return null;
+          }
           setTimeout(() => send<TermEvent>(a.onEvent, { type: "data", data: btoa(`demo@patchbay:${a.cwd}$ `) }), 50);
           (window as unknown as Record<string, unknown>).__term = a.onEvent;
           return null;
@@ -823,6 +935,13 @@ export function install() {
           return null;
         }
         case "mesh_add_address": return null;
+        case "mesh_set_passphrase": {
+          if (((a.passphrase as string) ?? "").length < 8) throw "use a passphrase of at least 8 characters";
+          mesh.problem = null;
+          meshMember();
+          meshStatusChanged();
+          return null;
+        }
         case "mesh_chat_streams": return [];
 
         case "remote_status": return structuredClone(phone);

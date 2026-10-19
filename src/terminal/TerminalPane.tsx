@@ -16,9 +16,29 @@ function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
-export function TerminalPane({ id, cwd, visible }: { id: string; cwd: string; visible: boolean }) {
+/**
+ * A terminal for session `id`, on the computer that runs it: the user's shell, or with
+ * `authMethod` the agent's sign-in command for that method, which `onExit` hears end.
+ */
+export function TerminalPane({
+  id,
+  cwd,
+  visible,
+  authMethod,
+  onExit,
+}: {
+  id: string;
+  cwd: string;
+  visible: boolean;
+  authMethod?: string;
+  onExit?: (code: number | null) => void;
+}) {
   const host = useRef<HTMLDivElement>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const onExitRef = useRef(onExit);
+  useEffect(() => {
+    onExitRef.current = onExit;
+  });
 
   useEffect(() => {
     const el = host.current;
@@ -44,7 +64,7 @@ export function TerminalPane({ id, cwd, visible }: { id: string; cwd: string; vi
     } catch {
       /* hidden */
     }
-    const termId = `term-${id}`;
+    const termId = authMethod ? `auth-${id}` : `term-${id}`;
     let closed = false;
     api
       .termOpen(
@@ -54,11 +74,18 @@ export function TerminalPane({ id, cwd, visible }: { id: string; cwd: string; vi
         term.rows || 24,
         (e) => {
           if (e.type === "data") term.write(b64ToBytes(e.data));
-          else term.write(`\r\n\x1b[2m[process exited${e.code != null ? ` with code ${e.code}` : ""}]\x1b[0m\r\n`);
+          else {
+            term.write(`\r\n\x1b[2m[process exited${e.code != null ? ` with code ${e.code}` : ""}]\x1b[0m\r\n`);
+            if (!closed) onExitRef.current?.(e.code);
+          }
         },
         id,
+        authMethod,
       )
-      .catch((err) => term.write(`\x1b[31m${String(err)}\x1b[0m\r\n`));
+      .catch((err) => {
+        term.write(`\x1b[31m${String(err)}\x1b[0m\r\n`);
+        if (authMethod && !closed) onExitRef.current?.(null);
+      });
     const onData = term.onData((d) => {
       if (!closed) api.termWrite(termId, d).catch(() => {});
     });
@@ -82,7 +109,7 @@ export function TerminalPane({ id, cwd, visible }: { id: string; cwd: string; vi
       term.dispose();
       fitRef.current = null;
     };
-  }, [id, cwd]);
+  }, [id, cwd, authMethod]);
 
   useEffect(() => {
     if (visible)

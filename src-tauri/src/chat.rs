@@ -233,7 +233,7 @@ pub async fn send(
         }
     }
 
-    let history = {
+    let mut history = {
         let db = db.clone();
         let data_dir = data_dir.clone();
         let cid = conversation_id.clone();
@@ -243,6 +243,7 @@ pub async fn send(
         tokio::task::spawn_blocking(move || build_history(&data_dir, &db, &cid, &leaf, sp.as_deref(), native_pdf))
             .await??
     };
+    providers::prepare_items(&resolved, &mut history);
 
     let token = CancellationToken::new();
     manager
@@ -392,8 +393,9 @@ pub(crate) fn clip(s: &str, max: usize) -> String {
 /// One non-streaming-style completion: collects the visible text of a single reply.
 pub(crate) async fn complete_text(
     resolved: &providers::Resolved,
-    items: Vec<ConversationItem>,
+    mut items: Vec<ConversationItem>,
 ) -> Result<String> {
+    providers::prepare_items(resolved, &mut items);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let handle = SamplerActor::spawn(providers::sampler_config(resolved), RetryPolicy::default(), tx);
     handle.submit(

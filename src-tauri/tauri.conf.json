@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Patchbay",
-  "version": "0.7.2",
+  "version": "0.8.0",
   "identifier": "dev.patchbay.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -38,6 +38,9 @@
       "../vendor/grok-build/THIRD-PARTY-NOTICES": "GROK_BUILD_THIRD_PARTY_NOTICES",
       "../vendor/grok-build/third_party/NOTICE": "GROK_BUILD_VENDORED_NOTICE"
     },
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -45,5 +48,14 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUxRjlFMkVCODM0NTFBQjQKUldTMEdrV0Q2K0w1VWFncjE0OFREUThQcnFGZ2FRZWZNaWZqTEpJWXhraERmWU53NHR5dTJ2SXAK",
+      "endpoints": ["https://github.com/jpsutton/patchbay/releases/latest/download/latest.json"],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

@@ -6,7 +6,7 @@ mod keystore;
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -55,6 +55,8 @@ struct Remote {
     /// Chat topics followed, oldest first.
     chats: Mutex<VecDeque<String>>,
     index: Mutex<Option<(Instant, Value)>>,
+    /// Bumped whenever the index goes stale, so a load already in flight doesn't cache it.
+    index_gen: AtomicU64,
     catalog: Mutex<Option<(Instant, Value)>>,
     /// This phone's own settings and preferences.
     local: Mutex<serde_json::Map<String, Value>>,
@@ -153,7 +155,7 @@ impl Remote {
                 self.emit("remote://live", payload);
             }
             rmt::EV_INDEX => {
-                *self.index.lock().unwrap() = None;
+                self.forget_index();
                 self.emit("mesh://changed", json!({ "tables": ["conversations", "messages", "code_sessions"] }));
             }
             client::EV_STATUS | client::EV_MEMBERS => {
@@ -170,9 +172,20 @@ impl Remote {
         {
             return Ok(v.clone());
         }
+        let generation = self.index_gen.load(Ordering::SeqCst);
         let v = self.client.rpc("remote.index", Value::Null).await?;
-        *self.index.lock().unwrap() = Some((Instant::now(), v.clone()));
+        let mut cache = self.index.lock().unwrap();
+        if self.index_gen.load(Ordering::SeqCst) == generation {
+            *cache = Some((Instant::now(), v.clone()));
+        }
         Ok(v)
+    }
+
+    /// Drop the cached index: the next load asks the gateway again.
+    fn forget_index(&self) {
+        let mut cache = self.index.lock().unwrap();
+        self.index_gen.fetch_add(1, Ordering::SeqCst);
+        *cache = None;
     }
 
     async fn catalog(&self) -> CmdResult<Value> {
@@ -245,7 +258,7 @@ fn remote_cancel_join(r: Shared<'_>) {
 #[tauri::command]
 fn remote_leave(r: Shared<'_>) {
     r.client.leave();
-    *r.index.lock().unwrap() = None;
+    r.forget_index();
     *r.catalog.lock().unwrap() = None;
 }
 
@@ -363,7 +376,7 @@ async fn list_conversations(r: Shared<'_>) -> CmdResult<Value> {
 
 #[tauri::command]
 async fn create_conversation(r: Shared<'_>, model_ref: Option<String>) -> CmdResult<Value> {
-    *r.index.lock().unwrap() = None;
+    r.forget_index();
     let conv = r.client.rpc("remote.create_conversation", json!({ "modelRef": model_ref })).await?;
     // The computer picked for the new chat runs this one.
     if let (Some(id), Some(node)) = (conv["id"].as_str(), r.chat_node("new")) {
@@ -404,7 +417,7 @@ async fn remote_create_code_session(
     model_ref: Option<String>,
     agent: Option<String>,
 ) -> CmdResult<Value> {
-    *r.index.lock().unwrap() = None;
+    r.forget_index();
     let p = json!({ "host": host, "cwd": cwd, "modelRef": model_ref, "agent": agent });
     Ok(r.client.rpc("remote.create_code_session", p).await?)
 }
@@ -419,7 +432,7 @@ async fn update_conversation(
     pinned: Option<bool>,
     archived: Option<bool>,
 ) -> CmdResult<()> {
-    *r.index.lock().unwrap() = None;
+    r.forget_index();
     let p = json!({
         "id": id, "title": title, "modelRef": model_ref, "systemPrompt": system_prompt, "pinned": pinned, "archived": archived,
     });
@@ -570,7 +583,7 @@ async fn update_code_session(
     archived: Option<bool>,
 ) -> CmdResult<()> {
     if title.is_some() || pinned.is_some() || archived.is_some() {
-        *r.index.lock().unwrap() = None;
+        r.forget_index();
         let p = json!({ "id": id, "title": title, "pinned": pinned, "archived": archived });
         r.client.rpc("remote.update_code_session", p).await?;
     }
@@ -579,7 +592,7 @@ async fn update_code_session(
 
 #[tauri::command]
 async fn code_auto_title(r: Shared<'_>, id: String) -> CmdResult<Value> {
-    *r.index.lock().unwrap() = None;
+    r.forget_index();
     r.code("code.auto_title", json!({ "id": id })).await
 }
 
@@ -638,7 +651,7 @@ async fn code_is_running(r: Shared<'_>, id: String) -> CmdResult<bool> {
 
 #[tauri::command]
 async fn code_set_agent(r: Shared<'_>, id: String, agent: String, model_ref: Option<String>) -> CmdResult<()> {
-    *r.index.lock().unwrap() = None;
+    r.forget_index();
     r.code("code.set_agent", json!({ "id": id, "agent": agent, "modelRef": model_ref })).await?;
     Ok(())
 }
@@ -788,6 +801,7 @@ pub fn run() {
                 channels: Mutex::default(),
                 chats: Mutex::default(),
                 index: Mutex::default(),
+                index_gen: AtomicU64::new(0),
                 catalog: Mutex::default(),
                 local: Mutex::new(local),
                 foreground: AtomicBool::new(true),

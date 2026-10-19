@@ -104,7 +104,25 @@ struct State {
     numbering: Numbering,
     /// What the session list shows per Code session, from the events seen here.
     live: HashMap<String, Live>,
+    /// Members (or, for seeds, URLs) whose handshake failed on the passphrase: since when.
+    auth_failed: HashMap<String, i64>,
+    /// Why the listener isn't up.
+    listen_error: Option<String>,
+    /// The problem last sent as `mesh://error`, so each one is announced once.
+    announced: Option<String>,
 }
+
+/// The two sides of a handshake hold different passphrases.
+#[derive(Debug)]
+struct PassphraseMismatch;
+
+impl std::fmt::Display for PassphraseMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("passphrase mismatch")
+    }
+}
+
+impl std::error::Error for PassphraseMismatch {}
 
 struct RemoteSess {
     id: u64,
@@ -269,6 +287,8 @@ impl Mesh {
         st.remotes.clear();
         st.pending.clear();
         st.circuits.clear();
+        st.auth_failed.clear();
+        st.listen_error = None;
         drop(st);
         *self.0.bound_port.lock().unwrap() = None;
         self.0.emit_status();
@@ -417,6 +437,29 @@ impl Mesh {
             self.start();
         }
         self.0.emit_status();
+        Ok(())
+    }
+
+    /// Store the mesh passphrase again, after this computer lost it or it doesn't match the others'.
+    pub fn set_passphrase(&self, passphrase: &str) -> Result<()> {
+        check_passphrase(passphrase)?;
+        if !self.is_member() {
+            bail!("this computer is not in a mesh");
+        }
+        if !self.0.keys.set(PASSPHRASE, passphrase) {
+            bail!("could not store the mesh passphrase");
+        }
+        {
+            // Retry everyone now instead of waiting out the backoff.
+            let mut st = self.0.st.lock().unwrap();
+            st.auth_failed.clear();
+            st.backoff.clear();
+            st.blocked.clear();
+        }
+        self.0.check_problem();
+        if !self.running() {
+            self.start();
+        }
         Ok(())
     }
 
@@ -723,6 +766,7 @@ impl Inner {
                     "admittedAt": m.admitted_at,
                     "approver": m.approver,
                     "role": m.role,
+                    "authFailed": st.auth_failed.contains_key(&m.node_id),
                 })
             })
             .collect();
@@ -736,6 +780,7 @@ impl Inner {
         });
         drop(st);
         json!({
+            "problem": self.problem(),
             "nodeId": self.me,
             "name": self.name(),
             "member": mesh_id.is_some(),
@@ -758,11 +803,14 @@ impl Inner {
             Ok(l) => l,
             Err(e) => {
                 tracing::warn!("mesh: cannot listen on {addr}: {e}");
-                self.ui("mesh://error", json!({ "message": format!("Can't listen on {addr}: {e}") }));
+                self.st.lock().unwrap().listen_error = Some(format!("{e}"));
+                self.check_problem();
                 return;
             }
         };
         *self.bound_port.lock().unwrap() = listener.local_addr().ok().map(|a| a.port());
+        self.st.lock().unwrap().listen_error = None;
+        self.check_problem();
         self.emit_status();
         loop {
             let (tcp, peer) = tokio::select! {
@@ -798,6 +846,8 @@ impl Inner {
     async fn connector(self: Arc<Self>, token: CancellationToken) {
         loop {
             self.clone().dial_round(&token);
+            // Also notices a passphrase that went missing from the keyring.
+            self.check_problem();
             tokio::select! {
                 _ = token.cancelled() => return,
                 _ = tokio::time::sleep(Duration::from_secs(3)) => {}
@@ -858,7 +908,9 @@ impl Inner {
             let token = token.clone();
             tokio::spawn(async move {
                 let res = inner.clone().dial(&url, token).await;
-                let _ = node;
+                if res.as_ref().is_err_and(|e| e.is::<PassphraseMismatch>()) {
+                    inner.auth_failed(node.as_deref().unwrap_or(&url));
+                }
                 let mut st = inner.st.lock().unwrap();
                 st.dialing.remove(&url);
                 match res {
@@ -898,6 +950,9 @@ impl Inner {
                 let link = inner.clone().circuit_link(circuit, target.clone());
                 let r = inner.clone().run_conn(link, true, None, None, Some(hop), token).await;
                 inner.st.lock().unwrap().relaying_to.remove(&target);
+                if r.as_ref().is_err_and(|e| e.is::<PassphraseMismatch>()) {
+                    inner.auth_failed(&target);
+                }
                 if let Err(e) = r {
                     tracing::debug!("mesh: relay to {target}: {e:#}");
                 }
@@ -971,6 +1026,88 @@ impl Inner {
         st.blocked.insert(key.to_owned(), (n, Instant::now() + wait));
     }
 
+    /// A handshake with this member (or seed URL) failed on the passphrase.
+    fn auth_failed(&self, key: &str) {
+        if self.mesh_id().is_none() {
+            return;
+        }
+        self.st.lock().unwrap().auth_failed.entry(key.to_owned()).or_insert_with(now_ms);
+        self.check_problem();
+    }
+
+    /// The member whose known address is at `ip`.
+    fn member_at(&self, ip: IpAddr) -> Option<String> {
+        let hosts = [format!("//{ip}:"), format!("//[{ip}]:")];
+        let st = self.st.lock().unwrap();
+        st.addrs
+            .iter()
+            .find(|(_, urls)| urls.iter().any(|u| hosts.iter().any(|h| u.contains(h.as_str()))))
+            .map(|(node, _)| node.clone())
+    }
+
+    /// What's wrong with this computer's mesh, for the UI: `{kind, title, message}`.
+    fn problem(&self) -> Option<Value> {
+        let (listen_error, mut failed) = {
+            let st = self.st.lock().unwrap();
+            (st.listen_error.clone(), st.auth_failed.keys().cloned().collect::<Vec<_>>())
+        };
+        if let Some(e) = listen_error {
+            return Some(json!({
+                "kind": "listen",
+                "title": format!("Can't listen on {}", self.listen_addr()),
+                "message": format!("{e}. Other computers can't connect to this one. Change the address in Settings → Mesh."),
+            }));
+        }
+        self.mesh_id()?;
+        if self.keys.get(PASSPHRASE).is_none() {
+            return Some(json!({
+                "kind": "passphrase",
+                "title": "This computer has lost the mesh passphrase",
+                "message": "It can't connect to the other computers. Re-enter the passphrase in Settings → Mesh.",
+            }));
+        }
+        if failed.is_empty() {
+            return None;
+        }
+        failed.sort();
+        let names: Vec<String> = failed
+            .iter()
+            .map(|k| members::get(&self.db, k).ok().flatten().map(|m| m.name).unwrap_or_else(|| k.clone()))
+            .collect();
+        let who = match names.as_slice() {
+            [a] => a.clone(),
+            [a, b] => format!("{a} and {b}"),
+            [a, rest @ ..] => format!("{a} and {} others", rest.len()),
+            [] => unreachable!(),
+        };
+        let them = if names.len() == 1 { "it" } else { "them" };
+        Some(json!({
+            "kind": "auth",
+            "title": format!("{who} rejected this computer's passphrase"),
+            "message": format!(
+                "This computer can't sync with {them} until the passphrases match. Re-enter the passphrase in Settings → Mesh."
+            ),
+        }))
+    }
+
+    /// Announce a new problem once with `mesh://error`; any change also refreshes the status.
+    fn check_problem(&self) {
+        let p = self.problem();
+        let key = p.as_ref().map(|p| p.to_string());
+        {
+            let mut st = self.st.lock().unwrap();
+            if st.announced == key {
+                return;
+            }
+            st.announced = key;
+        }
+        if let Some(p) = p {
+            tracing::warn!("mesh: {}", p["title"].as_str().unwrap_or_default());
+            self.ui("mesh://error", p);
+        }
+        self.emit_status();
+    }
+
     // ---------------- connections ----------------
 
     /// Handshake, identify, then run a session until it ends.
@@ -1001,9 +1138,13 @@ impl Inner {
             Err(HandshakeError::WrongPassphrase) => {
                 if !initiator {
                     self.record_failure(&source);
+                    // A stranger guessing isn't news; a member that can't get in is.
+                    if let Some(node) = ip.and_then(|ip| self.member_at(ip)) {
+                        self.auth_failed(&node);
+                    }
                 }
                 self.set_join_error(url.as_deref(), "The passphrase doesn't match this mesh's");
-                bail!("passphrase mismatch");
+                return Err(PassphraseMismatch.into());
             }
             // A phone with a stale ticket; it retries with the passphrase.
             Err(HandshakeError::UnknownTicket) => bail!("unknown resume ticket"),
@@ -1323,14 +1464,19 @@ impl Inner {
             }
             if let Some(old) = st.sessions.insert(
                 node.clone(),
-                Sess { id, tx: tx.clone(), kill: kill.clone(), via: via.clone(), url, rtt: None, opener },
+                Sess { id, tx: tx.clone(), kill: kill.clone(), via: via.clone(), url: url.clone(), rtt: None, opener },
             ) {
                 old.kill.cancel();
             }
             for s in st.streams.values_mut().filter(|s| s.streamer == node) {
                 s.lost_at = None;
             }
+            st.auth_failed.remove(&node);
+            if let Some(u) = &url {
+                st.auth_failed.remove(u);
+            }
         }
+        self.check_problem();
         tracing::info!("mesh: connected to {name}{}", via.as_ref().map(|v| format!(" via {v}")).unwrap_or_default());
         self.emit_status();
         self.send_links();
@@ -1488,6 +1634,14 @@ impl Inner {
             for n in drop_nodes {
                 if n == self.me {
                     tracing::warn!("mesh: this node was removed from the mesh");
+                    self.ui(
+                        "mesh://error",
+                        json!({
+                            "kind": "removed",
+                            "title": "This computer was removed from the mesh",
+                            "message": "It no longer syncs with the other computers. Its chats and sessions stay here.",
+                        }),
+                    );
                     if let Some(t) = self.run.lock().unwrap().take() {
                         t.cancel();
                     }
@@ -1507,6 +1661,10 @@ impl Inner {
                     && let Err(e) = secrets::install(&self.db, self.keys.as_ref(), &dk, pk)
                 {
                     tracing::warn!("mesh: installing secret: {e:#}");
+                    self.ui(
+                        "mesh://error",
+                        json!({ "kind": "key", "title": "Couldn't install a synced API key", "message": format!("{e:#}") }),
+                    );
                 }
             }
         }
@@ -1592,6 +1750,10 @@ impl Inner {
                     && let Err(e) = self.adopt_data_key(dk)
                 {
                     tracing::warn!("mesh: data key: {e:#}");
+                    self.ui(
+                        "mesh://error",
+                        json!({ "kind": "key", "title": "Couldn't store the mesh data key", "message": format!("{e:#}") }),
+                    );
                 }
             }
             Msg::Relay { circuit, from: src, to, ttl, data, close } => self.relay(from, circuit, src, to, ttl, data, close),

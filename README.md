@@ -66,6 +66,24 @@ Download Patchbay from the [Releases page](https://github.com/jpsutton/patchbay/
 
 Windows and macOS builds aren't signed by Microsoft or Apple yet, so your system will warn you the first time you open them.
 
+The macOS app, the Windows installers and the AppImage update themselves. When a new release is out, an **Update** button appears above **Settings** in the sidebar. The `.deb`, `.rpm` and Arch packages update through your package manager instead.
+
+### macOS
+
+The easiest way to install or update is the install script. It downloads the latest `.dmg`, checks it against the release's `SHA256SUMS`, and copies Patchbay into `/Applications`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jpsutton/patchbay/release/scripts/install-macos.sh | bash
+```
+
+Files downloaded with `curl` aren't quarantined, so Patchbay opens without a Gatekeeper prompt. Run the same command again to update.
+
+If you download the `.dmg` in a browser instead, macOS says Apple could not verify that Patchbay is free of malware. After the first attempt to open it, go to **System Settings › Privacy & Security** and click **Open Anyway**. Or clear the quarantine from a terminal:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Patchbay.app
+```
+
 For a computer without a display, `patchbayd` runs Patchbay headless and serves the same UI to a browser. It comes in the same formats (`.deb`, `.rpm`, the Arch repository, plus archives for any Linux, Windows and macOS), with systemd units on Linux. See [docs/headless.md](docs/headless.md).
 
 ### Arch Linux
