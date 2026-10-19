@@ -32,7 +32,7 @@ All eight speak ACP over stdio, so one client (`code/acp.rs`) drives them all. P
   - Refuses `Rewind` unless `Extensions.rewind` is set.
   - Normalizes session config (next section).
   - Folds standard ACP usage (`usage_update`, `PromptResponse.usage`) into the same `Usage` event as Grok's status line.
-  - Turns ACP `auth_required` (-32000) into a message that tells the user how to sign in.
+  - Handles ACP `auth_required` (-32000) with a sign-in flow (see "Sign-in" below).
 - DB: `code_sessions.agent` (default `grok`) and `code_sessions.agent_model`. ACP session ids only mean something to the agent that made them, so switching agents starts a new ACP session (next section).
 - Preferences: `defaultAgent` and `agentPaths` (id -> executable). Changing `agentPaths` restarts idle sessions, like the other agent settings.
 
@@ -60,6 +60,30 @@ Before the first message, a switch only changes `agent`. After it, the new agent
 - The UI shows `earlier` dimmed, above the current agent's turns. Those turns can't be edited or rewound.
 
 Switching back to an agent the session had before also starts a fresh ACP session with the note. It does not resume that agent's old session.
+
+## Sign-in
+
+An agent that isn't signed in refuses `session/new` (or `session/load`) with `auth_required` (-32000). Instead of failing, `acp::run` then:
+
+1. Picks the auth methods from `initialize` that Patchbay can run (`auth_choices`). Those are methods the agent carries out itself: no `type`, or `type: "agent"`. Methods of type `env_var` or `terminal` are left out, and so are custom gateways (`_meta.gateway`), which need a URL. A method whose `_meta` has an `api-key` entry is marked `apiKey`, and the UI asks for a key.
+2. Sends `authRequired { message, methods }`. The message is the old hint text: Patchbay's `login_hint`, or the methods' descriptions.
+3. Waits for `AgentCmd::Authenticate { method_id, api_key }` (the `code_authenticate` command). Other commands get "the agent isn't signed in yet". `Shutdown` or a restart ends the wait cleanly.
+4. Calls ACP `authenticate`. A browser method can block for minutes while the user signs in, and the loop keeps serving `Shutdown` meanwhile. An API key goes in `_meta["api-key"]`. Gemini CLI reads that key as a string, and codex-acp reads it as `{ "apiKey": … }`. So Patchbay sends the string first and the object if that is refused.
+5. On success it retries opening the session, and the command resolves once the session is up. If the agent accepts the sign-in but still refuses the session, the command fails with the agent's message, and a new `authRequired` follows. With no method Patchbay can run, the hint becomes the start error, as before.
+
+Nothing here depends on which agent runs; it follows only the advertised methods. The agent stores whatever credentials it gets. Patchbay never saves the key and never logs it.
+
+In the UI, `CodeState.auth` holds the event. It is cleared by `sessionReady` and by the agent exiting. `SignInCard` shows one button per method, and a password field for API-key methods. While a sign-in runs it says to finish in the browser, and offers Cancel, which restarts the agent. The status light shows "needs you", and the agent picker stays usable, so the user can pick another agent instead. `LiveAgent.auth` keeps the event for windows and phones that attach later. For a session on another computer, `code.authenticate` goes over the mesh with the long RPC timeout, and the browser opens on the computer that runs the agent. The phone app doesn't render the card yet.
+
+What each agent advertises (signed out, 2026-10-19):
+
+| Agent | Methods |
+|---|---|
+| Codex | `api-key` (key), `chat-gpt` (browser; left out when `NO_BROWSER` is set). `chat-gpt-device-code` only for clients with URL elicitation, which Patchbay lacks. |
+| Gemini CLI | `oauth-personal` (browser), `gemini-api-key` (key), `vertex-ai` (environment), `gateway` (left out) |
+| Antigravity | `oauth-personal`, `oauth-business`, `gemini-api-key` (from `GEMINI_API_KEY`, no key field), `agent-platform` |
+
+`sign_in_then_start_the_session` in `acp.rs` drives a fake Python ACP agent through a refused key, the second key shape, and the session start. `fakeBackend.ts` fakes the flow for Codex and Gemini CLI: the key `bad` is refused, and browser methods take 2.5 s.
 
 ## Custom instructions
 
@@ -91,7 +115,7 @@ Probed from Patchbay's own launch path (`cargo test --lib agents_live -- --ignor
 
 ## Open items
 
-- **Sign-in for Codex, Gemini CLI and Antigravity.** Patchbay never calls ACP `authenticate`; it shows a hint instead. All three advertise browser OAuth as an auth method, and Antigravity has no terminal login of its own. A "Sign in" button that calls `authenticate` with a chosen method would cover them all.
+- **Sign-in, not yet covered.** The phone app shows no sign-in card. `env_var` and `terminal` auth methods (ACP unstable), custom gateways, and URL elicitation (codex-acp's device-code sign-in) aren't supported. No real browser sign-in has been tried end to end, since nobody is signed in on this machine.
 - **Antigravity install.** A one-click install from the ACP registry (download, unpack under the data dir, record the path) would spare the manual step. The archive is large and proprietary, so it should stay opt-in.
 - **Patchbay providers for Codex.** `CODEX_CONFIG` takes `model_provider` and `model_providers` (OpenAI-compatible `base_url`, `env_key`), so Codex could run on Patchbay's OpenAI-kind providers the way OpenCode does. Untested.
 - **A real turn on each of the three**, with instructions, approvals and usage, once someone signs in.

@@ -102,6 +102,8 @@ struct LiveAgent {
     ready: Option<serde_json::Value>,
     permissions: Vec<(String, serde_json::Value)>,
     usage: Option<serde_json::Value>,
+    /// The agent's `authRequired` event while it waits for a sign-in.
+    auth: Option<serde_json::Value>,
 }
 
 /// Errors cross the IPC boundary as plain strings.
@@ -618,7 +620,12 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
             let id = env.code_session_id.clone();
             let ev = serde_json::to_value(&env.event).unwrap_or_default();
             match &env.event {
-                CodeEvent::SessionReady { .. } => live.entry(id).or_default().ready = Some(ev),
+                CodeEvent::SessionReady { .. } => {
+                    let l = live.entry(id).or_default();
+                    l.ready = Some(ev);
+                    l.auth = None;
+                }
+                CodeEvent::AuthRequired { .. } => live.entry(id).or_default().auth = Some(ev),
                 CodeEvent::Usage { .. } => live.entry(id).or_default().usage = Some(ev),
                 CodeEvent::Permission { request_id, .. } => {
                     live.entry(id).or_default().permissions.push((request_id.clone(), ev))
@@ -754,6 +761,7 @@ fn code_attach_local(state: &AppState, id: &str) -> serde_json::Value {
     let mut events = Vec::new();
     if running && let Some(l) = live.get(id) {
         events.extend(l.ready.clone());
+        events.extend(l.auth.clone());
         events.extend(l.permissions.iter().map(|(_, e)| e.clone()));
         events.extend(l.usage.clone());
     }
@@ -917,6 +925,22 @@ async fn code_set_config_option(
         return Ok(());
     }
     Ok(state.code.set_config_option(&id, config_id, value).await?)
+}
+
+/// Sign the session's agent in with a method from its `authRequired` event. A browser sign-in
+/// opens on the computer that runs the agent.
+async fn code_authenticate(
+    state: &AppState,
+    id: String,
+    method_id: String,
+    api_key: Option<String>,
+) -> CmdResult<()> {
+    if let Some(host) = remote_host(state, &id)? {
+        let params = serde_json::json!({ "id": id, "methodId": method_id, "apiKey": api_key });
+        state.mesh.rpc_long(&host, "code.authenticate", params).await?;
+        return Ok(());
+    }
+    Ok(state.code.authenticate(&id, method_id, api_key).await?)
 }
 
 /// Switch a session that hasn't started yet to another agent. The agent here stops; whoever asked
@@ -1260,6 +1284,12 @@ impl mesh::RpcHandler for MeshRpc {
                 ensure_local_host(state, &id()?)?;
                 let (cid, value) = (param(&p, "configId")?.to_owned(), param(&p, "value")?.to_owned());
                 state.code.set_config_option(&id()?, cid, value).await.map(|_| Value::Null)
+            }
+            "code.authenticate" => {
+                ensure_local_host(state, &id()?)?;
+                let method = param(&p, "methodId")?.to_owned();
+                let key = p["apiKey"].as_str().map(str::to_owned);
+                state.code.authenticate(&id()?, method, key).await.map(|_| Value::Null)
             }
             "code.set_agent" => {
                 code_set_agent_local(state, &id()?, param(&p, "agent")?, p["modelRef"].as_str()).map(|_| Value::Null)

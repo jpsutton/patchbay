@@ -24,6 +24,7 @@ const CODE_METHODS: &[&str] = &[
     "code.cancel",
     "code.set_model",
     "code.set_config_option",
+    "code.authenticate",
     "code.set_mode",
     "code.set_permission_mode",
     "code.set_agent",
@@ -312,6 +313,10 @@ async fn forward_code(state: &AppState, from: &str, p: &Value) -> Result<Value> 
         Some(host) => {
             if method == "code.attach" && !state.mesh.connected(&host) {
                 return Ok(json!({ "running": false, "busy": false, "events": [], "offline": true }));
+            }
+            // A browser sign-in waits for the user.
+            if method == "code.authenticate" {
+                return state.mesh.rpc_long(&host, method, params).await;
             }
             state.mesh.rpc(&host, method, params).await
         }
