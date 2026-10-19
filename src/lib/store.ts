@@ -872,7 +872,27 @@ export function applyUiPrefs(p: Preferences) {
 /** True when this keydown should send, per the "send with" preference. */
 export function isSendKey(e: { key: string; shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }, sendKey: Preferences["sendKey"]) {
   if (e.key !== "Enter") return false;
+  // Phone soft keyboards: Enter inserts a line; send with the button (and Mod+Enter if a
+  // hardware keyboard is attached). Desktop still follows the preference.
+  if (isRemoteApp()) return e.ctrlKey || e.metaKey;
   return sendKey === "mod-enter" ? e.ctrlKey || e.metaKey : !e.shiftKey && !e.ctrlKey && !e.metaKey;
+}
+
+/**
+ * True when Enter should insert a newline but the browser won't (Mod+Enter). Shift+Enter is
+ * left to the textarea's default. Callers must preventDefault and insert `\n` themselves.
+ */
+export function needsExplicitNewline(
+  e: { key: string; shiftKey: boolean; ctrlKey: boolean; metaKey: boolean },
+  sendKey: Preferences["sendKey"],
+): boolean {
+  if (e.key !== "Enter" || !(e.ctrlKey || e.metaKey)) return false;
+  return !isSendKey(e, sendKey);
+}
+
+/** Insert `\n` at the textarea caret and return the new value + caret. */
+export function insertNewlineAtCaret(value: string, start: number, end: number): { value: string; caret: number } {
+  return { value: value.slice(0, start) + "\n" + value.slice(end), caret: start + 1 };
 }
 
 export function modelLabel(models: Model[], providers: Provider[], ref: string | null): string {
