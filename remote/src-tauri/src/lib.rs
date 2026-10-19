@@ -71,6 +71,28 @@ impl Remote {
         let _ = std::fs::write(self.dir.join("local.json"), s);
     }
 
+    /// The computer picked to run a chat's turns (`key`: its id, or "new" before it exists).
+    /// `None`: the gateway runs them.
+    fn chat_node(&self, key: &str) -> Option<String> {
+        self.local.lock().unwrap().get("chatNodes")?.get(key)?.as_str().map(str::to_owned)
+    }
+
+    fn set_chat_node(&self, key: &str, node: Option<String>) {
+        {
+            let mut local = self.local.lock().unwrap();
+            let nodes = local.entry("chatNodes").or_insert_with(|| json!({}));
+            match node {
+                Some(n) => nodes[key] = json!(n),
+                None => {
+                    if let Some(m) = nodes.as_object_mut() {
+                        m.remove(key);
+                    }
+                }
+            }
+        }
+        self.save_local();
+    }
+
     /// Notify only while the app is out of sight; on screen, the views show it.
     fn notify(&self, title: &str, body: &str) {
         if self.foreground.load(Ordering::Relaxed) {
@@ -342,7 +364,24 @@ async fn list_conversations(r: Shared<'_>) -> CmdResult<Value> {
 #[tauri::command]
 async fn create_conversation(r: Shared<'_>, model_ref: Option<String>) -> CmdResult<Value> {
     *r.index.lock().unwrap() = None;
-    Ok(r.client.rpc("remote.create_conversation", json!({ "modelRef": model_ref })).await?)
+    let conv = r.client.rpc("remote.create_conversation", json!({ "modelRef": model_ref })).await?;
+    // The computer picked for the new chat runs this one.
+    if let (Some(id), Some(node)) = (conv["id"].as_str(), r.chat_node("new")) {
+        r.set_chat_node(id, Some(node));
+        r.set_chat_node("new", None);
+    }
+    Ok(conv)
+}
+
+/// The computer picked to run a chat (`key`: its id, or "new"); `None` = the gateway.
+#[tauri::command]
+fn remote_chat_node(r: Shared<'_>, key: String) -> Option<String> {
+    r.chat_node(&key)
+}
+
+#[tauri::command]
+fn remote_set_chat_node(r: Shared<'_>, key: String, node: Option<String>) {
+    r.set_chat_node(&key, node);
 }
 
 /// Starting a Code session on a chosen computer: its agents, default agent and recent folders.
@@ -432,6 +471,7 @@ async fn send_chat_message(
         "text": text,
         "attachmentIds": attachment_ids,
         "reasoningEffort": reasoning_effort,
+        "node": r.chat_node(&conversation_id),
     });
     // Absent = after the visible branch; "" = a new first message; an id = under that one.
     if let Some(parent) = parent_id {
@@ -460,6 +500,7 @@ async fn regenerate_reply(
         "modelRef": model_ref,
         "userMessageId": user_message_id,
         "reasoningEffort": reasoning_effort,
+        "node": r.chat_node(&conversation_id),
     });
     if let Err(e) = r.client.rpc("remote.chat_regenerate", p).await {
         r.channels.lock().unwrap().remove(&conversation_id);
@@ -775,6 +816,8 @@ pub fn run() {
             set_preferences,
             list_conversations,
             create_conversation,
+            remote_chat_node,
+            remote_set_chat_node,
             remote_new_session_options,
             remote_list_dirs,
             remote_create_code_session,

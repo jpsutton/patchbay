@@ -1,5 +1,6 @@
 //! Requests from phones (remote members) that use this node as their gateway: the lists they
-//! show, chats run here on their behalf, and Code commands passed to each session's host. See
+//! show, chats run here (or on the computer the phone picked) on their behalf, and Code commands
+//! passed to each session's host. See
 //! docs/design/mobile.md, section 2.
 
 use std::io::Write;
@@ -64,19 +65,19 @@ pub(crate) async fn call(state: &AppState, from: &str, method: &str, p: &Value) 
             Value::Null
         }
         "remote.chat_send" | "remote.chat_regenerate" => {
-            let conv = s("conversationId")?;
-            let turn = if method == "remote.chat_send" {
-                let parent = p.get("parentId").filter(|v| !v.is_null()).map(|v| v.as_str().filter(|x| !x.is_empty()).map(str::to_owned));
-                chat::Turn::Message {
-                    text: s("text")?,
-                    attachment_ids: serde_json::from_value(p["attachmentIds"].clone()).unwrap_or_default(),
-                    parent,
+            // The phone may pick the computer that makes the call; by default it's this one.
+            match p["node"].as_str().filter(|n| !n.is_empty() && *n != state.mesh.node_id()) {
+                Some(node) => {
+                    if !state.mesh.connected(node) {
+                        bail!("{} is offline", state.mesh.member_name(node));
+                    }
+                    let mut params = p.clone();
+                    params["kind"] = json!(method.trim_start_matches("remote.chat_"));
+                    params["phone"] = json!(from);
+                    state.mesh.rpc(node, "chat.run", params).await?;
                 }
-            } else {
-                chat::Turn::Regenerate { user_message_id: s("userMessageId")? }
-            };
-            let effort = p["reasoningEffort"].as_str().map(str::to_owned);
-            spawn_chat(state, conv.clone(), s("modelRef")?, turn, effort, show_here(state, from, &conv));
+                None => run_chat_local(state, from, method == "remote.chat_send", p).await?,
+            }
             Value::Null
         }
         "remote.chat_cancel" => {
@@ -241,6 +242,38 @@ fn index(state: &AppState) -> Result<Value> {
         "live": live,
         "streams": state.mesh.all_streams(),
     }))
+}
+
+/// Longest a chat turn passed from a gateway waits for what it needs to sync here.
+const SYNC_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Run a phone's chat turn here (`send`: a new message, else a regenerate). A turn passed from
+/// its gateway may arrive before the new conversation or attachments do, so it waits for them.
+pub(crate) async fn run_chat_local(state: &AppState, phone: &str, send: bool, p: &Value) -> Result<()> {
+    let s = |k: &str| p[k].as_str().map(str::to_owned).ok_or_else(|| anyhow!("missing {k}"));
+    let conv = s("conversationId")?;
+    let attachment_ids: Vec<String> = serde_json::from_value(p["attachmentIds"].clone()).unwrap_or_default();
+    let user_message = if send { None } else { Some(s("userMessageId")?) };
+    let db = &state.db;
+    let ready = || -> Result<bool> {
+        Ok(db.get_conversation(&conv)?.is_some()
+            && attachment_ids.iter().all(|a| db.get_attachment(a).ok().flatten().is_some())
+            && user_message.as_ref().is_none_or(|m| db.path_to(&conv, m).is_ok_and(|path| !path.is_empty())))
+    };
+    let deadline = std::time::Instant::now() + SYNC_WAIT;
+    while !ready()? && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let turn = match user_message {
+        None => {
+            let parent = p.get("parentId").filter(|v| !v.is_null()).map(|v| v.as_str().filter(|x| !x.is_empty()).map(str::to_owned));
+            chat::Turn::Message { text: s("text")?, attachment_ids, parent }
+        }
+        Some(user_message_id) => chat::Turn::Regenerate { user_message_id },
+    };
+    let effort = p["reasoningEffort"].as_str().map(str::to_owned);
+    spawn_chat(state, conv.clone(), s("modelRef")?, turn, effort, show_here(state, phone, &conv));
+    Ok(())
 }
 
 /// A reply run here for a phone also shows in this node's own window, credited to the phone.
