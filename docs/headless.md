@@ -112,4 +112,4 @@ PROFILE=release scripts/build-sidecar.sh
 scripts/package-daemon.sh       # -> src-tauri/target/release/bundle/daemon/ (tar, deb, rpm on Linux)
 ```
 
-For development, `cargo build --bin patchbayd --no-default-features --features web` in `src-tauri` builds it without Tauri, so a server doesn't need WebKitGTK or GTK. Without `--features web` you get a daemon with no browser UI.
+For development, `cargo build --bin patchbayd --no-default-features --features web` in `src-tauri` builds it without Tauri, so a server doesn't need WebKitGTK or GTK. With `--features daemon` instead of `web` you get a daemon with no browser UI.

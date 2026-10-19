@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react";
 import { ContextMenu, type ItemAction } from "./ItemMenu";
 import type { Activity } from "../lib/activity";
 import {
+  ArchiveIcon,
   ChatIcon,
   FileDiffIcon,
   GitBranchIcon,
@@ -48,6 +49,7 @@ export function SidebarItem({
   onSelect,
   onRename,
   onDelete,
+  onArchive,
   onTogglePin,
   menu,
 }: {
@@ -70,6 +72,8 @@ export function SidebarItem({
   onSelect: () => void;
   onRename: (t: string) => void;
   onDelete: () => void;
+  /** When set, the row's hover button archives instead of deleting. */
+  onArchive?: () => void;
   onTogglePin?: () => void;
   /** Right-click actions; `rename` starts this row's inline editor. */
   menu?: (rename: () => void) => ItemAction[];
@@ -146,16 +150,30 @@ export function SidebarItem({
           <StarIcon size={14} fill={pinned ? "currentColor" : "none"} />
         </button>
       )}
-      <button
-        className="hidden h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted hover:bg-panel-2 hover:text-danger group-hover:flex"
-        onClick={(e) => {
-          e.stopPropagation();
-          onDelete();
-        }}
-        aria-label={`Delete ${title}`}
-      >
-        <XIcon size={14} />
-      </button>
+      {onArchive ? (
+        <button
+          className="hidden h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted hover:bg-panel-2 hover:text-fg group-hover:flex"
+          onClick={(e) => {
+            e.stopPropagation();
+            onArchive();
+          }}
+          title="Archive"
+          aria-label={`Archive ${title}`}
+        >
+          <ArchiveIcon size={14} />
+        </button>
+      ) : (
+        <button
+          className="hidden h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted hover:bg-panel-2 hover:text-danger group-hover:flex"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete();
+          }}
+          aria-label={`Delete ${title}`}
+        >
+          <XIcon size={14} />
+        </button>
+      )}
     </div>
   );
 }

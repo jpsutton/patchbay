@@ -542,9 +542,10 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     if (cur && cur.status !== "idle") return;
     const sess = useStore.getState().codeSessions.find((x) => x.id === activeId);
     // Until the mesh state is known, a session might be running on another computer.
-    if (sess?.hostNode && !meshLoaded) return;
+    if (sess?.hostNode && !meshLoaded && !remote) return;
     // Running on another computer: watch it there, never restart it just because we looked.
-    if (remoteHost(sess, useStore.getState().mesh)) {
+    // A phone hosts no session, so it always watches, even one its list hasn't caught up on yet.
+    if (remote || remoteHost(sess, useStore.getState().mesh)) {
       attach(activeId);
       return;
     }
@@ -571,6 +572,15 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
       }
     }
   });
+
+  // Re-render once foreground tools have been quiet long enough to stop showing Working….
+  useEffect(() => {
+    if (!state || state.busy || hasActiveForegroundTools(state.toolCalls) || state.lastForegroundAt == null) return;
+    const left = FOREGROUND_IDLE_MS - (Date.now() - state.lastForegroundAt);
+    if (left <= 0) return;
+    const id = window.setTimeout(() => setIdleTick((n) => n + 1), left + 1);
+    return () => clearTimeout(id);
+  }, [state?.busy, state?.lastForegroundAt, state?.toolCalls]);
 
   if (!session) {
     return (
@@ -609,13 +619,6 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   // they end).
   const background = Object.values(s?.toolCalls ?? {}).filter((tc) => tc.background);
 
-  useEffect(() => {
-    if (!s || s.busy || hasActiveForegroundTools(s.toolCalls) || s.lastForegroundAt == null) return;
-    const left = FOREGROUND_IDLE_MS - (Date.now() - s.lastForegroundAt);
-    if (left <= 0) return;
-    const id = window.setTimeout(() => setIdleTick((n) => n + 1), left + 1);
-    return () => clearTimeout(id);
-  }, [s?.busy, s?.lastForegroundAt, s?.toolCalls]);
   // What the session is waiting on, said plainly. A phone reaches it through a gateway, so it
   // can be reconnecting, or catching up on a session whose agent already runs.
   const reconnecting = remote && !!mesh?.phase && mesh.phase !== "online";

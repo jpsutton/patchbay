@@ -33,6 +33,10 @@ pub struct CodeManager {
     busy: Mutex<std::collections::HashSet<String>>,
     /// Sessions being handed to another node: no restarts until the handover settles.
     moving: Mutex<HashMap<String, std::time::Instant>>,
+    /// The newest agent started for each session. An agent stopped while still starting keeps
+    /// running until it reads its `Shutdown`; anything it sends after a newer one starts is dropped.
+    generations: Arc<Mutex<HashMap<String, u64>>>,
+    next_generation: std::sync::atomic::AtomicU64,
     pub titles: titles::Titles,
 }
 
@@ -105,6 +109,18 @@ impl CodeManager {
             .is_some_and(|a| !a.tx.is_closed())
     }
 
+    /// Mark a new agent as this session's newest. The returned check stays true until another starts.
+    fn new_generation(&self, code_session_id: &str) -> impl Fn() -> bool + Clone + Send + Sync + 'static {
+        let generation = self.next_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.generations
+            .lock()
+            .unwrap()
+            .insert(code_session_id.to_owned(), generation);
+        let generations = self.generations.clone();
+        let csid = code_session_id.to_owned();
+        move || generations.lock().unwrap().get(&csid) == Some(&generation)
+    }
+
     pub fn start(
         &self,
         sink: Sink,
@@ -124,10 +140,15 @@ impl CodeManager {
         usage.roll_over();
         db.set_code_usage(code_session_id, &usage)?;
         let usage = Arc::new(Mutex::new(usage));
+        let current = self.new_generation(code_session_id);
         let sink: Sink = {
             let db = db.clone();
             let csid = code_session_id.to_owned();
+            let current = current.clone();
             Arc::new(move |env: acp::Envelope| {
+                if !current() {
+                    return;
+                }
                 let view = {
                     let mut u = usage.lock().unwrap();
                     match &env.event {
@@ -160,7 +181,10 @@ impl CodeManager {
             on_session: {
                 let csid = csid.clone();
                 Box::new(move |sid| {
-                    let _ = db2.update_code_session(&csid, Some(&sid), None, None);
+                    // A replaced agent's session id would make the new agent try to load it.
+                    if current() {
+                        let _ = db2.update_code_session(&csid, Some(&sid), None, None);
+                    }
                 })
             },
             auto_approve: {
@@ -302,5 +326,23 @@ impl CodeManager {
         {
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CodeManager;
+
+    #[test]
+    fn replaced_agent_goes_quiet() {
+        let m = CodeManager::default();
+        let cursor = m.new_generation("s1");
+        let other_session = m.new_generation("s2");
+        assert!(cursor());
+        // Switching agents starts a new one while the old one may still be starting up.
+        let claude = m.new_generation("s1");
+        assert!(!cursor());
+        assert!(claude());
+        assert!(other_session());
     }
 }

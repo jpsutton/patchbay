@@ -1,6 +1,6 @@
 [package]
 name = "patchbay-mesh"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2024"
 license = "Apache-2.0"
 description = "Patchbay's mesh protocol: handshakes, wire messages, member records and the remote client"

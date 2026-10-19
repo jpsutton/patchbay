@@ -103,6 +103,10 @@ export function NewSessionSheet({
       const st = useStore.getState();
       const s = await call.create(host, folder, st.defaultModelRef, agent);
       await st.refreshCodeSessions();
+      // The gateway's list can lag the host that made it: show the new session either way.
+      if (!useStore.getState().codeSessions.some((x) => x.id === s.id)) {
+        useStore.setState((cur) => ({ codeSessions: [s, ...cur.codeSessions] }));
+      }
       onCreated(s.id);
     } catch (e) {
       setErr(errorText(e));

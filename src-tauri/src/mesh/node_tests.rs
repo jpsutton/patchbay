@@ -199,3 +199,32 @@ async fn members_find_each_other_through_gossip() {
     let cid = c.mesh.node_id().to_owned();
     until("alpha connects to charlie directly", 20, || member_state(&a, &cid) == "direct").await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn passphrase_mismatch_with_a_member_is_reported_and_fixed() {
+    let a = node("pa");
+    let b = node("pb");
+    a.mesh.create(PASS, "pa").unwrap();
+    admit(&a, &b).await;
+    let a_id = a.mesh.node_id().to_owned();
+    until("connected", 10, || member_state(&b, &a_id) == "direct").await;
+    assert!(b.mesh.status()["problem"].is_null());
+
+    // Another instance overwrote this computer's passphrase (the 0.7.1 bug).
+    b.mesh.stop();
+    b.keys.set("mesh:passphrase", "some other passphrase");
+    b.mesh.start();
+    until("auth problem", 20, || b.mesh.status()["problem"]["kind"] == "auth").await;
+    let st = b.mesh.status();
+    let a_row = st["members"].as_array().unwrap().iter().find(|m| m["nodeId"] == a_id.as_str()).unwrap();
+    assert_eq!(a_row["authFailed"], true);
+    assert_eq!(st["problem"]["title"], "pa rejected this computer's passphrase");
+    let errors = |n: &Node| n.events.lock().unwrap().iter().filter(|(e, _)| e == "mesh://error").count();
+    let announced = errors(&b);
+    assert_eq!(announced, 1, "announced once");
+
+    b.mesh.set_passphrase(PASS).unwrap();
+    until("reconnected", 40, || member_state(&b, &a_id) == "direct").await;
+    assert!(b.mesh.status()["problem"].is_null());
+    assert_eq!(errors(&b), announced, "fixing it announces nothing new");
+}

@@ -159,6 +159,7 @@ commands! {
     mesh_leave();
     mesh_set_config(name, listen, advertise);
     mesh_add_address(url);
+    mesh_set_passphrase(passphrase);
     mesh_chat_streams();
     term_open(id, cwd, cols, rows, on_event, session_id);
     term_write(id, data);

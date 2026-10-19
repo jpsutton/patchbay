@@ -1,6 +1,6 @@
 [package]
 name = "tauri-plugin-remote-platform"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2024"
 license = "Apache-2.0"
 description = "Patchbay Remote's platform services: sealing keys in the Android Keystore and keeping the connection open in the background"

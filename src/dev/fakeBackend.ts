@@ -476,6 +476,23 @@ export function install() {
     mesh.pending = [{ nodeId: "n-new", name: "travel-pc", code: "482 913" }];
     setTimeout(fakeRemoteStream, 2500);
   }
+  // `?mesh=1&meshError=1`: studio rejects this computer's passphrase, so nothing else is reachable.
+  if (meshDemo && new URLSearchParams(location.search).has("meshError")) {
+    mesh.pending = [];
+    for (const m of mesh.members) {
+      if (m.state === "self") continue;
+      Object.assign(m, { state: "offline", via: null, viaName: null, rttMs: null, authFailed: m.nodeId === "n-studio" });
+    }
+    mesh.problem = {
+      kind: "auth",
+      title: "studio rejected this computer's passphrase",
+      message: "This computer can't sync with it until the passphrases match. Re-enter the passphrase in Settings → Mesh.",
+    };
+    setTimeout(() => {
+      emit("mesh://error", mesh.problem);
+      meshStatusChanged();
+    }, 800);
+  }
   const conv = (title: string, agoDays: number, pinned = false) =>
     db.conversations.push({ id: id(), title, modelRef: "m1", systemPrompt: null, pinned, createdAt: now() - agoDays * 86_400_000, updatedAt: now() - agoDays * 86_400_000 });
   conv("Trip planning", 0.01);
@@ -871,6 +888,13 @@ export function install() {
           return null;
         }
         case "mesh_add_address": return null;
+        case "mesh_set_passphrase": {
+          if (((a.passphrase as string) ?? "").length < 8) throw "use a passphrase of at least 8 characters";
+          mesh.problem = null;
+          meshMember();
+          meshStatusChanged();
+          return null;
+        }
         case "mesh_chat_streams": return [];
 
         case "remote_status": return structuredClone(phone);
