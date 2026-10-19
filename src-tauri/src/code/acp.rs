@@ -109,6 +109,23 @@ pub enum CodeEvent {
     Title {
         title: String,
     },
+    /// The agent refused to start a session until the user signs in (ACP `auth_required`).
+    /// The agent waits for `AgentCmd::Authenticate` with one of `methods`.
+    AuthRequired {
+        message: String,
+        methods: Vec<AuthChoice>,
+    },
+}
+
+/// A sign-in method the agent advertised in `initialize`, as the UI offers it.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthChoice {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    /// The method takes an API key from the user (`_meta["api-key"]` on the method).
+    pub api_key: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -144,6 +161,13 @@ pub enum AgentCmd {
         ordinal: usize,
         preview: String,
         revert_files: bool,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// Sign in with one of the methods from `CodeEvent::AuthRequired`, then start the session.
+    /// Replies once the session is up, or with why not.
+    Authenticate {
+        method_id: String,
+        api_key: Option<String>,
         reply: oneshot::Sender<Result<()>>,
     },
     Shutdown,
@@ -611,32 +635,52 @@ async fn run(
     }
 
     let cwd_str = cwd.to_string_lossy().into_owned();
-    let auth_hint = |e: &acp::Error| auth_message(e, &init_v, login_hint);
-    let (session_id, resp, loaded) = match resume.filter(|_| can_load) {
-        Some(sid) => {
-            let req: acp::LoadSessionRequest = from_json(
-                json!({ "sessionId": sid, "cwd": cwd_str, "mcpServers": mcp_servers, "_meta": session_meta }),
-            )?;
-            match conn.load_session(req).await {
-                Ok(resp) => (sid, serde_json::to_value(&resp).unwrap_or_default(), true),
-                Err(e) => {
-                    if let Some(msg) = auth_hint(&e) {
-                        return Err(anyhow!(msg));
-                    }
-                    // Not an error: some agents (Cursor, Claude Code) can't load a session that
-                    // never got a prompt, and the transcript cache still shows earlier turns.
-                    emit(
-                        &sink,
-                        &csid,
-                        CodeEvent::Notice {
-                            message: format!("Couldn't resume the agent's previous session, so it started a new one ({e})."),
-                        },
-                    );
-                    new_session(&conn, &cwd_str, &mcp_servers, &session_meta, &init_v, login_hint).await?
+    let resume = resume.filter(|_| can_load);
+    // A sign-in waiting for the session it was for, so it can say whether it worked.
+    let mut signing_in: Option<oneshot::Sender<Result<()>>> = None;
+    let (session_id, resp, loaded) = loop {
+        let opened = open_session(
+            &conn,
+            &sink,
+            &csid,
+            resume.as_deref(),
+            &cwd_str,
+            &mcp_servers,
+            &session_meta,
+        )
+        .await;
+        let e = match opened {
+            Ok(opened) => {
+                if let Some(reply) = signing_in.take() {
+                    let _ = reply.send(Ok(()));
                 }
+                break opened;
+            }
+            Err(OpenError::Other(e)) => {
+                if let Some(reply) = signing_in.take() {
+                    let _ = reply.send(Err(anyhow!("{e:#}")));
+                }
+                return Err(e);
+            }
+            Err(OpenError::Auth(e)) => e,
+        };
+        let message = auth_message(&e, &init_v, login_hint);
+        let methods = auth_choices(&init_v);
+        if methods.is_empty() {
+            return Err(anyhow!(message));
+        }
+        if let Some(reply) = signing_in.take() {
+            // The agent accepted the sign-in but still refuses the session.
+            let _ = reply.send(Err(anyhow!(message.clone())));
+        }
+        emit(&sink, &csid, CodeEvent::AuthRequired { message, methods });
+        match wait_for_sign_in(&conn, &mut rx, &mut child, &stderr_tail).await? {
+            Some(reply) => signing_in = Some(reply),
+            None => {
+                close(io_task, conn, &mut child).await;
+                return Ok(());
             }
         }
-        None => new_session(&conn, &cwd_str, &mcp_servers, &session_meta, &init_v, login_hint).await?,
     };
     on_session(session_id.clone());
     let mut cfg = SessionConfig::from_response(&resp);
@@ -789,14 +833,26 @@ async fn run(
                         };
                         let _ = reply.send(r);
                     }
+                    AgentCmd::Authenticate { reply, .. } => {
+                        let _ = reply.send(Err(anyhow!("the agent is already signed in")));
+                    }
                     AgentCmd::Shutdown => break,
                 }
             }
         }
     }
     cancel_pending(&pending);
-    // Close stdin (by dropping the connection) so the agent can flush session state, then
-    // give it a moment before killing.
+    close(io_task, conn, &mut child).await;
+    Ok(())
+}
+
+/// Close stdin (by dropping the connection) so the agent can flush session state, then give it
+/// a moment before killing.
+async fn close(
+    io_task: tokio::task::JoinHandle<acp::Result<()>>,
+    conn: Rc<acp::ClientSideConnection>,
+    child: &mut tokio::process::Child,
+) {
     io_task.abort();
     drop(conn);
     if tokio::time::timeout(std::time::Duration::from_secs(3), child.wait())
@@ -806,7 +862,135 @@ async fn run(
         let _ = child.start_kill();
         let _ = child.wait().await;
     }
-    Ok(())
+}
+
+/// Wait, after `CodeEvent::AuthRequired`, for a sign-in the agent accepts. Returns its reply
+/// channel, to answer once the session is up, or `None` when Patchbay stops the agent instead.
+/// Other commands are refused until then.
+async fn wait_for_sign_in(
+    conn: &acp::ClientSideConnection,
+    rx: &mut mpsc::UnboundedReceiver<AgentCmd>,
+    child: &mut tokio::process::Child,
+    stderr_tail: &Rc<RefCell<Vec<String>>>,
+) -> Result<Option<oneshot::Sender<Result<()>>>> {
+    loop {
+        let (method_id, api_key, reply) = tokio::select! {
+            status = child.wait() => return Err(exited(status, stderr_tail)),
+            cmd = rx.recv() => match cmd {
+                None | Some(AgentCmd::Shutdown) => return Ok(None),
+                Some(AgentCmd::Authenticate { method_id, api_key, reply }) => (method_id, api_key, reply),
+                Some(other) => {
+                    refuse_until_signed_in(other);
+                    continue;
+                }
+            },
+        };
+        // A browser sign-in can take minutes: keep answering commands meanwhile.
+        let signed_in = authenticate(conn, &method_id, api_key.as_deref());
+        tokio::pin!(signed_in);
+        let result = loop {
+            tokio::select! {
+                r = &mut signed_in => break r,
+                status = child.wait() => {
+                    let e = exited(status, stderr_tail);
+                    let _ = reply.send(Err(anyhow!("{e:#}")));
+                    return Err(e);
+                }
+                cmd = rx.recv() => match cmd {
+                    None | Some(AgentCmd::Shutdown) => {
+                        let _ = reply.send(Err(anyhow!("the agent stopped")));
+                        return Ok(None);
+                    }
+                    Some(other) => refuse_until_signed_in(other),
+                },
+            }
+        };
+        match result {
+            Ok(()) => return Ok(Some(reply)),
+            Err(e) => {
+                let _ = reply.send(Err(e));
+            }
+        }
+    }
+}
+
+fn refuse_until_signed_in(cmd: AgentCmd) {
+    match cmd {
+        AgentCmd::SetModel { reply, .. }
+        | AgentCmd::SetMode { reply, .. }
+        | AgentCmd::SetConfigOption { reply, .. }
+        | AgentCmd::Rewind { reply, .. } => {
+            let _ = reply.send(Err(anyhow!("the agent isn't signed in yet")));
+        }
+        AgentCmd::Authenticate { reply, .. } => {
+            let _ = reply.send(Err(anyhow!("a sign-in is already in progress")));
+        }
+        AgentCmd::Prompt { .. } | AgentCmd::Cancel | AgentCmd::Shutdown => {}
+    }
+}
+
+/// The advertised auth methods Patchbay can run: ones the agent carries out itself (no `type`,
+/// or `agent`), optionally with an API key the user types. Methods that need the client to set
+/// environment variables or run a terminal, and custom gateways that need a URL, are left out.
+fn auth_choices(init: &Value) -> Vec<AuthChoice> {
+    init["authMethods"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| matches!(m["type"].as_str(), None | Some("agent")))
+        .filter(|m| m["_meta"]["gateway"].is_null())
+        .filter_map(|m| {
+            let id = m["id"].as_str()?.to_owned();
+            Some(AuthChoice {
+                name: m["name"].as_str().unwrap_or(&id).to_owned(),
+                description: m["description"].as_str().map(str::to_owned),
+                api_key: !m["_meta"]["api-key"].is_null(),
+                id,
+            })
+        })
+        .collect()
+}
+
+/// `_meta` values to try, in order, for ACP `authenticate`. A key goes in `_meta["api-key"]`,
+/// which agents read in two shapes: Gemini CLI a string, codex-acp `{ "apiKey": … }`. Neither
+/// rejects the other's shape outright; each falls back to its environment and fails there.
+fn auth_metas(api_key: Option<&str>) -> Vec<Option<Value>> {
+    match api_key.map(str::trim).filter(|k| !k.is_empty()) {
+        Some(k) => vec![Some(json!({ "api-key": k })), Some(json!({ "api-key": { "apiKey": k } }))],
+        None => vec![None],
+    }
+}
+
+async fn authenticate(conn: &acp::ClientSideConnection, method_id: &str, api_key: Option<&str>) -> Result<()> {
+    let mut last = None;
+    for meta in auth_metas(api_key) {
+        let mut req = json!({ "methodId": method_id });
+        if let Some(meta) = meta {
+            req["_meta"] = meta;
+        }
+        let req: acp::AuthenticateRequest = from_json(req)?;
+        match conn.authenticate(req).await {
+            Ok(_) => return Ok(()),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(match last {
+        Some(e) => anyhow!("Sign-in failed: {}", acp_error_text(&e)),
+        None => anyhow!("Sign-in failed"),
+    })
+}
+
+/// An ACP error's message, plus its `data.message` when the agent explains further.
+fn acp_error_text(e: &acp::Error) -> String {
+    let detail = e
+        .data
+        .as_ref()
+        .and_then(|d| d["message"].as_str().or(d.as_str()))
+        .filter(|d| !d.is_empty() && *d != e.message);
+    match detail {
+        Some(d) => format!("{} ({d})", e.message),
+        None => e.message.clone(),
+    }
 }
 
 fn exited(
@@ -818,12 +1002,13 @@ fn exited(
     anyhow!("agent process exited ({code})\n{tail}")
 }
 
+fn is_auth_required(e: &acp::Error) -> bool {
+    i32::from(e.code) == -32000
+}
+
 /// For ACP's `auth_required` error: how to sign in. Patchbay's own hint for the agent comes
 /// first, then whatever auth methods the agent advertises.
-fn auth_message(e: &acp::Error, init: &Value, login_hint: &str) -> Option<String> {
-    if i32::from(e.code) != -32000 {
-        return None;
-    }
+fn auth_message(e: &acp::Error, init: &Value, login_hint: &str) -> String {
     let how = if login_hint.is_empty() {
         init["authMethods"]
             .as_array()
@@ -839,11 +1024,11 @@ fn auth_message(e: &acp::Error, init: &Value, login_hint: &str) -> Option<String
         .as_str()
         .or(init["agentInfo"]["name"].as_str())
         .unwrap_or("The agent");
-    Some(if how.is_empty() {
+    if how.is_empty() {
         format!("{name} needs you to sign in first ({e}).")
     } else {
         format!("{name} needs you to sign in first. {how}")
-    })
+    }
 }
 
 /// Select a model through the config option when the agent has one, else `session/set_model`.
@@ -977,28 +1162,64 @@ fn pick_rewind_point(points: &[RewindPoint], ordinal: usize, text: &str) -> Opti
     points.get(ordinal).map(|p| p.prompt_index)
 }
 
-async fn new_session(
+enum OpenError {
+    /// ACP `auth_required`: the agent wants a sign-in first.
+    Auth(acp::Error),
+    Other(anyhow::Error),
+}
+
+/// `session/load` the session to resume, falling back to `session/new`.
+async fn open_session(
     conn: &acp::ClientSideConnection,
+    sink: &Sink,
+    csid: &str,
+    resume: Option<&str>,
     cwd: &str,
     mcp_servers: &[Value],
     meta: &Value,
-    init: &Value,
-    login_hint: &str,
-) -> Result<(String, Value, bool)> {
+) -> std::result::Result<(String, Value, bool), OpenError> {
+    if let Some(sid) = resume {
+        let req: acp::LoadSessionRequest = from_json(
+            json!({ "sessionId": sid, "cwd": cwd, "mcpServers": mcp_servers, "_meta": meta }),
+        )
+        .map_err(OpenError::Other)?;
+        match conn.load_session(req).await {
+            Ok(resp) => return Ok((sid.to_owned(), serde_json::to_value(&resp).unwrap_or_default(), true)),
+            Err(e) if is_auth_required(&e) => return Err(OpenError::Auth(e)),
+            Err(e) => {
+                // Not an error: some agents (Cursor, Claude Code) can't load a session that
+                // never got a prompt, and the transcript cache still shows earlier turns.
+                emit(
+                    sink,
+                    csid,
+                    CodeEvent::Notice {
+                        message: format!("Couldn't resume the agent's previous session, so it started a new one ({e})."),
+                    },
+                );
+            }
+        }
+    }
     let req: acp::NewSessionRequest =
-        from_json(json!({ "cwd": cwd, "mcpServers": mcp_servers, "_meta": meta }))?;
-    let resp = conn.new_session(req).await.map_err(|e| match auth_message(&e, init, login_hint) {
-        Some(msg) => anyhow!(msg),
-        None => anyhow!("session/new failed: {e}"),
-    })?;
-    let v = serde_json::to_value(&resp).unwrap_or_default();
-    Ok((resp.session_id.to_string(), v, false))
+        from_json(json!({ "cwd": cwd, "mcpServers": mcp_servers, "_meta": meta })).map_err(OpenError::Other)?;
+    match conn.new_session(req).await {
+        Ok(resp) => {
+            let v = serde_json::to_value(&resp).unwrap_or_default();
+            Ok((resp.session_id.to_string(), v, false))
+        }
+        Err(e) if is_auth_required(&e) => Err(OpenError::Auth(e)),
+        Err(e) => Err(OpenError::Other(anyhow!("session/new failed: {e}"))),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigIds, RewindPoint, SessionConfig, merge_config, pick_rewind_point};
+    use super::{
+        AgentCmd, AuthChoice, CodeEvent, ConfigIds, Envelope, RewindPoint, SessionConfig, SpawnSpec, auth_choices,
+        auth_metas, merge_config, pick_rewind_point,
+    };
     use serde_json::json;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     fn opencode_like() -> serde_json::Value {
         json!({
@@ -1093,5 +1314,204 @@ mod tests {
         let pts = [pt(0, None), pt(1, None)];
         assert_eq!(pick_rewind_point(&pts, 1, "anything"), Some(1));
         assert_eq!(pick_rewind_point(&pts, 5, "anything"), None);
+    }
+
+    #[test]
+    fn auth_choices_keep_methods_patchbay_can_run() {
+        // Methods as Gemini CLI and codex-acp advertise them, plus kinds Patchbay can't run.
+        let init = json!({ "authMethods": [
+            { "id": "oauth-personal", "name": "Log in with Google", "description": "Log in with your Google account" },
+            { "id": "gemini-api-key", "name": "Gemini API key", "_meta": { "api-key": { "provider": "google" } } },
+            { "id": "gateway", "name": "AI API Gateway", "_meta": { "gateway": { "protocol": "google" } } },
+            { "type": "env_var", "id": "env", "name": "Env", "vars": [{ "name": "X_KEY" }] },
+            { "type": "terminal", "id": "tui", "name": "Terminal login" },
+        ] });
+        assert_eq!(
+            auth_choices(&init),
+            [
+                AuthChoice {
+                    id: "oauth-personal".into(),
+                    name: "Log in with Google".into(),
+                    description: Some("Log in with your Google account".into()),
+                    api_key: false,
+                },
+                AuthChoice { id: "gemini-api-key".into(), name: "Gemini API key".into(), description: None, api_key: true },
+            ]
+        );
+        assert!(auth_choices(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn api_keys_go_in_both_meta_shapes() {
+        assert_eq!(auth_metas(None), [None]);
+        assert_eq!(auth_metas(Some("  ")), [None], "a blank key is no key");
+        assert_eq!(
+            auth_metas(Some(" sk-1 ")),
+            [Some(json!({ "api-key": "sk-1" })), Some(json!({ "api-key": { "apiKey": "sk-1" } }))]
+        );
+    }
+
+    #[test]
+    fn auth_required_event_serializes_for_the_ui() {
+        let ev = CodeEvent::AuthRequired {
+            message: "Sign in".into(),
+            methods: vec![AuthChoice { id: "k".into(), name: "Key".into(), description: None, api_key: true }],
+        };
+        assert_eq!(
+            serde_json::to_value(&ev).unwrap(),
+            json!({ "type": "authRequired", "message": "Sign in",
+                    "methods": [{ "id": "k", "name": "Key", "description": null, "apiKey": true }] })
+        );
+    }
+
+    /// An ACP agent that refuses `session/new` until `authenticate` gets method `api-key` with
+    /// key `sk-test` in codex-acp's shape, so the string shape Patchbay tries first is refused.
+    const FAKE_AGENT: &str = r#"
+import json, sys
+authed = False
+def send(m):
+    sys.stdout.write(json.dumps(m) + "\n"); sys.stdout.flush()
+def err(i, msg, data=None):
+    e = {"code": -32000, "message": msg}
+    if data: e["data"] = {"message": data}
+    send({"jsonrpc": "2.0", "id": i, "error": e})
+for line in sys.stdin:
+    m = json.loads(line)
+    if "id" not in m or "method" not in m:
+        continue
+    i, meth, p = m["id"], m["method"], m.get("params") or {}
+    if meth == "initialize":
+        send({"jsonrpc": "2.0", "id": i, "result": {"protocolVersion": 1, "agentCapabilities": {},
+              "agentInfo": {"name": "fake", "title": "Fake Agent", "version": "1"},
+              "authMethods": [{"id": "browser", "name": "Log in", "description": "Opens a browser"},
+                              {"id": "api-key", "name": "API key", "_meta": {"api-key": {"provider": "x"}}}]}})
+    elif meth == "authenticate":
+        key = (p.get("_meta") or {}).get("api-key")
+        if p["methodId"] == "api-key" and isinstance(key, dict) and key.get("apiKey") == "sk-test":
+            authed = True
+            send({"jsonrpc": "2.0", "id": i, "result": {}})
+        else:
+            err(i, "Authentication required", "bad key")
+    elif meth == "session/new":
+        if authed:
+            send({"jsonrpc": "2.0", "id": i, "result": {"sessionId": "s1"}})
+        else:
+            err(i, "Authentication required")
+    else:
+        send({"jsonrpc": "2.0", "id": i, "error": {"code": -32601, "message": "unsupported"}})
+"#;
+
+    type Events = Arc<Mutex<Vec<CodeEvent>>>;
+
+    /// Start `FAKE_AGENT` under Patchbay's ACP client, or `None` without a Python to run it.
+    fn spawn_fake_agent(
+        dir: &std::path::Path,
+    ) -> Option<(Events, tokio::sync::mpsc::UnboundedSender<AgentCmd>, std::thread::JoinHandle<()>)> {
+        let python = ["python3", "python"].into_iter().find(|p| {
+            std::process::Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success())
+        })?;
+        std::fs::create_dir_all(dir).unwrap();
+        let script = dir.join("agent.py");
+        std::fs::write(&script, FAKE_AGENT).unwrap();
+        let events: Events = Arc::default();
+        let ev = events.clone();
+        let (tx, thread) = super::spawn(SpawnSpec {
+            sink: Arc::new(move |e: Envelope| ev.lock().unwrap().push(e.event)),
+            code_session_id: "cs".into(),
+            launch: crate::code::agents::Launch {
+                program: python.into(),
+                args: vec![script.to_string_lossy().into_owned()],
+                env: Vec::new(),
+                env_remove: Vec::new(),
+                ext: Default::default(),
+                session_meta: json!({}),
+                initial_model: None,
+                login_hint: "",
+                approvals: Default::default(),
+            },
+            cwd: dir.to_owned(),
+            resume: None,
+            pending: Arc::default(),
+            on_session: Box::new(|_| {}),
+            auto_approve: Arc::new(|_, _| None),
+            mcp: Box::new(|_| (Vec::new(), Vec::new())),
+        });
+        Some((events, tx, thread))
+    }
+
+    fn wait_for(events: &Events, what: &str, f: impl Fn(&[CodeEvent]) -> bool) {
+        let t0 = std::time::Instant::now();
+        while !f(&events.lock().unwrap()) {
+            assert!(t0.elapsed() < Duration::from_secs(20), "timed out waiting for {what}: {:?}", events.lock().unwrap());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn auth_events(evs: &[CodeEvent]) -> usize {
+        evs.iter().filter(|e| matches!(e, CodeEvent::AuthRequired { .. })).count()
+    }
+
+    #[test]
+    fn sign_in_then_start_the_session() {
+        let dir = std::env::temp_dir().join(format!("pb-auth-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent(&dir) else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        let authenticate = |method: &str, key: Option<&str>| {
+            let (reply, rx) = tokio::sync::oneshot::channel();
+            let cmd = AgentCmd::Authenticate { method_id: method.into(), api_key: key.map(str::to_owned), reply };
+            tx.send(cmd).unwrap();
+            rx.blocking_recv().unwrap()
+        };
+
+        wait_for(&events, "authRequired", |evs| auth_events(evs) == 1);
+        {
+            let evs = events.lock().unwrap();
+            let Some(CodeEvent::AuthRequired { message, methods }) =
+                evs.iter().find(|e| matches!(e, CodeEvent::AuthRequired { .. }))
+            else {
+                unreachable!()
+            };
+            assert!(message.starts_with("Fake Agent needs you to sign in first."), "{message}");
+            let ids: Vec<(&str, bool)> = methods.iter().map(|m| (m.id.as_str(), m.api_key)).collect();
+            assert_eq!(ids, [("browser", false), ("api-key", true)]);
+        }
+
+        // While it waits, other commands are refused.
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        tx.send(AgentCmd::SetModel { model_id: "m".into(), reply }).unwrap();
+        let err = rx.blocking_recv().unwrap().unwrap_err();
+        assert!(err.to_string().contains("isn't signed in"), "{err}");
+
+        // A refused sign-in reports the agent's reason, and the agent keeps waiting.
+        let err = authenticate("api-key", Some("wrong")).unwrap_err();
+        assert!(err.to_string().contains("bad key"), "{err}");
+        // The right key, in the second shape Patchbay tries, signs in and starts the session.
+        authenticate("api-key", Some("sk-test")).unwrap();
+        wait_for(&events, "sessionReady", |evs| evs.iter().any(|e| matches!(e, CodeEvent::SessionReady { .. })));
+        assert_eq!(auth_events(&events.lock().unwrap()), 1);
+
+        let err = authenticate("api-key", Some("sk-test")).unwrap_err();
+        assert!(err.to_string().contains("already signed in"), "{err}");
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stopping_while_waiting_for_sign_in_exits_cleanly() {
+        let dir = std::env::temp_dir().join(format!("pb-auth-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent(&dir) else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        wait_for(&events, "authRequired", |evs| auth_events(evs) == 1);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let evs = events.lock().unwrap();
+        assert!(!evs.iter().any(|e| matches!(e, CodeEvent::Error { .. })), "{evs:?}");
+        assert!(matches!(evs.last(), Some(CodeEvent::Status { state, .. }) if state == "exited"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

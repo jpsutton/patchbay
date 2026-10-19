@@ -12,6 +12,7 @@ import {
   type AcpPlanEntry,
   type AcpToolCall,
   type AcpUpdate,
+  type AuthChoice,
   type CodeEvent,
   type CodeEnvelope,
   type EventPoint,
@@ -69,6 +70,8 @@ export interface CodeState {
   extensions: AgentExtensions;
   /** What the agent does without asking, whatever the session's approval mode. */
   approvalGaps: string[];
+  /** The agent waits for a sign-in before it starts a session. */
+  auth: { message: string; methods: AuthChoice[] } | null;
   /** Tool call id -> why a saved rule or the approval mode approved it. */
   autoApproved: Record<string, string>;
   /** Cached transcript from a previous run, shown until (or unless) the agent replays it. */
@@ -112,6 +115,7 @@ const emptyCode = (): CodeState => ({
   configOptions: [],
   extensions: { statusLine: false, rewind: false },
   approvalGaps: [],
+  auth: null,
   autoApproved: {},
   history: null,
   earlier: null,
@@ -638,6 +642,7 @@ export const useStore = create<Store>((set, get) => ({
           status: e.state,
           busy: e.state === "exited" ? false : s.busy,
           permissions: e.state === "exited" ? [] : s.permissions,
+          auth: e.state === "exited" ? null : s.auth,
           // Commands an agent backgrounded end with it.
           toolCalls: e.state === "exited" ? endBackground(s.toolCalls) : s.toolCalls,
         };
@@ -671,9 +676,14 @@ export const useStore = create<Store>((set, get) => ({
           configOptions: e.configOptions ?? [],
           extensions: e.extensions ?? { statusLine: false, rewind: false },
           approvalGaps: e.approvalGaps ?? [],
+          auth: null,
         };
         break;
       }
+      case "authRequired":
+        next = { ...s, auth: { message: e.message, methods: e.methods } };
+        notifyCode(id, "needs you to sign in");
+        break;
       case "config":
         // Options-based agents resend their full config; legacy model/mode lists stay as they are.
         next = {

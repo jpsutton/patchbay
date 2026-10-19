@@ -254,6 +254,18 @@ impl CodeManager {
         rx.await.map_err(|_| anyhow!("agent stopped"))?
     }
 
+    /// Sign in with one of the agent's advertised methods. Resolves once the session is up.
+    pub async fn authenticate(
+        &self,
+        code_session_id: &str,
+        method_id: String,
+        api_key: Option<String>,
+    ) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.send(code_session_id, AgentCmd::Authenticate { method_id, api_key, reply })?;
+        rx.await.map_err(|_| anyhow!("agent stopped"))?
+    }
+
     pub fn respond_permission(&self, request_id: &str, option_id: Option<String>) {
         if let Some((_, tx)) = self.pending.lock().unwrap().remove(request_id) {
             let _ = tx.send(option_id);

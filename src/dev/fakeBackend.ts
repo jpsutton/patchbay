@@ -23,6 +23,7 @@ import type {
   AcpConfigOption,
   AgentId,
   AgentInfo,
+  AuthChoice,
 } from "../lib/ipc";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -117,6 +118,55 @@ let clock = 0;
 const tick = () => (clock = Math.max(now(), clock + 1));
 
 const pending = new Map<string, (opt: string | null) => void>();
+
+/** Agents that want a sign-in first (as Codex, Gemini CLI and Antigravity do when signed out). */
+const FAKE_AUTH: Partial<Record<AgentId, AuthChoice[]>> = {
+  codex: [
+    { id: "chat-gpt", name: "ChatGPT", description: "Use ChatGPT to authenticate", apiKey: false },
+    { id: "api-key", name: "API Key", description: "Use an API key to authenticate", apiKey: true },
+  ],
+  gemini: [
+    { id: "oauth-personal", name: "Log in with Google", description: "Log in with your Google account", apiKey: false },
+    { id: "gemini-api-key", name: "Gemini API key", description: "Use an API key with Gemini Developer API", apiKey: true },
+    { id: "vertex-ai", name: "Vertex AI", description: "Use an API key with Vertex AI GenAI API", apiKey: false },
+  ],
+};
+/** Fake agents signed in during this page load. */
+const fakeSignedIn = new Set<string>();
+/** Agent starts per session, so a sign-in from before a restart is dropped as the real one is. */
+const fakeStarts: Record<string, number> = {};
+
+function fakeReady(csid: string) {
+  const grok = (db.code.find((c) => c.id === csid)?.agent ?? "grok") === "grok";
+  codeEmit(csid, {
+    type: "sessionReady", acpSessionId: "acp-" + csid, loaded: false,
+    approvalGaps: grok ? [] : ["This agent edits files in this project without asking, in every mode."],
+    capabilities: { loadSession: true, promptCapabilities: { image: false, embeddedContext: true }, mcpCapabilities: { http: true, sse: true } },
+    agentInfo: { name: "fake-agent" },
+    models: grok
+      ? { currentModelId: "pb-m1", availableModels: db.models.map((m) => ({ modelId: "pb-" + m.id, name: m.displayName })) }
+      : { currentModelId: "sonnet", availableModels: [{ modelId: "sonnet", name: "Sonnet" }, { modelId: "opus", name: "Opus" }] },
+    modes: grok
+      ? null
+      : { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] },
+    configOptions: grok ? [] : [fakeEffort(fakeConfig[csid] ?? "medium")],
+    extensions: { statusLine: grok, rewind: grok, patchbayModels: grok },
+  });
+  codeEmit(csid, {
+    type: "update",
+    update: {
+      sessionUpdate: "available_commands_update",
+      availableCommands: [
+        { name: "compact", description: "Summarize the conversation to free up context" },
+        { name: "context", description: "Show context window usage" },
+        { name: "model", description: "Switch model", input: { hint: "<model>" } },
+        { name: "review", description: "Review the current changes", input: { hint: "[focus]" } },
+      ],
+    },
+  });
+  codeEmit(csid, { type: "status", state: "ready", message: null });
+}
+
 const cancelled = new Set<string>();
 
 function send<T>(ch: unknown, msg: T) {
@@ -606,39 +656,34 @@ export function install() {
         case "code_start": {
           const csid = a.id as string;
           fakeRunning.add(csid);
+          fakeStarts[csid] = (fakeStarts[csid] ?? 0) + 1;
           setTimeout(() => {
             codeEmit(csid, { type: "status", state: "starting", message: null });
             setTimeout(() => {
-              const grok = (db.code.find((c) => c.id === csid)?.agent ?? "grok") === "grok";
-              codeEmit(csid, {
-                type: "sessionReady", acpSessionId: "acp-" + csid, loaded: false,
-                approvalGaps: grok ? [] : ["This agent edits files in this project without asking, in every mode."],
-                capabilities: { loadSession: true, promptCapabilities: { image: false, embeddedContext: true }, mcpCapabilities: { http: true, sse: true } },
-                agentInfo: { name: "fake-agent" },
-                models: grok
-                  ? { currentModelId: "pb-m1", availableModels: db.models.map((m) => ({ modelId: "pb-" + m.id, name: m.displayName })) }
-                  : { currentModelId: "sonnet", availableModels: [{ modelId: "sonnet", name: "Sonnet" }, { modelId: "opus", name: "Opus" }] },
-                modes: grok
-                  ? null
-                  : { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] },
-                configOptions: grok ? [] : [fakeEffort(fakeConfig[csid] ?? "medium")],
-                extensions: { statusLine: grok, rewind: grok, patchbayModels: grok },
-              });
-              codeEmit(csid, {
-                type: "update",
-                update: {
-                  sessionUpdate: "available_commands_update",
-                  availableCommands: [
-                    { name: "compact", description: "Summarize the conversation to free up context" },
-                    { name: "context", description: "Show context window usage" },
-                    { name: "model", description: "Switch model", input: { hint: "<model>" } },
-                    { name: "review", description: "Review the current changes", input: { hint: "[focus]" } },
-                  ],
-                },
-              });
-              codeEmit(csid, { type: "status", state: "ready", message: null });
+              const agent = db.code.find((c) => c.id === csid)?.agent ?? "grok";
+              const methods = FAKE_AUTH[agent];
+              if (methods && !fakeSignedIn.has(agent)) {
+                const label = FAKE_AGENTS.find((x) => x.id === agent)?.label ?? agent;
+                codeEmit(csid, { type: "authRequired", message: `${label} needs you to sign in first.`, methods });
+                return;
+              }
+              fakeReady(csid);
             }, 400);
           }, 10);
+          return null;
+        }
+        case "code_authenticate": {
+          const csid = a.id as string;
+          const agent = db.code.find((c) => c.id === csid)?.agent ?? "grok";
+          const m = FAKE_AUTH[agent]?.find((x) => x.id === a.methodId);
+          if (!m) throw "agent is not running for this session";
+          // A browser sign-in takes a while; a key "bad" is refused.
+          const start = fakeStarts[csid];
+          await sleep(m.apiKey ? 400 : 2500);
+          if (fakeStarts[csid] !== start) throw "the agent stopped";
+          if (m.apiKey && a.apiKey === "bad") throw "Sign-in failed: Authentication required (API key not valid)";
+          fakeSignedIn.add(agent);
+          fakeReady(csid);
           return null;
         }
         case "code_stop": return null;

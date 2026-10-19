@@ -354,6 +354,15 @@ export type ChatEvent =
   | { type: "error"; message: string }
   | { type: "title"; title: string };
 
+/** A sign-in method the agent advertised, as Patchbay can run it (`acp::AuthChoice`). */
+export interface AuthChoice {
+  id: string;
+  name: string;
+  description: string | null;
+  /** The method takes an API key the user types in. */
+  apiKey: boolean;
+}
+
 export type CodeEvent =
   | { type: "status"; state: "starting" | "ready" | "exited"; message: string | null }
   | {
@@ -382,7 +391,9 @@ export type CodeEvent =
   /** `replay`: part of a catch-up, so shown even in the window that sent it. */
   | { type: "userPrompt"; text: string; origin: string; attachments: Attachment[]; replay?: boolean }
   /** The session was renamed automatically. */
-  | { type: "title"; title: string };
+  | { type: "title"; title: string }
+  /** The agent won't start a session until the user signs in with one of `methods`. */
+  | { type: "authRequired"; message: string; methods: AuthChoice[] };
 
 /** Where a live event sits in its topic's stream (see docs/design/mobile.md, section 3). */
 export interface EventPoint {
@@ -684,6 +695,9 @@ export const api = {
     invoke<void>("code_set_agent", { id, agent, modelRef }),
   codeSetConfigOption: (id: string, configId: string, value: string) =>
     invoke<void>("code_set_config_option", { id, configId, value }),
+  /** Sign the agent in; resolves once its session is up. A browser sign-in can take minutes. */
+  codeAuthenticate: (id: string, methodId: string, apiKey?: string) =>
+    invoke<void>("code_authenticate", { id, methodId, apiKey: apiKey ?? null }),
   codeRewind: (id: string, ordinal: number, preview: string, revertFiles: boolean) =>
     invoke<void>("code_rewind", { id, ordinal, preview, revertFiles }),
   codeUsage: (id: string) => invoke<UsageView>("code_usage", { id }),

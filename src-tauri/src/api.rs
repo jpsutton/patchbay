@@ -139,6 +139,7 @@ commands! {
     code_cancel(id);
     code_set_model(id, model_id);
     code_set_config_option(id, config_id, value);
+    code_authenticate(id, method_id, api_key);
     code_set_agent(id, agent, model_ref);
     code_set_mode(id, mode_id);
     code_set_permission_mode(id, mode);
