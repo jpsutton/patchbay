@@ -38,6 +38,7 @@ const fakeAgent = (id: AgentId, label: string, program: string | null, extra: Pa
   installHint: `Install ${label}, then sign in from a terminal.`,
   usesPatchbayModels: id === "grok",
   supportsInstructions: id === "grok" || id === "claude-code",
+  takesProviders: id === "claude-code" || id === "opencode" || id === "kilo",
   ...extra,
 });
 /** Sessions whose fake agent was started (code_start) and still runs. */
@@ -834,7 +835,7 @@ export function install() {
         case "remote_kick": case "remote_set_foreground": case "remote_unwatch": case "remote_keep_alive": return null;
         case "remote_new_session_options": {
           const agent = (id: AgentId, label: string, available: boolean) =>
-            ({ id, label, available, program: null, source: null, version: null, error: null, installHint: "", usesPatchbayModels: id === "grok", supportsInstructions: id === "grok" });
+            ({ id, label, available, program: null, source: null, version: null, error: null, installHint: "", usesPatchbayModels: id === "grok", supportsInstructions: id === "grok", takesProviders: false });
           return {
             agents: [agent("grok", "Grok Build", true), agent("claude-code", "Claude Code", true), agent("cursor", "Cursor CLI", false)],
             defaultAgent: "grok",

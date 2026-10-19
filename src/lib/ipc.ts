@@ -304,6 +304,8 @@ export interface AgentInfo {
   installHint: string;
   usesPatchbayModels: boolean;
   supportsInstructions: boolean;
+  /** Can be set to run on Patchbay's providers instead of its own sign-in. */
+  takesProviders: boolean;
 }
 
 /** Labels for agent ids, for places that don't load the full list. */
@@ -494,6 +496,8 @@ export interface Preferences {
   defaultAgent: AgentId;
   /** Executable overrides: agent id -> path. */
   agentPaths: Partial<Record<AgentId, string>>;
+  /** Agents set to run on Patchbay's providers: agent id -> Patchbay model ref. */
+  agentProviders: Partial<Record<AgentId, string>>;
   permissionMode: "default" | "auto" | "always-approve";
   agentInstructions: string;
   webFetch: boolean;
@@ -517,6 +521,7 @@ export const defaultPreferences: Preferences = {
   generateTitles: true,
   defaultAgent: "grok",
   agentPaths: {},
+  agentProviders: {},
   permissionMode: "default",
   agentInstructions: "",
   webFetch: false,
