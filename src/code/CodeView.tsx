@@ -1005,7 +1005,14 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                   />
                 ))}
                 {s?.auth && (
-                  <SignInCard key={session.id} sessionId={session.id} message={s.auth.message} methods={s.auth.methods} />
+                  <SignInCard
+                    key={session.id}
+                    sessionId={session.id}
+                    cwd={session.cwd}
+                    message={s.auth.message}
+                    methods={s.auth.methods}
+                    again={status === "ready"}
+                  />
                 )}
                 {working && s?.permissions.length === 0 && (
                   <div className="flex items-center gap-2 text-xs text-muted">

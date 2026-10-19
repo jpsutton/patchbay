@@ -1,31 +1,39 @@
 import { useState } from "react";
 import { api, errorText, type AuthChoice } from "../lib/ipc";
 import { useStore } from "../lib/store";
+import { TerminalPane } from "../terminal/TerminalPane";
 
 /**
- * The agent refused to start a session until the user signs in. Offers the methods it
- * advertised; whatever they are (browser, API key), Patchbay passes the choice to ACP
- * `authenticate` and the agent does the rest.
+ * The agent wants a sign-in: before it starts a session, or (`again`) mid-session, after it
+ * refused a prompt. Offers the methods it advertised. A browser or API-key method goes to ACP
+ * `authenticate` and the agent does the rest. A terminal method runs the agent's login command
+ * in a terminal here; when that succeeds, Patchbay restarts the agent so it picks up the login.
  */
 export function SignInCard({
   sessionId,
+  cwd,
   message,
   methods,
+  again,
 }: {
   sessionId: string;
+  cwd: string;
   message: string;
   methods: AuthChoice[];
+  again: boolean;
 }) {
   const [keyFor, setKeyFor] = useState<string | null>(null);
   const [key, setKey] = useState("");
   const [pending, setPending] = useState<AuthChoice | null>(null);
+  const [terminal, setTerminal] = useState<AuthChoice | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const signIn = async (m: AuthChoice, apiKey?: string) => {
     setPending(m);
     setError(null);
     try {
-      // Resolves once the agent's session is up; the card goes away with the sessionReady event.
+      // Resolves once the agent's session is up, or mid-session once it accepts the sign-in. The
+      // card goes away with the sessionReady or authResolved event.
       await api.codeAuthenticate(sessionId, m.id, apiKey);
     } catch (e) {
       setError(errorText(e));
@@ -40,6 +48,13 @@ export function SignInCard({
     useStore.getState().startAgent(sessionId);
   };
 
+  // The login command ended. Signed in: a fresh agent process reads the new login (and resumes
+  // the session); the card goes away as the old one exits.
+  const terminalDone = (m: AuthChoice, code: number | null) => {
+    if (code === 0) useStore.getState().startAgent(sessionId);
+    else setError(`${m.name}: the sign-in ${code == null ? "didn't start" : `exited with code ${code}`}.`);
+  };
+
   const keyMethod = methods.find((m) => m.id === keyFor);
   return (
     <section
@@ -48,10 +63,39 @@ export function SignInCard({
     >
       <div className="flex items-center gap-2">
         <span className="signal-pulse h-2 w-2 rounded-full bg-accent" />
-        <span className="text-xs font-medium text-accent-ink">Sign in to start the agent</span>
+        <span className="text-xs font-medium text-accent-ink">
+          {again ? "Sign in to continue" : "Sign in to start the agent"}
+        </span>
       </div>
       <div className="text-sm text-muted">{message}</div>
-      {pending ? (
+      {terminal ? (
+        <div className="flex flex-col gap-2">
+          <div className="h-56 overflow-hidden rounded-lg border border-border">
+            <TerminalPane
+              id={sessionId}
+              cwd={cwd}
+              visible
+              authMethod={terminal.id}
+              onExit={(code) => terminalDone(terminal, code)}
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-3 text-sm">
+            <span className="min-w-0 flex-1 text-muted">
+              Finish signing in ({terminal.name}) in the terminal. When it's done, Patchbay restarts the agent
+              {again ? " and you can resend your message" : ""}.
+            </span>
+            <button
+              className="h-[34px] rounded-lg border border-border bg-panel px-3 text-xs text-fg hover:bg-panel-2"
+              onClick={() => {
+                setTerminal(null);
+                setError(null);
+              }}
+            >
+              Back
+            </button>
+          </div>
+        </div>
+      ) : pending ? (
         <div className="flex flex-wrap items-center gap-3 text-sm">
           <span className="signal-pulse h-1.5 w-1.5 shrink-0 rounded-full bg-live" />
           <span className="min-w-0 flex-1">
@@ -116,7 +160,8 @@ export function SignInCard({
               }`}
               onClick={() => {
                 setError(null);
-                if (m.apiKey) setKeyFor(m.id);
+                if (m.terminal) setTerminal(m);
+                else if (m.apiKey) setKeyFor(m.id);
                 else signIn(m);
               }}
             >

@@ -626,6 +626,11 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
                     l.auth = None;
                 }
                 CodeEvent::AuthRequired { .. } => live.entry(id).or_default().auth = Some(ev),
+                CodeEvent::AuthResolved => {
+                    if let Some(l) = live.get_mut(&id) {
+                        l.auth = None;
+                    }
+                }
                 CodeEvent::Usage { .. } => live.entry(id).or_default().usage = Some(ev),
                 CodeEvent::Permission { request_id, .. } => {
                     live.entry(id).or_default().permissions.push((request_id.clone(), ev))
@@ -1363,9 +1368,17 @@ impl mesh::RpcHandler for MeshRpc {
                     let payload = json!({ "termId": term_id, "event": ev });
                     mesh.send_event(&to, "mesh://term", payload)
                 });
-                let shell = prefs::load(&state.db).terminal_shell;
                 let (cols, rows) = (p["cols"].as_u64().unwrap_or(80) as u16, p["rows"].as_u64().unwrap_or(24) as u16);
-                state.terminals.open(&key, &s.cwd, Some(&shell), cols, rows, sink)?;
+                match p["authMethod"].as_str() {
+                    Some(method) => {
+                        let program = state.code.terminal_auth(sid, method.to_owned()).await?;
+                        state.terminals.open_program(&key, &s.cwd, &program, cols, rows, sink)?;
+                    }
+                    None => {
+                        let shell = prefs::load(&state.db).terminal_shell;
+                        state.terminals.open(&key, &s.cwd, Some(&shell), cols, rows, sink)?;
+                    }
+                }
                 Ok(Value::Null)
             }
             "term.write" => {
@@ -1513,7 +1526,9 @@ async fn mesh_chat_streams(state: &AppState) -> CmdResult<Vec<mesh::node::Stream
 // ---------------- terminal ----------------
 //
 // With `session_id`, the terminal runs on the node hosting that session: output arrives as
-// `mesh://term` events, and input goes there in order through a per-terminal queue.
+// `mesh://term` events, and input goes there in order through a per-terminal queue. With
+// `auth_method` too, it runs that session's agent's terminal sign-in command, which the agent
+// thread builds from what the agent advertised, instead of the user's shell.
 
 async fn term_open(
     state: &AppState,
@@ -1523,9 +1538,10 @@ async fn term_open(
     rows: u16,
     on_event: Chan<TermEvent>,
     session_id: Option<String>,
+    auth_method: Option<String>,
 ) -> CmdResult<()> {
-    if let Some(sid) = session_id
-        && let Some(host) = remote_host(state, &sid)?
+    if let Some(sid) = &session_id
+        && let Some(host) = remote_host(state, sid)?
     {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, serde_json::Value)>();
         let mesh = state.mesh.clone();
@@ -1538,12 +1554,19 @@ async fn term_open(
             }
         });
         state.remote_terms.lock().unwrap().insert(id.clone(), RemoteTerm { channel: on_event, input: tx });
-        let params = serde_json::json!({ "termId": id, "sessionId": sid, "cols": cols, "rows": rows });
+        let params = serde_json::json!({
+            "termId": id, "sessionId": sid, "cols": cols, "rows": rows, "authMethod": auth_method,
+        });
         state.mesh.rpc(&host, "term.open", params).await?;
         return Ok(());
     }
-    let shell = prefs::load(&state.db).terminal_shell;
     let sink: terminal::TermSink = Arc::new(move |ev| on_event.send(ev));
+    if let Some(method) = auth_method {
+        let sid = session_id.ok_or_else(|| CmdError("a sign-in terminal needs its session".into()))?;
+        let program = state.code.terminal_auth(&sid, method).await?;
+        return Ok(state.terminals.open_program(&id, &cwd, &program, cols, rows, sink)?);
+    }
+    let shell = prefs::load(&state.db).terminal_shell;
     Ok(state.terminals.open(&id, &cwd, Some(&shell), cols, rows, sink)?)
 }
 

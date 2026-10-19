@@ -119,24 +119,35 @@ const tick = () => (clock = Math.max(now(), clock + 1));
 
 const pending = new Map<string, (opt: string | null) => void>();
 
-/** Agents that want a sign-in first (as Codex, Gemini CLI and Antigravity do when signed out). */
+/**
+ * Agents that want a sign-in first (as Codex, Gemini CLI and Antigravity do when signed out).
+ * Claude Code's methods are terminal ones: its login command runs in a terminal.
+ */
 const FAKE_AUTH: Partial<Record<AgentId, AuthChoice[]>> = {
+  "claude-code": [
+    { id: "claude-ai-login", name: "Claude Subscription", description: "Use Claude subscription", apiKey: false, terminal: true },
+    { id: "console-login", name: "Anthropic Console", description: "Use Anthropic Console (API usage billing)", apiKey: false, terminal: true },
+  ],
   codex: [
-    { id: "chat-gpt", name: "ChatGPT", description: "Use ChatGPT to authenticate", apiKey: false },
-    { id: "api-key", name: "API Key", description: "Use an API key to authenticate", apiKey: true },
+    { id: "chat-gpt", name: "ChatGPT", description: "Use ChatGPT to authenticate", apiKey: false, terminal: false },
+    { id: "api-key", name: "API Key", description: "Use an API key to authenticate", apiKey: true, terminal: false },
   ],
   gemini: [
-    { id: "oauth-personal", name: "Log in with Google", description: "Log in with your Google account", apiKey: false },
-    { id: "gemini-api-key", name: "Gemini API key", description: "Use an API key with Gemini Developer API", apiKey: true },
-    { id: "vertex-ai", name: "Vertex AI", description: "Use an API key with Vertex AI GenAI API", apiKey: false },
+    { id: "oauth-personal", name: "Log in with Google", description: "Log in with your Google account", apiKey: false, terminal: false },
+    { id: "gemini-api-key", name: "Gemini API key", description: "Use an API key with Gemini Developer API", apiKey: true, terminal: false },
+    { id: "vertex-ai", name: "Vertex AI", description: "Use an API key with Vertex AI GenAI API", apiKey: false, terminal: false },
   ],
 };
-/** Fake agents signed in during this page load. */
+/** Fake agents signed in during this page load. The prompt `/logout` signs one out again. */
 const fakeSignedIn = new Set<string>();
+/** Sessions whose fake agent has its session up. */
+const fakeLive = new Set<string>();
+const fakeLabel = (agent: string) => FAKE_AGENTS.find((x) => x.id === agent)?.label ?? agent;
 /** Agent starts per session, so a sign-in from before a restart is dropped as the real one is. */
 const fakeStarts: Record<string, number> = {};
 
 function fakeReady(csid: string) {
+  fakeLive.add(csid);
   const grok = (db.code.find((c) => c.id === csid)?.agent ?? "grok") === "grok";
   codeEmit(csid, {
     type: "sessionReady", acpSessionId: "acp-" + csid, loaded: false,
@@ -656,6 +667,7 @@ export function install() {
         case "code_start": {
           const csid = a.id as string;
           fakeRunning.add(csid);
+          fakeLive.delete(csid);
           fakeStarts[csid] = (fakeStarts[csid] ?? 0) + 1;
           setTimeout(() => {
             codeEmit(csid, { type: "status", state: "starting", message: null });
@@ -663,8 +675,7 @@ export function install() {
               const agent = db.code.find((c) => c.id === csid)?.agent ?? "grok";
               const methods = FAKE_AUTH[agent];
               if (methods && !fakeSignedIn.has(agent)) {
-                const label = FAKE_AGENTS.find((x) => x.id === agent)?.label ?? agent;
-                codeEmit(csid, { type: "authRequired", message: `${label} needs you to sign in first.`, methods });
+                codeEmit(csid, { type: "authRequired", message: `${fakeLabel(agent)} needs you to sign in first.`, methods });
                 return;
               }
               fakeReady(csid);
@@ -675,7 +686,7 @@ export function install() {
         case "code_authenticate": {
           const csid = a.id as string;
           const agent = db.code.find((c) => c.id === csid)?.agent ?? "grok";
-          const m = FAKE_AUTH[agent]?.find((x) => x.id === a.methodId);
+          const m = FAKE_AUTH[agent]?.find((x) => x.id === a.methodId && !x.terminal);
           if (!m) throw "agent is not running for this session";
           // A browser sign-in takes a while; a key "bad" is refused.
           const start = fakeStarts[csid];
@@ -683,7 +694,11 @@ export function install() {
           if (fakeStarts[csid] !== start) throw "the agent stopped";
           if (m.apiKey && a.apiKey === "bad") throw "Sign-in failed: Authentication required (API key not valid)";
           fakeSignedIn.add(agent);
-          fakeReady(csid);
+          if (fakeLive.has(csid)) {
+            // Mid-session: the session goes on.
+            codeEmit(csid, { type: "authResolved" });
+            codeEmit(csid, { type: "notice", message: "Signed in. Send your message again." });
+          } else fakeReady(csid);
           return null;
         }
         case "code_stop": return null;
@@ -694,6 +709,16 @@ export function install() {
           if (line && !s.titleManual && s.title === "New session") {
             s.title = line.length > 60 ? `${line.slice(0, 60)}…` : line;
             codeEmit(s.id, { type: "title", title: s.title });
+          }
+          // Signed out mid-session (`/logout` fakes it): the prompt is refused for a sign-in.
+          const methods = FAKE_AUTH[s.agent];
+          if (methods && (a.text === "/logout" || !fakeSignedIn.has(s.agent))) {
+            fakeSignedIn.delete(s.agent);
+            setTimeout(() => {
+              codeEmit(s.id, { type: "authRequired", message: `${fakeLabel(s.agent)} needs you to sign in again.`, methods });
+              codeEmit(s.id, { type: "promptDone", stopReason: "error" });
+            }, 300);
+            return null;
           }
           fakeAgentTurn(a.id as string, a.text as string, (a.mentions as string[]) ?? []);
           return null;
@@ -805,6 +830,21 @@ export function install() {
         }
 
         case "term_open": {
+          if (a.authMethod) {
+            // A terminal sign-in: the agent's login command prints a little and exits 0.
+            const s = db.code.find((x) => x.id === a.sessionId);
+            const m = s && FAKE_AUTH[s.agent]?.find((x) => x.id === a.authMethod && x.terminal);
+            if (!s || !m) throw `the agent offers no terminal sign-in "${a.authMethod}"`;
+            const out = (t: string, ms: number) => setTimeout(() => send<TermEvent>(a.onEvent, { type: "data", data: btoa(t) }), ms);
+            out(`Opening browser to sign in (${m.name})...\r\n`, 100);
+            out("Waiting for the browser... ", 600);
+            out("\x1b[32mLogin successful.\x1b[0m\r\n", 2600);
+            setTimeout(() => {
+              fakeSignedIn.add(s.agent);
+              send<TermEvent>(a.onEvent, { type: "exit", code: 0 });
+            }, 3000);
+            return null;
+          }
           setTimeout(() => send<TermEvent>(a.onEvent, { type: "data", data: btoa(`demo@patchbay:${a.cwd}$ `) }), 50);
           (window as unknown as Record<string, unknown>).__term = a.onEvent;
           return null;

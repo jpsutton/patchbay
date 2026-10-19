@@ -160,7 +160,7 @@ commands! {
     mesh_set_config(name, listen, advertise);
     mesh_add_address(url);
     mesh_chat_streams();
-    term_open(id, cwd, cols, rows, on_event, session_id);
+    term_open(id, cwd, cols, rows, on_event, session_id, auth_method);
     term_write(id, data);
     term_resize(id, cols, rows);
     term_close(id);
