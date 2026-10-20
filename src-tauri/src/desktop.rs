@@ -311,6 +311,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(PendingUpdate::default())
         .setup(|app| {
             let emit: crate::mesh::node::UiSink = {

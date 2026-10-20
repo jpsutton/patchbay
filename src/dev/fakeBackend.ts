@@ -811,6 +811,8 @@ export function install() {
         case "plugin:webview|set_webview_zoom": document.documentElement.style.zoom = String(a.value); return null;
         case "plugin:notification|is_permission_granted": return true;
         case "plugin:notification|notify": console.info("fake backend: notification", a); return null;
+        case "plugin:clipboard-manager|write_text": return navigator.clipboard.writeText(a.text as string).then(() => null);
+        case "plugin:clipboard-manager|read_text": return navigator.clipboard.readText();
         case "code_cancel":
           for (const [k, r] of pending) { r(null); pending.delete(k); }
           return null;
