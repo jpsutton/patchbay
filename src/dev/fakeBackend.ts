@@ -874,8 +874,13 @@ export function install() {
           return null;
         }
         case "term_write": {
+          const w = window as unknown as Record<string, unknown>;
           const d = (a.data as string).replace(/\r/g, "\r\n");
-          send<TermEvent>((window as unknown as Record<string, unknown>).__term, { type: "data", data: btoa(d) });
+          send<TermEvent>(w.__term, { type: "data", data: btoa(d) });
+          // A typed `exit` ends the fake shell, as a real one would.
+          const line = ((w.__termLine as string) ?? "") + (a.data as string);
+          w.__termLine = line.includes("\r") ? "" : line;
+          if (line.includes("\r") && line.split("\r")[0].trim() === "exit") send<TermEvent>(w.__term, { type: "exit", code: 0 });
           return null;
         }
         case "term_resize": case "term_close": return null;
