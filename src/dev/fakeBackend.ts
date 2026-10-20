@@ -969,6 +969,7 @@ export function install() {
           };
         }
         case "remote_kick": case "remote_set_foreground": case "remote_unwatch": case "remote_keep_alive": return null;
+        case "new_session_options":
         case "remote_new_session_options": {
           const agent = (id: AgentId, label: string, available: boolean) =>
             ({ id, label, available, program: null, source: null, version: null, error: null, installHint: "", usesPatchbayModels: id === "grok", supportsInstructions: id === "grok", takesProviders: false });
@@ -976,9 +977,10 @@ export function install() {
             agents: [agent("grok", "Grok Build", true), agent("claude-code", "Claude Code", true), agent("cursor", "Cursor CLI", false)],
             defaultAgent: "grok",
             home: "/home/demo",
-            recent: [...new Set(db.code.map((s) => s.cwd))].slice(0, 12),
+            recent: [...new Set(db.code.filter((s) => (s.hostNode ?? ME) === ((a.host as string | null) ?? ME)).map((s) => s.cwd))].slice(0, 12),
           };
         }
+        case "list_dirs":
         case "remote_list_dirs": {
           const path = (a.path as string | null) ?? "/home/demo";
           const tree: Record<string, string[]> = {

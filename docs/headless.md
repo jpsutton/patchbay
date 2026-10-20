@@ -95,7 +95,7 @@ Only one Patchbay may use a data folder at a time. `patchbayd` refuses to start 
 ## What's different from the desktop app
 
 - **Files come from the browser.** Attaching a file uploads it from the computer running the browser. Exports download through the browser.
-- **Folders are on the server.** "Open folder" for a Code session browses folders under the server's home folder.
+- **Folders are on the server.** "New session" in Code browses folders under the server's home folder.
 - **No desktop extras.** There's no tray icon, quick-entry window or global shortcut. Window controls and "Show in file manager" are hidden.
 - **Secrets.** API keys go to the OS keyring when one runs. Servers usually have none, so keys are stored in the database inside the data folder. The daemon creates that folder readable by you only. If the folder already existed, check its permissions yourself.
 - **Reconnecting.** If the daemon restarts, open tabs show a banner and reload when it's back. Chats and agent turns keep running on the daemon while no tab is open.
