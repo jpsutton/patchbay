@@ -662,8 +662,9 @@ export const api = {
   attachmentThumbnail: (id: string) => invoke<string>("attachment_thumbnail", { id }),
 
   listCodeSessions: () => invoke<CodeSession[]>("list_code_sessions"),
-  createCodeSession: (cwd: string, modelRef: string | null, agent?: AgentId) =>
-    invoke<CodeSession>("create_code_session", { cwd, modelRef, agent: agent ?? null }),
+  /** With `host`, the session runs on that computer, in its folder `cwd`. */
+  createCodeSession: (cwd: string, modelRef: string | null, agent?: AgentId, host?: string | null) =>
+    invoke<CodeSession>("create_code_session", { cwd, modelRef, agent: agent ?? null, host: host ?? null }),
   /** With `host`, the agents installed on that computer. */
   listAgents: (host?: string | null) => invoke<AgentInfo[]>("list_agents", { host: host ?? null }),
   updateCodeSession: (

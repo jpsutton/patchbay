@@ -125,6 +125,30 @@ async fn move_checkpoint_take_over_and_orphaned_work() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn desktop_starts_a_session_in_a_remote_folder() {
+    let (a, b) = (node("alpha7"), node("bravo7"));
+    link(&a, &b).await;
+    let an = a.state.mesh.node_id().to_owned();
+    let proj = a.dir.join("proj");
+    repo(&proj);
+    let cwd = proj.to_string_lossy().into_owned();
+
+    // Started from B with A as host, it runs on A, and B has its row when the call returns.
+    let s = create_code_session(&b.state, cwd.clone(), None, Some("grok".into()), Some(an.clone())).await.unwrap();
+    assert_eq!(s.host_node.as_deref(), Some(an.as_str()));
+    assert_eq!(s.cwd, cwd);
+    assert_eq!(host_of(&a, &s.id).as_deref(), Some(an.as_str()));
+    assert_eq!(host_of(&b, &s.id).as_deref(), Some(an.as_str()));
+
+    // Naming this computer as host is the same as naming none.
+    let bn = b.state.mesh.node_id().to_owned();
+    let bproj = b.dir.join("proj");
+    repo(&bproj);
+    let s = create_code_session(&b.state, bproj.to_string_lossy().into_owned(), None, None, Some(bn.clone())).await.unwrap();
+    assert_eq!(s.host_node.as_deref(), Some(bn.as_str()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn remote_session_commands_and_terminal() {
     let (a, b) = (node("alpha2"), node("bravo2"));
     link(&a, &b).await;
