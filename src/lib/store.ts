@@ -258,6 +258,8 @@ interface Store {
   settingsOpen: boolean;
   sidebarCollapsed: boolean;
   shortcutsOpen: boolean;
+  /** The New session dialog (Code). */
+  newSessionOpen: boolean;
   /** Sidebar title filter. */
   sidebarQuery: string;
   providers: Provider[];
@@ -285,6 +287,7 @@ interface Store {
   setSettingsOpen: (o: boolean) => void;
   setSidebarCollapsed: (c: boolean) => void;
   setShortcutsOpen: (o: boolean) => void;
+  setNewSessionOpen: (o: boolean) => void;
   setSidebarQuery: (q: string) => void;
   setToast: (t: string | null) => void;
   setAlert: (a: Alert | null) => void;
@@ -523,6 +526,7 @@ export const useStore = create<Store>((set, get) => ({
   settingsOpen: false,
   sidebarCollapsed: loadSidebarCollapsed(),
   shortcutsOpen: false,
+  newSessionOpen: false,
   sidebarQuery: "",
   providers: [],
   models: [],
@@ -591,6 +595,7 @@ export const useStore = create<Store>((set, get) => ({
     set({ sidebarCollapsed });
   },
   setShortcutsOpen: (shortcutsOpen) => set({ shortcutsOpen }),
+  setNewSessionOpen: (newSessionOpen) => set({ newSessionOpen }),
   setSidebarQuery: (sidebarQuery) => set({ sidebarQuery }),
   setToast: (toast) => set({ toast }),
   setAlert: (alert) => set({ alert }),

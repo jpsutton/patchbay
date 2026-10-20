@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { AGENT_LABELS, api, type AgentInfo, type CodeSession } from "../lib/ipc";
-import { remoteHost, useStore } from "../lib/store";
+import { memberName, remoteHost, useStore } from "../lib/store";
 import { ArchivedToggle, SectionLabel, SidebarItem } from "../components/SidebarItem";
 import { sessionActions, toggleSessionArchive } from "../lib/itemActions";
 import { fmtShort, matchesQuery } from "../lib/format";
@@ -39,7 +39,11 @@ function parentLabel(p: string): string {
 }
 
 interface Group {
+  /** `cwd`, or for a folder on another computer `host:cwd`. */
+  key: string;
   cwd: string;
+  /** The computer the folder is on, when that isn't this one. */
+  host: string | null;
   label: string;
   where: string;
   sessions: CodeSession[];
@@ -59,7 +63,12 @@ export function CodeSidebar() {
   const [collapsed, setCollapsed] = useState(loadCollapsed);
   const [showArchived, setShowArchived] = useState(false);
   /** Right-click on a folder's "+": which agent to start there. */
-  const [agentMenu, setAgentMenu] = useState<{ x: number; y: number; cwd: string; agents: AgentInfo[] } | null>(null);
+  const [agentMenu, setAgentMenu] = useState<{
+    x: number;
+    y: number;
+    group: Group;
+    agents: AgentInfo[];
+  } | null>(null);
 
   const matching = useMemo(() => sessions.filter((s) => matchesQuery(query, s.title, s.cwd)), [sessions, query]);
   const hits = useMemo(() => matching.filter((s) => s.archivedAt == null), [matching]);
@@ -67,25 +76,32 @@ export function CodeSidebar() {
   const pinned = useMemo(() => hits.filter((s) => s.pinned), [hits]);
 
   const groups = useMemo<Group[]>(() => {
-    const by = new Map<string, CodeSession[]>();
-    for (const s of hits) if (!s.pinned) by.set(s.cwd, [...(by.get(s.cwd) ?? []), s]);
-    const names = new Map<string, number>();
-    for (const cwd of by.keys()) names.set(basename(cwd), (names.get(basename(cwd)) ?? 0) + 1);
+    // The same path on two computers is two folders.
+    const by = new Map<string, { cwd: string; host: string | null; list: CodeSession[] }>();
+    for (const s of hits) {
+      if (s.pinned) continue;
+      const host = remoteHost(s, mesh);
+      const key = host ? `${host}:${s.cwd}` : s.cwd;
+      const g = by.get(key) ?? { cwd: s.cwd, host, list: [] };
+      g.list.push(s);
+      by.set(key, g);
+    }
     return [...by.entries()]
-      .map(([cwd, list]) => {
+      .map(([key, { cwd, host, list }]) => {
         const sorted = [...list].sort((a, b) => b.updatedAt - a.updatedAt);
-        const name = basename(cwd);
         return {
+          key,
           cwd,
+          host,
+          label: basename(cwd),
           // Same folder name in two places: show where each one lives.
-          label: name,
-          where: parentLabel(cwd),
+          where: host ? `${memberName(mesh, host)}:${parentLabel(cwd)}` : parentLabel(cwd),
           sessions: sorted,
           latest: sorted[0]?.updatedAt ?? 0,
         };
       })
       .sort((a, b) => b.latest - a.latest);
-  }, [hits]);
+  }, [hits, mesh]);
 
   const toggle = (cwd: string) =>
     setCollapsed((prev) => {
@@ -172,15 +188,15 @@ export function CodeSidebar() {
       {pinned.length > 0 && groups.length > 0 && <SectionLabel>Folders</SectionLabel>}
       {groups.map((g) => {
         // While searching, show every match regardless of collapsed folders.
-        const isCollapsed = !query.trim() && collapsed.has(g.cwd);
+        const isCollapsed = !query.trim() && collapsed.has(g.key);
         const hasActive = g.sessions.some((s) => s.id === activeId);
         return (
-          <div key={g.cwd} className="mb-1">
+          <div key={g.key} className="mb-1">
             <div className="group/header mx-2 mt-2 flex items-center gap-1 rounded-lg py-1 pl-2.5 pr-1 hover:bg-panel-2/50">
               <button
                 className="flex min-w-0 flex-1 items-baseline gap-1.5 text-left"
-                onClick={() => toggle(g.cwd)}
-                title={g.cwd}
+                onClick={() => toggle(g.key)}
+                title={g.host ? `${g.cwd} on ${memberName(mesh, g.host)}` : g.cwd}
                 aria-expanded={!isCollapsed}
               >
                 <span className="shrink-0 truncate text-[13px] font-medium text-fg/90">{g.label}</span>
@@ -195,15 +211,21 @@ export function CodeSidebar() {
               <button
                 className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-faint opacity-0 hover:bg-panel-2 hover:text-fg focus-visible:opacity-100 group-hover/header:opacity-100"
                 onClick={() => {
-                  if (isCollapsed) toggle(g.cwd);
-                  newSessionIn(g.cwd);
+                  if (isCollapsed) toggle(g.key);
+                  newSessionIn(g.cwd, undefined, g.host);
                 }}
                 onContextMenu={(e) => {
                   e.preventDefault();
-                  const at = { x: e.clientX, y: e.clientY, cwd: g.cwd };
-                  installedAgents().then((agents) => setAgentMenu({ ...at, agents: agents.filter((a) => a.available) }));
+                  const at = { x: e.clientX, y: e.clientY, group: g };
+                  installedAgents(g.host).then((agents) =>
+                    setAgentMenu({ ...at, agents: agents.filter((a) => a.available) }),
+                  );
                 }}
-                title={`New ${AGENT_LABELS[prefs.defaultAgent] ?? ""} session in ${g.cwd} (right-click for another agent)`}
+                title={
+                  g.host
+                    ? `New session in ${g.cwd} on ${memberName(mesh, g.host)} (right-click for another agent)`
+                    : `New ${AGENT_LABELS[prefs.defaultAgent] ?? ""} session in ${g.cwd} (right-click for another agent)`
+                }
                 aria-label={`New session in ${g.label}`}
               >
                 <PlusIcon size={14} />
@@ -217,12 +239,12 @@ export function CodeSidebar() {
         <ContextMenu
           x={agentMenu.x}
           y={agentMenu.y}
-          title={`New session in ${agentMenu.cwd}`}
+          title={`New session in ${agentMenu.group.cwd}`}
           actions={agentMenu.agents.map((a) => ({
             label: `New ${a.label} session${a.id === prefs.defaultAgent ? " (default)" : ""}`,
             onSelect: () => {
-              if (collapsed.has(agentMenu.cwd)) toggle(agentMenu.cwd);
-              newSessionIn(agentMenu.cwd, a.id);
+              if (collapsed.has(agentMenu.group.key)) toggle(agentMenu.group.key);
+              newSessionIn(agentMenu.group.cwd, a.id, agentMenu.group.host);
             },
           }))}
           onClose={() => setAgentMenu(null)}
