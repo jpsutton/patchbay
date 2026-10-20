@@ -159,3 +159,48 @@ impl TerminalManager {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn sink() -> (TermSink, mpsc::Receiver<TermEvent>) {
+        let (tx, rx) = mpsc::channel();
+        (Arc::new(move |ev| tx.send(ev).is_ok()), rx)
+    }
+
+    /// Output until the shell exits, or until `want` shows up.
+    fn read_until(rx: &mpsc::Receiver<TermEvent>, want: Option<&str>) -> (String, bool) {
+        let mut out = Vec::new();
+        while let Ok(ev) = rx.recv_timeout(Duration::from_secs(10)) {
+            match ev {
+                TermEvent::Data { data } => out.extend(B64.decode(data).unwrap()),
+                TermEvent::Exit { .. } => return (String::from_utf8_lossy(&out).into_owned(), true),
+            }
+            if want.is_some_and(|w| String::from_utf8_lossy(&out).contains(w)) {
+                break;
+            }
+        }
+        (String::from_utf8_lossy(&out).into_owned(), false)
+    }
+
+    #[test]
+    fn a_shell_that_exited_opens_again_under_its_id() {
+        let terms = TerminalManager::default();
+        let cwd = std::env::temp_dir();
+        let cwd = cwd.to_str().unwrap();
+        let (s, rx) = sink();
+        terms.open("t", cwd, Some("/bin/sh"), 80, 24, s).unwrap();
+        terms.write("t", "exit\n").unwrap();
+        assert!(read_until(&rx, None).1, "the shell should exit");
+
+        let (s, rx) = sink();
+        terms.open("t", cwd, Some("/bin/sh"), 80, 24, s).unwrap();
+        terms.write("t", "echo again-$((40+2))\n").unwrap();
+        let (out, exited) = read_until(&rx, Some("again-42"));
+        assert!(!exited && out.contains("again-42"), "{out}");
+        terms.close("t");
+    }
+}

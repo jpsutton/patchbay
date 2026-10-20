@@ -66,31 +66,61 @@ export function TerminalPane({
     }
     const termId = authMethod ? `auth-${id}` : `term-${id}`;
     let closed = false;
-    api
-      .termOpen(
-        termId,
-        cwd,
-        term.cols || 80,
-        term.rows || 24,
-        (e) => {
-          if (e.type === "data") term.write(b64ToBytes(e.data));
-          else {
-            term.write(`\r\n\x1b[2m[process exited${e.code != null ? ` with code ${e.code}` : ""}]\x1b[0m\r\n`);
-            if (!closed) onExitRef.current?.(e.code);
-          }
-        },
-        id,
-        authMethod,
-      )
-      .catch((err) => {
-        term.write(`\x1b[31m${String(err)}\x1b[0m\r\n`);
-        if (authMethod && !closed) onExitRef.current?.(null);
-      });
+    // Bumped per spawn, so a replaced shell's late events are ignored.
+    let gen = 0;
+    // A user shell that has exited waits for Enter to start a new one, and input waits until
+    // the new one is open.
+    let shell: "starting" | "open" | "exited" = "starting";
+    const start = () => {
+      const mine = ++gen;
+      shell = "starting";
+      api
+        .termOpen(
+          termId,
+          cwd,
+          term.cols || 80,
+          term.rows || 24,
+          (e) => {
+            if (closed || mine !== gen) return;
+            if (e.type === "data") term.write(b64ToBytes(e.data));
+            else {
+              const how = e.code != null ? ` with code ${e.code}` : "";
+              if (authMethod) {
+                term.write(`\r\n\x1b[2m[process exited${how}]\x1b[0m\r\n`);
+                onExitRef.current?.(e.code);
+              } else {
+                term.write(`\r\n\x1b[2m[process exited${how}; press Enter for a new shell]\x1b[0m\r\n`);
+                shell = "exited";
+              }
+            }
+          },
+          id,
+          authMethod,
+        )
+        .then(() => {
+          if (mine !== gen || shell !== "starting") return;
+          shell = "open";
+          // The window may have been resized while it started.
+          if (!closed) api.termResize(termId, term.cols, term.rows).catch(() => {});
+        })
+        .catch((err) => {
+          if (closed || mine !== gen) return;
+          term.write(`\x1b[31m${String(err)}\x1b[0m\r\n`);
+          if (authMethod) onExitRef.current?.(null);
+          else shell = "exited";
+        });
+    };
+    start();
     const onData = term.onData((d) => {
-      if (!closed) api.termWrite(termId, d).catch(() => {});
+      if (closed) return;
+      if (shell === "exited") {
+        if (d === "\r") start();
+        return;
+      }
+      if (shell === "open") api.termWrite(termId, d).catch(() => {});
     });
     const onResize = term.onResize(({ cols, rows }) => {
-      if (!closed) api.termResize(termId, cols, rows).catch(() => {});
+      if (!closed && shell === "open") api.termResize(termId, cols, rows).catch(() => {});
     });
     const ro = new ResizeObserver(() => {
       try {
