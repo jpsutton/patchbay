@@ -1,8 +1,11 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { api } from "../lib/ipc";
+import { ContextMenu, type ItemAction } from "../components/ItemMenu";
+import { copyText, pasteText } from "../lib/clipboard";
+import { api, errorText } from "../lib/ipc";
+import { isMod } from "../lib/shortcuts";
 import { useStore } from "../lib/store";
 
 function b64ToBytes(b64: string): Uint8Array {
@@ -10,6 +13,19 @@ function b64ToBytes(b64: string): Uint8Array {
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
+}
+
+/** Copy the terminal's selection, if any. */
+function copySelection(term: Terminal) {
+  const text = term.getSelection();
+  if (text) copyText(text).catch((e) => useStore.getState().setToast(`Could not copy: ${errorText(e)}`));
+}
+
+/** Paste the clipboard into the terminal, bracketed when the program asked for that. */
+function pasteInto(term: Terminal) {
+  pasteText()
+    .then((text) => text && term.paste(text))
+    .catch((e) => useStore.getState().setToast(`Could not paste: ${errorText(e)}`));
 }
 
 function cssVar(name: string): string {
@@ -35,6 +51,8 @@ export function TerminalPane({
 }) {
   const host = useRef<HTMLDivElement>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const termRef = useRef<Terminal | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; actions: ItemAction[] } | null>(null);
   const onExitRef = useRef(onExit);
   useEffect(() => {
     onExitRef.current = onExit;
@@ -54,6 +72,22 @@ export function TerminalPane({
         cursor: cssVar("--color-accent"),
         selectionBackground: cssVar("--color-border"),
       },
+    });
+    termRef.current = term;
+    // Ctrl+C is the shell's interrupt, so copy and paste are Ctrl+Shift+C and Ctrl+Shift+V, as in
+    // other terminals (⌘C and ⌘V on macOS reach the browser's own copy and paste). The keys stop
+    // here: the shell doesn't see them, and neither does the app's Ctrl+Shift+C (copy last reply).
+    term.attachCustomKeyEventHandler((e) => {
+      if (!isMod(e) || !e.shiftKey || e.altKey) return true;
+      const k = e.key.toLowerCase();
+      if (k !== "c" && k !== "v") return true;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.type === "keydown") {
+        if (k === "c") copySelection(term);
+        else pasteInto(term);
+      }
+      return false;
     });
     const fit = new FitAddon();
     fitRef.current = fit;
@@ -137,6 +171,7 @@ export function TerminalPane({
       onResize.dispose();
       api.termClose(termId).catch(() => {});
       term.dispose();
+      termRef.current = null;
       fitRef.current = null;
     };
   }, [id, cwd, authMethod]);
@@ -152,5 +187,24 @@ export function TerminalPane({
       });
   }, [visible]);
 
-  return <div ref={host} className="h-full w-full overflow-hidden bg-panel" />;
+  const openMenu = (e: ReactMouseEvent) => {
+    const term = termRef.current;
+    if (!term) return;
+    e.preventDefault();
+    const done = (f: (t: Terminal) => void) => () => {
+      f(term);
+      term.focus();
+    };
+    const actions: ItemAction[] = [];
+    if (term.hasSelection()) actions.push({ label: "Copy", onSelect: done(copySelection) });
+    actions.push({ label: "Paste", onSelect: done(pasteInto) });
+    setMenu({ x: e.clientX, y: e.clientY, actions });
+  };
+
+  return (
+    <>
+      <div ref={host} className="h-full w-full overflow-hidden bg-panel" onContextMenu={openMenu} />
+      {menu && <ContextMenu x={menu.x} y={menu.y} title="Terminal" actions={menu.actions} onClose={() => setMenu(null)} />}
+    </>
+  );
 }
