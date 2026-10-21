@@ -339,6 +339,8 @@ interface Store {
   clearCodeRestore: (id: string) => void;
   setCodeUsage: (id: string, usage: UsageView) => void;
   applyCodeEvent: (id: string, e: CodeEvent) => void;
+  /** Applies events in order with one store update, so a replay doesn't re-render per event. */
+  applyCodeEvents: (id: string, events: CodeEvent[]) => void;
   patchChatStream: (convId: string, patch: Partial<ChatStream> | ((s: ChatStream) => Partial<ChatStream>)) => void;
   /** This node's mesh state (null until loaded). */
   mesh: MeshStatus | null;
@@ -480,6 +482,151 @@ function reduceUpdate(s: CodeState, u: AcpUpdate): CodeState {
   }
 }
 
+/** One Code event applied to a session's state; notifications and saves happen here too. */
+function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "title" }>): CodeState {
+  let next: CodeState = s;
+  switch (e.type) {
+    case "status":
+      next = {
+        ...s,
+        status: e.state,
+        busy: e.state === "exited" ? false : s.busy,
+        permissions: e.state === "exited" ? [] : s.permissions,
+        auth: e.state === "exited" ? null : s.auth,
+        // The agent's queue goes with it; this window gets back what it wrote.
+        queued: e.state === "exited" ? [] : s.queued,
+        restore: e.state === "exited" ? handBack(s.restore, s.queued, useStore.getState().mesh?.nodeId) : s.restore,
+        // Commands an agent backgrounded end with it.
+        toolCalls: e.state === "exited" ? endBackground(s.toolCalls) : s.toolCalls,
+      };
+      break;
+    case "sessionReady": {
+      // A replay rebuilt the transcript: drop the cached copy. No replay but resumed: the cache
+      // is the transcript. A fresh session keeps the cache as earlier, out-of-context history.
+      let { entries, toolCalls, history, earlier } = s;
+      if (history && entries.length > 0) history = null;
+      else if (history && e.loaded) {
+        entries = history.entries;
+        toolCalls = { ...history.toolCalls, ...toolCalls };
+        history = null;
+      } else if (history) {
+        // Kept as earlier turns, so the next save doesn't drop them.
+        earlier = {
+          entries: [...(earlier?.entries ?? []), ...history.entries],
+          toolCalls: { ...earlier?.toolCalls, ...history.toolCalls },
+        };
+        history = null;
+      }
+      next = {
+        ...s,
+        entries,
+        toolCalls,
+        history,
+        earlier,
+        models: e.models ?? null,
+        modes: e.modes ?? null,
+        capabilities: e.capabilities ?? null,
+        configOptions: e.configOptions ?? [],
+        extensions: e.extensions ?? { statusLine: false, rewind: false },
+        approvalGaps: e.approvalGaps ?? [],
+        auth: null,
+      };
+      break;
+    }
+    case "authRequired":
+      next = { ...s, auth: { message: e.message, methods: e.methods } };
+      notifyCode(id, "needs you to sign in");
+      break;
+    case "authResolved":
+      next = { ...s, auth: null };
+      break;
+    case "config":
+      // Options-based agents resend their full config; legacy model/mode lists stay as they are.
+      next = {
+        ...s,
+        models: e.models ?? s.models,
+        modes: e.modes ?? s.modes,
+        configOptions: e.configOptions ?? [],
+      };
+      break;
+    case "autoApproved":
+      next = { ...s, autoApproved: { ...s.autoApproved, [e.toolCallId]: e.description } };
+      break;
+    case "notice":
+      next = { ...s, entries: [...s.entries, { kind: "info", text: e.message }] };
+      break;
+    case "update":
+      next = reduceUpdate(s, e.update);
+      break;
+    case "permission":
+      next = { ...s, permissions: [...s.permissions, { requestId: e.requestId, request: e.request }] };
+      notifyCode(id, "needs your approval");
+      break;
+    case "permissionResolved":
+      next = { ...s, permissions: s.permissions.filter((p) => p.requestId !== e.requestId) };
+      break;
+    case "promptDone":
+      next = {
+        ...s,
+        busy: false,
+        entries:
+          e.stopReason === "cancelled" ? [...s.entries, { kind: "info", text: "Cancelled" }] : s.entries,
+      };
+      saveTranscript(id, next);
+      {
+        const calls = [...Object.values(next.history?.toolCalls ?? {}), ...Object.values(next.toolCalls)];
+        queueMicrotask(() => recordActivity(id, activityOf(calls)));
+      }
+      if (e.stopReason !== "cancelled") notifyCode(id, "finished");
+      break;
+    case "error":
+      next = { ...s, entries: [...s.entries, { kind: "error", text: e.message }] };
+      break;
+    case "usage":
+      next = { ...s, usage: e.usage };
+      break;
+    case "userPrompt": {
+      const attachments = e.attachments?.length ? e.attachments : undefined;
+      if (!e.promptId) {
+        // An older host. The window that sent it already shows it, unless this is a catch-up.
+        if (e.origin === useStore.getState().mesh?.nodeId && !e.replay) return s;
+        next = { ...s, busy: true, entries: [...s.entries, { kind: "user", text: e.text, attachments }] };
+        break;
+      }
+      // Keyed by prompt id: the sending window may already show it, and a catch-up repeats it.
+      const pid = e.promptId;
+      const isIt = (x: Entry) => x.kind === "user" && x.promptId === pid;
+      const shown = s.entries.some(isIt);
+      const queued = s.queued.filter((q) => q.promptId !== pid);
+      if (e.delivery === "queued") {
+        next = {
+          ...s,
+          entries: shown ? s.entries.filter((x) => !isIt(x)) : s.entries,
+          queued: [...queued, { promptId: pid, text: e.text, attachments, origin: e.origin, replayed: e.replay }],
+        };
+      } else {
+        next = {
+          ...s,
+          busy: e.delivery === "steered" ? s.busy : true,
+          entries: shown ? s.entries : [...s.entries, { kind: "user", text: e.text, attachments, promptId: pid }],
+          queued,
+        };
+      }
+      break;
+    }
+    case "unqueued": {
+      const dropped = s.queued.filter((q) => e.promptIds.includes(q.promptId));
+      next = {
+        ...s,
+        queued: s.queued.filter((q) => !e.promptIds.includes(q.promptId)),
+        restore: e.restore ? handBack(s.restore, dropped, useStore.getState().mesh?.nodeId) : s.restore,
+      };
+      break;
+    }
+  }
+  return next;
+}
+
 const SIDEBAR_KEY = "patchbay.sidebarCollapsed";
 
 function loadSidebarCollapsed(): boolean {
@@ -514,6 +661,7 @@ export const useStore = create<Store>((set, get) => ({
     get().restartStaleAgents();
   },
   startAgent: async (id) => {
+    flushCodeEvents(id);
     const rev = get().agentConfigRev;
     const catalogRev = get().catalogRev;
     const prev = get().code[id];
@@ -615,11 +763,13 @@ export const useStore = create<Store>((set, get) => ({
         },
       }),
     ),
-  truncateCode: (id, entryIndex) =>
+  truncateCode: (id, entryIndex) => {
+    flushCodeEvents(id);
     set((st) => {
       const s = st.code[id] ?? emptyCode();
       return { code: { ...st.code, [id]: { ...s, entries: s.entries.slice(0, entryIndex), plan: null } } };
-    }),
+    });
+  },
 
   setMode: (mode) => set({ mode }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
@@ -673,17 +823,24 @@ export const useStore = create<Store>((set, get) => ({
   },
   selectCodeSession: (id) => set({ activeCodeSessionId: id }),
 
-  resetCode: (id) => set((st) => ({ code: { ...st.code, [id]: emptyCode() } })),
-  pushCodeEntry: (id, e) =>
+  resetCode: (id) => {
+    flushCodeEvents(id);
+    set((st) => ({ code: { ...st.code, [id]: emptyCode() } }));
+  },
+  pushCodeEntry: (id, e) => {
+    flushCodeEvents(id);
     set((st) => {
       const s = st.code[id] ?? emptyCode();
       return { code: { ...st.code, [id]: { ...s, entries: [...s.entries, e] } } };
-    }),
-  setCodeBusy: (id, busy) =>
+    });
+  },
+  setCodeBusy: (id, busy) => {
+    flushCodeEvents(id);
     set((st) => {
       const s = st.code[id] ?? emptyCode();
       return { code: { ...st.code, [id]: { ...s, busy } } };
-    }),
+    });
+  },
   clearCodeRestore: (id) =>
     set((st) => {
       const s = st.code[id];
@@ -696,156 +853,26 @@ export const useStore = create<Store>((set, get) => ({
       return { code: { ...st.code, [id]: { ...s, usage } } };
     }),
 
-  applyCodeEvent: (id, e) => {
-    if (e.type === "title") {
-      set((st) => ({
-        codeSessions: st.codeSessions.map((x) => (x.id === id ? { ...x, title: e.title, titleManual: false } : x)),
-      }));
-      return;
+  applyCodeEvent: (id, e) => get().applyCodeEvents(id, [e]),
+  applyCodeEvents: (id, events) => {
+    flushCodeEvents(id);
+    const start = get().code[id];
+    let s = start ?? emptyCode();
+    let title: string | null = null;
+    let restart = false;
+    for (const e of events) {
+      if (e.type === "title") title = e.title;
+      else s = stepCodeEvent(id, s, e);
+      if (e.type === "promptDone" || e.type === "permissionResolved") restart = true;
     }
-    const s = get().code[id] ?? emptyCode();
-    let next: CodeState = s;
-    switch (e.type) {
-      case "status":
-        next = {
-          ...s,
-          status: e.state,
-          busy: e.state === "exited" ? false : s.busy,
-          permissions: e.state === "exited" ? [] : s.permissions,
-          auth: e.state === "exited" ? null : s.auth,
-          // The agent's queue goes with it; this window gets back what it wrote.
-          queued: e.state === "exited" ? [] : s.queued,
-          restore: e.state === "exited" ? handBack(s.restore, s.queued, get().mesh?.nodeId) : s.restore,
-          // Commands an agent backgrounded end with it.
-          toolCalls: e.state === "exited" ? endBackground(s.toolCalls) : s.toolCalls,
-        };
-        break;
-      case "sessionReady": {
-        // A replay rebuilt the transcript: drop the cached copy. No replay but resumed: the cache
-        // is the transcript. A fresh session keeps the cache as earlier, out-of-context history.
-        let { entries, toolCalls, history, earlier } = s;
-        if (history && entries.length > 0) history = null;
-        else if (history && e.loaded) {
-          entries = history.entries;
-          toolCalls = { ...history.toolCalls, ...toolCalls };
-          history = null;
-        } else if (history) {
-          // Kept as earlier turns, so the next save doesn't drop them.
-          earlier = {
-            entries: [...(earlier?.entries ?? []), ...history.entries],
-            toolCalls: { ...earlier?.toolCalls, ...history.toolCalls },
-          };
-          history = null;
-        }
-        next = {
-          ...s,
-          entries,
-          toolCalls,
-          history,
-          earlier,
-          models: e.models ?? null,
-          modes: e.modes ?? null,
-          capabilities: e.capabilities ?? null,
-          configOptions: e.configOptions ?? [],
-          extensions: e.extensions ?? { statusLine: false, rewind: false },
-          approvalGaps: e.approvalGaps ?? [],
-          auth: null,
-        };
-        break;
-      }
-      case "authRequired":
-        next = { ...s, auth: { message: e.message, methods: e.methods } };
-        notifyCode(id, "needs you to sign in");
-        break;
-      case "authResolved":
-        next = { ...s, auth: null };
-        break;
-      case "config":
-        // Options-based agents resend their full config; legacy model/mode lists stay as they are.
-        next = {
-          ...s,
-          models: e.models ?? s.models,
-          modes: e.modes ?? s.modes,
-          configOptions: e.configOptions ?? [],
-        };
-        break;
-      case "autoApproved":
-        next = { ...s, autoApproved: { ...s.autoApproved, [e.toolCallId]: e.description } };
-        break;
-      case "notice":
-        next = { ...s, entries: [...s.entries, { kind: "info", text: e.message }] };
-        break;
-      case "update":
-        next = reduceUpdate(s, e.update);
-        break;
-      case "permission":
-        next = { ...s, permissions: [...s.permissions, { requestId: e.requestId, request: e.request }] };
-        notifyCode(id, "needs your approval");
-        break;
-      case "permissionResolved":
-        next = { ...s, permissions: s.permissions.filter((p) => p.requestId !== e.requestId) };
-        break;
-      case "promptDone":
-        next = {
-          ...s,
-          busy: false,
-          entries:
-            e.stopReason === "cancelled" ? [...s.entries, { kind: "info", text: "Cancelled" }] : s.entries,
-        };
-        saveTranscript(id, next);
-        {
-          const calls = [...Object.values(next.history?.toolCalls ?? {}), ...Object.values(next.toolCalls)];
-          queueMicrotask(() => recordActivity(id, activityOf(calls)));
-        }
-        if (e.stopReason !== "cancelled") notifyCode(id, "finished");
-        break;
-      case "error":
-        next = { ...s, entries: [...s.entries, { kind: "error", text: e.message }] };
-        break;
-      case "usage":
-        next = { ...s, usage: e.usage };
-        break;
-      case "userPrompt": {
-        const attachments = e.attachments?.length ? e.attachments : undefined;
-        if (!e.promptId) {
-          // An older host. The window that sent it already shows it, unless this is a catch-up.
-          if (e.origin === get().mesh?.nodeId && !e.replay) return;
-          next = { ...s, busy: true, entries: [...s.entries, { kind: "user", text: e.text, attachments }] };
-          break;
-        }
-        // Keyed by prompt id: the sending window may already show it, and a catch-up repeats it.
-        const pid = e.promptId;
-        const isIt = (x: Entry) => x.kind === "user" && x.promptId === pid;
-        const shown = s.entries.some(isIt);
-        const queued = s.queued.filter((q) => q.promptId !== pid);
-        if (e.delivery === "queued") {
-          next = {
-            ...s,
-            entries: shown ? s.entries.filter((x) => !isIt(x)) : s.entries,
-            queued: [...queued, { promptId: pid, text: e.text, attachments, origin: e.origin, replayed: e.replay }],
-          };
-        } else {
-          next = {
-            ...s,
-            busy: e.delivery === "steered" ? s.busy : true,
-            entries: shown ? s.entries : [...s.entries, { kind: "user", text: e.text, attachments, promptId: pid }],
-            queued,
-          };
-        }
-        break;
-      }
-      case "unqueued": {
-        const dropped = s.queued.filter((q) => e.promptIds.includes(q.promptId));
-        next = {
-          ...s,
-          queued: s.queued.filter((q) => !e.promptIds.includes(q.promptId)),
-          restore: e.restore ? handBack(s.restore, dropped, get().mesh?.nodeId) : s.restore,
-        };
-        break;
-      }
-    }
-    set((st) => ({ code: { ...st.code, [id]: next } }));
-    if (e.type === "promptDone" || e.type === "permissionResolved") get().restartStaleAgents();
+    // One store update for the whole batch: each one re-renders the open transcript.
+    set((st) => ({
+      ...(s !== start ? { code: { ...st.code, [id]: s } } : {}),
+      ...(title !== null
+        ? { codeSessions: st.codeSessions.map((x) => (x.id === id ? { ...x, title: title!, titleManual: false } : x)) }
+        : {}),
+    }));
+    if (restart) get().restartStaleAgents();
   },
 
   patchChatStream: (convId, patch) =>
@@ -910,15 +937,14 @@ export const useStore = create<Store>((set, get) => ({
     }
   },
   attachAgent: async (id) => {
+    flushCodeEvents(id);
     // Live events that arrive while the catch-up is in flight wait, so none is lost or doubled.
     attaching.set(id, []);
     const finish = (point?: EventPoint | null) => {
       const held = attaching.get(id) ?? [];
       attaching.delete(id);
-      for (const { e, pt } of held) {
-        if (point && pt && pt.s === point.s && pt.n <= point.n) continue;
-        get().applyCodeEvent(id, e);
-      }
+      const fresh = held.filter(({ pt }) => !(point && pt && pt.s === point.s && pt.n <= point.n));
+      if (fresh.length) get().applyCodeEvents(id, fresh.map(({ e }) => e));
     };
     // Both go to the gateway: ask at once rather than one round trip after the other.
     const attached = api.codeAttach(id);
@@ -947,7 +973,7 @@ export const useStore = create<Store>((set, get) => ({
     set((st) => ({
       code: { ...st.code, [id]: { ...emptyCode(), configRev: rev, catalogRev, history, earlier, status: "ready", busy: info.busy } },
     }));
-    for (const e of info.events) get().applyCodeEvent(id, e);
+    get().applyCodeEvents(id, info.events);
     // A replayed "ready" counts as loaded, so the cached transcript becomes the session's.
     const cur = get().code[id];
     if (cur?.history && cur.entries.length === 0) {
@@ -962,11 +988,47 @@ export const useStore = create<Store>((set, get) => ({
 /** Sessions mid-catch-up, with the live events held back meanwhile. */
 const attaching = new Map<string, { e: CodeEvent; pt?: EventPoint }[]>();
 
-/** A live Code event from the backend: applied now, or after the catch-up in progress. */
+/** Live events not applied yet, per session: they go in together on the next flush. */
+const pendingEvents = new Map<string, CodeEvent[]>();
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+/**
+ * How long live events gather before they are applied. An agent replaying a long session sends
+ * thousands of events, each in its own task; one store update (and render) per event made opening
+ * such a session take minutes.
+ */
+const EVENT_BATCH_MS = 16;
+
+/** A live Code event from the backend: applied shortly, or after the catch-up in progress. */
 export function codeEventArrived(env: CodeEnvelope) {
-  const held = attaching.get(env.codeSessionId);
-  if (held) held.push({ e: env.event, pt: env._pt });
-  else useStore.getState().applyCodeEvent(env.codeSessionId, env.event);
+  const id = env.codeSessionId;
+  const held = attaching.get(id);
+  if (held) {
+    held.push({ e: env.event, pt: env._pt });
+    return;
+  }
+  const queue = pendingEvents.get(id);
+  if (queue) queue.push(env.event);
+  else pendingEvents.set(id, [env.event]);
+  // A hidden window may run timers late or not at all, and its notifications must not wait.
+  if (document.hidden) flushCodeEvents(id);
+  else flushTimer ??= setTimeout(() => flushCodeEvents(), EVENT_BATCH_MS);
+}
+
+/**
+ * Applies the live events still waiting, for session `id` or for all. Anything that changes a
+ * session's state directly flushes first, so it lands after the events that arrived before it.
+ */
+export function flushCodeEvents(id?: string) {
+  const ids = id === undefined ? [...pendingEvents.keys()] : pendingEvents.has(id) ? [id] : [];
+  for (const sid of ids) {
+    const events = pendingEvents.get(sid)!;
+    pendingEvents.delete(sid);
+    useStore.getState().applyCodeEvents(sid, events);
+  }
+  if (pendingEvents.size === 0 && flushTimer !== null) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
 }
 
 function notifyCode(id: string, what: string) {

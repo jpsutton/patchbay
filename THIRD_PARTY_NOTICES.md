@@ -1028,7 +1028,7 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 
 ## JavaScript packages
 
-272 packages, bundled into the frontend. Each is used unmodified.
+274 packages, bundled into the frontend. Each is used unmodified.
 
 | Package | Version | License | Texts |
 |---|---|---|---|
@@ -1052,6 +1052,8 @@ The crates in the sidecar are listed in `vendor/grok-build/THIRD-PARTY-NOTICES`,
 | @shikijs/themes | 4.5.0 | MIT | [f20e2ee5da6c](#text-f20e2ee5da6c) |
 | @shikijs/types | 4.5.0 | MIT | [f20e2ee5da6c](#text-f20e2ee5da6c) |
 | @shikijs/vscode-textmate | 10.0.2 | MIT | [b09ac0e46520](#text-b09ac0e46520) |
+| @tanstack/react-virtual | 3.14.21 | MIT | [277d2a8e4597](#text-277d2a8e4597) |
+| @tanstack/virtual-core | 3.19.6 | MIT | [277d2a8e4597](#text-277d2a8e4597) |
 | @tauri-apps/api | 2.12.4 | Apache-2.0 OR MIT | [4bf96504d6e8](#text-4bf96504d6e8) [89ff9689dcf9](#text-89ff9689dcf9) [7c667b0cf986](#text-7c667b0cf986) |
 | @tauri-apps/plugin-clipboard-manager | 2.5.0 | MIT OR Apache-2.0 | [eb8a6c846304](#text-eb8a6c846304) |
 | @tauri-apps/plugin-dialog | 2.8.3 | MIT OR Apache-2.0 | [eb8a6c846304](#text-eb8a6c846304) |
@@ -27634,6 +27636,34 @@ Used by: @shikijs/vscode-textmate@10.0.2
 The MIT License (MIT)
 
 Copyright (c) Microsoft Corporation
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### <a id="text-277d2a8e4597"></a>277d2a8e4597
+
+Used by: @tanstack/react-virtual@3.14.21, @tanstack/virtual-core@3.19.6
+
+```text
+MIT License
+
+Copyright (c) 2021-present Tanner Linsley
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

@@ -98,8 +98,9 @@ struct State {
     /// Remote members (phones) connected to this node as their gateway.
     remotes: HashMap<String, RemoteSess>,
     tickets: HashMap<[u8; TICKET_ID_LEN], Ticket>,
-    /// Recent live events per topic, for remote members resuming; and when each was last touched.
-    rings: HashMap<String, (Ring, Instant)>,
+    /// Recent live events per topic, for remote members resuming; when each was last touched; and
+    /// the member it last came from (none when this node originates it).
+    rings: HashMap<String, (Ring, Instant, Option<String>)>,
     /// Points for the live events this node originates.
     numbering: Numbering,
     /// What the session list shows per Code session, from the events seen here.
@@ -487,7 +488,7 @@ impl Mesh {
     /// following its topic. Returns the payload as sent: with its point, when it has a topic.
     pub fn broadcast_event(&self, name: &str, mut payload: Value) -> Value {
         self.0.st.lock().unwrap().numbering.stamp(name, &mut payload);
-        self.0.fanout(name, &payload);
+        self.0.fanout(None, name, &payload);
         self.0.broadcast(Msg::Event { name: name.to_owned(), payload: payload.clone() });
         payload
     }
@@ -573,7 +574,7 @@ impl Mesh {
         });
         self.0.st.lock().unwrap().numbering.stamp(rmt::EV_CHAT, &mut payload);
         self.0.track_stream(&payload);
-        self.0.fanout(rmt::EV_CHAT, &payload);
+        self.0.fanout(None, rmt::EV_CHAT, &payload);
         self.0.broadcast(Msg::Event { name: rmt::EV_CHAT.into(), payload });
     }
 
@@ -1007,7 +1008,7 @@ impl Inner {
                 let mut st = self.st.lock().unwrap();
                 let now = now_ms();
                 st.tickets.retain(|_, t| t.expires > now);
-                st.rings.retain(|_, (_, touched)| touched.elapsed() < RING_IDLE);
+                st.rings.retain(|_, (_, touched, _)| touched.elapsed() < RING_IDLE);
             }
             if tick % 720 == 1 {
                 let db = self.db.clone();
@@ -1551,6 +1552,11 @@ impl Inner {
             let mine = st.sessions.get(&node).is_some_and(|s| s.id == id);
             if mine {
                 st.sessions.remove(&node);
+                for (ring, _, src) in st.rings.values_mut() {
+                    if src.as_deref() == Some(node.as_str()) {
+                        ring.mark_stale();
+                    }
+                }
                 let now = now_ms();
                 for s in st.streams.values_mut().filter(|s| s.streamer == node && !s.done) {
                     s.lost_at.get_or_insert(now);
@@ -1683,7 +1689,7 @@ impl Inner {
                 if name == "mesh://chat" {
                     self.track_stream(&payload);
                 }
-                self.fanout(&name, &payload);
+                self.fanout(Some(from), &name, &payload);
                 if let Some(h) = self.handler.read().unwrap().clone() {
                     h.event(&name, &payload);
                 }
@@ -2181,7 +2187,7 @@ impl Inner {
                 rs.subs.insert(topic.clone());
             }
             let point: Option<rmt::Point> = serde_json::from_value(r["point"].clone()).ok();
-            let ring = st.rings.get(&topic).map(|(r, _)| r);
+            let ring = st.rings.get(&topic).map(|(r, _, _)| r);
             let last = ring.and_then(Ring::last);
             if let (Some(p), Some(ring)) = (&point, ring)
                 && let Some(events) = ring.since(p)
@@ -2267,13 +2273,14 @@ impl Inner {
 
     /// Record a live event for resuming, update the session list's summary, and pass it to the
     /// phones following its topic.
-    fn fanout(&self, name: &str, payload: &Value) {
+    fn fanout(&self, from: Option<&str>, name: &str, payload: &Value) {
         let Some(topic) = rmt::topic_of(name, payload) else { return };
         let mut st = self.st.lock().unwrap();
         if let Some(pt) = rmt::point_of(payload) {
-            let e = st.rings.entry(topic.clone()).or_insert_with(|| (Ring::default(), Instant::now()));
+            let e = st.rings.entry(topic.clone()).or_insert_with(|| (Ring::default(), Instant::now(), None));
             e.0.push(&pt, name, payload);
             e.1 = Instant::now();
+            e.2 = from.map(str::to_owned);
         }
         let mut live = None;
         if name == rmt::EV_CODE

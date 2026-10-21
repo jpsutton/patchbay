@@ -167,11 +167,11 @@ async function runFakeTurns(csid: string, promptId: string, text: string, mentio
 /** Agent starts per session, so a sign-in from before a restart is dropped as the real one is. */
 const fakeStarts: Record<string, number> = {};
 
-function fakeReady(csid: string) {
+function fakeReady(csid: string, loaded = false) {
   fakeLive.add(csid);
   const grok = (db.code.find((c) => c.id === csid)?.agent ?? "grok") === "grok";
   codeEmit(csid, {
-    type: "sessionReady", acpSessionId: "acp-" + csid, loaded: false,
+    type: "sessionReady", acpSessionId: "acp-" + csid, loaded,
     approvalGaps: grok ? [] : ["This agent edits files in this project without asking, in every mode."],
     capabilities: { loadSession: true, promptCapabilities: { image: false, embeddedContext: true }, mcpCapabilities: { http: true, sse: true } },
     agentInfo: { name: "fake-agent" },
@@ -207,6 +207,63 @@ function send<T>(ch: unknown, msg: T) {
 
 function codeEmit(codeSessionId: string, event: CodeEnvelope["event"]) {
   emit("code://event", { codeSessionId, event } satisfies CodeEnvelope);
+}
+
+/** `?long=<turns>`: a seeded session whose load replays a long transcript with images in it. */
+const longTurns = Number(new URLSearchParams(location.search).get("long") ?? 0);
+let longSessionId: string | null = null;
+
+/** A noisy PNG, so it stays large the way a screenshot does. */
+function noisePng(w: number, h: number, seed: number): string {
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext("2d")!;
+  const img = ctx.createImageData(w, h);
+  let x = seed * 2654435761;
+  for (let i = 0; i < img.data.length; i++) {
+    x = (x * 1103515245 + 12345) >>> 0;
+    img.data[i] = i % 4 === 3 ? 255 : x >>> 24;
+  }
+  ctx.putImageData(img, 0, 0);
+  return c.toDataURL("image/png").split(",")[1];
+}
+
+/** Each event in its own task, the way the real backend's events arrive. */
+const nextTask = () =>
+  new Promise<void>((r) => {
+    const ch = new MessageChannel();
+    ch.port1.onmessage = () => r();
+    ch.port2.postMessage(null);
+  });
+
+/** Replays `longTurns` turns of reads, commands and screenshots, then reports the session loaded. */
+async function fakeLongReplay(csid: string) {
+  const out = (n: number) => Array.from({ length: 60 }, (_, j) => `line ${j} of output ${n}: ${"x".repeat(40)}`).join("\n");
+  const ev = async (event: CodeEnvelope["event"]) => {
+    codeEmit(csid, event);
+    await nextTask();
+  };
+  const t0 = performance.now();
+  for (let t = 0; t < longTurns; t++) {
+    await ev({ type: "update", update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: `Turn ${t}: keep going.` } } });
+    for (const w of "Looking at the code first.".split(/(?<=\s)/)) {
+      await ev({ type: "update", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: w } } });
+    }
+    for (let k = 0; k < 25; k++) {
+      const tid = `long-${t}-${k}`;
+      await ev({ type: "update", update: { sessionUpdate: "tool_call", toolCallId: tid, title: `cat src/file${k}.ts`, kind: "execute", status: "in_progress", rawInput: { command: `cat src/file${k}.ts` } } });
+      const content = k === 24 && t % 2 === 0
+        ? [{ type: "content" as const, content: { type: "image" as const, data: noisePng(480, 320, t * 100 + k), mimeType: "image/png" } }]
+        : [{ type: "content" as const, content: { type: "text" as const, text: out(t * 100 + k) } }];
+      await ev({ type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: tid, status: "completed", content } });
+    }
+    for (const w of `Done with turn ${t}. Here is **what changed** and \`why\`:\n\n- one\n- two\n\n\`\`\`ts\nconst x = ${t};\n\`\`\`\n`.split(/(?<=\s)/)) {
+      await ev({ type: "update", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: w } } });
+    }
+  }
+  console.info(`[fake] long replay: ${Math.round(performance.now() - t0)} ms`);
+  (window as unknown as { __longReplayMs: number }).__longReplayMs = performance.now() - t0;
 }
 
 async function fakeChat(a: Record<string, unknown>, regenerate?: string) {
@@ -533,6 +590,10 @@ export function install() {
   seed("/home/demo/Projects/nulamp", "Release to staging", 5000, "pr");
   seed("/home/demo/Projects/omnimark", "Interactive document controls", 3000, "branch", meshDemo ? "n-studio" : ME);
   seed("/home/demo/Work/omnimark", "Session overview", 9000, null, meshDemo ? "n-old" : ME);
+  if (longTurns > 0) {
+    seed("/home/demo/Projects/ips-amp-admin", "Long transcript", 10, "edit");
+    longSessionId = db.code[db.code.length - 1].id;
+  }
   if (meshDemo) {
     meshMember();
     mesh.pending = [{ nodeId: "n-new", name: "travel-pc", code: "482 913" }];
@@ -753,7 +814,8 @@ export function install() {
                 codeEmit(csid, { type: "authRequired", message: `${fakeLabel(agent)} needs you to sign in first.`, methods });
                 return;
               }
-              fakeReady(csid);
+              if (csid === longSessionId) void fakeLongReplay(csid).then(() => fakeReady(csid, true));
+              else fakeReady(csid);
             }, 400);
           }, 10);
           return null;

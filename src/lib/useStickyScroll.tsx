@@ -63,7 +63,7 @@ export function useStickyScroll(deps: DependencyList) {
     });
   };
 
-  return { ref, onScroll, atBottom, atTop, pin, toBottom: pin };
+  return { ref, el, onScroll, atBottom, atTop, pin, toBottom: pin };
 }
 
 export function JumpToBottom({ show, onClick }: { show: boolean; onClick: () => void }) {
