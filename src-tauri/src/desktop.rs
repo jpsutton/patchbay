@@ -2,6 +2,8 @@
 //! window's title bar.
 
 use std::str::FromStr;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -22,12 +24,25 @@ pub fn show_main(app: &AppHandle) {
     }
 }
 
-/// Tray icon left click: hide the main window when it is on screen, otherwise bring it back.
+/// When the main window last lost focus. Some panels take focus on a tray click, so the window
+/// is already unfocused when the click arrives; a blur just before the click still counts.
+static MAIN_BLURRED_AT: Mutex<Option<Instant>> = Mutex::new(None);
+const BLUR_GRACE: Duration = Duration::from_millis(500);
+
+fn main_recently_focused() -> bool {
+    MAIN_BLURRED_AT.lock().ok().and_then(|t| *t).is_some_and(|t| t.elapsed() < BLUR_GRACE)
+}
+
+/// Tray icon left click: hide the main window when it is in front, otherwise bring it forward
+/// (from hidden, minimized or behind other windows).
 pub fn toggle_main(app: &AppHandle) {
     let Some(w) = app.get_webview_window("main") else {
         return;
     };
-    if w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false) {
+    let in_front = w.is_visible().unwrap_or(false)
+        && !w.is_minimized().unwrap_or(false)
+        && (w.is_focused().unwrap_or(false) || main_recently_focused());
+    if in_front {
         let _ = w.hide();
     } else {
         show_main(app);
@@ -353,6 +368,12 @@ pub fn run() {
             // The hidden quick-entry window must not keep the app alive after the main one closes.
             if w.label() == "main" && matches!(ev, tauri::WindowEvent::Destroyed) {
                 w.app_handle().exit(0);
+            }
+            if w.label() == "main"
+                && let tauri::WindowEvent::Focused(focused) = ev
+                && let Ok(mut t) = MAIN_BLURRED_AT.lock()
+            {
+                *t = (!focused).then(Instant::now);
             }
         })
         .invoke_handler(invoke_handler())
