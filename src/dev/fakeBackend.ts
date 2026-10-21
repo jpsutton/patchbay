@@ -667,9 +667,10 @@ export function install() {
         case "delete_model": db.models = db.models.filter((m) => m.id !== a.id); return null;
         case "get_preferences": return JSON.parse(db.settings.preferences ?? "{}");
         case "set_preferences": {
-          const p = a.prefs as { terminalShell?: string; autoCompactPercent?: number | null };
+          const p = a.prefs as { terminalShell?: string; autoCompactPercent?: number | null; usageLimit?: { percent: number } };
           if (p.terminalShell && !p.terminalShell.startsWith("/")) throw `terminal shell ${p.terminalShell} does not exist`;
           if (p.autoCompactPercent != null && (p.autoCompactPercent < 10 || p.autoCompactPercent > 99)) throw "auto-compact threshold must be between 10 and 99%";
+          if (p.usageLimit && (p.usageLimit.percent < 1 || p.usageLimit.percent > 100)) throw "usage limit must be between 1 and 100%";
           db.settings.preferences = JSON.stringify(a.prefs);
           return null;
         }
@@ -989,6 +990,19 @@ export function install() {
         }
         case "code_rewind": await sleep(150); return null;
         case "code_usage": return { totals: { ...fakeUsage }, contextTokens: null, contextWindow: 128000, autoCompactPercent: 85 };
+        case "plan_limits": {
+          // `?plan=none` before any report; `?plan=over` past the limit and on extra usage.
+          const plan = new URLSearchParams(location.search).get("plan");
+          if (plan === "none") return null;
+          const now = Math.floor(Date.now() / 1000);
+          const over = plan === "over";
+          return {
+            fiveHour: { utilization: over ? 1 : 0.82, resetsAt: now + 72 * 60 },
+            sevenDay: { utilization: over ? 0.96 : 0.41, resetsAt: now + 3 * 86400 + 7200 },
+            overageUntil: over ? now + 72 * 60 : null,
+            observedAt: now - 240,
+          };
+        }
         case "code_permission_respond": {
           const r = pending.get(a.requestId as string);
           pending.delete(a.requestId as string);

@@ -94,6 +94,10 @@ pub enum CodeEvent {
     TurnUsage {
         usage: Value,
     },
+    /// The Claude plan's usage windows, from a `usage_update`; the app's usage guard reads it.
+    PlanLimits {
+        limits: super::plan_limits::PlanLimits,
+    },
     /// Cumulative token usage and context fill for the session.
     Usage {
         usage: crate::usage::UsageView,

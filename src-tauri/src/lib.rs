@@ -85,6 +85,9 @@ impl AppState {
             remote_terms: Arc::default(),
             desktop: Arc::default(),
         };
+        if let Some(l) = state.db.get_setting(PLAN_LIMITS_KEY).ok().flatten().and_then(|j| serde_json::from_str(&j).ok()) {
+            state.code.plan.record(l);
+        }
         mesh.set_ui(emit);
         mesh.set_handler(Arc::new(MeshRpc { state: state.clone() }));
         state
@@ -294,6 +297,10 @@ async fn set_preferences(state: &AppState, prefs: prefs::Preferences) -> CmdResu
         && old.title_bar != prefs.title_bar
     {
         d.apply_title_bar(&prefs.title_bar);
+    }
+    // A lower limit applies to turns already running.
+    if old.usage_limit != prefs.usage_limit {
+        enforce_plan_limit(state);
     }
     Ok(())
 }
@@ -620,6 +627,14 @@ fn code_sink(state: &AppState) -> code::acp::Sink {
 
 fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     use code::acp::CodeEvent;
+    if let CodeEvent::PlanLimits { limits } = env.event {
+        let v = serde_json::to_value(&limits).unwrap_or_default();
+        let _ = state.db.set_setting(PLAN_LIMITS_KEY, &v.to_string());
+        state.code.plan.record(limits);
+        (state.emit)(PLAN_LIMITS_EVENT, v);
+        enforce_plan_limit(state);
+        return;
+    }
     track_titles(state, &env);
     {
         let mesh = &state.mesh;
@@ -630,6 +645,7 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
         };
         if turn_over {
             state.code.set_busy(&env.code_session_id, false);
+            state.code.plan.turn_ended(&env.code_session_id);
         }
         if matches!(env.event, CodeEvent::UserPrompt { delivery: code::acp::Delivery::Sent, .. }) {
             state.code.set_busy(&env.code_session_id, true);
@@ -672,6 +688,48 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
         // Stamped with its point, so phones and windows can resume from it.
         let v = mesh.broadcast_event(code::acp::EVENT, serde_json::to_value(&env).unwrap_or_default());
         (state.emit)(code::acp::EVENT, v);
+    }
+}
+
+/// The Claude plan usage Claude Code last reported, saved so the panel and the guard have it
+/// after a restart; its reset times say when it goes stale.
+const PLAN_LIMITS_KEY: &str = "claude.planLimits";
+const PLAN_LIMITS_EVENT: &str = "code://plan-limits";
+
+async fn plan_limits(state: &AppState) -> CmdResult<Option<code::plan_limits::PlanLimits>> {
+    Ok(state.code.plan.latest())
+}
+
+/// Whether the session runs Claude Code on its own sign-in, which may be a Claude plan with
+/// usage limits (not on a Patchbay provider, which bills by the token).
+fn on_claude_plan(state: &AppState, prefs: &prefs::Preferences, id: &str) -> bool {
+    let claude = code::agents::AgentKind::ClaudeCode.id();
+    !prefs.agent_providers.contains_key(claude)
+        && state.db.get_code_session(id).ok().flatten().is_some_and(|s| s.agent == claude)
+}
+
+/// Past the usage limit, cancel every running Claude Code turn on the plan. The agent stops
+/// cleanly, its session stays resumable, and queued prompts go back to their composers.
+fn enforce_plan_limit(state: &AppState) {
+    let prefs = prefs::load(&state.db);
+    let now = code::plan_limits::now();
+    let Some(hit) = state.code.plan.hit(&prefs.usage_limit, now) else {
+        return;
+    };
+    for id in state.code.busy_sessions() {
+        if !on_claude_plan(state, &prefs, &id) || !state.code.plan.start_stopping(&id) {
+            continue;
+        }
+        tracing::info!("usage limit: stopping {id} ({} at {}%)", hit.what, hit.percent);
+        if state.code.send(&id, AgentCmd::Cancel).is_err() {
+            state.code.plan.turn_ended(&id);
+            continue;
+        }
+        let message = format!("Stopped. {}", hit.message(prefs.usage_limit.percent, now));
+        on_code_event(
+            state,
+            code::acp::Envelope { code_session_id: id, event: code::acp::CodeEvent::Notice { message } },
+        );
     }
 }
 
@@ -832,6 +890,12 @@ async fn code_prompt_local(
     prompt_id: Option<String>,
 ) -> anyhow::Result<()> {
     ensure_local_host(state, &id)?;
+    let prefs = prefs::load(&state.db);
+    if on_claude_plan(state, &prefs, &id)
+        && let Some(hit) = state.code.plan.hit(&prefs.usage_limit, code::plan_limits::now())
+    {
+        anyhow::bail!("Not sent. {}", hit.message(prefs.usage_limit.percent, code::plan_limits::now()));
+    }
     let mut blocks = Vec::new();
     // @-mentioned project files go as standard ACP resource links; the agent reads them itself.
     for path in mentions {
