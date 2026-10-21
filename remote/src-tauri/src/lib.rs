@@ -669,8 +669,13 @@ async fn code_prompt(
     text: String,
     attachment_ids: Vec<String>,
     mentions: Option<Vec<String>>,
+    prompt_id: Option<String>,
 ) -> CmdResult<()> {
-    let p = json!({ "id": id, "text": text, "attachmentIds": attachment_ids, "mentions": mentions.unwrap_or_default() });
+    // The host echoes the prompt back under this id; the view already shows it under the same one.
+    let p = json!({
+        "id": id, "text": text, "attachmentIds": attachment_ids, "mentions": mentions.unwrap_or_default(),
+        "promptId": prompt_id,
+    });
     r.code("code.prompt", p).await?;
     Ok(())
 }
