@@ -22,6 +22,7 @@ const CODE_METHODS: &[&str] = &[
     "code.stop",
     "code.prompt",
     "code.cancel",
+    "code.unqueue",
     "code.set_model",
     "code.set_config_option",
     "code.authenticate",

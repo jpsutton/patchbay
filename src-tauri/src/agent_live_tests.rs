@@ -167,9 +167,7 @@ fn live(kind: AgentKind) {
         run.manager
             .send(
                 &run.session_id,
-                AgentCmd::Prompt {
-                    blocks: vec![serde_json::json!({ "type": "text", "text": "Reply with exactly the word pong and nothing else. Do not use any tools." })],
-                },
+                AgentCmd::prompt("Reply with exactly the word pong and nothing else. Do not use any tools."),
             )
             .unwrap();
         let stop = run.wait_for("promptDone", 180, |e| match e {

@@ -98,12 +98,23 @@ pub enum CodeEvent {
     Usage {
         usage: crate::usage::UsageView,
     },
-    /// A prompt was sent to the agent (from `origin`, a mesh node), so every viewer shows it.
+    /// A prompt was sent to the agent (from `origin`, a mesh node), so every viewer shows it. One
+    /// sent mid-turn is steered into the running turn or queued behind it; a queued one comes
+    /// again as `Sent` when its turn starts.
     #[serde(rename_all = "camelCase")]
     UserPrompt {
+        prompt_id: String,
         text: String,
         origin: String,
         attachments: Value,
+        delivery: Delivery,
+    },
+    /// Queued prompts that won't be sent: the user removed one, or the turn was stopped or
+    /// failed. `restore` asks the window that sent them to put them back in its composer.
+    #[serde(rename_all = "camelCase")]
+    Unqueued {
+        prompt_ids: Vec<String>,
+        restore: bool,
     },
     /// The session was renamed automatically (see `code::titles`).
     Title {
@@ -155,8 +166,50 @@ fn emit(sink: &Sink, code_session_id: &str, event: CodeEvent) {
 pub type PendingPermissions =
     Arc<Mutex<HashMap<String, (String, oneshot::Sender<Option<String>>)>>>;
 
+/// How a prompt reached the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Delivery {
+    /// As a new turn (`session/prompt`).
+    Sent,
+    /// Into the running turn, through the agent's steering extension.
+    Steered,
+    /// Held by Patchbay until the running turn ends: agents without steering cancel, refuse or
+    /// garble a second `session/prompt` mid-turn.
+    Queued,
+}
+
+/// A user prompt: the ACP blocks for the agent, and what the transcript shows for it.
+#[derive(Debug, Clone)]
+pub struct UserMessage {
+    pub id: String,
+    pub blocks: Vec<Value>,
+    pub text: String,
+    pub origin: String,
+    pub attachments: Value,
+}
+
+impl UserMessage {
+    fn event(&self, delivery: Delivery) -> CodeEvent {
+        CodeEvent::UserPrompt {
+            prompt_id: self.id.clone(),
+            text: self.text.clone(),
+            origin: self.origin.clone(),
+            attachments: self.attachments.clone(),
+            delivery,
+        }
+    }
+}
+
 pub enum AgentCmd {
-    Prompt { blocks: Vec<Value> },
+    /// A new turn when the agent is idle. Mid-turn, steered into the running turn when the agent
+    /// can take that, else queued until the turn ends.
+    Prompt {
+        msg: UserMessage,
+        reply: Option<oneshot::Sender<Result<Delivery>>>,
+    },
+    /// Drop a queued prompt.
+    Unqueue { prompt_id: String },
     Cancel,
     SetModel { model_id: String, reply: oneshot::Sender<Result<()>> },
     SetMode { mode_id: String, reply: oneshot::Sender<Result<()>> },
@@ -182,6 +235,168 @@ pub enum AgentCmd {
         reply: oneshot::Sender<Result<crate::terminal::Program>>,
     },
     Shutdown,
+}
+
+#[cfg(test)]
+impl AgentCmd {
+    /// A text prompt nobody waits on.
+    pub fn prompt(text: &str) -> Self {
+        AgentCmd::Prompt {
+            msg: UserMessage {
+                id: crate::db::new_id(),
+                blocks: vec![json!({ "type": "text", "text": text })],
+                text: text.to_owned(),
+                origin: String::new(),
+                attachments: json!([]),
+            },
+            reply: None,
+        }
+    }
+}
+
+/// How an agent takes a message mid-turn.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Steer {
+    /// ACP's `_session/steering` extension, advertised as `initialize` `_meta.steering`.
+    Acp,
+    /// Grok Build's `x.ai/interject`.
+    Interject,
+}
+
+impl Steer {
+    /// Only what the agent advertises counts, never a call that seems to work: some agents
+    /// answer any `_` method with `null`.
+    fn of(init: &Value, interject: bool) -> Option<Self> {
+        if init["_meta"]["steering"]["supported"] == true {
+            Some(Steer::Acp)
+        } else if interject {
+            Some(Steer::Interject)
+        } else {
+            None
+        }
+    }
+
+    /// The extension method and params that steer `blocks` in, or `None` when they have to wait
+    /// for the next turn.
+    fn request(self, session_id: &str, blocks: &[Value]) -> Option<(&'static str, Value)> {
+        match self {
+            // `promptRequired`: if the turn just ended, Claude Code hands the message back instead
+            // of starting a turn that no `session/prompt` reports the end of.
+            Steer::Acp => Some((
+                "session/steering",
+                json!({
+                    "sessionId": session_id,
+                    "prompt": blocks,
+                    "_meta": { "steering": { "idleBehavior": "promptRequired" } },
+                }),
+            )),
+            // Grok takes one text and images: files and @-mentions wait for the next turn.
+            Steer::Interject => {
+                if blocks.iter().any(|b| !matches!(b["type"].as_str(), Some("text" | "image"))) {
+                    return None;
+                }
+                let text = blocks.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n\n");
+                let content: Vec<Value> = std::iter::once(json!({ "type": "text", "text": text }))
+                    .chain(blocks.iter().filter(|b| b["type"] == "image").cloned())
+                    .collect();
+                Some(("x.ai/interject", json!({ "sessionId": session_id, "text": text, "content": content })))
+            }
+        }
+    }
+}
+
+enum Steered {
+    Yes,
+    /// The turn had already ended; send it as a new one.
+    HandedBack,
+    No,
+}
+
+fn steer_outcome(resp: &Value) -> Steered {
+    // `_session/steering` answers `outcome`; Grok's `x.ai/interject` answers `status`. Codex
+    // starts a turn itself when the running one just ended (`startedNewTurn`).
+    match resp["outcome"].as_str().or(resp["status"].as_str()) {
+        Some("injected" | "startedNewTurn" | "queued") => Steered::Yes,
+        Some("promptRequired") => Steered::HandedBack,
+        _ => Steered::No,
+    }
+}
+
+fn answer(reply: Option<oneshot::Sender<Result<Delivery>>>, r: Result<Delivery>) {
+    if let Some(reply) = reply {
+        let _ = reply.send(r);
+    }
+}
+
+/// What a turn needs to run beside the command loop.
+#[derive(Clone)]
+struct TurnCtx {
+    conn: Rc<acp::ClientSideConnection>,
+    sink: Sink,
+    csid: String,
+    session_id: String,
+    init_v: Rc<Value>,
+    auth_methods: Vec<AuthChoice>,
+    auth_lost: Rc<std::cell::Cell<bool>>,
+    login_hint: &'static str,
+    /// Told when the turn ends, and whether queued prompts may follow (not after a stop or an
+    /// error).
+    done: mpsc::UnboundedSender<bool>,
+}
+
+/// Start a turn for `msg` with `session/prompt`.
+fn start_turn(ctx: &TurnCtx, msg: UserMessage) -> Result<Delivery> {
+    let req: acp::PromptRequest = from_json(json!({ "sessionId": ctx.session_id, "prompt": msg.blocks }))?;
+    emit(&ctx.sink, &ctx.csid, msg.event(Delivery::Sent));
+    let ctx = ctx.clone();
+    tokio::task::spawn_local(async move {
+        let (sink, csid) = (&ctx.sink, ctx.csid.as_str());
+        let go_on = match ctx.conn.prompt(req).await {
+            Ok(resp) => {
+                let v = serde_json::to_value(&resp).unwrap_or_default();
+                if v["usage"].is_object() {
+                    emit(sink, csid, CodeEvent::TurnUsage { usage: v["usage"].clone() });
+                }
+                let go_on = v["stopReason"] != "cancelled";
+                emit(sink, csid, CodeEvent::PromptDone { stop_reason: v["stopReason"].clone() });
+                go_on
+            }
+            // Signed out mid-session (a logout, an expired token): offer a sign-in when there is
+            // one Patchbay can run, else say how.
+            Err(e) if is_auth_required(&e) => {
+                let message = auth_message(&e, &ctx.init_v, ctx.login_hint, true);
+                if ctx.auth_methods.is_empty() {
+                    emit(sink, csid, CodeEvent::Error { message });
+                } else {
+                    ctx.auth_lost.set(true);
+                    emit(sink, csid, CodeEvent::AuthRequired { message, methods: ctx.auth_methods.clone() });
+                }
+                emit(sink, csid, CodeEvent::PromptDone { stop_reason: json!("error") });
+                false
+            }
+            Err(e) => {
+                emit(sink, csid, CodeEvent::Error { message: e.to_string() });
+                emit(sink, csid, CodeEvent::PromptDone { stop_reason: json!("error") });
+                false
+            }
+        };
+        let _ = ctx.done.send(go_on);
+    });
+    Ok(Delivery::Sent)
+}
+
+fn enqueue(ctx: &TurnCtx, queue: &mut std::collections::VecDeque<UserMessage>, msg: UserMessage) -> Delivery {
+    emit(&ctx.sink, &ctx.csid, msg.event(Delivery::Queued));
+    queue.push_back(msg);
+    Delivery::Queued
+}
+
+fn drop_queue(ctx: &TurnCtx, queue: &mut std::collections::VecDeque<UserMessage>) {
+    if queue.is_empty() {
+        return;
+    }
+    let prompt_ids = queue.drain(..).map(|m| m.id).collect();
+    emit(&ctx.sink, &ctx.csid, CodeEvent::Unqueued { prompt_ids, restore: true });
 }
 
 /// Decides whether a permission request is pre-approved: (merged tool call, options) ->
@@ -538,7 +753,7 @@ async fn run(
         args,
         env,
         env_remove,
-        ext: extensions,
+        ext: mut extensions,
         session_meta,
         initial_model,
         login_hint,
@@ -638,6 +853,8 @@ async fn run(
     let init_commands = init_v["_meta"]["availableCommands"].clone();
     let capabilities = init_v["agentCapabilities"].clone();
     let can_load = capabilities["loadSession"].as_bool().unwrap_or(false);
+    let steer = Steer::of(&init_v, extensions.interject);
+    extensions.steering = steer.is_some();
     let (mcp_servers, mcp_skipped) = mcp(&init_v);
     if !mcp_skipped.is_empty() {
         emit(
@@ -788,59 +1005,89 @@ async fn run(
     let auth_lost: Rc<std::cell::Cell<bool>> = Rc::default();
     let signing_in: Rc<std::cell::Cell<bool>> = Rc::default();
 
+    // One turn at a time: a prompt sent mid-turn is steered in or queued here, never sent as a
+    // second `session/prompt` (agents cancel, refuse or garble those).
+    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<bool>();
+    type SteerReply = (UserMessage, Option<oneshot::Sender<Result<Delivery>>>, Result<Value>);
+    let (steered_tx, mut steered_rx) = mpsc::unbounded_channel::<SteerReply>();
+    let turns = TurnCtx {
+        conn: conn.clone(),
+        sink: sink.clone(),
+        csid: csid.clone(),
+        session_id: session_id.clone(),
+        init_v: init_v.clone(),
+        auth_methods: auth_methods.clone(),
+        auth_lost: auth_lost.clone(),
+        login_hint,
+        done: done_tx,
+    };
+    let mut running = false;
+    let mut queue = std::collections::VecDeque::<UserMessage>::new();
+
     loop {
         tokio::select! {
             status = child.wait() => {
                 return Err(exited(status, &stderr_tail));
             }
+            Some(go_on) = done_rx.recv() => {
+                running = false;
+                if !go_on {
+                    drop_queue(&turns, &mut queue);
+                } else if let Some(next) = queue.pop_front() {
+                    match start_turn(&turns, next) {
+                        Ok(_) => running = true,
+                        Err(e) => emit(&sink, &csid, CodeEvent::Error { message: format!("{e:#}") }),
+                    }
+                }
+            }
+            Some((msg, reply, resp)) = steered_rx.recv() => {
+                let outcome = resp.map(|v| steer_outcome(&v)).unwrap_or_else(|e| {
+                    tracing::warn!("steering failed, queueing the message instead: {e:#}");
+                    Steered::No
+                });
+                // Shown as steered already; a queued or sent event moves it where it went.
+                let r = match outcome {
+                    Steered::Yes => Ok(Delivery::Steered),
+                    _ if running => Ok(enqueue(&turns, &mut queue, msg)),
+                    _ => start_turn(&turns, msg).inspect(|_| running = true),
+                };
+                answer(reply, r);
+            }
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else { break };
                 match cmd {
-                    AgentCmd::Prompt { blocks } => {
-                        let req: acp::PromptRequest =
-                            match from_json(json!({ "sessionId": session_id, "prompt": blocks })) {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    emit(&sink, &csid, CodeEvent::Error { message: format!("{e:#}") });
-                                    continue;
-                                }
-                            };
-                        let conn = conn.clone();
-                        let sink = sink.clone();
-                        let csid = csid.clone();
-                        let (init_v, methods, auth_lost) = (init_v.clone(), auth_methods.clone(), auth_lost.clone());
-                        tokio::task::spawn_local(async move {
-                            match conn.prompt(req).await {
-                                Ok(resp) => {
-                                    let v = serde_json::to_value(&resp).unwrap_or_default();
-                                    if v["usage"].is_object() {
-                                        emit(&sink, &csid, CodeEvent::TurnUsage { usage: v["usage"].clone() });
-                                    }
-                                    emit(&sink, &csid, CodeEvent::PromptDone { stop_reason: v["stopReason"].clone() });
-                                }
-                                // Signed out mid-session (a logout, an expired token): offer a
-                                // sign-in when there is one Patchbay can run, else say how.
-                                Err(e) if is_auth_required(&e) => {
-                                    let message = auth_message(&e, &init_v, login_hint, true);
-                                    if methods.is_empty() {
-                                        emit(&sink, &csid, CodeEvent::Error { message });
-                                    } else {
-                                        auth_lost.set(true);
-                                        emit(&sink, &csid, CodeEvent::AuthRequired { message, methods });
-                                    }
-                                    emit(&sink, &csid, CodeEvent::PromptDone { stop_reason: json!("error") });
-                                }
-                                Err(e) => {
-                                    emit(&sink, &csid, CodeEvent::Error { message: e.to_string() });
-                                    emit(&sink, &csid, CodeEvent::PromptDone { stop_reason: json!("error") });
-                                }
-                            }
-                        });
+                    AgentCmd::Prompt { msg, reply } => {
+                        if !running {
+                            answer(reply, start_turn(&turns, msg).inspect(|_| running = true));
+                        } else if let Some((method, params)) = steer.and_then(|s| s.request(&session_id, &msg.blocks)) {
+                            // Shown at once, ahead of the agent's answer to it. The agent's reply
+                            // comes on `steered_rx`, so the loop goes on meanwhile.
+                            emit(&sink, &csid, msg.event(Delivery::Steered));
+                            let (conn, steered) = (conn.clone(), steered_tx.clone());
+                            tokio::task::spawn_local(async move {
+                                let resp = ext(&conn, method, params).await;
+                                let _ = steered.send((msg, reply, resp));
+                            });
+                        } else {
+                            answer(reply, Ok(enqueue(&turns, &mut queue, msg)));
+                        }
+                    }
+                    AgentCmd::Unqueue { prompt_id } => {
+                        if let Some(i) = queue.iter().position(|m| m.id == prompt_id) {
+                            queue.remove(i);
+                            emit(&sink, &csid, CodeEvent::Unqueued { prompt_ids: vec![prompt_id], restore: false });
+                        }
                     }
                     AgentCmd::Cancel => {
                         cancel_pending(&pending);
+                        drop_queue(&turns, &mut queue);
                         if let Ok(n) = from_json::<acp::CancelNotification>(json!({ "sessionId": session_id })) {
-                            let _ = conn.cancel(n).await;
+                            // A turn's `session/prompt` goes out from its own task. Spawning the
+                            // cancel behind it keeps it from overtaking a prompt that was just sent.
+                            let conn = conn.clone();
+                            tokio::task::spawn_local(async move {
+                                let _ = conn.cancel(n).await;
+                            });
                         }
                     }
                     AgentCmd::SetModel { model_id, reply } => {
@@ -994,7 +1241,8 @@ fn refuse_until_signed_in(cmd: AgentCmd) {
         AgentCmd::TerminalAuth { reply, .. } => {
             let _ = reply.send(Err(anyhow!("a sign-in is already in progress")));
         }
-        AgentCmd::Prompt { .. } | AgentCmd::Cancel | AgentCmd::Shutdown => {}
+        AgentCmd::Prompt { reply, .. } => answer(reply, Err(anyhow!("the agent isn't signed in yet"))),
+        AgentCmd::Unqueue { .. } | AgentCmd::Cancel | AgentCmd::Shutdown => {}
     }
 }
 
@@ -1334,8 +1582,9 @@ async fn open_session(
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentCmd, AuthChoice, CodeEvent, ConfigIds, Envelope, RewindPoint, SessionConfig, SpawnSpec, auth_choices,
-        auth_metas, merge_config, pick_rewind_point, terminal_auth_command,
+        AgentCmd, AuthChoice, CodeEvent, ConfigIds, Delivery, Envelope, RewindPoint, SessionConfig, SpawnSpec, Steer,
+        Steered, UserMessage, auth_choices, auth_metas, merge_config, pick_rewind_point, steer_outcome,
+        terminal_auth_command,
     };
     use serde_json::json;
     use std::sync::{Arc, Mutex};
@@ -1555,8 +1804,13 @@ mod tests {
     /// next sign-in. To clients that run terminal sign-ins it also offers `tui`, whose command
     /// (this script with `--login`) leaves a `signed-in` file that a new process starts with.
     /// `--no-methods` starts it signed in, with no auth methods.
+    ///
+    /// Turns: a prompt `hold` runs until a `release` steer or a cancel, and `brief` for half a
+    /// second. A second prompt mid-turn is refused. `--steering` advertises `_session/steering`
+    /// (a `refuse` steer fails), and every prompt or steer is echoed as agent text
+    /// (`prompt:<text>`, `steer:<text>`).
     const FAKE_AGENT: &str = r#"
-import json, os, sys
+import json, os, sys, threading
 if "--login" in sys.argv:
     if os.environ.get("FAKE_LOGIN") != "1":
         sys.exit(3)
@@ -1564,14 +1818,30 @@ if "--login" in sys.argv:
     sys.exit(0)
 no_methods = "--no-methods" in sys.argv
 authed = no_methods or os.path.exists("signed-in")
+lock = threading.Lock()
+held = None
 def send(m):
-    sys.stdout.write(json.dumps(m) + "\n"); sys.stdout.flush()
+    with lock:
+        sys.stdout.write(json.dumps(m) + "\n"); sys.stdout.flush()
 def err(i, msg, data=None):
     e = {"code": -32000, "message": msg}
     if data: e["data"] = {"message": data}
     send({"jsonrpc": "2.0", "id": i, "error": e})
+def say(text):
+    send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1",
+          "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}}})
+def finish(reason="end_turn"):
+    global held
+    i, held = held, None
+    if i is not None:
+        send({"jsonrpc": "2.0", "id": i, "result": {"stopReason": reason}})
+def text_of(p):
+    return " ".join(b.get("text", "") for b in p.get("prompt") or [] if b.get("type") == "text")
 for line in sys.stdin:
     m = json.loads(line)
+    if m.get("method") == "session/cancel":
+        finish("cancelled")
+        continue
     if "id" not in m or "method" not in m:
         continue
     i, meth, p = m["id"], m["method"], m.get("params") or {}
@@ -1581,9 +1851,10 @@ for line in sys.stdin:
         if ((p.get("clientCapabilities") or {}).get("auth") or {}).get("terminal"):
             methods.append({"id": "tui", "name": "Terminal", "type": "terminal", "args": ["--login"],
                             "env": {"FAKE_LOGIN": "1"}})
+        meta = {"steering": {"supported": True}} if "--steering" in sys.argv else {}
         send({"jsonrpc": "2.0", "id": i, "result": {"protocolVersion": 1, "agentCapabilities": {},
               "agentInfo": {"name": "fake", "title": "Fake Agent", "version": "1"},
-              "authMethods": [] if no_methods else methods}})
+              "authMethods": [] if no_methods else methods, "_meta": meta}})
     elif meth == "authenticate":
         key = (p.get("_meta") or {}).get("api-key")
         if p["methodId"] == "api-key" and isinstance(key, dict) and key.get("apiKey") == "sk-test":
@@ -1597,12 +1868,37 @@ for line in sys.stdin:
         else:
             err(i, "Authentication required")
     elif meth == "session/prompt":
-        if p["prompt"][0].get("text") == "expire":
+        t = text_of(p)
+        if held is not None:
+            err(i, "a turn is already running")
+            continue
+        if t == "expire":
             authed = False
-        if authed:
-            send({"jsonrpc": "2.0", "id": i, "result": {"stopReason": "end_turn"}})
-        else:
+        if not authed:
             err(i, "Authentication required")
+            continue
+        say("prompt:" + t)
+        if t in ("hold", "brief"):
+            held = i
+            if t == "brief":
+                threading.Timer(0.5, finish).start()
+        else:
+            send({"jsonrpc": "2.0", "id": i, "result": {"stopReason": "end_turn"}})
+    elif meth == "_x.ai/interject" and "--interject" in sys.argv:
+        say("interject:" + p["text"])
+        send({"jsonrpc": "2.0", "id": i, "result": {"status": "queued"}})
+    elif meth == "_session/steering" and "--steering" in sys.argv:
+        t = text_of(p)
+        if held is None:
+            idle = ((p.get("_meta") or {}).get("steering") or {}).get("idleBehavior")
+            send({"jsonrpc": "2.0", "id": i, "result": {"outcome": idle or "startedNewTurn"}})
+        elif t == "refuse":
+            send({"jsonrpc": "2.0", "id": i, "result": {"outcome": "failed"}})
+        else:
+            say("steer:" + t)
+            send({"jsonrpc": "2.0", "id": i, "result": {"outcome": "injected"}})
+            if t == "release":
+                finish()
     else:
         send({"jsonrpc": "2.0", "id": i, "error": {"code": -32601, "message": "unsupported"}})
 "#;
@@ -1617,6 +1913,15 @@ for line in sys.stdin:
     }
 
     fn spawn_fake_agent_with(dir: &std::path::Path, flags: &[&str], login_hint: &'static str) -> Option<Fake> {
+        spawn_fake_agent_ext(dir, flags, login_hint, Default::default())
+    }
+
+    fn spawn_fake_agent_ext(
+        dir: &std::path::Path,
+        flags: &[&str],
+        login_hint: &'static str,
+        ext: crate::code::agents::Extensions,
+    ) -> Option<Fake> {
         let python = ["python3", "python"].into_iter().find(|p| {
             std::process::Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success())
         })?;
@@ -1635,7 +1940,7 @@ for line in sys.stdin:
                     .collect(),
                 env: Vec::new(),
                 env_remove: Vec::new(),
-                ext: Default::default(),
+                ext,
                 session_meta: json!({}),
                 initial_model: None,
                 login_hint,
@@ -1672,7 +1977,7 @@ for line in sys.stdin:
     }
 
     fn send_prompt(tx: &tokio::sync::mpsc::UnboundedSender<AgentCmd>, text: &str) {
-        tx.send(AgentCmd::Prompt { blocks: vec![json!({ "type": "text", "text": text })] }).unwrap();
+        tx.send(AgentCmd::prompt(text)).unwrap();
     }
 
     fn authenticate(
@@ -1769,7 +2074,9 @@ for line in sys.stdin:
 
         send_prompt(&tx, "hello");
         wait_for(&events, "promptDone", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 2);
-        assert!(matches!(events.lock().unwrap().last(), Some(CodeEvent::PromptDone { stop_reason }) if stop_reason == "end_turn"));
+        // The agent's text for the turn may land after its end: notifications run as tasks.
+        let last_done = events.lock().unwrap().iter().rev().find(|e| prompt_done(e)).cloned();
+        assert!(matches!(last_done, Some(CodeEvent::PromptDone { stop_reason }) if stop_reason == "end_turn"));
         tx.send(AgentCmd::Shutdown).unwrap();
         thread.join().unwrap();
         let _ = std::fs::remove_dir_all(dir);
@@ -1850,5 +2157,251 @@ for line in sys.stdin:
         assert!(!evs.iter().any(|e| matches!(e, CodeEvent::Error { .. })), "{evs:?}");
         assert!(matches!(evs.last(), Some(CodeEvent::Status { state, .. }) if state == "exited"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A prompt whose id is its text, sent with `blocks` (or just the text).
+    fn prompt_with(
+        tx: &tokio::sync::mpsc::UnboundedSender<AgentCmd>,
+        text: &str,
+        blocks: Option<Vec<serde_json::Value>>,
+    ) -> Delivery {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        let msg = UserMessage {
+            id: text.into(),
+            blocks: blocks.unwrap_or_else(|| vec![json!({ "type": "text", "text": text })]),
+            text: text.into(),
+            origin: "me".into(),
+            attachments: json!([]),
+        };
+        tx.send(AgentCmd::Prompt { msg, reply: Some(reply) }).unwrap();
+        rx.blocking_recv().unwrap().unwrap()
+    }
+
+    fn prompt(tx: &tokio::sync::mpsc::UnboundedSender<AgentCmd>, text: &str) -> Delivery {
+        prompt_with(tx, text, None)
+    }
+
+    /// What the fake agent said it got, in order (`prompt:x`, `steer:x`, `interject:x`).
+    fn heard(evs: &[CodeEvent]) -> Vec<String> {
+        evs.iter()
+            .filter_map(|e| match e {
+                CodeEvent::Update { update } => update["content"]["text"].as_str().map(str::to_owned),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Once the agent has said `n` things: its text may trail the turn's end.
+    fn agent_heard(events: &Events, n: usize) -> Vec<String> {
+        wait_for(events, "agent text", |evs| heard(evs).len() >= n);
+        heard(&events.lock().unwrap())
+    }
+
+    /// How each prompt went, as the transcript heard it: (id, delivery).
+    fn deliveries(events: &Events) -> Vec<(String, Delivery)> {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                CodeEvent::UserPrompt { prompt_id, delivery, .. } => Some((prompt_id.clone(), *delivery)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn steering_advertised(events: &Events) -> bool {
+        events.lock().unwrap().iter().any(|e| matches!(e, CodeEvent::SessionReady { extensions, .. } if extensions.steering))
+    }
+
+    fn ready(events: &Events) {
+        wait_for(events, "sessionReady", |evs| evs.iter().any(|e| matches!(e, CodeEvent::SessionReady { .. })));
+    }
+
+    fn no_errors(events: &Events) {
+        let evs = events.lock().unwrap();
+        assert!(!evs.iter().any(|e| matches!(e, CodeEvent::Error { .. })), "{evs:?}");
+    }
+
+    #[test]
+    fn steering_joins_the_running_turn() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods", "--steering"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert!(steering_advertised(&events));
+
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        assert_eq!(prompt(&tx, "also this"), Delivery::Steered);
+        assert_eq!(prompt(&tx, "release"), Delivery::Steered);
+        wait_for(&events, "promptDone", |evs| evs.iter().any(prompt_done));
+        // Idle again: the next one is a turn of its own.
+        assert_eq!(prompt(&tx, "after"), Delivery::Sent);
+        wait_for(&events, "second promptDone", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 2);
+
+        assert_eq!(agent_heard(&events, 4), ["prompt:hold", "steer:also this", "steer:release", "prompt:after"]);
+        assert_eq!(
+            deliveries(&events),
+            [
+                ("hold".into(), Delivery::Sent),
+                ("also this".into(), Delivery::Steered),
+                ("release".into(), Delivery::Steered),
+                ("after".into(), Delivery::Sent),
+            ]
+        );
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_refused_steer_waits_for_the_next_turn() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods", "--steering"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert_eq!(prompt(&tx, "brief"), Delivery::Sent);
+        assert_eq!(prompt(&tx, "refuse"), Delivery::Queued);
+        wait_for(&events, "two turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 2);
+        assert_eq!(agent_heard(&events, 2), ["prompt:brief", "prompt:refuse"]);
+        assert_eq!(
+            deliveries(&events),
+            [
+                ("brief".into(), Delivery::Sent),
+                ("refuse".into(), Delivery::Steered),
+                ("refuse".into(), Delivery::Queued),
+                ("refuse".into(), Delivery::Sent),
+            ]
+        );
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prompts_mid_turn_wait_without_steering() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert!(!steering_advertised(&events));
+
+        assert_eq!(prompt(&tx, "brief"), Delivery::Sent);
+        assert_eq!(prompt(&tx, "second"), Delivery::Queued);
+        assert_eq!(prompt(&tx, "third"), Delivery::Queued);
+        tx.send(AgentCmd::Unqueue { prompt_id: "third".into() }).unwrap();
+        // The queued one goes out once the running turn ends, as a turn of its own.
+        wait_for(&events, "two turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 2);
+
+        assert_eq!(agent_heard(&events, 2), ["prompt:brief", "prompt:second"]);
+        assert_eq!(
+            deliveries(&events),
+            [
+                ("brief".into(), Delivery::Sent),
+                ("second".into(), Delivery::Queued),
+                ("third".into(), Delivery::Queued),
+                ("second".into(), Delivery::Sent),
+            ]
+        );
+        let unqueued = |e: &CodeEvent| matches!(e, CodeEvent::Unqueued { prompt_ids, restore: false } if prompt_ids == &["third"]);
+        assert_eq!(count(&events, unqueued), 1);
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stopping_hands_back_the_queue() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        assert_eq!(prompt(&tx, "next"), Delivery::Queued);
+        assert_eq!(prompt(&tx, "and next"), Delivery::Queued);
+        tx.send(AgentCmd::Cancel).unwrap();
+        wait_for(&events, "promptDone", |evs| evs.iter().any(prompt_done));
+        // Nothing follows a stopped turn; the queued text goes back to whoever wrote it.
+        assert_eq!(prompt(&tx, "fresh"), Delivery::Sent);
+        wait_for(&events, "second promptDone", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 2);
+
+        assert_eq!(agent_heard(&events, 2), ["prompt:hold", "prompt:fresh"]);
+        let handed_back =
+            |e: &CodeEvent| matches!(e, CodeEvent::Unqueued { prompt_ids, restore: true } if prompt_ids == &["next", "and next"]);
+        assert_eq!(count(&events, handed_back), 1);
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn grok_interjects_text_and_queues_files() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let ext = crate::code::agents::Extensions { interject: true, ..Default::default() };
+        let Some((events, tx, thread)) = spawn_fake_agent_ext(&dir, &["--no-methods", "--interject"], "", ext) else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert!(steering_advertised(&events));
+
+        assert_eq!(prompt(&tx, "brief"), Delivery::Sent);
+        assert_eq!(prompt(&tx, "look left"), Delivery::Steered);
+        let with_file = vec![
+            json!({ "type": "resource_link", "name": "a.rs", "uri": "file:///a.rs" }),
+            json!({ "type": "text", "text": "see this" }),
+        ];
+        assert_eq!(prompt_with(&tx, "see this", Some(with_file)), Delivery::Queued);
+        wait_for(&events, "two turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 2);
+        assert_eq!(agent_heard(&events, 3), ["prompt:brief", "interject:look left", "prompt:see this"]);
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn steering_needs_advertising() {
+        assert_eq!(Steer::of(&json!({ "_meta": { "steering": { "supported": true } } }), false), Some(Steer::Acp));
+        // An agent that answers any `_` method (Antigravity) but advertises nothing doesn't steer.
+        assert_eq!(Steer::of(&json!({ "_meta": {} }), false), None);
+        assert_eq!(Steer::of(&json!({ "_meta": { "steering": { "supported": "yes" } } }), false), None);
+        assert_eq!(Steer::of(&json!({}), true), Some(Steer::Interject));
+    }
+
+    #[test]
+    fn steering_requests_and_answers() {
+        let blocks = [json!({ "type": "text", "text": "a" }), json!({ "type": "image", "data": "x", "mimeType": "image/png" })];
+        let (method, params) = Steer::Acp.request("s", &blocks).unwrap();
+        assert_eq!(method, "session/steering");
+        assert_eq!(params["prompt"].as_array().unwrap().len(), 2);
+        assert_eq!(params["_meta"]["steering"]["idleBehavior"], "promptRequired");
+
+        let (method, params) = Steer::Interject.request("s", &blocks).unwrap();
+        assert_eq!(method, "x.ai/interject");
+        assert_eq!(params["text"], "a");
+        assert_eq!(params["content"][1]["type"], "image");
+        let note_and_text = [json!({ "type": "text", "text": "note" }), json!({ "type": "text", "text": "ask" })];
+        assert_eq!(Steer::Interject.request("s", &note_and_text).unwrap().1["text"], "note\n\nask");
+        assert!(Steer::Interject.request("s", &[json!({ "type": "resource", "resource": {} })]).is_none());
+
+        assert!(matches!(steer_outcome(&json!({ "outcome": "injected" })), Steered::Yes));
+        assert!(matches!(steer_outcome(&json!({ "outcome": "startedNewTurn" })), Steered::Yes));
+        assert!(matches!(steer_outcome(&json!({ "status": "queued" })), Steered::Yes));
+        assert!(matches!(steer_outcome(&json!({ "outcome": "promptRequired" })), Steered::HandedBack));
+        assert!(matches!(steer_outcome(&json!({ "outcome": "failed" })), Steered::No));
+        assert!(matches!(steer_outcome(&json!(null)), Steered::No));
     }
 }

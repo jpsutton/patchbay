@@ -631,6 +631,9 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
         if turn_over {
             state.code.set_busy(&env.code_session_id, false);
         }
+        if matches!(env.event, CodeEvent::UserPrompt { delivery: code::acp::Delivery::Sent, .. }) {
+            state.code.set_busy(&env.code_session_id, true);
+        }
         {
             let mut live = state.live.lock().unwrap();
             let id = env.code_session_id.clone();
@@ -826,6 +829,7 @@ async fn code_prompt_local(
     attachment_ids: Vec<String>,
     mentions: Vec<String>,
     origin: String,
+    prompt_id: Option<String>,
 ) -> anyhow::Result<()> {
     ensure_local_host(state, &id)?;
     let mut blocks = Vec::new();
@@ -869,17 +873,28 @@ async fn code_prompt_local(
     if note.is_some() {
         state.code.titles.on_handoff(&id);
     }
-    state.code.send(&id, AgentCmd::Prompt { blocks })?;
-    state.code.set_busy(&id, true);
+    // The agent thread tells every viewer about the prompt, and whether it went out now, mid-turn
+    // or after the running turn.
+    let msg = code::acp::UserMessage {
+        id: prompt_id.filter(|p| !p.is_empty()).unwrap_or_else(db::new_id),
+        blocks,
+        text,
+        origin,
+        attachments: serde_json::to_value(&atts)?,
+    };
+    state.code.prompt(&id, msg).await?;
     if note.is_some() {
         state.db.with_conn(|c| c.execute("DELETE FROM settings WHERE key = ?1", [&note_key]))?;
     }
-    // Every viewer shows the prompt; the window that sent it already has.
-    code_sink(state)(code::acp::Envelope {
-        code_session_id: id,
-        event: code::acp::CodeEvent::UserPrompt { text, origin, attachments: serde_json::to_value(&atts)? },
-    });
     Ok(())
+}
+
+async fn code_unqueue(state: &AppState, id: String, prompt_id: String) -> CmdResult<()> {
+    if let Some(host) = remote_host(state, &id)? {
+        state.mesh.rpc(&host, "code.unqueue", serde_json::json!({ "id": id, "promptId": prompt_id })).await?;
+        return Ok(());
+    }
+    Ok(state.code.send(&id, AgentCmd::Unqueue { prompt_id })?)
 }
 
 async fn code_prompt(
@@ -888,15 +903,18 @@ async fn code_prompt(
     text: String,
     attachment_ids: Vec<String>,
     mentions: Option<Vec<String>>,
+    prompt_id: Option<String>,
 ) -> CmdResult<()> {
     let mentions = mentions.unwrap_or_default();
     if let Some(host) = remote_host(state, &id)? {
-        let params = serde_json::json!({ "id": id, "text": text, "attachmentIds": attachment_ids, "mentions": mentions });
+        let params = serde_json::json!({
+            "id": id, "text": text, "attachmentIds": attachment_ids, "mentions": mentions, "promptId": prompt_id,
+        });
         state.mesh.rpc(&host, "code.prompt", params).await?;
         return Ok(());
     }
     let me = state.mesh.node_id().to_owned();
-    Ok(code_prompt_local(state, id, text, attachment_ids, mentions, me).await?)
+    Ok(code_prompt_local(state, id, text, attachment_ids, mentions, me, prompt_id).await?)
 }
 
 async fn code_cancel(state: &AppState, id: String) -> CmdResult<()> {
@@ -1294,11 +1312,17 @@ impl mesh::RpcHandler for MeshRpc {
                 let text = p["text"].as_str().unwrap_or_default().to_owned();
                 // A gateway passing on a phone's prompt names the phone.
                 let origin = p["origin"].as_str().map(str::to_owned).unwrap_or(from);
-                code_prompt_local(state, id()?, text, atts, mentions, origin).await.map(|_| Value::Null)
+                let prompt_id = p["promptId"].as_str().map(str::to_owned);
+                code_prompt_local(state, id()?, text, atts, mentions, origin, prompt_id).await.map(|_| Value::Null)
             }
             "code.cancel" => {
                 ensure_local_host(state, &id()?)?;
                 state.code.send(&id()?, AgentCmd::Cancel).map(|_| Value::Null)
+            }
+            "code.unqueue" => {
+                ensure_local_host(state, &id()?)?;
+                let prompt_id = param(&p, "promptId")?.to_owned();
+                state.code.send(&id()?, AgentCmd::Unqueue { prompt_id }).map(|_| Value::Null)
             }
             "code.set_model" => code_set_model_local(state, &id()?, param(&p, "modelId")?.to_owned()).await.map(|_| Value::Null),
             "code.set_config_option" => {

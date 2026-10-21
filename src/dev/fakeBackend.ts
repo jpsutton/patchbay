@@ -9,6 +9,7 @@ import type {
   MeshStatus,
   McpServer,
   PermissionRule,
+  PromptDelivery,
   Prompt,
   SearchHit,
   Attachment,
@@ -143,6 +144,26 @@ const fakeSignedIn = new Set<string>();
 /** Sessions whose fake agent has its session up. */
 const fakeLive = new Set<string>();
 const fakeLabel = (agent: string) => FAKE_AGENTS.find((x) => x.id === agent)?.label ?? agent;
+/** Agents that take a message mid-turn (the rest queue it behind the turn, as the backend does). */
+const FAKE_STEERING = new Set(["grok", "claude-code", "codex"]);
+/** Sessions mid-turn, and the prompts queued behind each turn. */
+const fakeTurns = new Set<string>();
+const fakeQueues: Record<string, { promptId: string; text: string; mentions: string[] }[]> = {};
+
+function fakeEcho(csid: string, promptId: string, text: string, delivery: PromptDelivery) {
+  codeEmit(csid, { type: "userPrompt", promptId, text, origin: ME, attachments: [], delivery });
+}
+
+/** Run turns back to back: this one, then whatever queued up behind it. */
+async function runFakeTurns(csid: string, promptId: string, text: string, mentions: string[]) {
+  fakeEcho(csid, promptId, text, "sent");
+  fakeTurns.add(csid);
+  await fakeAgentTurn(csid, text, mentions);
+  fakeTurns.delete(csid);
+  const next = fakeQueues[csid]?.shift();
+  if (next) void runFakeTurns(csid, next.promptId, next.text, next.mentions);
+}
+
 /** Agent starts per session, so a sign-in from before a restart is dropped as the real one is. */
 const fakeStarts: Record<string, number> = {};
 
@@ -161,7 +182,7 @@ function fakeReady(csid: string) {
       ? null
       : { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] },
     configOptions: grok ? [] : [fakeEffort(fakeConfig[csid] ?? "medium")],
-    extensions: { statusLine: grok, rewind: grok, patchbayModels: grok },
+    extensions: { statusLine: grok, rewind: grok, patchbayModels: grok, steering: FAKE_STEERING.has(db.code.find((c) => c.id === csid)?.agent ?? "grok") },
   });
   codeEmit(csid, {
     type: "update",
@@ -774,7 +795,28 @@ export function install() {
             }, 300);
             return null;
           }
-          fakeAgentTurn(a.id as string, a.text as string, (a.mentions as string[]) ?? []);
+          const promptId = (a.promptId as string) || id();
+          const mentions = (a.mentions as string[]) ?? [];
+          if (fakeTurns.has(s.id)) {
+            if (FAKE_STEERING.has(s.agent)) {
+              fakeEcho(s.id, promptId, a.text as string, "steered");
+              codeEmit(s.id, { type: "update", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `\n\n(Noted mid-turn: ${a.text})\n\n` } } });
+            } else {
+              (fakeQueues[s.id] ??= []).push({ promptId, text: a.text as string, mentions });
+              fakeEcho(s.id, promptId, a.text as string, "queued");
+            }
+            return null;
+          }
+          void runFakeTurns(s.id, promptId, a.text as string, mentions);
+          return null;
+        }
+        case "code_unqueue": {
+          const q = fakeQueues[a.id as string] ?? [];
+          const i = q.findIndex((x) => x.promptId === a.promptId);
+          if (i >= 0) {
+            q.splice(i, 1);
+            codeEmit(a.id as string, { type: "unqueued", promptIds: [a.promptId as string], restore: false });
+          }
           return null;
         }
         case "code_auto_title": {
@@ -843,9 +885,12 @@ export function install() {
         case "plugin:notification|notify": console.info("fake backend: notification", a); return null;
         case "plugin:clipboard-manager|write_text": return navigator.clipboard.writeText(a.text as string).then(() => null);
         case "plugin:clipboard-manager|read_text": return navigator.clipboard.readText();
-        case "code_cancel":
+        case "code_cancel": {
           for (const [k, r] of pending) { r(null); pending.delete(k); }
+          const dropped = (fakeQueues[a.id as string] ?? []).splice(0);
+          if (dropped.length) codeEmit(a.id as string, { type: "unqueued", promptIds: dropped.map((d) => d.promptId), restore: true });
           return null;
+        }
         case "code_set_model": case "code_set_mode": return null;
         case "code_set_config_option": {
           fakeConfig[a.id as string] = a.value as string;
