@@ -350,6 +350,52 @@ async fn phone_joins_follows_resumes_and_switches_gateway() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn snapshot_leaves_out_a_turn_cut_off_from_its_host() {
+    let (a, b) = (node("alpha8"), node("bravo8"));
+    link(&a, &b).await;
+    let an = a.state.mesh.node_id().to_owned();
+    let proj = a.dir.join("proj");
+    repo(&proj);
+    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok", "default").unwrap();
+    until("session reaches B", 10, || b.state.db.get_code_session(&s.id).unwrap().is_some()).await;
+
+    // The phone uses B as its gateway.
+    let p = phone();
+    let url = format!("127.0.0.1:{}", b.state.mesh.bound_port().unwrap());
+    p.client.join(&url, PASS, "pocket").unwrap();
+    let pid = p.client.node_id();
+    until("phone's join request", 10, || {
+        b.state.mesh.status()["pending"].as_array().unwrap().iter().any(|r| r["nodeId"] == pid)
+    })
+    .await;
+    b.state.mesh.approve(&pid).unwrap();
+    until("phone online", 10, || p.client.status()["phase"] == "online").await;
+
+    // A turn on A, half done. While A is there, a snapshot through B carries it.
+    emit(&a, &s.id, code::acp::CodeEvent::Status { state: "starting".into(), message: None });
+    emit(&a, &s.id, chunk("half a turn"));
+    let half = |snap: &Value| {
+        snap["tail"].as_array().unwrap().iter().any(|e| e[1]["event"]["update"]["content"]["text"] == "half a turn")
+    };
+    until("B has the turn so far", 10, || {
+        b.events.lock().unwrap().iter().any(|(_, e)| e["event"]["update"]["content"]["text"] == "half a turn")
+    })
+    .await;
+    let topic = format!("session:{}", s.id);
+    let snap = p.client.subscribe(&topic, true).await.unwrap();
+    assert!(half(&snap), "{snap}");
+
+    // B loses A. The turn may finish and reach the saved transcript meanwhile, so B's copy of
+    // its first half no longer goes into a snapshot.
+    a.state.mesh.stop();
+    until("B notices A is gone", 40, || !b.state.mesh.connected(&an)).await;
+    let snap = p.client.subscribe(&topic, true).await.unwrap();
+    assert_eq!(snap["mode"], "snapshot");
+    assert!(!half(&snap), "{snap}");
+    assert_eq!(snap["covered"], false);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn phone_starts_a_session_on_another_computer() {
     let (a, b) = (node("alpha4"), node("bravo4"));
     link(&a, &b).await;
