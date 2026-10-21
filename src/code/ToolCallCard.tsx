@@ -118,8 +118,24 @@ function rawOutputText(raw: unknown): string | null {
   return json === "{}" ? null : json;
 }
 
+/** A shell command in full, selectable and with a copy button: the row above truncates it. */
+function CommandBlock({ cmd }: { cmd: string }) {
+  return (
+    <div className="flex items-start gap-1 rounded-lg border border-line bg-bg py-1 pl-3 pr-1">
+      <pre className="min-w-0 flex-1 overflow-x-auto whitespace-pre-wrap break-words py-1.5 font-mono text-[12.5px] leading-5 text-fg">
+        <span className="select-none text-faint">$ </span>
+        {cmd}
+      </pre>
+      <span className="shrink-0 text-faint">
+        <CopyButton text={cmd} label="Copy command" icon={<CopyIcon size={14} />} />
+      </span>
+    </div>
+  );
+}
+
 export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withImages?: boolean }) {
   const content = tc.content ?? [];
+  const cmd = tc.kind === "execute" ? commandOf(tc) : null;
   const images = imagesOf(tc);
   const diffs = content.filter((c): c is Extract<AcpToolCallContent, { type: "diff" }> => c.type === "diff");
   const terminals = content.filter((c): c is Extract<AcpToolCallContent, { type: "terminal" }> => c.type === "terminal");
@@ -129,6 +145,7 @@ export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withI
   const output = texts.length === 0 && diffs.length === 0 && images.length === 0 && !tc.terminalOutput ? rawOutputText(tc.rawOutput) : null;
   return (
     <div className="flex flex-col gap-2">
+      {cmd && <CommandBlock cmd={cmd} />}
       {withImages && images.length > 0 && <ToolImages images={images} label={tc.title || "Tool output"} />}
       {diffs.map((d, i) => (
         <DiffView key={i} path={d.path} oldText={d.oldText} newText={d.newText} />
@@ -158,7 +175,7 @@ export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withI
           {texts.length > 0 ? texts.join("\n") : output}
         </pre>
       )}
-      {diffs.length === 0 && texts.length === 0 && images.length === 0 && terminals.length === 0 && !output && tc.rawInput != null && (
+      {!cmd && diffs.length === 0 && texts.length === 0 && images.length === 0 && terminals.length === 0 && !output && tc.rawInput != null && (
         <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12.5px] leading-5 text-muted">
           {JSON.stringify(tc.rawInput, null, 2)}
         </pre>
@@ -191,7 +208,11 @@ export function ToolCallCard({ tc, autoApproved }: { tc: AcpToolCall; autoApprov
         </span>
         <span className="min-w-0 flex-1 truncate">
           <span className="text-fg/85">{tc.title || tc.kind || "Tool call"}</span>
-          {summary && tc.title !== summary && <span className="ml-2 font-mono text-[12px] text-faint">{summary}</span>}
+          {summary && tc.title !== summary && (
+            <span className="ml-2 font-mono text-[12px] text-faint" title={summary}>
+              {summary}
+            </span>
+          )}
         </span>
         {(stats.add > 0 || stats.del > 0) && (
           <span className="meta shrink-0">
@@ -368,10 +389,7 @@ export function PermissionCard({
         </span>
       </div>
       {cmd ? (
-        <pre className="overflow-x-auto whitespace-pre-wrap rounded-lg border border-line bg-bg px-3 py-2.5 font-mono text-[13px] text-fg">
-          <span className="select-none text-faint">$ </span>
-          {cmd}
-        </pre>
+        <CommandBlock cmd={cmd} />
       ) : plan ? (
         // A plan waiting for approval reads the same as it does once answered.
         <PlanDocCard name={plan.name} text={plan.text} />
