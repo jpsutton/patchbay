@@ -18,7 +18,7 @@ import { fmtShort, groupByDate, matchesQuery } from "./lib/format";
 import { ModelRing } from "./lib/cable";
 import { emitViewAction, focusComposer, focusSidebarSearch, isMac, isMod, keyLabel, ViewActive } from "./lib/shortcuts";
 import { ScrollFade } from "./lib/useStickyScroll";
-import { notifyInBackground } from "./lib/notify";
+import { notifyInBackground, openNotified, type NotifyTarget } from "./lib/notify";
 import { useDragRegion, useRoundedWindow } from "./components/WindowControls";
 import { installUpdate, useUpdate, useUpdateChecks } from "./lib/update";
 import { AlertToast, MeshChip, MeshPopover, MeshRailButton } from "./components/MeshStatus";
@@ -655,6 +655,7 @@ export default function App() {
         s.selectConversation(null);
         focusComposer();
       }),
+      listen<NotifyTarget>("notification://open", (ev) => openNotified(ev.payload)),
       listen<string>("quick://prompt", (ev) => {
         const s = useStore.getState();
         s.setMode("chat");
