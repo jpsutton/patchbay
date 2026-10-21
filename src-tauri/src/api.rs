@@ -146,6 +146,7 @@ commands! {
     code_set_permission_mode(id, mode);
     code_rewind(id, ordinal, preview, revert_files);
     code_usage(id);
+    plan_limits();
     code_permission_respond(request_id, option_id, id);
     code_move(id, target, cwd);
     code_take_over(id, cwd);

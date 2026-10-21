@@ -22,6 +22,7 @@ import {
   type Model,
   type Provider,
   type UsageView,
+  type PlanLimits,
   type Preferences,
   type MeshStatus,
   type MeshChatEvent,
@@ -309,6 +310,9 @@ interface Store {
   /** A problem toast: stays until dismissed or fixed. */
   alert: Alert | null;
   meshPopoverOpen: boolean;
+  /** The Claude plan usage Claude Code last reported; null until a Claude Code turn reports it. */
+  planLimits: PlanLimits | null;
+  planOpen: boolean;
   prefs: Preferences;
   loadPrefs: () => Promise<void>;
   /** Persist a change; resolves to an error message when the backend rejects it. */
@@ -326,6 +330,8 @@ interface Store {
   setToast: (t: string | null) => void;
   setAlert: (a: Alert | null) => void;
   setMeshPopoverOpen: (o: boolean) => void;
+  setPlanLimits: (l: PlanLimits | null) => void;
+  setPlanOpen: (o: boolean) => void;
   refreshCatalog: () => Promise<void>;
   setDefaultModel: (ref: string) => Promise<void>;
   refreshConversations: () => Promise<void>;
@@ -725,6 +731,8 @@ export const useStore = create<Store>((set, get) => ({
   toast: null,
   alert: null,
   meshPopoverOpen: false,
+  planLimits: null,
+  planOpen: false,
   confirm: null,
   prefs: defaultPreferences,
   loadPrefs: async () => {
@@ -788,6 +796,8 @@ export const useStore = create<Store>((set, get) => ({
   setToast: (toast) => set({ toast }),
   setAlert: (alert) => set({ alert }),
   setMeshPopoverOpen: (meshPopoverOpen) => set({ meshPopoverOpen }),
+  setPlanLimits: (planLimits) => set({ planLimits }),
+  setPlanOpen: (planOpen) => set({ planOpen }),
 
   refreshCatalog: async () => {
     const [providers, models, def] = await Promise.all([

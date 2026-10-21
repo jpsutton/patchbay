@@ -94,6 +94,21 @@ export interface UsageView {
   autoCompactPercent: number | null;
 }
 
+/** One Claude plan usage window: the fraction used (0 to 1) and when it resets (unix seconds). */
+export interface PlanWindow {
+  utilization: number;
+  resetsAt: number;
+}
+
+/** The Claude plan usage Claude Code last reported (see `code/plan_limits.rs`). */
+export interface PlanLimits {
+  fiveHour: PlanWindow | null;
+  sevenDay: PlanWindow | null;
+  /** Billing extra usage, past the plan, until this time (unix seconds). */
+  overageUntil: number | null;
+  observedAt: number;
+}
+
 export interface Conversation {
   id: string;
   title: string;
@@ -754,6 +769,7 @@ export const api = {
   codeRewind: (id: string, ordinal: number, preview: string, revertFiles: boolean) =>
     invoke<void>("code_rewind", { id, ordinal, preview, revertFiles }),
   codeUsage: (id: string) => invoke<UsageView>("code_usage", { id }),
+  planLimits: () => invoke<PlanLimits | null>("plan_limits"),
   codePermissionRespond: (requestId: string, optionId: string | null, sessionId?: string) =>
     invoke<void>("code_permission_respond", { requestId, optionId, id: sessionId }),
   codeAttach: (id: string) => invoke<CodeAttach>("code_attach", { id }),

@@ -85,6 +85,9 @@ impl AppState {
             remote_terms: Arc::default(),
             desktop: Arc::default(),
         };
+        if let Some(l) = state.db.get_setting(PLAN_LIMITS_KEY).ok().flatten().and_then(|j| serde_json::from_str(&j).ok()) {
+            state.code.plan.record(l);
+        }
         mesh.set_ui(emit);
         mesh.set_handler(Arc::new(MeshRpc { state: state.clone() }));
         state
@@ -625,7 +628,10 @@ fn code_sink(state: &AppState) -> code::acp::Sink {
 fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     use code::acp::CodeEvent;
     if let CodeEvent::PlanLimits { limits } = env.event {
+        let v = serde_json::to_value(&limits).unwrap_or_default();
+        let _ = state.db.set_setting(PLAN_LIMITS_KEY, &v.to_string());
         state.code.plan.record(limits);
+        (state.emit)(PLAN_LIMITS_EVENT, v);
         enforce_plan_limit(state);
         return;
     }
@@ -683,6 +689,15 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
         let v = mesh.broadcast_event(code::acp::EVENT, serde_json::to_value(&env).unwrap_or_default());
         (state.emit)(code::acp::EVENT, v);
     }
+}
+
+/// The Claude plan usage Claude Code last reported, saved so the panel and the guard have it
+/// after a restart; its reset times say when it goes stale.
+const PLAN_LIMITS_KEY: &str = "claude.planLimits";
+const PLAN_LIMITS_EVENT: &str = "code://plan-limits";
+
+async fn plan_limits(state: &AppState) -> CmdResult<Option<code::plan_limits::PlanLimits>> {
+    Ok(state.code.plan.latest())
 }
 
 /// Whether the session runs Claude Code on its own sign-in, which may be a Claude plan with

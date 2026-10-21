@@ -8,26 +8,28 @@
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::prefs::UsageLimit;
 
 /// One usage window: the fraction used (0 to 1) and when it resets (unix seconds).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Window {
     pub utilization: f64,
     pub resets_at: i64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct PlanLimits {
     pub five_hour: Option<Window>,
     pub seven_day: Option<Window>,
     /// Turns are billed as extra usage, past the plan, until this time (unix seconds).
     pub overage_until: Option<i64>,
+    /// When Claude Code reported these (unix seconds).
+    pub observed_at: i64,
 }
 
 /// The window over the limit, for the message that explains a stop.
@@ -53,6 +55,7 @@ impl PlanLimits {
             five_hour: window(&unified["five_hour"]),
             seven_day: window(&unified["seven_day"]),
             overage_until: None,
+            observed_at: now(),
         };
         // Older CLIs report only the window that is closest to its limit.
         if l.five_hour.is_none() && l.seven_day.is_none()
@@ -130,6 +133,11 @@ pub struct PlanGuard {
 impl PlanGuard {
     pub fn record(&self, limits: PlanLimits) {
         *self.latest.lock().unwrap() = Some(limits);
+    }
+
+    /// The last limits Claude Code reported, kept for the usage panel and across restarts.
+    pub fn latest(&self) -> Option<PlanLimits> {
+        self.latest.lock().unwrap().clone()
     }
 
     pub fn hit(&self, limit: &UsageLimit, now: i64) -> Option<Hit> {

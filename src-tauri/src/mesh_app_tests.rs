@@ -710,4 +710,11 @@ async fn usage_limit_stops_claude_turns() {
     crate::api::call(&a.state, "set_preferences", json!({ "prefs": prefs }), &chans).await.unwrap();
     assert!(matches!(claude_rx.try_recv(), Ok(AgentCmd::Cancel)));
     assert_eq!(notices(), 2);
+
+    // The panel reads the last report, which a restart keeps.
+    let v = crate::api::call(&a.state, "plan_limits", json!({}), &chans).await.unwrap();
+    assert_eq!(v["fiveHour"]["utilization"], 0.97);
+    assert!(a.events.lock().unwrap().iter().any(|(n, p)| n == "code://plan-limits" && p["sevenDay"]["utilization"] == 0.3));
+    let again = AppState::new(a.state.db.clone(), a.dir.clone(), a.state.mesh.clone(), Arc::new(|_: &str, _: Value| {}));
+    assert_eq!(again.code.plan.latest().and_then(|l| l.five_hour).map(|w| w.utilization), Some(0.97));
 }
