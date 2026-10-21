@@ -341,6 +341,7 @@ export function PermissionCard({
     respond(allowId);
   };
   const cmd = tc.kind === "execute" ? commandOf(tc) : null;
+  const plan = planDocOf(tc);
   // The one-off "allow" leads as the primary button; broader allows follow it.
   const allows = request.options
     .filter((o) => !o.kind.startsWith("reject"))
@@ -371,6 +372,9 @@ export function PermissionCard({
           <span className="select-none text-faint">$ </span>
           {cmd}
         </pre>
+      ) : plan ? (
+        // A plan waiting for approval reads the same as it does once answered.
+        <PlanDocCard name={plan.name} text={plan.text} />
       ) : (
         <>
           <div className="text-sm font-medium">{tc.title || tc.kind || "Tool call"}</div>
