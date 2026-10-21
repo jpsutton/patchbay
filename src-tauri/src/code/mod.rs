@@ -235,6 +235,13 @@ impl CodeManager {
             .map_err(|_| anyhow!("agent stopped"))
     }
 
+    /// Send a prompt: a new turn, or mid-turn steered into the running one or queued behind it.
+    pub async fn prompt(&self, code_session_id: &str, msg: acp::UserMessage) -> Result<acp::Delivery> {
+        let (reply, rx) = oneshot::channel();
+        self.send(code_session_id, AgentCmd::Prompt { msg, reply: Some(reply) })?;
+        rx.await.map_err(|_| anyhow!("agent stopped"))?
+    }
+
     pub async fn set_model(&self, code_session_id: &str, model_id: String) -> Result<()> {
         let (reply, rx) = oneshot::channel();
         self.send(code_session_id, AgentCmd::SetModel { model_id, reply })?;

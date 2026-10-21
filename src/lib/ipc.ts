@@ -333,12 +333,16 @@ export const AGENT_LABELS: Record<AgentId, string> = {
   antigravity: "Antigravity",
 };
 
+export type PromptDelivery = "sent" | "steered" | "queued";
+
 /** Non-standard ACP extensions the session's agent understands. */
 export interface AgentExtensions {
   statusLine: boolean;
   rewind: boolean;
   /** Runs on Patchbay's providers and models: a change to them needs a restart to apply. */
   patchbayModels?: boolean;
+  /** A message sent mid-turn joins the running turn; otherwise it waits for the turn to end. */
+  steering?: boolean;
 }
 
 /** An ACP session config option (only `select` ones are shown). */
@@ -400,9 +404,22 @@ export type CodeEvent =
   | { type: "promptDone"; stopReason: string }
   | { type: "error"; message: string }
   | { type: "usage"; usage: UsageView }
-  /** A prompt sent to the agent from `origin` (a mesh node). */
-  /** `replay`: part of a catch-up, so shown even in the window that sent it. */
-  | { type: "userPrompt"; text: string; origin: string; attachments: Attachment[]; replay?: boolean }
+  /**
+   * A prompt sent to the agent from `origin` (a mesh node). `delivery`: a new turn, steered into
+   * the running turn, or queued behind it (it comes again as `sent` when its turn starts).
+   * `replay`: part of a catch-up. Older hosts send neither `promptId` nor `delivery`.
+   */
+  | {
+      type: "userPrompt";
+      promptId?: string;
+      text: string;
+      origin: string;
+      attachments: Attachment[];
+      delivery?: PromptDelivery;
+      replay?: boolean;
+    }
+  /** Queued prompts that won't be sent. `restore`: put them back in the sender's composer. */
+  | { type: "unqueued"; promptIds: string[]; restore: boolean }
   /** The session was renamed automatically. */
   | { type: "title"; title: string }
   /** The agent wants a sign-in with one of `methods`: before its session starts, or mid-session. */
@@ -687,9 +704,14 @@ export const api = {
   codeStart: (id: string) => invoke<void>("code_start", { id }),
   codeIsRunning: (id: string) => invoke<boolean>("code_is_running", { id }),
   codeStop: (id: string) => invoke<void>("code_stop", { id }),
-  /** `mentions`: absolute paths of @-mentioned project files. */
-  codePrompt: (id: string, text: string, attachmentIds: string[], mentions: string[] = []) =>
-    invoke<void>("code_prompt", { id, text, attachmentIds, mentions }),
+  /**
+   * `mentions`: absolute paths of @-mentioned project files. `promptId` names the prompt in the
+   * `userPrompt` events it causes.
+   */
+  codePrompt: (id: string, text: string, attachmentIds: string[], mentions: string[] = [], promptId?: string) =>
+    invoke<void>("code_prompt", { id, text, attachmentIds, mentions, promptId }),
+  /** Drop a prompt queued behind the running turn. */
+  codeUnqueue: (id: string, promptId: string) => invoke<void>("code_unqueue", { id, promptId }),
   getCodeTranscript: (id: string) => invoke<string | null>("get_code_transcript", { id }),
   saveCodeTranscript: (id: string, json: string) => invoke<void>("save_code_transcript", { id, json }),
   /** With `sessionId`, lists files on the node hosting that session. */

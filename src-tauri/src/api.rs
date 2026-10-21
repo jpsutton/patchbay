@@ -135,7 +135,8 @@ commands! {
     code_attach(id);
     code_is_running(id);
     code_stop(id);
-    code_prompt(id, text, attachment_ids, mentions);
+    code_prompt(id, text, attachment_ids, mentions, prompt_id);
+    code_unqueue(id, prompt_id);
     code_cancel(id);
     code_set_model(id, model_id);
     code_set_config_option(id, config_id, value);

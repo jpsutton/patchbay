@@ -119,6 +119,10 @@ export function Composer({
   commands,
   mentionFiles,
   onEditLast,
+  sendWhileBusy,
+  busySendHint,
+  restore,
+  onRestored,
 }: {
   /** `mentions`: project-relative paths picked with @ that are still in the text. */
   onSend: (text: string, attachments: Attachment[], mentions: string[]) => void | Promise<void>;
@@ -138,6 +142,14 @@ export function Composer({
   mentionFiles?: () => Promise<string[]>;
   /** Up arrow in an empty composer. */
   onEditLast?: () => void;
+  /** Sending stays open while `busy`, beside Stop (Code tab: the message steers or queues). */
+  sendWhileBusy?: boolean;
+  /** The send button's tooltip while `busy`. */
+  busySendHint?: string;
+  /** Text and attachments to take back into the composer (queued messages a stop dropped). */
+  restore?: { text: string; attachments: Attachment[] } | null;
+  /** Called once `restore` is in the composer. */
+  onRestored?: () => void;
 }) {
   const [text, setText] = useState("");
   const [atts, setAtts] = useState<Attachment[]>([]);
@@ -267,6 +279,14 @@ export function Composer({
   }, []);
 
   useEffect(() => {
+    if (!restore) return;
+    // Taken back ahead of anything typed since: it was written first.
+    setText((t) => (t.trim() ? `${restore.text}\n\n${t}` : restore.text));
+    setAtts((p) => [...restore.attachments, ...p].slice(0, MAX_ATTACHMENTS));
+    onRestored?.();
+  }, [restore]);
+
+  useEffect(() => {
     const el = ref.current;
     if (!el) return;
     el.style.height = "auto";
@@ -317,7 +337,7 @@ export function Composer({
   };
 
   const submit = async () => {
-    if (busy || disabled || adding > 0) return;
+    if ((busy && !sendWhileBusy) || disabled || adding > 0) return;
     if (!text.trim() && atts.length === 0) return;
     const t = text;
     const a = atts;
@@ -331,6 +351,7 @@ export function Composer({
   };
 
   const hasImage = atts.some((a) => a.kind === "image");
+  const hasContent = !!text.trim() || atts.length > 0;
 
   return (
     <div
@@ -500,7 +521,7 @@ export function Composer({
           <div className="flex min-w-0 flex-1 items-center gap-1.5">{footer}</div>
         )}
         {trailing}
-        {busy ? (
+        {busy && (
           <button
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-border bg-panel-2 text-fg hover:bg-border"
             onClick={onStop}
@@ -509,12 +530,13 @@ export function Composer({
           >
             <span className="h-3 w-3 rounded-[3px] bg-current" />
           </button>
-        ) : (
+        )}
+        {(!busy || (sendWhileBusy && hasContent)) && (
           <button
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-accent text-accent-fg transition-colors hover:brightness-105 disabled:bg-panel-2 disabled:text-faint"
             onClick={submit}
-            disabled={disabled || adding > 0 || (!text.trim() && atts.length === 0)}
-            title="Send"
+            disabled={disabled || adding > 0 || !hasContent}
+            title={busy ? (busySendHint ?? "Send") : "Send"}
             aria-label="Send"
           >
             <ArrowUpIcon size={18} strokeWidth={2.4} />

@@ -128,6 +128,39 @@ Tests in `acp.rs` drive a fake Python ACP agent:
 - Gemini CLI: no append. `GEMINI_SYSTEM_MD` replaces the whole system prompt, so it isn't used.
 - OpenCode, Cursor, Kilo: no way in today. Settings says so. ACP has a `systemPrompt` RFD (Claude's adapter advertises `sessionCapabilities.systemPrompt`), but `agent-client-protocol` 0.10.4 has no field for it yet.
 
+## Messages sent mid-turn (2026-10-20)
+
+The composer stays open while the agent works. `acp::run` keeps one turn at a time per agent and never sends a second `session/prompt` while one is running. Most agents mishandle one:
+
+| Agent | Overlapping `session/prompt` |
+|---|---|
+| Claude Code (claude-agent-acp 0.93.0) | queued until the turn ends |
+| Codex (codex-acp 2.2.2) | joins the running turn, but the first request likely never gets an answer |
+| Grok Build | queued by default |
+| OpenCode 2.1.1 | refused (-32603) |
+| Kilo 7.8.15 | ends the running turn early, after its current step |
+| Gemini CLI 0.64.0, Cursor 2026.10 | cancels the running turn |
+| Antigravity 1.4.1 | races; output can be lost |
+
+So a message sent mid-turn takes one of two paths:
+
+- **Steered** into the running turn when the agent supports it:
+  - Claude Code and Codex advertise `initialize` `_meta.steering.supported` and take `_session/steering` (`{sessionId, prompt}`). Patchbay sends `_meta.steering.idleBehavior: "promptRequired"`, so Claude hands back a message that arrives just after its turn ended. Patchbay then sends it as a new turn. Codex ignores this field. In that window it starts a turn of its own, and no `session/prompt` reports when that turn ends.
+  - Grok Build takes `x.ai/interject` (`{sessionId, text, content}`) and merges the message at its next safe point. Grok doesn't advertise this, so it is `Extensions.interject`. Its interject carries only text and images, so a message with files or @-mentions waits for the next turn instead.
+  - Patchbay checks steering support only from what the agent advertises, never from whether a call returns. Antigravity answers any `_` method with `null`.
+- **Queued** otherwise, or when a steer fails. Patchbay sends queued messages one at a time when the running turn ends normally. A stop, or a turn that ends in an error, drops the queue. The window that sent the dropped messages gets their text back in its composer.
+
+Every prompt carries a `promptId`, which the UI generates and the backend fills in when it is missing. The agent thread reports each step as a `userPrompt` event with a `delivery`:
+- `sent`: a new turn. This marks the session busy.
+- `steered`: emitted before the agent answers, so the message shows ahead of the reply.
+- `queued`: the UI moves it from the transcript to the queue list above the composer. When its turn starts, it comes again as `sent`.
+
+`unqueued` removes messages from the queue: the user clicked ✕ (`code_unqueue`), or the turn was stopped or failed (`restore: true`). The store keys all of this by prompt id, so the sending window, other windows and a catch-up replay all agree. A `userPrompt` without a `promptId` comes from an older host and keeps the old origin check.
+
+Tests: `steering_joins_the_running_turn`, `a_refused_steer_waits_for_the_next_turn`, `prompts_mid_turn_wait_without_steering`, `stopping_hands_back_the_queue` and `grok_interjects_text_and_queues_files` drive the fake agent in `acp.rs`. `fakeBackend.ts` steers for Grok, Claude Code and Codex, and queues for the other agents.
+
+Not verified against the real agents yet: a live `_session/steering` turn on Claude Code or Codex, and `x.ai/interject` on the Grok sidecar. The queue isn't in the attach snapshot (`LiveAgent`): a window that opens a session mid-turn sees a queued message only once it is sent. Mesh catch-up replays include it. The composer sends mid-turn only to hosts that report `extensions.steering`; an older host gets the old behavior.
+
 ## Verified (2026-10-17, this machine)
 
 `cargo test --lib agents_live -- --ignored` runs start, model list, model switch, restart, resume and model restore against the installed agents: Claude Code adapter 0.93.0, OpenCode 2.0.29, Cursor CLI 2026.10.01, Kilo 7.8.12. All four pass. One prompt each went end to end through Claude Code and Cursor, including resume after a turn and usage folding for Claude. OpenCode's prompt failed only because its configured provider server was down (`ECONNREFUSED`); Patchbay showed that error.
