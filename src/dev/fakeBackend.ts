@@ -875,12 +875,40 @@ export function install() {
         }
         case "term_write": {
           const w = window as unknown as Record<string, unknown>;
-          const d = (a.data as string).replace(/\r/g, "\r\n");
-          send<TermEvent>(w.__term, { type: "data", data: btoa(d) });
-          // A typed `exit` ends the fake shell, as a real one would.
-          const line = ((w.__termLine as string) ?? "") + (a.data as string);
-          w.__termLine = line.includes("\r") ? "" : line;
-          if (line.includes("\r") && line.split("\r")[0].trim() === "exit") send<TermEvent>(w.__term, { type: "exit", code: 0 });
+          // Like a line-editing shell: echo printable keys, erase on backspace, and after
+          // `sudo` read one line without echo. `__termLatency` (ms) delays the echo, as a
+          // shell on another computer would.
+          let out = "";
+          for (const ch of a.data as string) {
+            let line = (w.__termLine as string) ?? "";
+            if (ch === "\r") {
+              const cmd = line.trim();
+              w.__termLine = "";
+              if (w.__termSecret) {
+                w.__termSecret = false;
+                out += "\r\nok\r\ndemo@patchbay$ ";
+              } else if (cmd === "exit") {
+                out += "\r\n";
+                setTimeout(() => send<TermEvent>(w.__term, { type: "exit", code: 0 }), Number(w.__termLatency ?? 0));
+              } else if (cmd === "sudo") {
+                w.__termSecret = true;
+                out += "\r\n[sudo] password: ";
+              } else {
+                out += "\r\ndemo@patchbay$ ";
+              }
+              continue;
+            }
+            if (ch === "\x7f") {
+              if (!line) continue;
+              w.__termLine = line.slice(0, -1);
+              if (!w.__termSecret) out += "\b\x1b[K";
+              continue;
+            }
+            line += ch;
+            w.__termLine = line;
+            if (!w.__termSecret) out += ch;
+          }
+          if (out) setTimeout(() => send<TermEvent>(w.__term, { type: "data", data: btoa(out) }), Number(w.__termLatency ?? 0));
           return null;
         }
         case "term_resize": case "term_close": return null;
