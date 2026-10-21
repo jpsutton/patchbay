@@ -1,4 +1,4 @@
-import { useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AGENT_LABELS,
   api,
@@ -14,6 +14,7 @@ import {
 } from "../lib/ipc";
 import {
   codeWorking,
+  flushCodeEvents,
   FOREGROUND_IDLE_MS,
   hasActiveForegroundTools,
   memberName,
@@ -31,6 +32,7 @@ import { UsageBar } from "../components/UsageBar";
 import { TerminalPane } from "../terminal/TerminalPane";
 import { PermissionCard, PlanDocCard, planDocOf, ToolCallCard, ToolGroup } from "./ToolCallCard";
 import { SignInCard } from "./SignInCard";
+import { TranscriptRows, type TranscriptRow } from "./TranscriptRows";
 import { DiffView, diffStats } from "./DiffView";
 import { CopyButton, copyText } from "../components/CopyButton";
 import { ExportMenu } from "../components/ExportMenu";
@@ -287,24 +289,46 @@ function AgentEntry({ text }: { text: string }) {
   );
 }
 
-function EntryView({
+type Permission = CodeState["permissions"][number];
+
+/**
+ * One transcript entry. Memoized, and given only what it shows, so a long transcript re-renders
+ * just the entries an update touched. `onEditing` and `onEdit` must be stable.
+ */
+const EntryView = memo(function EntryView({
   e,
-  s,
+  i,
+  tc,
+  perm,
+  autoApproved,
   cwd,
   editing,
-  setEditing,
+  canEdit,
+  onEditing,
   onEdit,
 }: {
   e: Entry;
-  s: Pick<CodeState, "toolCalls" | "permissions" | "autoApproved">;
+  /** The entry's index, passed back to `onEditing` and `onEdit`. */
+  i: number;
+  tc?: AcpToolCall;
+  perm?: Permission;
+  autoApproved?: string;
   cwd: string;
   editing: boolean;
-  setEditing: (on: boolean) => void;
-  onEdit?: (text: string, atts: Attachment[]) => Promise<boolean>;
+  canEdit: boolean;
+  onEditing?: (i: number | null) => void;
+  onEdit?: (i: number, text: string, atts: Attachment[]) => Promise<boolean>;
 }) {
   switch (e.kind) {
     case "user":
-      return <UserEntry e={e} editing={editing} setEditing={setEditing} onEdit={onEdit} />;
+      return (
+        <UserEntry
+          e={e}
+          editing={editing}
+          setEditing={(on) => onEditing?.(on ? i : null)}
+          onEdit={canEdit && onEdit ? (t, a) => onEdit(i, t, a) : undefined}
+        />
+      );
     case "agent":
       return <AgentEntry text={e.text} />;
     case "image":
@@ -312,12 +336,10 @@ function EntryView({
     case "thought":
       return <Thought text={e.text} />;
     case "tool": {
-      const tc = s.toolCalls[e.id];
-      const perm = s.permissions.find((p) => p.request.toolCall.toolCallId === e.id);
       if (perm) return <PermissionCard requestId={perm.requestId} request={perm.request} live={tc} cwd={cwd} />;
       const doc = tc && planDocOf(tc);
       if (doc) return <PlanDocCard name={doc.name} text={doc.text} />;
-      return tc ? <ToolCallCard tc={tc} autoApproved={s.autoApproved[e.id]} /> : null;
+      return tc ? <ToolCallCard tc={tc} autoApproved={autoApproved} /> : null;
     }
     case "error":
       return (
@@ -328,7 +350,7 @@ function EntryView({
     case "info":
       return <div className="text-center text-[12px] text-faint">{e.text}</div>;
   }
-}
+});
 
 function PlanPanel({ plan }: { plan: NonNullable<CodeState["plan"]> }) {
   if (plan.length === 0) return null;
@@ -412,14 +434,11 @@ function runsOf(entries: Entry[], s: Pick<CodeState, "toolCalls" | "permissions"
   return out;
 }
 
-function renderRuns(runs: Run[], one: (e: Entry, i: number) => ReactNode): ReactNode[] {
-  return runs.map((r) =>
-    "tools" in r ? (
-      <ToolGroup key={`g${r.tools[0].i}`}>{r.tools.map(({ e, i }) => one(e, i))}</ToolGroup>
-    ) : (
-      one(r.e, r.i)
-    ),
-  );
+/** A run as one transcript row: `key` keeps each entry's row (and measured height) across renders. */
+function runRow(r: Run, key: string, dim: boolean, one: (e: Entry, i: number) => ReactNode): TranscriptRow {
+  return "tools" in r
+    ? { key: `${key}g${r.tools[0].i}`, dim, render: () => <ToolGroup>{r.tools.map(({ e, i }) => one(e, i))}</ToolGroup> }
+    : { key: `${key}${r.i}`, dim, render: () => one(r.e, r.i) };
 }
 
 type Diff = Extract<AcpToolCallContent, { type: "diff" }>;
@@ -551,6 +570,26 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, meshLoaded]);
 
+  const earlierRuns = useMemo(
+    () => (state?.earlier ? runsOf(state.earlier.entries, { toolCalls: state.earlier.toolCalls, permissions: [] }) : []),
+    [state?.earlier],
+  );
+  const historyRuns = useMemo(
+    () => (state?.history ? runsOf(state.history.entries, { toolCalls: state.history.toolCalls, permissions: [] }) : []),
+    [state?.history],
+  );
+  const entryRuns = useMemo(
+    () => (state ? runsOf(state.entries, state) : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state?.entries, state?.toolCalls, state?.permissions],
+  );
+  // Stable for the memoized entries; it calls the latest `editAndResend`, set on each render.
+  const editRef = useRef<(i: number, text: string, atts: Attachment[]) => Promise<boolean>>(null);
+  const onEdit = useCallback(
+    (i: number, text: string, atts: Attachment[]) => editRef.current?.(i, text, atts) ?? Promise.resolve(false),
+    [],
+  );
+
   const changes = useMemo(
     () => (state ? collectChanges(state.entries, state.toolCalls) : []),
     [state?.entries, state?.toolCalls],
@@ -646,6 +685,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const send = async (text: string, atts: Attachment[], mentions: string[] = []) => {
     if (!activeId) return;
     const promptId = crypto.randomUUID();
+    // Events still waiting may end the turn: apply them before deciding.
+    flushCodeEvents(activeId);
     // Mid-turn the agent steers it in or Patchbay queues it; its `userPrompt` event shows which.
     const midTurn = !!useStore.getState().code[activeId]?.busy;
     if (!midTurn) {
@@ -696,6 +737,80 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     await send(text, atts);
     return true;
   };
+
+  editRef.current = editAndResend;
+
+  // The transcript as rows, mounted only near the viewport: earlier agents' part, the cached
+  // history, the plan, then this agent's entries.
+  const rows: TranscriptRow[] = [];
+  if (s?.earlier) {
+    const calls = s.earlier.toolCalls;
+    rows.push({
+      key: "earlier-note",
+      dim: true,
+      render: () => (
+        <div className="text-center text-[12px] text-faint">
+          Earlier in this session. The current agent has it only as context, so it can't be edited or rewound.
+        </div>
+      ),
+    });
+    for (const r of earlierRuns) {
+      rows.push(
+        runRow(r, "e", true, (e, i) => (
+          <EntryView key={i} e={e} i={i} tc={e.kind === "tool" ? calls[e.id] : undefined} cwd={session.cwd} editing={false} canEdit={false} />
+        )),
+      );
+    }
+    rows.push({ key: "earlier-end", dim: true, render: () => <div className="border-t border-line" /> });
+  }
+  if (s?.history) {
+    const calls = s.history.toolCalls;
+    if (ready) {
+      rows.push({
+        key: "history-note",
+        dim: true,
+        render: () => (
+          <div className="text-center text-[12px] text-faint">
+            Earlier in this session. The agent started fresh, so this isn't in its context.
+          </div>
+        ),
+      });
+    }
+    for (const r of historyRuns) {
+      rows.push(
+        runRow(r, "h", ready, (e, i) => (
+          <EntryView key={i} e={e} i={i} tc={e.kind === "tool" ? calls[e.id] : undefined} cwd={session.cwd} editing={false} canEdit={false} />
+        )),
+      );
+    }
+    if (ready) rows.push({ key: "history-end", dim: true, render: () => <div className="border-t border-line" /> });
+  }
+  if (s?.plan && s.plan.length > 0) {
+    const plan = s.plan;
+    rows.push({ key: "plan", render: () => <PlanPanel plan={plan} /> });
+  }
+  if (s && (ready || !s.history)) {
+    const canEdit = ready && !working && !!s.extensions.rewind;
+    for (const r of entryRuns) {
+      rows.push(
+        runRow(r, "", false, (e, i) => (
+          <EntryView
+            key={i}
+            e={e}
+            i={i}
+            tc={e.kind === "tool" ? s.toolCalls[e.id] : undefined}
+            perm={e.kind === "tool" ? s.permissions.find((p) => p.request.toolCall.toolCallId === e.id) : undefined}
+            autoApproved={e.kind === "tool" ? s.autoApproved[e.id] : undefined}
+            cwd={session.cwd}
+            editing={editingIdx === i}
+            canEdit={canEdit && e.kind === "user"}
+            onEditing={setEditingIdx}
+            onEdit={onEdit}
+          />
+        )),
+      );
+    }
+  }
 
   const needsYou = (s?.permissions.length ?? 0) > 0 || !!s?.auth;
   // The status light: amber = needs you, blue = working, green = ready, red = stopped.
@@ -926,7 +1041,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             <ScrollFade show={!sticky.atTop} />
             <div
               ref={sticky.ref}
-              className={`h-full overflow-y-auto [overflow-anchor:none] ${sticky.atTop ? "" : "fade-top"}`}
+              className={`relative h-full overflow-y-auto [overflow-anchor:none] ${sticky.atTop ? "" : "fade-top"}`}
               onScroll={sticky.onScroll}
             >
               <div className="mx-auto flex max-w-3xl flex-col gap-4 px-6 py-6">
@@ -937,66 +1052,13 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     {waiting}
                   </div>
                 )}
-                {s?.earlier && (
-                  <div className="flex flex-col gap-4 opacity-70">
-                    <div className="text-center text-[12px] text-faint">
-                      Earlier in this session. The current agent has it only as context, so it can't be edited or rewound.
-                    </div>
-                    {renderRuns(runsOf(s.earlier.entries, { toolCalls: s.earlier.toolCalls, permissions: [] }), (e, i) => (
-                      <EntryView
-                        key={`e${i}`}
-                        e={e}
-                        s={{ toolCalls: s.earlier!.toolCalls, permissions: [], autoApproved: {} }}
-                        cwd={session.cwd}
-                        editing={false}
-                        setEditing={() => {}}
-                      />
-                    ))}
-                    <div className="border-t border-line" />
-                  </div>
-                )}
-                {s?.history && (
-                  <div className={ready ? "flex flex-col gap-4 opacity-70" : "flex flex-col gap-4"}>
-                    {ready && (
-                      <div className="text-center text-[12px] text-faint">
-                        Earlier in this session. The agent started fresh, so this isn't in its context.
-                      </div>
-                    )}
-                    {renderRuns(runsOf(s.history.entries, { toolCalls: s.history.toolCalls, permissions: [] }), (e, i) => (
-                      <EntryView
-                        key={`h${i}`}
-                        e={e}
-                        s={{ toolCalls: s.history!.toolCalls, permissions: [], autoApproved: {} }}
-                        cwd={session.cwd}
-                        editing={false}
-                        setEditing={() => {}}
-                      />
-                    ))}
-                    {ready && <div className="border-t border-line" />}
-                  </div>
-                )}
                 {ready && (s?.entries.length ?? 0) === 0 && !s?.history && !s?.earlier && (
                   <div className="mt-16 text-center text-muted">
                     Ask the agent to read, change, or run things in{" "}
                     <span className="font-mono text-[13px] text-fg/80">{session.cwd}</span>.
                   </div>
                 )}
-                {s?.plan && <PlanPanel plan={s.plan} />}
-                {(ready || !s?.history) && s && renderRuns(runsOf(s.entries, s), (e, i) => (
-                  <EntryView
-                    key={i}
-                    e={e}
-                    s={s}
-                    cwd={session.cwd}
-                    editing={editingIdx === i}
-                    setEditing={(on) => setEditingIdx(on ? i : null)}
-                    onEdit={
-                      ready && !working && e.kind === "user" && s.extensions.rewind
-                        ? (t, a) => editAndResend(i, t, a)
-                        : undefined
-                    }
-                  />
-                ))}
+                {rows.length > 0 && <TranscriptRows rows={rows} scroller={sticky.el} />}
                 {s?.permissions
                   .filter((p) => !s.entries.some((e) => e.kind === "tool" && e.id === p.request.toolCall.toolCallId))
                   .map((p) => (

@@ -2,10 +2,57 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { XIcon } from "./icons";
 
+/** Object URLs for image data, shared by everything showing the same image, with their users. */
+const blobUrls = new Map<string, { url: string; users: number }>();
+
+/**
+ * An object URL for base64 image data, held until `release`. A `data:` URL would put the whole
+ * image, as text, in the page once per `<img>`, and a long session can hold many screenshots.
+ */
+function acquireUrl(data: string, mimeType: string): string {
+  const key = `${mimeType};${data}`;
+  const hit = blobUrls.get(key);
+  if (hit) {
+    hit.users++;
+    return hit.url;
+  }
+  let url: string;
+  try {
+    const bin = atob(data);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    url = URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+  } catch {
+    // Not valid base64: let the browser show it as broken, the way the data URL did.
+    return `data:${mimeType};base64,${data}`;
+  }
+  blobUrls.set(key, { url, users: 1 });
+  return url;
+}
+
+function releaseUrl(data: string, mimeType: string) {
+  const key = `${mimeType};${data}`;
+  const hit = blobUrls.get(key);
+  if (!hit || --hit.users > 0) return;
+  blobUrls.delete(key);
+  URL.revokeObjectURL(hit.url);
+}
+
+/** The image's object URL while the component is mounted. */
+function useImageUrl(data: string, mimeType: string): string | null {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    setUrl(acquireUrl(data, mimeType));
+    return () => releaseUrl(data, mimeType);
+  }, [data, mimeType]);
+  return url;
+}
+
 /** An image an agent produced (an ACP image block), shown inline; a click opens it full size. */
 export function AgentImage({ data, mimeType, alt }: { data: string; mimeType: string; alt?: string }) {
   const [open, setOpen] = useState(false);
-  const src = `data:${mimeType};base64,${data}`;
+  const src = useImageUrl(data, mimeType);
+  if (!src) return null;
   return (
     <>
       <button
@@ -13,7 +60,13 @@ export function AgentImage({ data, mimeType, alt }: { data: string; mimeType: st
         onClick={() => setOpen(true)}
         aria-label={alt ? `Open ${alt}` : "Open image"}
       >
-        <img src={src} alt={alt ?? ""} className="block max-h-[28rem] max-w-full object-contain" />
+        <img
+          src={src}
+          alt={alt ?? ""}
+          loading="lazy"
+          decoding="async"
+          className="block max-h-[28rem] max-w-full object-contain"
+        />
       </button>
       {open && <ImageViewer src={src} alt={alt} onClose={() => setOpen(false)} />}
     </>
