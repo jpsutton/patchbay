@@ -160,6 +160,12 @@ pub struct Extensions {
     pub rewind: bool,
     /// Runs on Patchbay's providers and models, so a change to them needs a restart to apply.
     pub patchbay_models: bool,
+    /// Grok Build's `x.ai/interject`, which steers a message into the running turn.
+    #[serde(skip)]
+    pub interject: bool,
+    /// A message sent mid-turn joins the running turn, through `interject` or the steering
+    /// extension the agent advertises; otherwise Patchbay queues it. Known once the agent starts.
+    pub steering: bool,
 }
 
 /// What makes an agent ask Patchbay before acting, so the session's approval mode decides
@@ -580,7 +586,7 @@ fn prepare_grok(
         args,
         env,
         env_remove: vec!["XAI_API_KEY".into(), "GROK_CODE_XAI_API_KEY".into()],
-        ext: Extensions { status_line: true, rewind: true, patchbay_models: true },
+        ext: Extensions { status_line: true, rewind: true, patchbay_models: true, interject: true, steering: false },
         session_meta,
         initial_model: None,
         login_hint: "",

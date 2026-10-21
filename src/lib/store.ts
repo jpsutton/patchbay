@@ -38,7 +38,8 @@ export { codeWorking, FOREGROUND_IDLE_MS, hasActiveForegroundTools } from "./cod
 export type Mode = "chat" | "code";
 
 export type Entry =
-  | { kind: "user"; text: string; attachments?: Attachment[] }
+  /** `promptId`: names the prompt in its `userPrompt` events, so each shows once. */
+  | { kind: "user"; text: string; attachments?: Attachment[]; promptId?: string }
   | { kind: "agent"; text: string }
   /** An image the agent sent in its reply (an ACP image block). */
   | { kind: "image"; data: string; mimeType: string }
@@ -46,6 +47,23 @@ export type Entry =
   | { kind: "tool"; id: string }
   | { kind: "error"; text: string }
   | { kind: "info"; text: string };
+
+/** A prompt waiting for the running turn to end (agents that can't take one mid-turn). */
+export interface QueuedPrompt {
+  promptId: string;
+  text: string;
+  attachments?: Attachment[];
+  /** The mesh node that sent it. */
+  origin: string;
+  /** Learned from a catch-up, not live: never handed back to a composer. */
+  replayed?: boolean;
+}
+
+/** What a composer gets back when queued prompts it sent won't be. */
+export interface ComposerRestore {
+  text: string;
+  attachments: Attachment[];
+}
 
 export interface TranscriptPart {
   entries: Entry[];
@@ -72,6 +90,10 @@ export interface CodeState {
   approvalGaps: string[];
   /** The agent waits for a sign-in: before it starts a session, or mid-session. */
   auth: { message: string; methods: AuthChoice[] } | null;
+  /** Prompts waiting for the running turn to end. */
+  queued: QueuedPrompt[];
+  /** Queued prompts this window sent that a stop dropped, for its composer to take back. */
+  restore: ComposerRestore | null;
   /** Tool call id -> why a saved rule or the approval mode approved it. */
   autoApproved: Record<string, string>;
   /** Cached transcript from a previous run, shown until (or unless) the agent replays it. */
@@ -116,6 +138,8 @@ const emptyCode = (): CodeState => ({
   extensions: { statusLine: false, rewind: false },
   approvalGaps: [],
   auth: null,
+  queued: [],
+  restore: null,
   autoApproved: {},
   history: null,
   earlier: null,
@@ -134,6 +158,16 @@ const AGENT_PREF_KEYS: (keyof Preferences)[] = [
   "agentPaths",
   "agentProviders",
 ];
+
+/** Add the queued prompts `me` sent (live, not from a catch-up) to what its composer takes back. */
+function handBack(prev: ComposerRestore | null, dropped: QueuedPrompt[], me: string | undefined): ComposerRestore | null {
+  const mine = dropped.filter((q) => q.origin === me && !q.replayed);
+  if (mine.length === 0) return prev;
+  return {
+    text: [prev?.text, ...mine.map((q) => q.text)].filter((t) => t?.trim()).join("\n\n"),
+    attachments: [...(prev?.attachments ?? []), ...mine.flatMap((q) => q.attachments ?? [])],
+  };
+}
 
 /** Persist what the transcript shows, so the session renders before the agent replays it. */
 function saveTranscript(id: string, s: CodeState) {
@@ -301,6 +335,8 @@ interface Store {
   resetCode: (id: string) => void;
   pushCodeEntry: (id: string, e: Entry) => void;
   setCodeBusy: (id: string, busy: boolean) => void;
+  /** The composer took back `restore`. */
+  clearCodeRestore: (id: string) => void;
   setCodeUsage: (id: string, usage: UsageView) => void;
   applyCodeEvent: (id: string, e: CodeEvent) => void;
   patchChatStream: (convId: string, patch: Partial<ChatStream> | ((s: ChatStream) => Partial<ChatStream>)) => void;
@@ -516,7 +552,8 @@ export const useStore = create<Store>((set, get) => ({
       const session = codeSessions.find((c) => c.id === id);
       if (!session || remoteHost(session, mesh)) continue;
       const stale = s.configRev < agentConfigRev || (!!s.extensions.patchbayModels && s.catalogRev < catalogRev);
-      if (s.status === "ready" && !s.busy && s.permissions.length === 0 && stale) {
+      // A queued prompt goes out as soon as the turn ends: a restart would drop it.
+      if (s.status === "ready" && !s.busy && s.permissions.length === 0 && s.queued.length === 0 && stale) {
         startAgent(id).then(() =>
           get().pushCodeEntry(id, { kind: "info", text: "Restarted the agent to apply changed settings" }),
         );
@@ -647,6 +684,11 @@ export const useStore = create<Store>((set, get) => ({
       const s = st.code[id] ?? emptyCode();
       return { code: { ...st.code, [id]: { ...s, busy } } };
     }),
+  clearCodeRestore: (id) =>
+    set((st) => {
+      const s = st.code[id];
+      return s?.restore ? { code: { ...st.code, [id]: { ...s, restore: null } } } : {};
+    }),
 
   setCodeUsage: (id, usage) =>
     set((st) => {
@@ -671,6 +713,9 @@ export const useStore = create<Store>((set, get) => ({
           busy: e.state === "exited" ? false : s.busy,
           permissions: e.state === "exited" ? [] : s.permissions,
           auth: e.state === "exited" ? null : s.auth,
+          // The agent's queue goes with it; this window gets back what it wrote.
+          queued: e.state === "exited" ? [] : s.queued,
+          restore: e.state === "exited" ? handBack(s.restore, s.queued, get().mesh?.nodeId) : s.restore,
           // Commands an agent backgrounded end with it.
           toolCalls: e.state === "exited" ? endBackground(s.toolCalls) : s.toolCalls,
         };
@@ -760,15 +805,44 @@ export const useStore = create<Store>((set, get) => ({
       case "usage":
         next = { ...s, usage: e.usage };
         break;
-      case "userPrompt":
-        // The window that sent it already shows it, unless this is a catch-up after reconnecting.
-        if (e.origin === get().mesh?.nodeId && !e.replay) return;
+      case "userPrompt": {
+        const attachments = e.attachments?.length ? e.attachments : undefined;
+        if (!e.promptId) {
+          // An older host. The window that sent it already shows it, unless this is a catch-up.
+          if (e.origin === get().mesh?.nodeId && !e.replay) return;
+          next = { ...s, busy: true, entries: [...s.entries, { kind: "user", text: e.text, attachments }] };
+          break;
+        }
+        // Keyed by prompt id: the sending window may already show it, and a catch-up repeats it.
+        const pid = e.promptId;
+        const isIt = (x: Entry) => x.kind === "user" && x.promptId === pid;
+        const shown = s.entries.some(isIt);
+        const queued = s.queued.filter((q) => q.promptId !== pid);
+        if (e.delivery === "queued") {
+          next = {
+            ...s,
+            entries: shown ? s.entries.filter((x) => !isIt(x)) : s.entries,
+            queued: [...queued, { promptId: pid, text: e.text, attachments, origin: e.origin, replayed: e.replay }],
+          };
+        } else {
+          next = {
+            ...s,
+            busy: e.delivery === "steered" ? s.busy : true,
+            entries: shown ? s.entries : [...s.entries, { kind: "user", text: e.text, attachments, promptId: pid }],
+            queued,
+          };
+        }
+        break;
+      }
+      case "unqueued": {
+        const dropped = s.queued.filter((q) => e.promptIds.includes(q.promptId));
         next = {
           ...s,
-          busy: true,
-          entries: [...s.entries, { kind: "user", text: e.text, attachments: e.attachments?.length ? e.attachments : undefined }],
+          queued: s.queued.filter((q) => !e.promptIds.includes(q.promptId)),
+          restore: e.restore ? handBack(s.restore, dropped, get().mesh?.nodeId) : s.restore,
         };
         break;
+      }
     }
     set((st) => ({ code: { ...st.code, [id]: next } }));
     if (e.type === "promptDone" || e.type === "permissionResolved") get().restartStaleAgents();
@@ -897,7 +971,7 @@ export function codeEventArrived(env: CodeEnvelope) {
 
 function notifyCode(id: string, what: string) {
   const title = useStore.getState().codeSessions.find((c) => c.id === id)?.title ?? "Code session";
-  notifyInBackground(`Agent ${what}`, title);
+  notifyInBackground(`Agent ${what}`, title, { kind: "code", id });
 }
 
 const TEXT_SIZE_PX = { small: "15px", default: "16px", large: "17.5px" } as const;

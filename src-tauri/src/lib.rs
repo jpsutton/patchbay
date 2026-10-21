@@ -631,6 +631,9 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
         if turn_over {
             state.code.set_busy(&env.code_session_id, false);
         }
+        if matches!(env.event, CodeEvent::UserPrompt { delivery: code::acp::Delivery::Sent, .. }) {
+            state.code.set_busy(&env.code_session_id, true);
+        }
         {
             let mut live = state.live.lock().unwrap();
             let id = env.code_session_id.clone();
@@ -826,6 +829,7 @@ async fn code_prompt_local(
     attachment_ids: Vec<String>,
     mentions: Vec<String>,
     origin: String,
+    prompt_id: Option<String>,
 ) -> anyhow::Result<()> {
     ensure_local_host(state, &id)?;
     let mut blocks = Vec::new();
@@ -869,17 +873,28 @@ async fn code_prompt_local(
     if note.is_some() {
         state.code.titles.on_handoff(&id);
     }
-    state.code.send(&id, AgentCmd::Prompt { blocks })?;
-    state.code.set_busy(&id, true);
+    // The agent thread tells every viewer about the prompt, and whether it went out now, mid-turn
+    // or after the running turn.
+    let msg = code::acp::UserMessage {
+        id: prompt_id.filter(|p| !p.is_empty()).unwrap_or_else(db::new_id),
+        blocks,
+        text,
+        origin,
+        attachments: serde_json::to_value(&atts)?,
+    };
+    state.code.prompt(&id, msg).await?;
     if note.is_some() {
         state.db.with_conn(|c| c.execute("DELETE FROM settings WHERE key = ?1", [&note_key]))?;
     }
-    // Every viewer shows the prompt; the window that sent it already has.
-    code_sink(state)(code::acp::Envelope {
-        code_session_id: id,
-        event: code::acp::CodeEvent::UserPrompt { text, origin, attachments: serde_json::to_value(&atts)? },
-    });
     Ok(())
+}
+
+async fn code_unqueue(state: &AppState, id: String, prompt_id: String) -> CmdResult<()> {
+    if let Some(host) = remote_host(state, &id)? {
+        state.mesh.rpc(&host, "code.unqueue", serde_json::json!({ "id": id, "promptId": prompt_id })).await?;
+        return Ok(());
+    }
+    Ok(state.code.send(&id, AgentCmd::Unqueue { prompt_id })?)
 }
 
 async fn code_prompt(
@@ -888,15 +903,18 @@ async fn code_prompt(
     text: String,
     attachment_ids: Vec<String>,
     mentions: Option<Vec<String>>,
+    prompt_id: Option<String>,
 ) -> CmdResult<()> {
     let mentions = mentions.unwrap_or_default();
     if let Some(host) = remote_host(state, &id)? {
-        let params = serde_json::json!({ "id": id, "text": text, "attachmentIds": attachment_ids, "mentions": mentions });
+        let params = serde_json::json!({
+            "id": id, "text": text, "attachmentIds": attachment_ids, "mentions": mentions, "promptId": prompt_id,
+        });
         state.mesh.rpc(&host, "code.prompt", params).await?;
         return Ok(());
     }
     let me = state.mesh.node_id().to_owned();
-    Ok(code_prompt_local(state, id, text, attachment_ids, mentions, me).await?)
+    Ok(code_prompt_local(state, id, text, attachment_ids, mentions, me, prompt_id).await?)
 }
 
 async fn code_cancel(state: &AppState, id: String) -> CmdResult<()> {
@@ -1294,11 +1312,17 @@ impl mesh::RpcHandler for MeshRpc {
                 let text = p["text"].as_str().unwrap_or_default().to_owned();
                 // A gateway passing on a phone's prompt names the phone.
                 let origin = p["origin"].as_str().map(str::to_owned).unwrap_or(from);
-                code_prompt_local(state, id()?, text, atts, mentions, origin).await.map(|_| Value::Null)
+                let prompt_id = p["promptId"].as_str().map(str::to_owned);
+                code_prompt_local(state, id()?, text, atts, mentions, origin, prompt_id).await.map(|_| Value::Null)
             }
             "code.cancel" => {
                 ensure_local_host(state, &id()?)?;
                 state.code.send(&id()?, AgentCmd::Cancel).map(|_| Value::Null)
+            }
+            "code.unqueue" => {
+                ensure_local_host(state, &id()?)?;
+                let prompt_id = param(&p, "promptId")?.to_owned();
+                state.code.send(&id()?, AgentCmd::Unqueue { prompt_id }).map(|_| Value::Null)
             }
             "code.set_model" => code_set_model_local(state, &id()?, param(&p, "modelId")?.to_owned()).await.map(|_| Value::Null),
             "code.set_config_option" => {
@@ -1567,7 +1591,18 @@ async fn term_open(
         let mesh = state.mesh.clone();
         let h = host.clone();
         api::spawn(async move {
-            while let Some((method, params)) = rx.recv().await {
+            let mut held = None;
+            loop {
+                let first = match held.take() {
+                    Some(m) => m,
+                    None => match rx.recv().await {
+                        Some(m) => m,
+                        None => break,
+                    },
+                };
+                // Keys typed while the last write was in flight go out as one write, so input
+                // lags by one round trip at most instead of one per key.
+                let (method, params) = coalesce_term_input(first, &mut rx, &mut held);
                 if let Err(e) = mesh.rpc(&h, &method, params).await {
                     tracing::debug!("remote terminal: {e:#}");
                 }
@@ -1588,6 +1623,51 @@ async fn term_open(
     }
     let shell = prefs::load(&state.db).terminal_shell;
     Ok(state.terminals.open(&id, &cwd, Some(&shell), cols, rows, sink)?)
+}
+
+type TermInput = (String, serde_json::Value);
+
+/// Merge `first`, when it is a write, with the writes already queued behind it. The first
+/// queued message that is not a write is left in `held`, to go next.
+fn coalesce_term_input(
+    first: TermInput,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<TermInput>,
+    held: &mut Option<TermInput>,
+) -> TermInput {
+    let (method, mut params) = first;
+    if method != "term.write" {
+        return (method, params);
+    }
+    let mut data = params["data"].as_str().unwrap_or_default().to_owned();
+    while let Ok(next) = rx.try_recv() {
+        match next.1["data"].as_str().filter(|_| next.0 == "term.write") {
+            Some(more) => data.push_str(more),
+            None => {
+                *held = Some(next);
+                break;
+            }
+        }
+    }
+    params["data"] = data.into();
+    (method, params)
+}
+
+#[cfg(test)]
+#[test]
+fn coalesce_term_input_merges_writes_in_order() {
+    let w = |d: &str| ("term.write".to_owned(), serde_json::json!({ "termId": "t", "data": d }));
+    let resize = ("term.resize".to_owned(), serde_json::json!({ "termId": "t", "cols": 100, "rows": 30 }));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    for m in [w("b"), w("c"), resize.clone(), w("d")] {
+        tx.send(m).unwrap();
+    }
+    let mut held = None;
+    let (method, params) = coalesce_term_input(w("a"), &mut rx, &mut held);
+    assert_eq!((method.as_str(), params["data"].as_str()), ("term.write", Some("abc")));
+    assert_eq!(held.take(), Some(resize.clone()));
+    let next = rx.try_recv().unwrap();
+    assert_eq!(coalesce_term_input(next, &mut rx, &mut held).1["data"], "d");
+    assert_eq!(coalesce_term_input(resize.clone(), &mut rx, &mut held), resize);
 }
 
 /// Queue input for a remote terminal; false when `id` is local.

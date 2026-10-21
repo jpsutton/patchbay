@@ -9,6 +9,7 @@ import type {
   MeshStatus,
   McpServer,
   PermissionRule,
+  PromptDelivery,
   Prompt,
   SearchHit,
   Attachment,
@@ -143,6 +144,26 @@ const fakeSignedIn = new Set<string>();
 /** Sessions whose fake agent has its session up. */
 const fakeLive = new Set<string>();
 const fakeLabel = (agent: string) => FAKE_AGENTS.find((x) => x.id === agent)?.label ?? agent;
+/** Agents that take a message mid-turn (the rest queue it behind the turn, as the backend does). */
+const FAKE_STEERING = new Set(["grok", "claude-code", "codex"]);
+/** Sessions mid-turn, and the prompts queued behind each turn. */
+const fakeTurns = new Set<string>();
+const fakeQueues: Record<string, { promptId: string; text: string; mentions: string[] }[]> = {};
+
+function fakeEcho(csid: string, promptId: string, text: string, delivery: PromptDelivery) {
+  codeEmit(csid, { type: "userPrompt", promptId, text, origin: ME, attachments: [], delivery });
+}
+
+/** Run turns back to back: this one, then whatever queued up behind it. */
+async function runFakeTurns(csid: string, promptId: string, text: string, mentions: string[]) {
+  fakeEcho(csid, promptId, text, "sent");
+  fakeTurns.add(csid);
+  await fakeAgentTurn(csid, text, mentions);
+  fakeTurns.delete(csid);
+  const next = fakeQueues[csid]?.shift();
+  if (next) void runFakeTurns(csid, next.promptId, next.text, next.mentions);
+}
+
 /** Agent starts per session, so a sign-in from before a restart is dropped as the real one is. */
 const fakeStarts: Record<string, number> = {};
 
@@ -161,7 +182,7 @@ function fakeReady(csid: string) {
       ? null
       : { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] },
     configOptions: grok ? [] : [fakeEffort(fakeConfig[csid] ?? "medium")],
-    extensions: { statusLine: grok, rewind: grok, patchbayModels: grok },
+    extensions: { statusLine: grok, rewind: grok, patchbayModels: grok, steering: FAKE_STEERING.has(db.code.find((c) => c.id === csid)?.agent ?? "grok") },
   });
   codeEmit(csid, {
     type: "update",
@@ -277,6 +298,36 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
     }
   };
   codeEmit(csid, { type: "update", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Planning the change." } } });
+  // A plan that waits for approval, the way Claude Code's `ExitPlanMode` asks.
+  if (text.startsWith("/plan-approve")) {
+    const plan = `# Tidy the README\n\n## Steps\n\n1. Read \`README.md\`.\n2. Rewrite the intro.\n`;
+    const planId = id();
+    const reqId = id();
+    codeEmit(csid, {
+      type: "update",
+      update: { sessionUpdate: "tool_call", toolCallId: planId, title: "Ready to code?", kind: "switch_mode", status: "pending", rawInput: { plan }, content: [{ type: "content", content: { type: "text", text: plan } }] },
+    });
+    const choice = await new Promise<string | null>((resolve) => {
+      pending.set(reqId, resolve);
+      codeEmit(csid, {
+        type: "permission",
+        requestId: reqId,
+        request: {
+          sessionId: "acp",
+          toolCall: { toolCallId: planId, title: "Ready to code?", kind: "switch_mode" },
+          options: [
+            { optionId: "default", name: "Yes, and manually approve edits", kind: "allow_once" },
+            { optionId: "plan", name: "No, keep planning", kind: "reject_once" },
+          ],
+        },
+      });
+    });
+    codeEmit(csid, { type: "permissionResolved", requestId: reqId });
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: planId, status: choice === "default" ? "completed" : "failed" } });
+    await say(choice === "default" ? "Starting on it." : "Okay, still planning.");
+    codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
   // A plan document written as a tool call, the way Cursor's plan mode does it.
   if (text.startsWith("/plan")) {
     const plan = `# Tidy the README\n\n## Problem\n\nThe intro is out of date.\n\n## Steps\n\n1. Read \`README.md\`.\n2. Rewrite the intro.\n3. Check the links still work.\n`;
@@ -744,7 +795,28 @@ export function install() {
             }, 300);
             return null;
           }
-          fakeAgentTurn(a.id as string, a.text as string, (a.mentions as string[]) ?? []);
+          const promptId = (a.promptId as string) || id();
+          const mentions = (a.mentions as string[]) ?? [];
+          if (fakeTurns.has(s.id)) {
+            if (FAKE_STEERING.has(s.agent)) {
+              fakeEcho(s.id, promptId, a.text as string, "steered");
+              codeEmit(s.id, { type: "update", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `\n\n(Noted mid-turn: ${a.text})\n\n` } } });
+            } else {
+              (fakeQueues[s.id] ??= []).push({ promptId, text: a.text as string, mentions });
+              fakeEcho(s.id, promptId, a.text as string, "queued");
+            }
+            return null;
+          }
+          void runFakeTurns(s.id, promptId, a.text as string, mentions);
+          return null;
+        }
+        case "code_unqueue": {
+          const q = fakeQueues[a.id as string] ?? [];
+          const i = q.findIndex((x) => x.promptId === a.promptId);
+          if (i >= 0) {
+            q.splice(i, 1);
+            codeEmit(a.id as string, { type: "unqueued", promptIds: [a.promptId as string], restore: false });
+          }
           return null;
         }
         case "code_auto_title": {
@@ -811,9 +883,14 @@ export function install() {
         case "plugin:webview|set_webview_zoom": document.documentElement.style.zoom = String(a.value); return null;
         case "plugin:notification|is_permission_granted": return true;
         case "plugin:notification|notify": console.info("fake backend: notification", a); return null;
-        case "code_cancel":
+        case "plugin:clipboard-manager|write_text": return navigator.clipboard.writeText(a.text as string).then(() => null);
+        case "plugin:clipboard-manager|read_text": return navigator.clipboard.readText();
+        case "code_cancel": {
           for (const [k, r] of pending) { r(null); pending.delete(k); }
+          const dropped = (fakeQueues[a.id as string] ?? []).splice(0);
+          if (dropped.length) codeEmit(a.id as string, { type: "unqueued", promptIds: dropped.map((d) => d.promptId), restore: true });
           return null;
+        }
         case "code_set_model": case "code_set_mode": return null;
         case "code_set_config_option": {
           fakeConfig[a.id as string] = a.value as string;
@@ -875,12 +952,40 @@ export function install() {
         }
         case "term_write": {
           const w = window as unknown as Record<string, unknown>;
-          const d = (a.data as string).replace(/\r/g, "\r\n");
-          send<TermEvent>(w.__term, { type: "data", data: btoa(d) });
-          // A typed `exit` ends the fake shell, as a real one would.
-          const line = ((w.__termLine as string) ?? "") + (a.data as string);
-          w.__termLine = line.includes("\r") ? "" : line;
-          if (line.includes("\r") && line.split("\r")[0].trim() === "exit") send<TermEvent>(w.__term, { type: "exit", code: 0 });
+          // Like a line-editing shell: echo printable keys, erase on backspace, and after
+          // `sudo` read one line without echo. `__termLatency` (ms) delays the echo, as a
+          // shell on another computer would.
+          let out = "";
+          for (const ch of a.data as string) {
+            let line = (w.__termLine as string) ?? "";
+            if (ch === "\r") {
+              const cmd = line.trim();
+              w.__termLine = "";
+              if (w.__termSecret) {
+                w.__termSecret = false;
+                out += "\r\nok\r\ndemo@patchbay$ ";
+              } else if (cmd === "exit") {
+                out += "\r\n";
+                setTimeout(() => send<TermEvent>(w.__term, { type: "exit", code: 0 }), Number(w.__termLatency ?? 0));
+              } else if (cmd === "sudo") {
+                w.__termSecret = true;
+                out += "\r\n[sudo] password: ";
+              } else {
+                out += "\r\ndemo@patchbay$ ";
+              }
+              continue;
+            }
+            if (ch === "\x7f") {
+              if (!line) continue;
+              w.__termLine = line.slice(0, -1);
+              if (!w.__termSecret) out += "\b\x1b[K";
+              continue;
+            }
+            line += ch;
+            w.__termLine = line;
+            if (!w.__termSecret) out += ch;
+          }
+          if (out) setTimeout(() => send<TermEvent>(w.__term, { type: "data", data: btoa(out) }), Number(w.__termLatency ?? 0));
           return null;
         }
         case "term_resize": case "term_close": return null;

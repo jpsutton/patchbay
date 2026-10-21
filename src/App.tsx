@@ -18,7 +18,7 @@ import { fmtShort, groupByDate, matchesQuery } from "./lib/format";
 import { ModelRing } from "./lib/cable";
 import { emitViewAction, focusComposer, focusSidebarSearch, isMac, isMod, keyLabel, ViewActive } from "./lib/shortcuts";
 import { ScrollFade } from "./lib/useStickyScroll";
-import { notifyInBackground } from "./lib/notify";
+import { notifyInBackground, openNotified, type NotifyTarget } from "./lib/notify";
 import { useDragRegion, useRoundedWindow } from "./components/WindowControls";
 import { installUpdate, useUpdate, useUpdateChecks } from "./lib/update";
 import { AlertToast, MeshChip, MeshPopover, MeshRailButton } from "./components/MeshStatus";
@@ -377,9 +377,11 @@ function ModeToggle({ vertical }: { vertical?: boolean }) {
       aria-label="Mode"
       className={`relative flex gap-0.5 rounded-[10px] border border-line bg-bg p-0.5 ${vertical ? "flex-col" : ""}`}
     >
+      {/* will-change keeps the highlight on its own layer. Without it WebKitGTK promotes the
+          highlight only while it slides, and the whole switch flickers when the layer drops. */}
       <span
         aria-hidden="true"
-        className={`absolute left-0.5 top-0.5 ${size} rounded-[7px] bg-panel-2 shadow-[inset_0_1px_0_rgb(255_255_255/0.04)] ring-1 ring-border/50 transition-transform duration-200 ease-out`}
+        className={`absolute left-0.5 top-0.5 ${size} rounded-[7px] bg-panel-2 shadow-[inset_0_1px_0_rgb(255_255_255/0.04)] ring-1 ring-border/50 transition-transform duration-200 ease-out will-change-transform`}
         style={{
           transform: vertical ? `translateY(calc(${idx * 100}% + ${idx * 2}px))` : `translateX(calc(${idx * 100}% + ${idx * 2}px))`,
         }}
@@ -653,6 +655,7 @@ export default function App() {
         s.selectConversation(null);
         focusComposer();
       }),
+      listen<NotifyTarget>("notification://open", (ev) => openNotified(ev.payload)),
       listen<string>("quick://prompt", (ev) => {
         const s = useStore.getState();
         s.setMode("chat");

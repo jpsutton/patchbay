@@ -508,6 +508,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const models = useStore((s) => s.models);
   const pushCodeEntry = useStore((s) => s.pushCodeEntry);
   const setCodeBusy = useStore((s) => s.setCodeBusy);
+  const clearCodeRestore = useStore((s) => s.clearCodeRestore);
   const refreshCodeSessions = useStore((s) => s.refreshCodeSessions);
   const setToast = useStore((s) => s.setToast);
   const askConfirm = useStore((st) => st.askConfirm);
@@ -644,8 +645,13 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
 
   const send = async (text: string, atts: Attachment[], mentions: string[] = []) => {
     if (!activeId) return;
-    pushCodeEntry(activeId, { kind: "user", text, attachments: atts });
-    setCodeBusy(activeId, true);
+    const promptId = crypto.randomUUID();
+    // Mid-turn the agent steers it in or Patchbay queues it; its `userPrompt` event shows which.
+    const midTurn = !!useStore.getState().code[activeId]?.busy;
+    if (!midTurn) {
+      pushCodeEntry(activeId, { kind: "user", text, attachments: atts, promptId });
+      setCodeBusy(activeId, true);
+    }
     sticky.pin();
     try {
       const root = session.cwd.replace(/[\\/]+$/, "");
@@ -654,10 +660,11 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
         text,
         atts.map((a) => a.id),
         mentions.map((m) => `${root}/${m}`),
+        promptId,
       );
       refreshCodeSessions();
     } catch (e) {
-      setCodeBusy(activeId, false);
+      if (!midTurn) setCodeBusy(activeId, false);
       pushCodeEntry(activeId, { kind: "error", text: errorText(e) });
     }
   };
@@ -1039,8 +1046,41 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             <JumpToBottom show={!sticky.atBottom} onClick={sticky.toBottom} />
           </div>
           <div className="mx-auto w-full max-w-3xl px-6 pb-3 pt-2">
+            {(s?.queued.length ?? 0) > 0 && (
+              <ul className="mb-2 flex flex-col gap-1" aria-label="Queued messages">
+                {s!.queued.map((q) => (
+                  <li
+                    key={q.promptId}
+                    className="flex items-center gap-2 rounded-[10px] border border-border bg-panel px-3 py-1.5 text-xs"
+                  >
+                    <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.08em] text-faint">Queued</span>
+                    <span className="min-w-0 flex-1 truncate text-muted">
+                      {q.text.trim() || q.attachments?.map((a) => a.name).join(", ")}
+                    </span>
+                    <button
+                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted hover:bg-panel-2 hover:text-fg"
+                      onClick={() => api.codeUnqueue(session.id, q.promptId).catch((e) => setToast(errorText(e)))}
+                      title="Don't send"
+                      aria-label="Remove queued message"
+                    >
+                      <XIcon size={12} />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
             <Composer
               busy={working}
+              // Hosts that steer or queue say whether the agent steers; an older host would send a
+              // second prompt into the running turn.
+              sendWhileBusy={s?.extensions.steering !== undefined}
+              busySendHint={
+                s?.extensions.steering
+                  ? "Send now: the agent reads it during this turn"
+                  : "Queue: sends when the agent finishes this turn"
+              }
+              restore={s?.restore}
+              onRestored={() => clearCodeRestore(session.id)}
               disabled={!ready}
               commands={s?.commands}
               mentionFiles={() => api.listProjectFiles(session.cwd, session.id)}
@@ -1055,7 +1095,11 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
               placeholder={
                 reconnecting
                   ? "Reconnecting…"
-                  : ready
+                  : ready && working
+                    ? s?.extensions.steering
+                      ? "Add to what the agent is doing…"
+                      : "Queue a message for when the agent finishes…"
+                    : ready
                     ? `Ask the agent…${s?.commands?.length ? "  / for commands, @ for files" : "  @ for files"}`
                     : (waiting ?? (s?.auth ? "Sign in to start the agent" : "Agent not running"))
               }

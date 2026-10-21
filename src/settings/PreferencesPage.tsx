@@ -422,6 +422,20 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
           }}
         />
       </Row>
+      <Row
+        label="Local echo"
+        hint="Show what you type right away, dimmed, before the shell echoes it back. Auto turns it on when the echo is slow, such as for a session on another computer."
+      >
+        <Choice
+          value={prefs.terminalLocalEcho}
+          onChange={(v) => update({ terminalLocalEcho: v })}
+          options={[
+            { value: "auto", label: "Auto" },
+            { value: "on", label: "Always" },
+            { value: "off", label: "Off" },
+          ]}
+        />
+      </Row>
       <p className="pt-3 text-xs text-muted">Applies to terminals opened after the change.</p>
     </div>
   );

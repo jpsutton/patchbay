@@ -269,9 +269,7 @@ fn smoke_code_agent_edit_with_permission() {
     manager
         .send(
             &session.id,
-            AgentCmd::Prompt {
-                blocks: vec![serde_json::json!({"type": "text", "text": "please !edit"})],
-            },
+            AgentCmd::prompt("please !edit"),
         )
         .unwrap();
     wait_for(&|e| matches!(e, CodeEvent::PromptDone { .. }), "prompt done");
@@ -424,9 +422,7 @@ fn smoke_code_rewind() {
         manager
             .send(
                 &session.id,
-                AgentCmd::Prompt {
-                    blocks: vec![serde_json::json!({"type": "text", "text": text})],
-                },
+                AgentCmd::prompt(text),
             )
             .unwrap()
     };
@@ -545,7 +541,7 @@ fn smoke_code_rules_and_mcp() {
     let is_done = |e: &CodeEvent| matches!(e, CodeEvent::PromptDone { .. });
     let prompt = |text: &str| {
         manager
-            .send(&session.id, AgentCmd::Prompt { blocks: vec![serde_json::json!({"type": "text", "text": text})] })
+            .send(&session.id, AgentCmd::prompt(text))
             .unwrap()
     };
     manager.start(sink, db.clone(), &data_dir, &session.id).unwrap();
