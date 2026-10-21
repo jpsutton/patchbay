@@ -546,6 +546,8 @@ export interface Preferences {
   agentPaths: Partial<Record<AgentId, string>>;
   /** Agents set to run on Patchbay's providers: agent id -> Patchbay model ref. */
   agentProviders: Partial<Record<AgentId, string>>;
+  /** Stop Claude Code turns when its plan's 5-hour or weekly usage reaches `percent`. */
+  usageLimit: { enabled: boolean; percent: number };
   permissionMode: "default" | "auto" | "always-approve";
   agentInstructions: string;
   webFetch: boolean;
@@ -572,6 +574,7 @@ export const defaultPreferences: Preferences = {
   defaultAgent: "grok",
   agentPaths: {},
   agentProviders: {},
+  usageLimit: { enabled: true, percent: 95 },
   permissionMode: "default",
   agentInstructions: "",
   webFetch: false,

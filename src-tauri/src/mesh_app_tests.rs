@@ -637,3 +637,77 @@ async fn sign_in_command_and_pending_auth() {
     });
     assert!(auth().is_none(), "signed in: nothing left to replay");
 }
+
+/// The usage guard: a Claude Code turn past the plan limit is cancelled once, with a notice, and
+/// new prompts are refused until the window resets. Sessions on other agents run on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_limit_stops_claude_turns() {
+    use code::acp::{AgentCmd, CodeEvent, Delivery};
+    use code::plan_limits::PlanLimits;
+    let a = node("alpha-limit");
+    let cwd = a.dir.to_string_lossy().into_owned();
+    let claude = a.state.db.create_code_session(&cwd, None, "claude-code", "default").unwrap();
+    let grok = a.state.db.create_code_session(&cwd, None, "grok", "default").unwrap();
+    let mut claude_rx = a.state.code.attach_test_agent(&claude.id);
+    let mut grok_rx = a.state.code.attach_test_agent(&grok.id);
+    for s in [&claude.id, &grok.id] {
+        emit(&a, s, CodeEvent::UserPrompt {
+            prompt_id: db::new_id(),
+            text: "go".into(),
+            origin: String::new(),
+            attachments: json!([]),
+            delivery: Delivery::Sent,
+        });
+    }
+    let resets = code::plan_limits::now() + 3600;
+    let limits = |five: f64| {
+        PlanLimits::from_update(&json!({ "_meta": { "_claude/rateLimit": { "status": "allowed", "unifiedWindows": {
+            "five_hour": { "utilization": five, "resetsAt": resets },
+            "seven_day": { "utilization": 0.3, "resetsAt": resets + 86400 }
+        }}}}))
+        .unwrap()
+    };
+    let notices = || {
+        a.events.lock().unwrap().iter().filter(|(n, p)| n == code::acp::EVENT && p["event"]["type"] == "notice").count()
+    };
+    let chans: crate::api::ChanFactory = Arc::new(|_| None);
+    let prompt = |id: String| crate::api::call(&a.state, "code_prompt", json!({ "id": id, "text": "more", "attachmentIds": [] }), &chans);
+
+    emit(&a, &claude.id, CodeEvent::PlanLimits { limits: limits(0.9) });
+    assert!(claude_rx.try_recv().is_err(), "under the limit");
+
+    emit(&a, &claude.id, CodeEvent::PlanLimits { limits: limits(0.96) });
+    assert!(matches!(claude_rx.try_recv(), Ok(AgentCmd::Cancel)));
+    assert!(grok_rx.try_recv().is_err(), "other agents have no plan limit");
+    assert_eq!(notices(), 1);
+    // Later reports in the same turn don't stop it again.
+    emit(&a, &claude.id, CodeEvent::PlanLimits { limits: limits(0.97) });
+    assert!(claude_rx.try_recv().is_err());
+    assert_eq!(notices(), 1);
+    let ev = a.events.lock().unwrap().iter().rev().find(|(_, p)| p["event"]["type"] == "notice").cloned().unwrap();
+    let text = ev.1["event"]["message"].as_str().unwrap().to_owned();
+    assert!(text.starts_with("Stopped. Claude Code has used 96% of your plan's 5-hour limit"), "{text}");
+
+    emit(&a, &claude.id, CodeEvent::PromptDone { stop_reason: json!("cancelled") });
+    let err = prompt(claude.id.clone()).await.unwrap_err();
+    assert!(err.0.starts_with("Not sent. Claude Code has used 97%"), "{}", err.0);
+
+    // Turning the guard off lets prompts through again.
+    let mut prefs = prefs::load(&a.state.db);
+    prefs.usage_limit.enabled = false;
+    crate::api::call(&a.state, "set_preferences", json!({ "prefs": prefs }), &chans).await.unwrap();
+    assert!(a.state.code.plan.hit(&prefs::load(&a.state.db).usage_limit, code::plan_limits::now()).is_none());
+
+    // Lowering the limit below current usage stops a running turn right away.
+    emit(&a, &claude.id, CodeEvent::UserPrompt {
+        prompt_id: db::new_id(),
+        text: "go".into(),
+        origin: String::new(),
+        attachments: json!([]),
+        delivery: Delivery::Sent,
+    });
+    prefs.usage_limit = prefs::UsageLimit { enabled: true, percent: 50 };
+    crate::api::call(&a.state, "set_preferences", json!({ "prefs": prefs }), &chans).await.unwrap();
+    assert!(matches!(claude_rx.try_recv(), Ok(AgentCmd::Cancel)));
+    assert_eq!(notices(), 2);
+}

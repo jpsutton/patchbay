@@ -733,6 +733,7 @@ export const useStore = create<Store>((set, get) => ({
       ...defaultPreferences,
       ...loaded,
       claudeConfig: { ...defaultPreferences.claudeConfig, ...loaded?.claudeConfig },
+      usageLimit: { ...defaultPreferences.usageLimit, ...loaded?.usageLimit },
     };
     set({ prefs });
     applyUiPrefs(prefs);

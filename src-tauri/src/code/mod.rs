@@ -8,6 +8,7 @@ pub mod agents;
 pub mod grok_config;
 pub mod mcp;
 pub mod permissions;
+pub mod plan_limits;
 pub mod titles;
 
 use std::collections::HashMap;
@@ -38,6 +39,7 @@ pub struct CodeManager {
     generations: Arc<Mutex<HashMap<String, u64>>>,
     next_generation: std::sync::atomic::AtomicU64,
     pub titles: titles::Titles,
+    pub plan: plan_limits::PlanGuard,
 }
 
 /// Locate the Grok Build binary: bundled sidecar next to our exe, `PATCHBAY_GROK_BIN`, or the
@@ -74,6 +76,19 @@ impl CodeManager {
         } else {
             b.remove(code_session_id);
         }
+    }
+
+    /// Stand in for a running agent: commands for the session come out of the returned channel.
+    #[cfg(test)]
+    pub fn attach_test_agent(&self, code_session_id: &str) -> mpsc::UnboundedReceiver<AgentCmd> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let thread = std::thread::spawn(|| {});
+        self.agents.lock().unwrap().insert(code_session_id.to_owned(), Agent { tx, thread });
+        rx
+    }
+
+    pub fn busy_sessions(&self) -> Vec<String> {
+        self.busy.lock().unwrap().iter().cloned().collect()
     }
 
     /// Mid-turn, or waiting on a permission answer.
@@ -149,6 +164,10 @@ impl CodeManager {
                 if !current() {
                     return;
                 }
+                let limits = match &env.event {
+                    acp::CodeEvent::ContextUsage { update } => plan_limits::PlanLimits::from_update(update),
+                    _ => None,
+                };
                 let view = {
                     let mut u = usage.lock().unwrap();
                     match &env.event {
@@ -164,9 +183,15 @@ impl CodeManager {
                     u.view()
                 };
                 sink(acp::Envelope {
-                    code_session_id: env.code_session_id,
+                    code_session_id: env.code_session_id.clone(),
                     event: acp::CodeEvent::Usage { usage: view },
                 });
+                if let Some(limits) = limits {
+                    sink(acp::Envelope {
+                        code_session_id: env.code_session_id,
+                        event: acp::CodeEvent::PlanLimits { limits },
+                    });
+                }
             })
         };
         let csid = code_session_id.to_owned();

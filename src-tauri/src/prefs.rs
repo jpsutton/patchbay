@@ -45,6 +45,8 @@ pub struct Preferences {
     /// Patchbay model ref. Claude Code uses that model; OpenCode and Kilo get every Patchbay
     /// model, with that one as their default. Agents not listed keep their own setup.
     pub agent_providers: std::collections::BTreeMap<String, String>,
+    /// Stop Claude Code turns before its sign-in's plan limits run into extra usage.
+    pub usage_limit: UsageLimit,
 
     // ---- Grok Build ----
     /// default | auto | always-approve
@@ -85,6 +87,21 @@ pub struct ClaudeConfig {
     pub plugins: bool,
 }
 
+/// When Claude Code runs on a Claude plan: stop its turns once the 5-hour or weekly window
+/// reaches `percent`, or once it bills extra usage.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UsageLimit {
+    pub enabled: bool,
+    pub percent: u8,
+}
+
+impl Default for UsageLimit {
+    fn default() -> Self {
+        Self { enabled: true, percent: 95 }
+    }
+}
+
 impl Default for ClaudeConfig {
     fn default() -> Self {
         Self { skills: true, instructions: true, agents: true, mcp_servers: true, hooks: true, plugins: true }
@@ -107,6 +124,7 @@ impl Default for Preferences {
             default_agent: "grok".into(),
             agent_paths: Default::default(),
             agent_providers: Default::default(),
+            usage_limit: UsageLimit::default(),
             permission_mode: "default".into(),
             agent_instructions: String::new(),
             web_fetch: false,
@@ -149,6 +167,9 @@ impl Preferences {
         {
             return Err("auto-compact threshold must be between 10 and 99%".into());
         }
+        if !(1..=100).contains(&self.usage_limit.percent) {
+            return Err("usage limit must be between 1 and 100%".into());
+        }
         if !(8..=32).contains(&self.terminal_font_size) {
             return Err("terminal font size must be between 8 and 32".into());
         }
@@ -185,6 +206,7 @@ mod tests {
         assert!(p.background_summaries);
         assert!(p.generate_titles);
         assert!(p.claude_config.skills && p.claude_config.hooks);
+        assert_eq!(p.usage_limit, super::UsageLimit { enabled: true, percent: 95 });
     }
 
     #[test]
@@ -199,6 +221,8 @@ mod tests {
         assert!(bad(|p| p.permission_mode = "yolo".into()));
         assert!(bad(|p| p.auto_compact_percent = Some(100)));
         assert!(bad(|p| p.terminal_font_size = 4));
+        assert!(bad(|p| p.usage_limit.percent = 0));
+        assert!(bad(|p| p.usage_limit.percent = 101));
         assert!(bad(|p| p.terminal_shell = "/no/such/shell".into()));
     }
 }
