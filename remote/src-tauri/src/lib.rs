@@ -676,6 +676,12 @@ async fn code_prompt(
 }
 
 #[tauri::command]
+async fn code_unqueue(r: Shared<'_>, id: String, prompt_id: String) -> CmdResult<()> {
+    r.code("code.unqueue", json!({ "id": id, "promptId": prompt_id })).await?;
+    Ok(())
+}
+
+#[tauri::command]
 async fn code_cancel(r: Shared<'_>, id: String) -> CmdResult<()> {
     r.code("code.cancel", json!({ "id": id })).await?;
     Ok(())
@@ -860,6 +866,7 @@ pub fn run() {
             code_stop,
             code_set_agent,
             code_prompt,
+            code_unqueue,
             code_cancel,
             code_set_model,
             code_set_mode,
