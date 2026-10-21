@@ -434,6 +434,9 @@ struct UiClient {
     /// The command loop, to put the agent back in `approvals.select_mode`. Weak, so the loop
     /// still ends when its owner drops the sender.
     cmds: mpsc::WeakUnboundedSender<AgentCmd>,
+    /// The ACP session this client shows, once known. Updates for other sessions are an agent's
+    /// subagents streaming their own work, and stay out of this transcript.
+    acp_session: Rc<RefCell<Option<String>>>,
 }
 
 /// Config option ids that carry the model and mode, when the agent uses `configOptions`
@@ -649,6 +652,9 @@ impl acp::Client for UiClient {
     }
 
     async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<()> {
+        if self.acp_session.borrow().as_deref().is_some_and(|sid| *args.session_id.0 != *sid) {
+            return Ok(());
+        }
         let update = serde_json::to_value(&args.update).unwrap_or(Value::Null);
         if matches!(update["sessionUpdate"].as_str(), Some("tool_call" | "tool_call_update"))
             && let Some(id) = update["toolCallId"].as_str()
@@ -799,6 +805,7 @@ async fn run(
     }
 
     let config_ids: Rc<RefCell<ConfigIds>> = Rc::default();
+    let acp_session: Rc<RefCell<Option<String>>> = Rc::default();
     let client = UiClient {
         sink: sink.clone(),
         code_session_id: csid.clone(),
@@ -808,6 +815,7 @@ async fn run(
         config_ids: config_ids.clone(),
         approvals: approvals.clone(),
         cmds,
+        acp_session: acp_session.clone(),
     };
     let (conn, io) = acp::ClientSideConnection::new(
         client,
@@ -826,11 +834,16 @@ async fn run(
     // `auth.terminal` (ACP, unstable) and `_meta["terminal-auth"]` (the older convention): the
     // agent may offer sign-in methods that run its login command in a terminal, which Patchbay
     // opens in its terminal pane.
+    // `_meta.subagents`: Cursor CLI delivers a background subagent's result only to clients that
+    // advertise it, by keeping `session/prompt` open and running a follow-up turn when the
+    // subagent ends. Without it the result is queued and never read. It then also streams each
+    // subagent under its own session id, which `session_notification` drops. Claude's adapter
+    // reads only the top-level `subagents`, so it is unaffected.
     let mut client_caps = json!({
         "fs": { "readTextFile": false, "writeTextFile": false },
         "terminal": false,
         "auth": { "terminal": true },
-        "_meta": { "terminal_output": true, "terminal-auth": true },
+        "_meta": { "terminal_output": true, "terminal-auth": true, "subagents": true },
     });
     if extensions.status_line {
         // Ask Grok Build for `session_status` updates (context fill, session token totals).
@@ -916,6 +929,7 @@ async fn run(
             }
         }
     };
+    *acp_session.borrow_mut() = Some(session_id.clone());
     on_session(session_id.clone());
     let mut cfg = SessionConfig::from_response(&resp);
     *config_ids.borrow_mut() = cfg.ids();
@@ -1806,8 +1820,10 @@ mod tests {
     /// `--no-methods` starts it signed in, with no auth methods.
     ///
     /// Turns: a prompt `hold` runs until a `release` steer or a cancel, and `brief` for half a
-    /// second. A second prompt mid-turn is refused. `--steering` advertises `_session/steering`
-    /// (a `refuse` steer fails), and every prompt or steer is echoed as agent text
+    /// second. `subagent` streams `child:work` under another session id, as a subagent would,
+    /// then says whether `initialize` advertised `_meta.subagents`. A second prompt mid-turn is
+    /// refused. `--steering` advertises `_session/steering` (a `refuse` steer fails), and every
+    /// prompt or steer is echoed as agent text
     /// (`prompt:<text>`, `steer:<text>`).
     const FAKE_AGENT: &str = r#"
 import json, os, sys, threading
@@ -1846,6 +1862,7 @@ for line in sys.stdin:
         continue
     i, meth, p = m["id"], m["method"], m.get("params") or {}
     if meth == "initialize":
+        subagents = (((p.get("clientCapabilities") or {}).get("_meta") or {}).get("subagents")) is True
         methods = [{"id": "browser", "name": "Log in", "description": "Opens a browser"},
                    {"id": "api-key", "name": "API key", "_meta": {"api-key": {"provider": "x"}}}]
         if ((p.get("clientCapabilities") or {}).get("auth") or {}).get("terminal"):
@@ -1878,6 +1895,10 @@ for line in sys.stdin:
             err(i, "Authentication required")
             continue
         say("prompt:" + t)
+        if t == "subagent":
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1-child",
+                  "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "child:work"}}}})
+            say("subagents:" + str(subagents))
         if t in ("hold", "brief"):
             held = i
             if t == "brief":
@@ -2366,6 +2387,23 @@ for line in sys.stdin:
         assert_eq!(prompt_with(&tx, "see this", Some(with_file)), Delivery::Queued);
         wait_for(&events, "two turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 2);
         assert_eq!(agent_heard(&events, 3), ["prompt:brief", "interject:look left", "prompt:see this"]);
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn subagents_advertised_and_kept_out_of_the_transcript() {
+        let dir = std::env::temp_dir().join(format!("pb-subagent-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        send_prompt(&tx, "subagent");
+        wait_for(&events, "promptDone", |evs| evs.iter().any(prompt_done));
+        assert_eq!(agent_heard(&events, 2), ["prompt:subagent", "subagents:True"]);
         no_errors(&events);
         tx.send(AgentCmd::Shutdown).unwrap();
         thread.join().unwrap();
