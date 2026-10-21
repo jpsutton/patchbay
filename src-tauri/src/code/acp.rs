@@ -1082,7 +1082,12 @@ async fn run(
                         cancel_pending(&pending);
                         drop_queue(&turns, &mut queue);
                         if let Ok(n) = from_json::<acp::CancelNotification>(json!({ "sessionId": session_id })) {
-                            let _ = conn.cancel(n).await;
+                            // A turn's `session/prompt` goes out from its own task. Spawning the
+                            // cancel behind it keeps it from overtaking a prompt that was just sent.
+                            let conn = conn.clone();
+                            tokio::task::spawn_local(async move {
+                                let _ = conn.cancel(n).await;
+                            });
                         }
                     }
                     AgentCmd::SetModel { model_id, reply } => {
