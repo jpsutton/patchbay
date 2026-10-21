@@ -237,6 +237,51 @@ fn agents_live_cursor() {
     live(AgentKind::Cursor);
 }
 
+/// A background subagent's result reaches the parent in the same turn, and the subagent's own
+/// stream stays out of the parent's transcript. Spends a little Cursor quota:
+/// `cargo test --lib agents_live_cursor_background_subagent -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn agents_live_cursor_background_subagent() {
+    let kind = AgentKind::Cursor;
+    if let Err(e) = agents::resolve(kind, &Default::default()) {
+        eprintln!("skip {}: {e:#}", kind.id());
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("pb-live-subagent-{}", std::process::id()));
+    let run = Run::new(kind, &root);
+    run.start();
+    run.ready();
+    let prompt = "Launch exactly one background subagent (Task tool, run_in_background true, subagent_type \
+        generalPurpose, model inherit) whose whole prompt is: 'Reply with exactly the word PROBE_DONE. Use no tools.' \
+        Then end your turn at once with the single word LAUNCHED. When the subagent's result arrives, reply with \
+        GOT: followed by what it returned.";
+    run.manager.send(&run.session_id, AgentCmd::prompt(prompt)).unwrap();
+    let stop = run.wait_for("promptDone", 300, |e| match e {
+        CodeEvent::PromptDone { stop_reason } => Some(stop_reason.clone()),
+        _ => None,
+    });
+    let text: String = run
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match &e.event {
+            CodeEvent::Update { update } if update["sessionUpdate"] == "agent_message_chunk" => {
+                update["content"]["text"].as_str().map(str::to_owned)
+            }
+            _ => None,
+        })
+        .collect();
+    eprintln!("cursor: stop {stop}, reply {text:?}");
+    run.manager.stop_all();
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(stop, "end_turn");
+    assert!(text.contains("LAUNCHED"), "reply {text:?}");
+    assert!(text.contains("GOT: PROBE_DONE"), "the subagent's result came back in the turn: {text:?}");
+    assert_eq!(text.matches("PROBE_DONE").count(), 1, "the subagent's own reply stays out: {text:?}");
+}
+
 #[test]
 #[ignore]
 fn agents_live_kilo() {
