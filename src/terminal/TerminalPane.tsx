@@ -7,6 +7,7 @@ import { copyText, pasteText } from "../lib/clipboard";
 import { api, errorText } from "../lib/ipc";
 import { isMod } from "../lib/shortcuts";
 import { useStore } from "../lib/store";
+import { TypeAheadAddon } from "./typeAhead";
 
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -92,6 +93,11 @@ export function TerminalPane({
     const fit = new FitAddon();
     fitRef.current = fit;
     term.loadAddon(fit);
+    // Local echo, for shells far enough away that typing lags. Sign-in terminals may ask for
+    // secrets, so they never guess.
+    const echo = useStore.getState().prefs.terminalLocalEcho;
+    const typeAhead = authMethod || echo === "off" ? null : new TypeAheadAddon({ threshold: echo === "on" ? 0 : 30 });
+    if (typeAhead) term.loadAddon(typeAhead);
     term.open(el);
     try {
       fit.fit();
@@ -108,6 +114,8 @@ export function TerminalPane({
     const start = () => {
       const mine = ++gen;
       shell = "starting";
+      typeAhead?.reset();
+      const decoder = new TextDecoder();
       api
         .termOpen(
           termId,
@@ -116,7 +124,10 @@ export function TerminalPane({
           term.rows || 24,
           (e) => {
             if (closed || mine !== gen) return;
-            if (e.type === "data") term.write(b64ToBytes(e.data));
+            if (e.type === "data") {
+              const bytes = b64ToBytes(e.data);
+              term.write(typeAhead ? typeAhead.beforeServerInput(decoder.decode(bytes, { stream: true })) : bytes);
+            }
             else {
               const how = e.code != null ? ` with code ${e.code}` : "";
               if (authMethod) {

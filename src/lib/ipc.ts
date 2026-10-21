@@ -537,6 +537,8 @@ export interface Preferences {
   claudeConfig: ClaudeConfig;
   terminalShell: string;
   terminalFontSize: number;
+  /** Draw typed characters before a slow shell echoes them: auto = when echo lags. */
+  terminalLocalEcho: "auto" | "on" | "off";
 }
 
 export const defaultPreferences: Preferences = {
@@ -561,6 +563,7 @@ export const defaultPreferences: Preferences = {
   claudeConfig: { skills: true, instructions: true, agents: true, mcpServers: true, hooks: true, plugins: true },
   terminalShell: "",
   terminalFontSize: 13,
+  terminalLocalEcho: "auto",
 };
 
 export type TermEvent = { type: "data"; data: string } | { type: "exit"; code: number | null };
