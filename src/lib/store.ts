@@ -971,7 +971,7 @@ export function codeEventArrived(env: CodeEnvelope) {
 
 function notifyCode(id: string, what: string) {
   const title = useStore.getState().codeSessions.find((c) => c.id === id)?.title ?? "Code session";
-  notifyInBackground(`Agent ${what}`, title);
+  notifyInBackground(`Agent ${what}`, title, { kind: "code", id });
 }
 
 const TEXT_SIZE_PX = { small: "15px", default: "16px", large: "17.5px" } as const;

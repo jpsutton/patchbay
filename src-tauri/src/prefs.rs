@@ -63,6 +63,8 @@ pub struct Preferences {
     /// Empty = the user's login shell.
     pub terminal_shell: String,
     pub terminal_font_size: u8,
+    /// auto | on | off: draw typed characters before the shell echoes them (UI-only).
+    pub terminal_local_echo: String,
 }
 
 /// Claude Code configuration the agent loads alongside its own. All on by default.
@@ -113,6 +115,7 @@ impl Default for Preferences {
             claude_config: ClaudeConfig::default(),
             terminal_shell: String::new(),
             terminal_font_size: 13,
+            terminal_local_echo: "auto".into(),
         }
     }
 }
@@ -132,6 +135,7 @@ impl Preferences {
         one_of("send key", &self.send_key, &["enter", "mod-enter"])?;
         one_of("launch tab", &self.launch_tab, &["chat", "code", "last"])?;
         one_of("title bar", &self.title_bar, &["system", "app"])?;
+        one_of("terminal local echo", &self.terminal_local_echo, &["auto", "on", "off"])?;
         one_of(
             "permission mode",
             &self.permission_mode,

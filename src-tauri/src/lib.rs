@@ -1591,7 +1591,18 @@ async fn term_open(
         let mesh = state.mesh.clone();
         let h = host.clone();
         api::spawn(async move {
-            while let Some((method, params)) = rx.recv().await {
+            let mut held = None;
+            loop {
+                let first = match held.take() {
+                    Some(m) => m,
+                    None => match rx.recv().await {
+                        Some(m) => m,
+                        None => break,
+                    },
+                };
+                // Keys typed while the last write was in flight go out as one write, so input
+                // lags by one round trip at most instead of one per key.
+                let (method, params) = coalesce_term_input(first, &mut rx, &mut held);
                 if let Err(e) = mesh.rpc(&h, &method, params).await {
                     tracing::debug!("remote terminal: {e:#}");
                 }
@@ -1612,6 +1623,51 @@ async fn term_open(
     }
     let shell = prefs::load(&state.db).terminal_shell;
     Ok(state.terminals.open(&id, &cwd, Some(&shell), cols, rows, sink)?)
+}
+
+type TermInput = (String, serde_json::Value);
+
+/// Merge `first`, when it is a write, with the writes already queued behind it. The first
+/// queued message that is not a write is left in `held`, to go next.
+fn coalesce_term_input(
+    first: TermInput,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<TermInput>,
+    held: &mut Option<TermInput>,
+) -> TermInput {
+    let (method, mut params) = first;
+    if method != "term.write" {
+        return (method, params);
+    }
+    let mut data = params["data"].as_str().unwrap_or_default().to_owned();
+    while let Ok(next) = rx.try_recv() {
+        match next.1["data"].as_str().filter(|_| next.0 == "term.write") {
+            Some(more) => data.push_str(more),
+            None => {
+                *held = Some(next);
+                break;
+            }
+        }
+    }
+    params["data"] = data.into();
+    (method, params)
+}
+
+#[cfg(test)]
+#[test]
+fn coalesce_term_input_merges_writes_in_order() {
+    let w = |d: &str| ("term.write".to_owned(), serde_json::json!({ "termId": "t", "data": d }));
+    let resize = ("term.resize".to_owned(), serde_json::json!({ "termId": "t", "cols": 100, "rows": 30 }));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    for m in [w("b"), w("c"), resize.clone(), w("d")] {
+        tx.send(m).unwrap();
+    }
+    let mut held = None;
+    let (method, params) = coalesce_term_input(w("a"), &mut rx, &mut held);
+    assert_eq!((method.as_str(), params["data"].as_str()), ("term.write", Some("abc")));
+    assert_eq!(held.take(), Some(resize.clone()));
+    let next = rx.try_recv().unwrap();
+    assert_eq!(coalesce_term_input(next, &mut rx, &mut held).1["data"], "d");
+    assert_eq!(coalesce_term_input(resize.clone(), &mut rx, &mut held), resize);
 }
 
 /// Queue input for a remote terminal; false when `id` is local.

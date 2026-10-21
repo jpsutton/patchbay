@@ -298,6 +298,36 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
     }
   };
   codeEmit(csid, { type: "update", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Planning the change." } } });
+  // A plan that waits for approval, the way Claude Code's `ExitPlanMode` asks.
+  if (text.startsWith("/plan-approve")) {
+    const plan = `# Tidy the README\n\n## Steps\n\n1. Read \`README.md\`.\n2. Rewrite the intro.\n`;
+    const planId = id();
+    const reqId = id();
+    codeEmit(csid, {
+      type: "update",
+      update: { sessionUpdate: "tool_call", toolCallId: planId, title: "Ready to code?", kind: "switch_mode", status: "pending", rawInput: { plan }, content: [{ type: "content", content: { type: "text", text: plan } }] },
+    });
+    const choice = await new Promise<string | null>((resolve) => {
+      pending.set(reqId, resolve);
+      codeEmit(csid, {
+        type: "permission",
+        requestId: reqId,
+        request: {
+          sessionId: "acp",
+          toolCall: { toolCallId: planId, title: "Ready to code?", kind: "switch_mode" },
+          options: [
+            { optionId: "default", name: "Yes, and manually approve edits", kind: "allow_once" },
+            { optionId: "plan", name: "No, keep planning", kind: "reject_once" },
+          ],
+        },
+      });
+    });
+    codeEmit(csid, { type: "permissionResolved", requestId: reqId });
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: planId, status: choice === "default" ? "completed" : "failed" } });
+    await say(choice === "default" ? "Starting on it." : "Okay, still planning.");
+    codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
   // A plan document written as a tool call, the way Cursor's plan mode does it.
   if (text.startsWith("/plan")) {
     const plan = `# Tidy the README\n\n## Problem\n\nThe intro is out of date.\n\n## Steps\n\n1. Read \`README.md\`.\n2. Rewrite the intro.\n3. Check the links still work.\n`;
@@ -853,6 +883,8 @@ export function install() {
         case "plugin:webview|set_webview_zoom": document.documentElement.style.zoom = String(a.value); return null;
         case "plugin:notification|is_permission_granted": return true;
         case "plugin:notification|notify": console.info("fake backend: notification", a); return null;
+        case "plugin:clipboard-manager|write_text": return navigator.clipboard.writeText(a.text as string).then(() => null);
+        case "plugin:clipboard-manager|read_text": return navigator.clipboard.readText();
         case "code_cancel": {
           for (const [k, r] of pending) { r(null); pending.delete(k); }
           const dropped = (fakeQueues[a.id as string] ?? []).splice(0);
@@ -920,12 +952,40 @@ export function install() {
         }
         case "term_write": {
           const w = window as unknown as Record<string, unknown>;
-          const d = (a.data as string).replace(/\r/g, "\r\n");
-          send<TermEvent>(w.__term, { type: "data", data: btoa(d) });
-          // A typed `exit` ends the fake shell, as a real one would.
-          const line = ((w.__termLine as string) ?? "") + (a.data as string);
-          w.__termLine = line.includes("\r") ? "" : line;
-          if (line.includes("\r") && line.split("\r")[0].trim() === "exit") send<TermEvent>(w.__term, { type: "exit", code: 0 });
+          // Like a line-editing shell: echo printable keys, erase on backspace, and after
+          // `sudo` read one line without echo. `__termLatency` (ms) delays the echo, as a
+          // shell on another computer would.
+          let out = "";
+          for (const ch of a.data as string) {
+            let line = (w.__termLine as string) ?? "";
+            if (ch === "\r") {
+              const cmd = line.trim();
+              w.__termLine = "";
+              if (w.__termSecret) {
+                w.__termSecret = false;
+                out += "\r\nok\r\ndemo@patchbay$ ";
+              } else if (cmd === "exit") {
+                out += "\r\n";
+                setTimeout(() => send<TermEvent>(w.__term, { type: "exit", code: 0 }), Number(w.__termLatency ?? 0));
+              } else if (cmd === "sudo") {
+                w.__termSecret = true;
+                out += "\r\n[sudo] password: ";
+              } else {
+                out += "\r\ndemo@patchbay$ ";
+              }
+              continue;
+            }
+            if (ch === "\x7f") {
+              if (!line) continue;
+              w.__termLine = line.slice(0, -1);
+              if (!w.__termSecret) out += "\b\x1b[K";
+              continue;
+            }
+            line += ch;
+            w.__termLine = line;
+            if (!w.__termSecret) out += ch;
+          }
+          if (out) setTimeout(() => send<TermEvent>(w.__term, { type: "data", data: btoa(out) }), Number(w.__termLatency ?? 0));
           return null;
         }
         case "term_resize": case "term_close": return null;
