@@ -96,6 +96,8 @@ pub struct Ring {
     bytes: usize,
     /// Holds the stream from its first event.
     complete: bool,
+    /// What fed it went away: the stream may have gone on without it.
+    stale: bool,
 }
 
 impl Ring {
@@ -113,6 +115,7 @@ impl Ring {
                 self.complete = false;
             }
         }
+        self.stale = false;
         let size = payload.to_string().len() + name.len();
         self.events.push_back((pt.n, name.to_owned(), payload.clone()));
         self.bytes += size;
@@ -122,6 +125,12 @@ impl Ring {
                 self.complete = false;
             }
         }
+    }
+
+    /// The connection it came over dropped. Until the stream continues, a snapshot takes nothing
+    /// from it: the saved transcript may already hold the turn it shows unfinished.
+    pub fn mark_stale(&mut self) {
+        self.stale = true;
     }
 
     pub fn last(&self) -> Option<Point> {
@@ -147,6 +156,9 @@ impl Ring {
     /// For a snapshot: the events after the last one matching `boundary` (a finished turn), or
     /// the whole stream when none matches. `covered` is false when the start of that span is gone.
     pub fn tail(&self, boundary: impl Fn(&str, &Value) -> bool) -> (Vec<(String, Value)>, bool) {
+        if self.stale {
+            return (Vec::new(), false);
+        }
         let cut = self.events.iter().rposition(|(_, n, p)| boundary(n, p));
         let covered = cut.is_some() || self.complete;
         let start = cut.map(|i| i + 1).unwrap_or(0);
@@ -363,6 +375,32 @@ mod tests {
         let (tail, covered) = r.tail(|_, p| p["event"]["type"] == "promptDone");
         assert!(covered);
         assert_eq!(tail.len(), 2);
+    }
+
+    #[test]
+    fn stale_ring_gives_no_tail_until_the_stream_continues() {
+        let mut r = Ring::default();
+        let evs = [code(json!({ "type": "userPrompt", "text": "go", "origin": "p" })), chunk("half")];
+        for (i, e) in evs.iter().enumerate() {
+            r.push(&Point { s: "a".into(), n: i as u64 + 1 }, &e.0, &e.1);
+        }
+        r.mark_stale();
+        let (tail, covered) = r.tail(|_, p| p["event"]["type"] == "promptDone");
+        assert!(tail.is_empty() && !covered);
+        // Resuming from a point still works: those events did happen.
+        assert_eq!(r.since(&Point { s: "a".into(), n: 1 }).unwrap().len(), 1);
+        // The stream went on meanwhile: the gap drops the old part and the tail is the new one.
+        r.push(&Point { s: "a".into(), n: 7 }, EV_CODE, &chunk("next").1);
+        let (tail, covered) = r.tail(|_, p| p["event"]["type"] == "promptDone");
+        assert_eq!((tail.len(), covered), (1, false));
+        // Nothing was missed: the old part holds again.
+        let mut r = Ring::default();
+        for (i, e) in evs.iter().enumerate() {
+            r.push(&Point { s: "a".into(), n: i as u64 + 1 }, &e.0, &e.1);
+        }
+        r.mark_stale();
+        r.push(&Point { s: "a".into(), n: 3 }, EV_CODE, &chunk("on").1);
+        assert_eq!(r.tail(|_, p| p["event"]["type"] == "promptDone").0.len(), 3);
     }
 
     #[test]
