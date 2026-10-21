@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { api, errorText, type CodeEnvelope, type Conversation, type MeshChatEvent, type MeshProblem } from "./lib/ipc";
+import {
+  api,
+  errorText,
+  type CodeEnvelope,
+  type Conversation,
+  type MeshChatEvent,
+  type MeshProblem,
+  type PlanLimits,
+} from "./lib/ipc";
 import { codeEventArrived, remoteHost, useStore, type Mode } from "./lib/store";
 import { goBack, goForward, resetHistory, useHistory } from "./lib/history";
 import { initZoom, zoomIn, zoomOut, zoomReset } from "./lib/zoom";
@@ -22,6 +30,7 @@ import { notifyInBackground, openNotified, type NotifyTarget } from "./lib/notif
 import { useDragRegion, useRoundedWindow } from "./components/WindowControls";
 import { installUpdate, useUpdate, useUpdateChecks } from "./lib/update";
 import { AlertToast, MeshChip, MeshPopover, MeshRailButton } from "./components/MeshStatus";
+import { PlanUsageBlade, PlanUsageButton } from "./components/PlanUsage";
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
@@ -636,8 +645,10 @@ export default function App() {
       })
       .catch((e) => setToast(errorText(e)));
     useStore.getState().refreshMesh();
+    api.planLimits().then((l) => useStore.getState().setPlanLimits(l), () => {});
     const unlisteners = [
       listen<CodeEnvelope>("code://event", (ev) => codeEventArrived(ev.payload)),
+      listen<PlanLimits>("code://plan-limits", (ev) => useStore.getState().setPlanLimits(ev.payload)),
       // Mesh (see src-tauri/src/mesh): membership changes, other nodes' writes, live streams.
       listen("mesh://status", () => useStore.getState().refreshMesh()),
       listen<{ tables: string[] }>("mesh://changed", (ev) => useStore.getState().onSynced(ev.payload.tables)),
@@ -752,11 +763,13 @@ export default function App() {
               <SettingsIcon size={17} />
               Settings
             </button>
+            <PlanUsageButton />
             <MeshChip />
             <IconButton label={`Keyboard shortcuts (${keyLabel("Mod+/")})`} onClick={() => setShortcutsOpen(true)}>
               <KeyboardIcon />
             </IconButton>
           </div>
+          <PlanUsageBlade className="absolute bottom-14 left-2" />
           <MeshPopover className="absolute bottom-14 left-2" />
         </aside>
       )}

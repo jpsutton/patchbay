@@ -94,6 +94,21 @@ export interface UsageView {
   autoCompactPercent: number | null;
 }
 
+/** One Claude plan usage window: the fraction used (0 to 1) and when it resets (unix seconds). */
+export interface PlanWindow {
+  utilization: number;
+  resetsAt: number;
+}
+
+/** The Claude plan usage Claude Code last reported (see `code/plan_limits.rs`). */
+export interface PlanLimits {
+  fiveHour: PlanWindow | null;
+  sevenDay: PlanWindow | null;
+  /** Billing extra usage, past the plan, until this time (unix seconds). */
+  overageUntil: number | null;
+  observedAt: number;
+}
+
 export interface Conversation {
   id: string;
   title: string;
@@ -185,7 +200,7 @@ export interface Prompt {
 
 export interface UsageReport {
   chat: { day: string; modelRef: string | null; replies: number; usage: Tokens }[];
-  code: { id: string; title: string; cwd: string; modelRef: string | null; updatedAt: number; usage: Tokens }[];
+  code: { id: string; title: string; cwd: string; modelRef: string | null; agent: AgentId; agentModel: string | null; updatedAt: number; usage: Tokens }[];
 }
 
 /** `agentCapabilities` from ACP `initialize` (subset we read). */
@@ -546,6 +561,8 @@ export interface Preferences {
   agentPaths: Partial<Record<AgentId, string>>;
   /** Agents set to run on Patchbay's providers: agent id -> Patchbay model ref. */
   agentProviders: Partial<Record<AgentId, string>>;
+  /** Stop Claude Code turns when its plan's 5-hour or weekly usage reaches `percent`. */
+  usageLimit: { enabled: boolean; percent: number };
   permissionMode: "default" | "auto" | "always-approve";
   agentInstructions: string;
   webFetch: boolean;
@@ -572,6 +589,7 @@ export const defaultPreferences: Preferences = {
   defaultAgent: "grok",
   agentPaths: {},
   agentProviders: {},
+  usageLimit: { enabled: true, percent: 95 },
   permissionMode: "default",
   agentInstructions: "",
   webFetch: false,
@@ -751,6 +769,7 @@ export const api = {
   codeRewind: (id: string, ordinal: number, preview: string, revertFiles: boolean) =>
     invoke<void>("code_rewind", { id, ordinal, preview, revertFiles }),
   codeUsage: (id: string) => invoke<UsageView>("code_usage", { id }),
+  planLimits: () => invoke<PlanLimits | null>("plan_limits"),
   codePermissionRespond: (requestId: string, optionId: string | null, sessionId?: string) =>
     invoke<void>("code_permission_respond", { requestId, optionId, id: sessionId }),
   codeAttach: (id: string) => invoke<CodeAttach>("code_attach", { id }),

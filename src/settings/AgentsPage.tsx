@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api, errorText, type AgentId, type AgentInfo } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { PermissionRulesList } from "./PermissionRules";
-import { Deferred, Row } from "./PreferencesPage";
+import { Deferred, Row, Toggle } from "./PreferencesPage";
 import { input } from "./ProviderPage";
 
 const SOURCE: Record<NonNullable<AgentInfo["source"]>, string> = {
@@ -67,6 +67,41 @@ function ProviderChoice({ agent }: { agent: AgentId }) {
 }
 
 /** Settings → Coding agents: which ACP agents are installed, the default, and path overrides. */
+/** Claude Code on a Claude plan: stop its turns before they run into extra usage. */
+function UsageLimit() {
+  const limit = useStore((s) => s.prefs.usageLimit);
+  const update = useStore((s) => s.updatePrefs);
+  return (
+    <>
+      <Row
+        label="Stop at plan limit"
+        hint="Cancel running turns and hold new prompts when your Claude plan's 5-hour or weekly usage reaches the limit, or extra usage starts. Lifts when the window resets."
+      >
+        <Toggle
+          label="Stop Claude Code at plan limit"
+          checked={limit.enabled}
+          onChange={(enabled) => update({ usageLimit: { ...limit, enabled } })}
+        />
+      </Row>
+      {limit.enabled && (
+        <Row label="Limit (%)" hint="Of the 5-hour or weekly window, whichever is higher.">
+          <Deferred
+            value={String(limit.percent)}
+            placeholder="95"
+            mono
+            width="w-24"
+            onCommit={(v) => {
+              const t = v.trim() || "95";
+              if (!/^\d+$/.test(t)) return Promise.resolve("Enter a whole number");
+              return update({ usageLimit: { ...limit, percent: Number(t) } });
+            }}
+          />
+        </Row>
+      )}
+    </>
+  );
+}
+
 export function AgentsPage() {
   const prefs = useStore((s) => s.prefs);
   const update = useStore((s) => s.updatePrefs);
@@ -148,6 +183,11 @@ export function AgentsPage() {
           {a.takesProviders && (
             <div className="mt-2">
               <ProviderChoice agent={a.id} />
+            </div>
+          )}
+          {a.id === "claude-code" && !prefs.agentProviders[a.id] && (
+            <div className="mt-2">
+              <UsageLimit />
             </div>
           )}
           {a.id !== "grok" || prefs.agentPaths[a.id] ? (
