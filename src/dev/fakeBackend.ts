@@ -277,6 +277,36 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
     }
   };
   codeEmit(csid, { type: "update", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Planning the change." } } });
+  // A plan that waits for approval, the way Claude Code's `ExitPlanMode` asks.
+  if (text.startsWith("/plan-approve")) {
+    const plan = `# Tidy the README\n\n## Steps\n\n1. Read \`README.md\`.\n2. Rewrite the intro.\n`;
+    const planId = id();
+    const reqId = id();
+    codeEmit(csid, {
+      type: "update",
+      update: { sessionUpdate: "tool_call", toolCallId: planId, title: "Ready to code?", kind: "switch_mode", status: "pending", rawInput: { plan }, content: [{ type: "content", content: { type: "text", text: plan } }] },
+    });
+    const choice = await new Promise<string | null>((resolve) => {
+      pending.set(reqId, resolve);
+      codeEmit(csid, {
+        type: "permission",
+        requestId: reqId,
+        request: {
+          sessionId: "acp",
+          toolCall: { toolCallId: planId, title: "Ready to code?", kind: "switch_mode" },
+          options: [
+            { optionId: "default", name: "Yes, and manually approve edits", kind: "allow_once" },
+            { optionId: "plan", name: "No, keep planning", kind: "reject_once" },
+          ],
+        },
+      });
+    });
+    codeEmit(csid, { type: "permissionResolved", requestId: reqId });
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: planId, status: choice === "default" ? "completed" : "failed" } });
+    await say(choice === "default" ? "Starting on it." : "Okay, still planning.");
+    codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
   // A plan document written as a tool call, the way Cursor's plan mode does it.
   if (text.startsWith("/plan")) {
     const plan = `# Tidy the README\n\n## Problem\n\nThe intro is out of date.\n\n## Steps\n\n1. Read \`README.md\`.\n2. Rewrite the intro.\n3. Check the links still work.\n`;
