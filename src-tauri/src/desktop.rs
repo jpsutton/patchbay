@@ -10,9 +10,11 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 pub const QUICK: &str = "quick";
-/// Main window events: `tray://new-chat`, `quick://prompt` (payload: the text).
+/// Main window events: `tray://new-chat`, `quick://prompt` (payload: the text),
+/// `notification://open` (payload: the `open` extra of the clicked notification).
 pub const EV_NEW_CHAT: &str = "tray://new-chat";
 pub const EV_QUICK_PROMPT: &str = "quick://prompt";
+pub const EV_NOTIFICATION_OPEN: &str = "notification://open";
 
 pub fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
@@ -340,6 +342,20 @@ pub fn run() {
                 Ok(Err(e)) => tracing::warn!("tray icon unavailable: {e:#}"),
                 Err(_) => tracing::warn!("tray icon unavailable"),
                 Ok(Ok(())) => {}
+            }
+            // A click on one of our notifications raises the window and opens what it was about.
+            {
+                use tauri_plugin_notification::NotificationExt;
+                let h = handle.clone();
+                let _ = app.notification().on_action(move |a| {
+                    if a.action_id() != "tap" {
+                        return;
+                    }
+                    show_main(&h);
+                    if let Some(open) = a.notification().and_then(|n| n.extra().get("open")) {
+                        let _ = h.emit_to("main", EV_NOTIFICATION_OPEN, open.clone());
+                    }
+                });
             }
             if p.title_bar != "system" {
                 apply_title_bar(&handle, &p.title_bar);

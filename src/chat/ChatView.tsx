@@ -359,7 +359,7 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
               patchChatStream(convId, { running: false });
               if (e.stopReason !== "cancelled") {
                 const title = useStore.getState().conversations.find((c) => c.id === convId)?.title ?? "Chat";
-                notifyInBackground("Reply ready", title);
+                notifyInBackground("Reply ready", title, { kind: "chat", id: convId });
               }
               // The DB row is finalized right after this event; reload once it lands.
               setTimeout(() => {
