@@ -185,7 +185,7 @@ export interface Prompt {
 
 export interface UsageReport {
   chat: { day: string; modelRef: string | null; replies: number; usage: Tokens }[];
-  code: { id: string; title: string; cwd: string; modelRef: string | null; updatedAt: number; usage: Tokens }[];
+  code: { id: string; title: string; cwd: string; modelRef: string | null; agent: AgentId; agentModel: string | null; updatedAt: number; usage: Tokens }[];
 }
 
 /** `agentCapabilities` from ACP `initialize` (subset we read). */

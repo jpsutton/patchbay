@@ -937,7 +937,11 @@ export function install() {
           }
           return {
             chat: [...days.values()],
-            code: db.code.slice(0, 2).map((s) => ({ id: s.id, title: s.title, cwd: s.cwd, modelRef: "m1", updatedAt: s.updatedAt, usage: { ...fakeUsage, input: 90000, output: 7000 } })),
+            code: [
+              ...db.code.slice(0, 2).map((s) => ({ id: s.id, title: s.title, cwd: s.cwd, modelRef: "m1", agent: "grok", agentModel: null, updatedAt: s.updatedAt, usage: { ...fakeUsage, input: 90000, output: 7000 } })),
+              // An agent that brings its own model: labeled by agent, priced only by what it reports.
+              { id: "fake-cc-usage", title: "Claude Code session", cwd: "/home/me/src/patchbay", modelRef: "m1", agent: "claude-code", agentModel: "opus", updatedAt: Date.now(), usage: { ...fakeUsage, input: 120000, output: 9000, costUsd: 1.23 } },
+            ],
           };
         }
         case "quick_submit": case "quick_dismiss": return null;

@@ -488,6 +488,9 @@ pub struct CodeUsageRow {
     pub title: String,
     pub cwd: String,
     pub model_ref: Option<String>,
+    /// `AgentKind` id: only Grok Build runs on `model_ref`; other agents bring their own model.
+    pub agent: String,
+    pub agent_model: Option<String>,
     pub updated_at: i64,
     pub usage: crate::usage::Tokens,
 }
@@ -1373,17 +1376,20 @@ impl Db {
     pub fn code_usage_rows(&self) -> Result<Vec<CodeUsageRow>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, title, cwd, model_ref, updated_at, usage_json FROM code_sessions
+            "SELECT id, title, cwd, model_ref, agent, agent_model, updated_at, usage_json FROM code_sessions
              WHERE usage_json IS NOT NULL ORDER BY updated_at DESC",
         )?;
-        let rows: Vec<(String, String, String, Option<String>, i64, String)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
+        type Row = (String, String, String, Option<String>, String, Option<String>, i64, String);
+        let rows: Vec<Row> = stmt
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
+            })?
             .collect::<rusqlite::Result<_>>()?;
         Ok(rows
             .into_iter()
-            .filter_map(|(id, title, cwd, model_ref, updated_at, json)| {
+            .filter_map(|(id, title, cwd, model_ref, agent, agent_model, updated_at, json)| {
                 let u: crate::usage::CodeUsageState = serde_json::from_str(&json).ok()?;
-                Some(CodeUsageRow { id, title, cwd, model_ref, updated_at, usage: u.view().totals })
+                Some(CodeUsageRow { id, title, cwd, model_ref, agent, agent_model, updated_at, usage: u.view().totals })
             })
             .collect())
     }
@@ -1494,6 +1500,17 @@ mod tests {
         assert_eq!(got.activity.as_deref(), Some("branch"));
         assert_eq!(got.updated_at, s.updated_at);
         assert!(db.set_code_session_activity(&s.id, "nonsense").is_err());
+    }
+
+    #[test]
+    fn code_usage_rows_carry_the_agent() {
+        let (db, _) = temp_db();
+        let s = db.create_code_session("/tmp", Some("m1"), "claude-code", "default").unwrap();
+        db.set_code_usage(&s.id, &Default::default()).unwrap();
+        let rows = db.code_usage_rows().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].agent, "claude-code");
+        assert_eq!(rows[0].model_ref.as_deref(), Some("m1"));
     }
 
     #[test]

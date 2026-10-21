@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, errorText, estimateCost, type Tokens, type UsageReport } from "../lib/ipc";
+import { AGENT_LABELS, api, errorText, estimateCost, type Tokens, type UsageReport } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { fmtTokens } from "../components/UsageBar";
 import { Choice } from "./PreferencesPage";
@@ -143,7 +143,16 @@ export function UsagePage() {
       cost += c;
       replies += r.replies;
     }
-    const code = report.code.map((s) => ({ ...s, cost: costOf(s.usage, s.modelRef) }));
+    // Only Grok Build runs on Patchbay's models; other agents bring their own, so `modelRef` is
+    // just the default it was created with and its prices don't apply.
+    const code = report.code.map((s) => {
+      const own = s.agent !== "grok";
+      return {
+        ...s,
+        label: own ? [s.agentModel, AGENT_LABELS[s.agent] ?? s.agent].filter(Boolean).join(" · ") : label(s.modelRef),
+        cost: own ? (s.usage.costUsd ?? 0) : costOf(s.usage, s.modelRef),
+      };
+    });
     return {
       dayList,
       perDay: dayList.map((d) => perDay.get(d)!),
@@ -155,7 +164,7 @@ export function UsagePage() {
       codeCost: code.reduce((s, c) => s + c.cost, 0),
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [report, models, days]);
+  }, [report, models, providers, days]);
 
   if (!view) return <div className="text-xs text-muted">Loading…</div>;
   const anyCost = view.cost > 0;
@@ -238,7 +247,7 @@ export function UsagePage() {
                 <td className="max-w-64 truncate py-1.5" title={s.cwd}>
                   {s.title}
                 </td>
-                <td className="py-1.5 text-muted">{label(s.modelRef)}</td>
+                <td className="py-1.5 text-muted">{s.label}</td>
                 <td className="py-1.5 text-right">{fmtTokens(s.usage.input)} in</td>
                 <td className="py-1.5 text-right">{fmtTokens(s.usage.output)} out</td>
                 <td className="py-1.5 text-right">{s.cost > 0 ? fmtUsd(s.cost) : "—"}</td>
