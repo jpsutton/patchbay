@@ -831,6 +831,8 @@ impl Inner {
                 if inner.is_blocked(&ip.to_string()) {
                     return;
                 }
+                // Small messages (keystrokes, terminal echo) must not wait on Nagle.
+                let _ = tcp.set_nodelay(true);
                 let ws = match tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::accept_async(tcp)).await {
                     Ok(Ok(ws)) => ws,
                     _ => return,
@@ -962,7 +964,7 @@ impl Inner {
 
     /// Connect to `url` and run the session there; the URL counts as busy until it ends.
     async fn dial(self: Arc<Self>, url: &str, token: CancellationToken) -> Result<()> {
-        let (ws, _) = tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async(url))
+        let (ws, _) = tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async_with_config(url, None, true))
             .await
             .map_err(|_| anyhow!("timed out"))??;
         self.run_conn(ws_link(ws), true, None, Some(url.to_owned()), None, token).await
