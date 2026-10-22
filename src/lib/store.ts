@@ -1063,7 +1063,8 @@ export function isSendKey(e: { key: string; shiftKey: boolean; ctrlKey: boolean;
   // Phone soft keyboards: Enter inserts a line; send with the button (and Mod+Enter if a
   // hardware keyboard is attached). Desktop still follows the preference.
   if (isRemoteApp()) return e.ctrlKey || e.metaKey;
-  return sendKey === "mod-enter" ? e.ctrlKey || e.metaKey : !e.shiftKey && !e.ctrlKey && !e.metaKey;
+  // With Enter to send, Mod+Enter sends too (and force-sends mid-turn); Shift+Enter breaks the line.
+  return sendKey === "mod-enter" ? e.ctrlKey || e.metaKey : !e.shiftKey;
 }
 
 /**

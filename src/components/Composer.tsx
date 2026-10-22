@@ -423,7 +423,7 @@ export function Composer({
             ? "Enter for a new line; send with the button"
             : sendKey === "mod-enter"
               ? "Ctrl+Enter to send, Enter for a new line"
-              : "Enter to send, Ctrl+Enter or Shift+Enter for a new line") + (forceHint ? `\n${forceHint}` : "")
+              : "Enter to send, Shift+Enter for a new line") + (forceHint ? `\n${forceHint}` : "")
         }
         className="block w-full resize-none bg-transparent px-4 pb-2 pt-3.5 text-[15px] leading-6 text-fg outline-none placeholder:text-faint"
         onChange={(e) => {
