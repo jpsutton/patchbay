@@ -43,6 +43,7 @@ const remote = {
   status: () => invoke<RemoteStatus>("remote_status"),
   join: (url: string, passphrase: string, name: string) => invoke<void>("remote_join", { url, passphrase, name }),
   cancelJoin: () => invoke<void>("remote_cancel_join"),
+  localNetwork: () => invoke<boolean>("remote_local_network"),
   leave: () => invoke<void>("remote_leave"),
   kick: () => invoke<void>("remote_kick"),
   setForeground: (foreground: boolean) => invoke<void>("remote_set_foreground", { foreground }),
@@ -122,6 +123,7 @@ function JoinScreen({ status }: { status: RemoteStatus }) {
   const [pass, setPass] = useState("");
   const [name, setName] = useState(status.name || "Phone");
   const [err, setErr] = useState<string | null>(null);
+  const [lanDenied, setLanDenied] = useState(false);
   const j = status.joining;
   const busy = j?.status === "connecting" || j?.status === "waiting";
 
@@ -172,11 +174,20 @@ function JoinScreen({ status }: { status: RemoteStatus }) {
       {(err || j?.error) && (
         <div className="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-[13px] text-danger">{err ?? j?.error}</div>
       )}
+      {lanDenied && (
+        <p className="text-[13px] text-muted">
+          Local network access is off, so only ZeroTier, Tailscale or VPN addresses can connect. Turn it on in Android
+          Settings → Apps → Patchbay Remote → Permissions → Nearby devices.
+        </p>
+      )}
       <button
         className={primaryCls}
         disabled={busy || !url.trim() || !pass}
-        onClick={() => {
+        onClick={async () => {
           setErr(null);
+          // Android 17 blocks home-network addresses until the user allows it; VPN addresses still work.
+          const lan = await remote.localNetwork().catch(() => true);
+          setLanDenied(!lan);
           remote.join(url, pass, name).catch((e) => setErr(errorText(e)));
         }}
       >
@@ -236,8 +247,13 @@ function Main({ status, onLock }: { status: RemoteStatus; onLock: () => void }) 
     const st = useStore.getState();
     st.loadPrefs().catch(() => {});
     st.refreshMesh();
-    // Android 13 and later ask before an app may notify; the backend notifies when out of sight.
-    isPermissionGranted()
+    // Android 17 asks before an app may reach the home network, which reconnecting to a LAN
+    // gateway needs; Android 13 and later ask before an app may notify, which the backend does when
+    // out of sight. One prompt at a time: Android cancels a request made while another shows.
+    remote
+      .localNetwork()
+      .catch(() => {})
+      .then(() => isPermissionGranted())
       .then(async (ok) => {
         if (!ok) await requestPermission();
       })
