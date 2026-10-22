@@ -1198,7 +1198,8 @@ impl Inner {
             let trusted = known
                 .as_ref()
                 .is_some_and(|m| !m.is_removed() && m.noise_pub == noise_pub && m.sign_pub == theirs.sign_pub);
-            if !trusted {
+            // A node that asks to join has left, even if its removal never reached us.
+            if !trusted || theirs.joining {
                 if theirs.joining {
                     // New, or coming back after being removed: a member has to approve it. Its
                     // address counts only once it is a member (dial_round dials members only),
@@ -2026,7 +2027,9 @@ impl Inner {
         let trusted = known.as_ref().is_some_and(|m| {
             !m.is_removed() && m.is_remote() && m.noise_pub == noise_pub && m.sign_pub == theirs.sign_pub
         });
-        if !trusted {
+        // A phone that left keeps its keys and its record here, so asking to join is what says
+        // it left: it waits for Admitted and would ignore the session we'd otherwise serve.
+        if !trusted || theirs.joining {
             if theirs.joining {
                 return self.pending_join(sec, link, theirs, noise_pub, token).await;
             }
