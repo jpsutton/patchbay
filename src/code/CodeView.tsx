@@ -16,6 +16,7 @@ import {
   codeWorking,
   flushCodeEvents,
   FOREGROUND_IDLE_MS,
+  harnessTags,
   hasActiveForegroundTools,
   memberName,
   memberOnline,
@@ -222,6 +223,32 @@ function Thought({ text }: { text: string }) {
   );
 }
 
+/** A message the agent's harness wrote as the user: dimmed and collapsed, named by its elements. */
+function HarnessEntry({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const tags = useMemo(() => harnessTags(text) ?? [], [text]);
+  return (
+    <div className="text-xs opacity-70">
+      <button
+        className="flex h-[26px] max-w-full items-center gap-2 rounded-lg px-1.5 text-faint hover:bg-panel-2/60 hover:text-muted"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        title="Added by the agent, not typed by you"
+      >
+        <span className={`flex transition-transform ${open ? "rotate-90" : ""}`}>
+          <ChevronRightIcon size={12} />
+        </span>
+        <span className="truncate font-mono">{tags.join(", ")}</span>
+      </button>
+      {open && (
+        <div className="mt-1 max-h-80 overflow-auto whitespace-pre-wrap border-l-2 border-line pl-3 font-mono leading-relaxed text-faint">
+          {text}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function UserEntry({
   e,
   editing,
@@ -349,6 +376,10 @@ const EntryView = memo(function EntryView({
       );
     case "info":
       return <div className="text-center text-[12px] text-faint">{e.text}</div>;
+    case "harness":
+      return <HarnessEntry text={e.text} />;
+    case "cancelled":
+      return <div className="text-center font-mono text-[11px] text-faint">Turn cancelled</div>;
   }
 });
 

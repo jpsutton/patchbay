@@ -266,6 +266,26 @@ async function fakeLongReplay(csid: string) {
   (window as unknown as { __longReplayMs: number }).__longReplayMs = performance.now() - t0;
 }
 
+/** `?harness=1`: a seeded session whose load replays Claude Code's harness messages and a cancel. */
+const harnessDemo = new URLSearchParams(location.search).has("harness");
+let harnessSessionId: string | null = null;
+
+function fakeHarnessReplay(csid: string) {
+  const user = (text: string) => codeEmit(csid, { type: "update", update: { sessionUpdate: "user_message_chunk", content: { type: "text", text } } });
+  const agent = (text: string) => codeEmit(csid, { type: "update", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } });
+  user("<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>opus</command-args>");
+  user("<local-command-stdout>Set model to Opus</local-command-stdout>");
+  user("Fix the flaky upload test.");
+  user("<system-reminder>\nThe user opened src/upload.test.ts in the IDE.\n</system-reminder>");
+  agent("Looking at the upload test now.");
+  user("[Request interrupted by user]");
+  user("Use <b>bold</b> in the summary instead.");
+  agent("Sure, here is the **summary**.");
+  user('<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>Background build finished</summary>\n</task-notification>');
+  agent("The background build passed.");
+  user("[Request interrupted by user for tool use]");
+}
+
 async function fakeChat(a: Record<string, unknown>, regenerate?: string) {
   const convId = a.conversationId as string;
   const ch = a.onEvent;
@@ -594,6 +614,10 @@ export function install() {
     seed("/home/demo/Projects/ips-amp-admin", "Long transcript", 10, "edit");
     longSessionId = db.code[db.code.length - 1].id;
   }
+  if (harnessDemo) {
+    seed("/home/demo/Projects/uploads", "Claude Code replay", 5, "edit");
+    harnessSessionId = db.code[db.code.length - 1].id;
+  }
   if (meshDemo) {
     meshMember();
     mesh.pending = [{ nodeId: "n-new", name: "travel-pc", code: "482 913" }];
@@ -816,7 +840,10 @@ export function install() {
                 return;
               }
               if (csid === longSessionId) void fakeLongReplay(csid).then(() => fakeReady(csid, true));
-              else fakeReady(csid);
+              else if (csid === harnessSessionId) {
+                fakeHarnessReplay(csid);
+                fakeReady(csid, true);
+              } else fakeReady(csid);
             }, 400);
           }, 10);
           return null;

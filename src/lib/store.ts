@@ -47,7 +47,11 @@ export type Entry =
   | { kind: "thought"; text: string }
   | { kind: "tool"; id: string }
   | { kind: "error"; text: string }
-  | { kind: "info"; text: string };
+  | { kind: "info"; text: string }
+  /** A replayed user-role message the agent's harness wrote (a reminder, a slash command's output). */
+  | { kind: "harness"; text: string }
+  /** A replayed marker that the user stopped the turn. */
+  | { kind: "cancelled" };
 
 /** A prompt waiting for the running turn to end (agents that can't take one mid-turn). */
 export interface QueuedPrompt {
@@ -212,6 +216,34 @@ function withoutNote(text: string): string {
   if (!text.startsWith("<patchbay-handoff>")) return text;
   const end = text.indexOf("</patchbay-handoff>");
   return end < 0 ? "" : text.slice(end + "</patchbay-handoff>".length).replace(/^\s+/, "");
+}
+
+/**
+ * Text made only of hyphenated XML-like elements (`<system-reminder>`, `<command-name>`,
+ * `<local-command-stdout>`, ...): what Claude Code injects as the user. Hyphenated names keep
+ * a prompt of pasted HTML a prompt. Returns the elements' names, or null for any other text.
+ */
+export function harnessTags(text: string): string[] | null {
+  const element = /^\s*<([a-z][\w.]*-[\w.:-]*)(?:\s[^>]*)?>[\s\S]*?<\/\1\s*>/i;
+  const tags: string[] = [];
+  let rest = text;
+  while (rest.trim()) {
+    const m = element.exec(rest);
+    if (!m) return null;
+    if (!tags.includes(m[1])) tags.push(m[1]);
+    rest = rest.slice(m[0].length);
+  }
+  return tags.length ? tags : null;
+}
+
+/** Claude Code's record that the user stopped a turn, replayed as a user message. */
+const CANCEL_MARKER = /^\[Request interrupted by user[^\]\n]*\]$/;
+
+/** A replayed user chunk: a prompt, a harness message, or a cancel marker, each its own entry. */
+function appendUserChunk(entries: Entry[], text: string): Entry[] {
+  if (CANCEL_MARKER.test(text.trim())) return [...entries, { kind: "cancelled" }];
+  if (harnessTags(text)) return [...entries, { kind: "harness", text: text.trim() }];
+  return appendText(entries, "user", text);
 }
 
 /** Raise a session's stored activity (its sidebar icon) to `found`; it never goes back down. */
@@ -449,7 +481,7 @@ function reduceUpdate(s: CodeState, u: AcpUpdate): CodeState {
       if (s.busy) return s;
       return {
         ...s,
-        entries: appendText(s.entries, "user", withoutNote(textOf((u as unknown as { content: { type: string; text?: string } }).content))),
+        entries: appendUserChunk(s.entries, withoutNote(textOf((u as unknown as { content: { type: string; text?: string } }).content))),
       };
     case "agent_message_chunk": {
       const c = (u as unknown as { content: { type: string; text?: string; data?: string; mimeType?: string } }).content;
