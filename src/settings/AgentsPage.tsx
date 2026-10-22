@@ -6,6 +6,7 @@ import { Choice, Deferred, LongText, Row, Toggle } from "./PreferencesPage";
 import { input } from "./ProviderPage";
 
 const SOURCE: Record<NonNullable<AgentInfo["source"]>, string> = {
+  builtin: "built in",
   override: "your path",
   bundled: "bundled",
   path: "PATH",
@@ -213,7 +214,7 @@ export function AgentsPage({ list, onOpen }: { list: AgentList; onOpen: (id: Age
   return (
     <div className="flex max-w-xl flex-col">
       <p className="pb-2 text-xs text-muted">
-        Code sessions run a coding agent over the Agent Client Protocol. Grok Build ships with Patchbay and uses your
+        Code sessions run a coding agent over the Agent Client Protocol. Patchbay's own agent is built in and uses your
         providers and models. The others bring their own sign-in and models; install and sign in to them in a
         terminal. A session keeps the agent it started with. The settings here apply to every agent; open an agent for
         its own.
@@ -366,7 +367,7 @@ export function AgentPage({ id, list }: { id: AgentId; list: AgentList }) {
       </div>
       {a.takesProviders && <ProviderChoice agent={a.id} label={a.label} />}
       {a.id === "claude-code" && !prefs.agentProviders[a.id] && <UsageLimit />}
-      {a.id !== "grok" || prefs.agentPaths[a.id] ? (
+      {(a.id !== "grok" && a.id !== "patchbay") || prefs.agentPaths[a.id] ? (
         <Row label="Executable" hint="Absolute path. Blank looks it up on PATH.">
           <Deferred
             value={prefs.agentPaths[a.id] ?? ""}

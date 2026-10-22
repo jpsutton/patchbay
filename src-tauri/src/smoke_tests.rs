@@ -135,7 +135,13 @@ fn smoke_render_grok_config() {
     println!("GROK_HOME={}", dir.join("grok").display());
 }
 
-/// Full Code-tab path: CodeManager -> ACP client -> Grok Build sidecar -> mock model.
+/// The agent the Code smoke tests drive: `patchbay` (in-process) unless `PATCHBAY_SMOKE_AGENT`
+/// names another, such as `grok` with its sidecar staged.
+fn smoke_agent() -> String {
+    std::env::var("PATCHBAY_SMOKE_AGENT").unwrap_or_else(|_| "patchbay".into())
+}
+
+/// Full Code-tab path: CodeManager -> ACP client -> agent -> mock model.
 #[test]
 #[ignore]
 fn smoke_code_agent_edit_with_permission() {
@@ -188,7 +194,7 @@ fn smoke_code_agent_edit_with_permission() {
     })
     .unwrap();
     let session = db
-        .create_code_session(proj.to_str().unwrap(), Some("m"), "grok", "default")
+        .create_code_session(proj.to_str().unwrap(), Some("m"), &smoke_agent(), "default")
         .unwrap();
     crate::prefs::save(
         &db,

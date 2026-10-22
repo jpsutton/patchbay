@@ -47,8 +47,15 @@ pub struct Meta {
     pub tarball: bool,
     /// Agent state, as `agent.tar`.
     pub agent: bool,
+    /// Whose state `agent.tar` holds (`grok` in packages from older versions).
+    #[serde(default = "default_agent_id")]
+    pub agent_id: String,
     pub files: Vec<String>,
     pub created_at: i64,
+}
+
+fn default_agent_id() -> String {
+    "grok".into()
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
@@ -125,7 +132,7 @@ fn snapshot(cwd: &Path, reference: &str, scratch: &Path) -> Result<Option<(PathB
 /// has, left out of the bundle.
 pub fn package(
     data_dir: &Path,
-    grok_home: &Path,
+    agent_home: &Path,
     s: &CodeSession,
     kind: &str,
     have: &[String],
@@ -174,11 +181,11 @@ pub fn package(
         files.push("workspace.tar".to_owned());
     }
     let mut agent = false;
-    // Only Grok Build's state is portable; other agents keep theirs in their own homes and get
-    // the hand-off note instead.
-    if s.agent == "grok"
+    // Only Patchbay's and Grok Build's state is portable; other agents keep theirs in their own
+    // homes and get the hand-off note instead.
+    if matches!(s.agent.as_str(), "patchbay" | "grok")
         && let Some(sid) = &s.acp_session_id
-        && let Some(bytes) = agent_state::export(grok_home, &s.cwd, sid)?
+        && let Some(bytes) = agent_state::export(agent_home, &s.agent, &s.cwd, sid)?
     {
         std::fs::write(dir.join("agent.tar"), bytes)?;
         agent = true;
@@ -191,6 +198,7 @@ pub fn package(
         git: git_meta,
         tarball,
         agent,
+        agent_id: s.agent.clone(),
         files,
         created_at: crate::db::now_ms(),
     };
@@ -298,7 +306,7 @@ pub fn apply_tarball(tar_path: &Path, target_cwd: &Path) -> Result<()> {
 }
 
 /// Unpack a fetched package into `target_cwd`. Returns (agent state restored, note for the user).
-pub fn unpack(dir: &Path, meta: &Meta, grok_home: &Path, target_cwd: &Path, from_name: &str) -> Result<(bool, Option<String>)> {
+pub fn unpack(dir: &Path, meta: &Meta, agent_home: &Path, target_cwd: &Path, from_name: &str) -> Result<(bool, Option<String>)> {
     let mut note = None;
     if let Some(g) = &meta.git {
         if !g.bundle {
@@ -308,15 +316,15 @@ pub fn unpack(dir: &Path, meta: &Meta, grok_home: &Path, target_cwd: &Path, from
     } else if meta.tarball {
         apply_tarball(&dir.join("workspace.tar"), target_cwd)?;
     }
-    let restored = restore_agent(dir, meta, grok_home, target_cwd)?;
+    let restored = restore_agent(dir, meta, agent_home, target_cwd)?;
     Ok((restored, note))
 }
 
-fn restore_agent(dir: &Path, meta: &Meta, grok_home: &Path, target_cwd: &Path) -> Result<bool> {
+fn restore_agent(dir: &Path, meta: &Meta, agent_home: &Path, target_cwd: &Path) -> Result<bool> {
     match (&meta.acp_session_id, meta.agent) {
         (Some(sid), true) => {
             let bytes = std::fs::read(dir.join("agent.tar"))?;
-            agent_state::import(grok_home, &meta.cwd, &target_cwd.to_string_lossy(), sid, &bytes)
+            agent_state::import(agent_home, &meta.agent_id, &meta.cwd, &target_cwd.to_string_lossy(), sid, &bytes)
         }
         _ => Ok(false),
     }
@@ -365,7 +373,7 @@ pub fn checkpoint_have(data_dir: &Path, session_id: &str) -> Vec<String> {
 }
 
 /// Restore a session from the local checkpoint. Returns (agent state restored, note).
-pub fn restore_checkpoint(data_dir: &Path, grok_home: &Path, session_id: &str, target_cwd: &Path, from_name: &str) -> Result<(bool, Option<String>)> {
+pub fn restore_checkpoint(data_dir: &Path, agent_home: &Path, session_id: &str, target_cwd: &Path, from_name: &str) -> Result<(bool, Option<String>)> {
     let meta = checkpoint(data_dir, session_id).ok_or_else(|| anyhow!("no checkpoint of this session on this computer"))?;
     let keep = checkpoint_dir(data_dir, session_id);
     let mut note = None;
@@ -374,7 +382,7 @@ pub fn restore_checkpoint(data_dir: &Path, grok_home: &Path, session_id: &str, t
     } else if meta.tarball {
         apply_tarball(&keep.join("workspace.tar"), target_cwd)?;
     }
-    let restored = restore_agent(&keep, &meta, grok_home, target_cwd)?;
+    let restored = restore_agent(&keep, &meta, agent_home, target_cwd)?;
     Ok((restored, note))
 }
 
@@ -534,12 +542,12 @@ mod tests {
         std::fs::write(src.join(".gitignore"), "ignored.txt\n").unwrap();
         std::fs::write(src.join("ignored.txt"), "stay home").unwrap();
 
-        let (dir, meta) = package(&data, &data.join("grok"), &session(&src), "handoff", &[]).unwrap();
+        let (dir, meta) = package(&data, &data, &session(&src), "handoff", &[]).unwrap();
         // The source is untouched.
         assert!(git(&src, &["status", "--porcelain"]).unwrap().contains("a.txt"));
         assert_eq!(git(&src, &["diff", "--cached", "--name-only"]).unwrap(), "");
 
-        let (restored, note) = unpack(&dir, &meta, &data.join("grok2"), &dst, "alpha").unwrap();
+        let (restored, note) = unpack(&dir, &meta, &data.join("home2"), &dst, "alpha").unwrap();
         assert!(!restored);
         assert!(note.is_none());
         assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "edited, not committed");
@@ -556,10 +564,10 @@ mod tests {
         let have = checkpoint_have(&data, "sess1");
         assert_eq!(have.len(), 1);
         std::fs::write(src.join("a.txt"), "second edit").unwrap();
-        let (dir2, meta2) = package(&data, &data.join("grok"), &session(&src), "handoff", &have).unwrap();
+        let (dir2, meta2) = package(&data, &data, &session(&src), "handoff", &have).unwrap();
         store_checkpoint(&data, &dir2, &meta2).unwrap();
         let dst2 = base.join("dst2");
-        restore_checkpoint(&data, &data.join("grok3"), "sess1", &dst2, "alpha").unwrap();
+        restore_checkpoint(&data, &data.join("home3"), "sess1", &dst2, "alpha").unwrap();
         assert_eq!(std::fs::read_to_string(dst2.join("a.txt")).unwrap(), "second edit");
     }
 
@@ -573,7 +581,7 @@ mod tests {
             sh(d, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "root"]);
         }
         std::fs::write(dst.join("mine.txt"), "local work").unwrap();
-        let (dir, meta) = package(&data, &data.join("grok"), &session(&src), "handoff", &[]).unwrap();
+        let (dir, meta) = package(&data, &data, &session(&src), "handoff", &[]).unwrap();
         let err = unpack(&dir, &meta, &data.join("g"), &dst, "alpha").unwrap_err();
         assert!(err.to_string().contains("uncommitted"), "{err}");
     }

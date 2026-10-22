@@ -100,6 +100,10 @@ impl CodeUsageState {
         if let Some(w) = update["size"].as_u64().filter(|w| *w > 0) {
             self.context_window = Some(w);
         }
+        // Patchbay's own agent says where it compacts; Grok reports that in its status line.
+        if let Some(p) = update["_meta"]["autoCompactPercent"].as_u64() {
+            self.auto_compact_percent = Some(p);
+        }
         if let Some(c) = update["cost"]["amount"].as_f64()
             && update["cost"]["currency"].as_str().is_none_or(|c| c.eq_ignore_ascii_case("USD"))
         {

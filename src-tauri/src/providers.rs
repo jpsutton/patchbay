@@ -138,11 +138,16 @@ pub async fn ensure_token(resolved: &mut Resolved) -> Result<()> {
 /// `429 rate_limit_error: Error`.
 pub const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
+/// System blocks the provider needs ahead of the caller's own.
+pub fn system_prefix(r: &Resolved) -> Vec<SystemBlock> {
+    // Its own block, so the caller's system prompt follows untouched.
+    if r.auth == Auth::ClaudeLogin { vec![SystemBlock::new(CLAUDE_CODE_IDENTITY)] } else { Vec::new() }
+}
+
 /// Make `req` acceptable to the provider before sending it.
 pub fn prepare_request(r: &Resolved, req: &mut patchbay_llm::Request) {
-    if r.auth == Auth::ClaudeLogin {
-        // Its own block, so the caller's system prompt follows untouched.
-        req.system.insert(0, SystemBlock::new(CLAUDE_CODE_IDENTITY));
+    for (i, b) in system_prefix(r).into_iter().enumerate() {
+        req.system.insert(i, b);
     }
 }
 

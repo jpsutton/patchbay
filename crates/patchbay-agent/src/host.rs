@@ -18,6 +18,8 @@ pub struct ModelClient {
     /// Blocks the provider needs ahead of the agent's own (Claude subscription logins).
     pub system_prefix: Vec<SystemBlock>,
     pub context_window: Option<u64>,
+    /// Compact when the context reaches this percentage of the window; `None` = the host default.
+    pub auto_compact_percent: Option<u8>,
 }
 
 #[derive(Debug, Clone)]

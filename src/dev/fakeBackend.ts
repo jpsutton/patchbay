@@ -3,7 +3,7 @@
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 import type { Channel } from "@tauri-apps/api/core";
-import { emptyParams } from "../lib/ipc";
+import { emptyParams, usesPatchbayModels } from "../lib/ipc";
 import type {
   MeshChatEvent,
   MeshStatus,
@@ -40,8 +40,8 @@ const fakeAgent = (id: AgentId, label: string, program: string | null, extra: Pa
   version: program ? "1.0.0" : null,
   error: program ? null : `${label} not found.`,
   installHint: `Install ${label}, then sign in from a terminal.`,
-  usesPatchbayModels: id === "grok",
-  supportsInstructions: id === "grok" || id === "claude-code" || id === "codex" || id === "antigravity",
+  usesPatchbayModels: id === "patchbay" || id === "grok",
+  supportsInstructions: id === "patchbay" || id === "grok" || id === "claude-code" || id === "codex" || id === "antigravity",
   takesProviders: id === "claude-code" || id === "opencode" || id === "kilo",
   ...extra,
 });
@@ -49,7 +49,8 @@ const fakeAgent = (id: AgentId, label: string, program: string | null, extra: Pa
 const fakeRunning = new Set<string>();
 
 const FAKE_AGENTS: AgentInfo[] = [
-  fakeAgent("grok", "Grok Build", "/opt/patchbay/grok", { source: "bundled" }),
+  fakeAgent("patchbay", "Patchbay", "/opt/patchbay", { source: "builtin" }),
+  fakeAgent("grok", "Grok Build", "/usr/local/bin/grok", { source: "path" }),
   fakeAgent("claude-code", "Claude Code", "/usr/bin/npx", { source: "npx", version: null }),
   fakeAgent("opencode", "OpenCode", "/usr/bin/opencode"),
   fakeAgent("cursor", "Cursor CLI", "/usr/bin/cursor-agent"),
@@ -196,7 +197,8 @@ const fakeStarts: Record<string, number> = {};
 
 function fakeReady(csid: string, loaded = false) {
   fakeLive.add(csid);
-  const grok = (db.code.find((c) => c.id === csid)?.agent ?? "grok") === "grok";
+  const agentId = db.code.find((c) => c.id === csid)?.agent ?? "patchbay";
+  const grok = usesPatchbayModels(agentId);
   codeEmit(csid, {
     type: "sessionReady", acpSessionId: "acp-" + csid, loaded,
     approvalGaps: grok ? [] : ["This agent edits files in this project without asking, in every mode."],
@@ -205,11 +207,13 @@ function fakeReady(csid: string, loaded = false) {
     models: grok
       ? { currentModelId: "pb-m1", availableModels: db.models.map((m) => ({ modelId: "pb-" + m.id, name: m.displayName })) }
       : { currentModelId: "sonnet", availableModels: [{ modelId: "sonnet", name: "Sonnet" }, { modelId: "opus", name: "Opus" }] },
-    modes: grok
+    modes: agentId === "patchbay"
+      ? { currentModeId: "default", availableModes: [{ id: "default", name: "Default" }, { id: "plan", name: "Plan" }] }
+      : grok
       ? null
       : { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] },
     configOptions: grok ? [] : fakeOptions(csid),
-    extensions: { statusLine: grok, rewind: grok, patchbayModels: grok, steering: FAKE_STEERING.has(db.code.find((c) => c.id === csid)?.agent ?? "grok"), forceSend: true },
+    extensions: { statusLine: agentId === "grok", rewind: agentId === "grok", patchbayModels: grok, steering: FAKE_STEERING.has(agentId), forceSend: true },
   });
   codeEmit(csid, {
     type: "update",
@@ -778,7 +782,7 @@ export function install() {
   db.models.push({ id: "m1", providerId: "p1", modelId: "demo-model", displayName: "Demo model", vision: true, contextWindow: 128000, params: { ...emptyParams(), pricing: { input: 3, cachedInput: 0.3, cacheWrite: 3.75, output: 15 } } });
   db.models.push({ id: "m2", providerId: "p1", modelId: "demo-mini", displayName: "Demo mini", vision: false, contextWindow: 32000, params: emptyParams() });
   const seed = (cwd: string, title: string, ago: number, activity: CodeSession["activity"], hostNode = ME) =>
-    db.code.push({ id: id(), cwd, acpSessionId: null, title, modelRef: "m1", pinned: false, createdAt: now() - ago, updatedAt: now() - ago, activity, hostNode, epoch: 0, agent: "grok", agentModel: null, permissionMode: "default" });
+    db.code.push({ id: id(), cwd, acpSessionId: null, title, modelRef: "m1", pinned: false, createdAt: now() - ago, updatedAt: now() - ago, activity, hostNode, epoch: 0, agent: "patchbay", agentModel: null, permissionMode: "default" });
   seed("/home/demo/Projects/nulamp", "Windows installer testing", 1000, "edit");
   seed("/home/demo/Projects/nulamp", "Release to staging", 5000, "pr");
   seed("/home/demo/Projects/omnimark", "Interactive document controls", 3000, "branch", meshDemo ? "n-studio" : ME);
@@ -970,7 +974,7 @@ export function install() {
             createdAt: now(),
             updatedAt: now(),
             activity: null,
-            agent: ((a.agent as AgentId | null) ?? prefs.defaultAgent ?? "grok"),
+            agent: ((a.agent as AgentId | null) ?? prefs.defaultAgent ?? "patchbay"),
             agentModel: null,
             hostNode: (a.host as string | null) ?? ME,
             epoch: 0,
@@ -1006,7 +1010,7 @@ export function install() {
           setTimeout(() => {
             codeEmit(csid, { type: "status", state: "starting", message: null });
             setTimeout(() => {
-              const agent = db.code.find((c) => c.id === csid)?.agent ?? "grok";
+              const agent = db.code.find((c) => c.id === csid)?.agent ?? "patchbay";
               const methods = FAKE_AUTH[agent];
               if (methods && !fakeSignedIn.has(agent)) {
                 codeEmit(csid, { type: "authRequired", message: `${fakeLabel(agent)} needs you to sign in first.`, methods });
@@ -1023,7 +1027,7 @@ export function install() {
         }
         case "code_authenticate": {
           const csid = a.id as string;
-          const agent = db.code.find((c) => c.id === csid)?.agent ?? "grok";
+          const agent = db.code.find((c) => c.id === csid)?.agent ?? "patchbay";
           const m = FAKE_AUTH[agent]?.find((x) => x.id === a.methodId && !x.terminal);
           if (!m) throw "agent is not running for this session";
           // A browser sign-in takes a while; a key "bad" is refused.
@@ -1154,7 +1158,7 @@ export function install() {
           return {
             chat: [...days.values()],
             code: [
-              ...db.code.slice(0, 2).map((s) => ({ id: s.id, title: s.title, cwd: s.cwd, modelRef: "m1", agent: "grok", agentModel: null, updatedAt: s.updatedAt, usage: { ...fakeUsage, input: 90000, output: 7000 } })),
+              ...db.code.slice(0, 2).map((s) => ({ id: s.id, title: s.title, cwd: s.cwd, modelRef: "m1", agent: "patchbay", agentModel: null, updatedAt: s.updatedAt, usage: { ...fakeUsage, input: 90000, output: 7000 } })),
               // An agent that brings its own model: labeled by agent, priced only by what it reports.
               { id: "fake-cc-usage", title: "Claude Code session", cwd: "/home/me/src/patchbay", modelRef: "m1", agent: "claude-code", agentModel: "opus", updatedAt: Date.now(), usage: { ...fakeUsage, input: 120000, output: 9000, costUsd: 1.23 } },
             ],
@@ -1188,7 +1192,7 @@ export function install() {
           if (s.agent !== a.agent && saved?.includes('"kind":"user"')) {
             // Like `handoff::fold_for_switch`: the old turns become earlier history.
             const v = JSON.parse(saved);
-            const name = (id: string) => ({ grok: "Grok Build", "claude-code": "Claude Code" })[id] ?? id;
+            const name = (id: string) => ({ patchbay: "Patchbay", grok: "Grok Build", "claude-code": "Claude Code" })[id] ?? id;
             const divider = `Switched from ${name(s.agent)} to ${name(a.agent as string)}. It got the conversation so far as context.`;
             db.transcripts[s.id] = JSON.stringify({
               v: 1,
@@ -1390,10 +1394,10 @@ export function install() {
         case "new_session_options":
         case "remote_new_session_options": {
           const agent = (id: AgentId, label: string, available: boolean) =>
-            ({ id, label, available, program: null, source: null, version: null, error: null, installHint: "", usesPatchbayModels: id === "grok", supportsInstructions: id === "grok", takesProviders: false });
+            ({ id, label, available, program: null, source: null, version: null, error: null, installHint: "", usesPatchbayModels: id === "patchbay" || id === "grok", supportsInstructions: id === "patchbay" || id === "grok", takesProviders: false });
           return {
-            agents: [agent("grok", "Grok Build", true), agent("claude-code", "Claude Code", true), agent("cursor", "Cursor CLI", false)],
-            defaultAgent: "grok",
+            agents: [agent("patchbay", "Patchbay", true), agent("grok", "Grok Build", true), agent("claude-code", "Claude Code", true), agent("cursor", "Cursor CLI", false)],
+            defaultAgent: "patchbay",
             home: "/home/demo",
             recent: [...new Set(db.code.filter((s) => (s.hostNode ?? ME) === ((a.host as string | null) ?? ME)).map((s) => s.cwd))].slice(0, 12),
           };
@@ -1411,7 +1415,7 @@ export function install() {
         case "remote_create_code_session": {
           const s: CodeSession = {
             id: id(), cwd: a.cwd as string, acpSessionId: null, title: "New session", modelRef: (a.modelRef as string) ?? null,
-            pinned: false, createdAt: now(), updatedAt: now(), activity: null, agent: (a.agent as AgentId) ?? "grok",
+            pinned: false, createdAt: now(), updatedAt: now(), activity: null, agent: (a.agent as AgentId) ?? "patchbay",
             agentModel: null, hostNode: a.host as string, epoch: 0, permissionMode: "default",
           };
           db.code.push(s);

@@ -456,6 +456,39 @@ pub type AutoApprove = Arc<dyn Fn(&Value, &Value) -> Option<(String, String)> + 
 /// names of servers left out because the agent doesn't support their transport.
 pub type McpProvider = Box<dyn FnOnce(&Value) -> (Vec<Value>, Vec<String>) + Send>;
 
+/// Starts an agent that runs inside the app, given the two pipes its ACP connection uses: what
+/// the client sends, and where the agent writes.
+pub type NativeAgent =
+    Arc<dyn Fn(tokio::io::DuplexStream, tokio::io::DuplexStream) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
+
+/// The agent behind the connection: a child process, or a task in this process.
+enum AgentProc {
+    Child(tokio::process::Child),
+    Native { done: tokio::sync::watch::Receiver<bool>, task: tokio::task::JoinHandle<()> },
+}
+
+impl AgentProc {
+    /// Resolves, every time it is polled after the agent ended, with a description of how.
+    async fn wait(&mut self) -> std::io::Result<String> {
+        match self {
+            AgentProc::Child(c) => c.wait().await.map(|s| s.to_string()),
+            AgentProc::Native { done, .. } => {
+                let _ = done.wait_for(|d| *d).await;
+                Ok("the Patchbay agent stopped".to_owned())
+            }
+        }
+    }
+
+    fn start_kill(&mut self) {
+        match self {
+            AgentProc::Child(c) => {
+                let _ = c.start_kill();
+            }
+            AgentProc::Native { task, .. } => task.abort(),
+        }
+    }
+}
+
 pub struct SpawnSpec {
     pub sink: Sink,
     pub code_session_id: String,
@@ -1048,45 +1081,63 @@ async fn run(
         initial_model,
         login_hint,
         approvals,
+        native,
     } = launch;
     emit(&sink, &csid, CodeEvent::Status { state: "starting".into(), message: None });
 
-    let mut cmd = tokio::process::Command::new(&program);
-    cmd.args(&args)
-        .current_dir(&cwd)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    for k in &env_remove {
-        cmd.env_remove(k);
-    }
-    for (k, v) in &env {
-        cmd.env(k, v);
-    }
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("start agent {}", program.display()))?;
-    let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
-    let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-    let stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
-
     // Keep the last stderr lines to explain crashes.
     let stderr_tail: Rc<RefCell<Vec<String>>> = Rc::default();
-    {
-        let tail = stderr_tail.clone();
-        tokio::task::spawn_local(async move {
-            let mut lines = tokio::io::BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(target: "agent_stderr", "{line}");
-                let mut t = tail.borrow_mut();
-                t.push(line);
-                if t.len() > 40 {
-                    t.remove(0);
-                }
+    let (stdin, stdout, mut child): (
+        Box<dyn tokio::io::AsyncWrite + Unpin>,
+        Box<dyn tokio::io::AsyncRead + Unpin>,
+        AgentProc,
+    ) = match native {
+        Some(start) => {
+            let (to_agent, agent_in) = tokio::io::duplex(1 << 20);
+            let (agent_out, from_agent) = tokio::io::duplex(1 << 20);
+            let (done_tx, done) = tokio::sync::watch::channel(false);
+            let agent = start(agent_in, agent_out);
+            let task = tokio::task::spawn_local(async move {
+                agent.await;
+                let _ = done_tx.send(true);
+            });
+            (Box::new(to_agent), Box::new(from_agent), AgentProc::Native { done, task })
+        }
+        None => {
+            let mut cmd = tokio::process::Command::new(&program);
+            cmd.args(&args)
+                .current_dir(&cwd)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true);
+            for k in &env_remove {
+                cmd.env_remove(k);
             }
-        });
-    }
+            for (k, v) in &env {
+                cmd.env(k, v);
+            }
+            let mut child = cmd
+                .spawn()
+                .with_context(|| format!("start agent {}", program.display()))?;
+            let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
+            let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+            let stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
+            let tail = stderr_tail.clone();
+            tokio::task::spawn_local(async move {
+                let mut lines = tokio::io::BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::debug!(target: "agent_stderr", "{line}");
+                    let mut t = tail.borrow_mut();
+                    t.push(line);
+                    if t.len() > 40 {
+                        t.remove(0);
+                    }
+                }
+            });
+            (Box::new(stdin), Box::new(stdout), AgentProc::Child(child))
+        }
+    };
 
     let config_ids: Rc<RefCell<ConfigIds>> = Rc::default();
     let acp_session: Rc<RefCell<Option<String>>> = Rc::default();
@@ -1523,7 +1574,7 @@ async fn run(
 async fn close(
     io_task: tokio::task::JoinHandle<acp::Result<()>>,
     conn: Rc<acp::ClientSideConnection>,
-    child: &mut tokio::process::Child,
+    child: &mut AgentProc,
 ) {
     io_task.abort();
     drop(conn);
@@ -1531,7 +1582,7 @@ async fn close(
         .await
         .is_err()
     {
-        let _ = child.start_kill();
+        child.start_kill();
         let _ = child.wait().await;
     }
 }
@@ -1542,7 +1593,7 @@ async fn close(
 async fn wait_for_sign_in(
     conn: &acp::ClientSideConnection,
     rx: &mut mpsc::UnboundedReceiver<AgentCmd>,
-    child: &mut tokio::process::Child,
+    child: &mut AgentProc,
     stderr_tail: &Rc<RefCell<Vec<String>>>,
     login_command: &dyn Fn(&str) -> Result<crate::terminal::Program>,
 ) -> Result<Option<oneshot::Sender<Result<()>>>> {
@@ -1727,12 +1778,9 @@ fn acp_error_text(e: &acp::Error) -> String {
     }
 }
 
-fn exited(
-    status: std::io::Result<std::process::ExitStatus>,
-    stderr_tail: &Rc<RefCell<Vec<String>>>,
-) -> anyhow::Error {
+fn exited(status: std::io::Result<String>, stderr_tail: &Rc<RefCell<Vec<String>>>) -> anyhow::Error {
     let tail = stderr_tail.borrow().join("\n");
-    let code = status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
+    let code = status.unwrap_or_else(|e| e.to_string());
     anyhow!("agent process exited ({code})\n{tail}")
 }
 
@@ -2378,6 +2426,7 @@ for line in sys.stdin:
                 initial_model: None,
                 login_hint,
                 approvals: Default::default(),
+                native: None,
             },
             cwd: dir.to_owned(),
             resume: None,

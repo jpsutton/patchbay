@@ -140,6 +140,7 @@ pub async fn run_turn(session: Arc<Session>, prompt_blocks: &Value, cancel: Canc
                 "sessionUpdate": "usage_update",
                 "used": u.input + u.output,
                 "size": mc.context_window.unwrap_or(0),
+                "_meta": {"autoCompactPercent": mc.auto_compact_percent.or((settings.auto_compact_percent > 0).then_some(settings.auto_compact_percent))},
             }));
         }
         let calls: Vec<ToolCall> = response.message.tool_calls().cloned().collect();

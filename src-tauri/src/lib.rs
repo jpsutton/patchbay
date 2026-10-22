@@ -1222,8 +1222,9 @@ async fn code_permission_respond(
 
 // ---------------- moving sessions between nodes ----------------
 
-fn grok_home(state: &AppState) -> PathBuf {
-    state.data_dir.join("grok")
+/// Where agents keep session state Patchbay can move between computers (see `agent_state`).
+fn agent_home(state: &AppState) -> PathBuf {
+    state.data_dir.clone()
 }
 
 /// Commits the target already has at `cwd`, so the bundle can leave them out.
@@ -1251,7 +1252,7 @@ async fn package_local(state: &AppState, id: &str, kind: &str, have: Vec<String>
         tokio::task::spawn_blocking(move || code.stop_and_wait(&sid, std::time::Duration::from_secs(5))).await?;
     }
     let s = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("no such session"))?;
-    let (dir, home, kind2) = (state.data_dir.clone(), grok_home(state), kind.to_owned());
+    let (dir, home, kind2) = (state.data_dir.clone(), agent_home(state), kind.to_owned());
     let res = tokio::task::spawn_blocking(move || handoff::package(&dir, &home, &s, &kind2, &have)).await?;
     match res {
         Ok((out, meta)) => {
@@ -1306,7 +1307,7 @@ async fn import_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Result<O
     let meta: handoff::Meta = serde_json::from_value(r["meta"].clone())?;
     let result: anyhow::Result<Option<String>> = async {
         let dir = fetch_package(state, &host, &token, &meta).await?;
-        let (home, target, from) = (grok_home(state), PathBuf::from(cwd), host_name.clone());
+        let (home, target, from) = (agent_home(state), PathBuf::from(cwd), host_name.clone());
         let m = meta.clone();
         let d = dir.clone();
         let (restored, note) = tokio::task::spawn_blocking(move || handoff::unpack(&d, &m, &home, &target, &from)).await??;
@@ -1353,7 +1354,7 @@ async fn take_over_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Resul
     if state.mesh.connected(&host) {
         anyhow::bail!("{host_name} is online; move the session instead");
     }
-    let (dir, home, target) = (state.data_dir.clone(), grok_home(state), PathBuf::from(cwd));
+    let (dir, home, target) = (state.data_dir.clone(), agent_home(state), PathBuf::from(cwd));
     let (sid, from) = (id.to_owned(), host_name.clone());
     let (restored, note) = if handoff::checkpoint(&state.data_dir, id).is_some() {
         tokio::task::spawn_blocking(move || handoff::restore_checkpoint(&dir, &home, &sid, &target, &from)).await??

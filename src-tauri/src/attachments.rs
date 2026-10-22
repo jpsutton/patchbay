@@ -269,6 +269,48 @@ fn prepare_pdf(bytes: Vec<u8>) -> Result<Vec<Prepared>> {
     Ok(out)
 }
 
+/// The text of a PDF's pages (`pages` like "3" or "1-5", at most 20 at a time), for the Code
+/// agent's Read tool. Scanned pages have no text and say so.
+pub fn pdf_text(path: &Path, pages: Option<&str>) -> Result<String> {
+    const MAX_PAGES: usize = 20;
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let doc = pdf_oxide::PdfDocument::from_bytes(bytes).map_err(|e| anyhow!("open PDF: {e}"))?;
+    let total = doc.page_count().map_err(|e| anyhow!("PDF page count: {e}"))?;
+    let (first, last) = match pages.map(str::trim).filter(|p| !p.is_empty()) {
+        None => (1, total.min(MAX_PAGES)),
+        Some(p) => {
+            let (a, b) = p.split_once('-').unwrap_or((p, p));
+            let a: usize = a.trim().parse().map_err(|_| anyhow!("pages must look like \"3\" or \"1-5\""))?;
+            let b: usize = b.trim().parse().map_err(|_| anyhow!("pages must look like \"3\" or \"1-5\""))?;
+            if a == 0 || b < a {
+                bail!("pages must look like \"3\" or \"1-5\"");
+            }
+            if b - a + 1 > MAX_PAGES {
+                bail!("read at most {MAX_PAGES} pages at a time");
+            }
+            (a, b.min(total))
+        }
+    };
+    if first > total {
+        bail!("the PDF has {total} pages");
+    }
+    let mut out = String::new();
+    for idx in first..=last {
+        let text = doc.extract_text(idx - 1).unwrap_or_default();
+        out.push_str(&format!("--- Page {idx} of {total} ---\n"));
+        if text.trim().is_empty() {
+            out.push_str("[no extractable text on this page; it may be a scan]\n");
+        } else {
+            out.push_str(text.trim_end());
+            out.push('\n');
+        }
+    }
+    if last < total {
+        out.push_str(&format!("\n[{} more pages; pass `pages` to read them]", total - last));
+    }
+    Ok(out)
+}
+
 pub fn to_content_parts(prepared: Vec<Prepared>) -> Vec<Part> {
     prepared
         .into_iter()

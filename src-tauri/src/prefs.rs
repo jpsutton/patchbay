@@ -37,7 +37,7 @@ pub struct Preferences {
     pub generate_titles: bool,
 
     // ---- Code agents ----
-    /// Agent for new Code sessions: an `AgentKind` id (grok, claude-code, opencode, cursor, kilo).
+    /// Agent for new Code sessions: an `AgentKind` id (patchbay, grok, claude-code, opencode, cursor, kilo).
     pub default_agent: String,
     /// Executable overrides, agent id -> path; agents not listed are looked up on PATH.
     pub agent_paths: crate::code::agents::AgentPaths,
@@ -121,7 +121,7 @@ impl Default for Preferences {
             default_system_prompt: String::new(),
             expand_reasoning: false,
             generate_titles: true,
-            default_agent: "grok".into(),
+            default_agent: "patchbay".into(),
             agent_paths: Default::default(),
             agent_providers: Default::default(),
             usage_limit: UsageLimit::default(),

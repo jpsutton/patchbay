@@ -282,8 +282,8 @@ export function ProviderPage({
       <ProviderEditor provider={provider} onSaved={onSaved} />
       {provider && <AddModels provider={provider} onAdded={onOpenModel} />}
       <p className="text-xs text-muted">
-        Keys are stored in the OS keychain when available. Chat calls the provider directly; Grok Build
-        runs locally and receives keys only through its process environment.
+        Keys are stored in the OS keychain when available. Chat and Patchbay's coding agent call the
+        provider directly from this app; other agents receive keys only through their process environment.
       </p>
     </div>
   );

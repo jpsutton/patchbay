@@ -16,4 +16,5 @@ mod tools;
 mod turn;
 
 pub use agent::serve;
+pub use store::sessions_dir;
 pub use host::{Host, ModelClient, ModelInfo, Settings};

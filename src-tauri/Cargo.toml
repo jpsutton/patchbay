@@ -49,6 +49,7 @@ tauri-build = { version = "2", features = [], optional = true }
 
 [dependencies]
 patchbay-llm = { path = "../crates/patchbay-llm" }
+patchbay-agent = { path = "../crates/patchbay-agent" }
 agent-client-protocol = { version = "=0.10.4", features = ["unstable"] }
 
 tauri = { version = "2", features = ["tray-icon"], optional = true }

@@ -7,6 +7,7 @@ pub mod agent_state;
 pub mod agents;
 pub mod grok_config;
 pub mod mcp;
+pub mod native;
 pub mod permissions;
 pub mod plan_limits;
 pub mod titles;

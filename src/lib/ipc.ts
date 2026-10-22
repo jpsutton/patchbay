@@ -338,7 +338,7 @@ export interface CodeAttach {
   point?: EventPoint | null;
 }
 
-export type AgentId = "grok" | "claude-code" | "opencode" | "cursor" | "kilo" | "codex" | "gemini" | "antigravity";
+export type AgentId = "patchbay" | "grok" | "claude-code" | "opencode" | "cursor" | "kilo" | "codex" | "gemini" | "antigravity";
 
 /** One coding agent backend, as the Agents settings page lists it. */
 export interface AgentInfo {
@@ -346,7 +346,7 @@ export interface AgentInfo {
   label: string;
   available: boolean;
   program: string | null;
-  source: "override" | "bundled" | "path" | "npx" | null;
+  source: "builtin" | "override" | "bundled" | "path" | "npx" | null;
   version: string | null;
   error: string | null;
   installHint: string;
@@ -358,6 +358,7 @@ export interface AgentInfo {
 
 /** Labels for agent ids, for places that don't load the full list. */
 export const AGENT_LABELS: Record<AgentId, string> = {
+  patchbay: "Patchbay",
   grok: "Grok Build",
   "claude-code": "Claude Code",
   opencode: "OpenCode",
@@ -367,6 +368,9 @@ export const AGENT_LABELS: Record<AgentId, string> = {
   gemini: "Gemini CLI",
   antigravity: "Antigravity",
 };
+
+/** Agents that run on Patchbay's own providers and models (`pb-<id>` model ids). */
+export const usesPatchbayModels = (agent: string): boolean => agent === "patchbay" || agent === "grok";
 
 export type PromptDelivery = "sent" | "steered" | "queued";
 
@@ -611,7 +615,7 @@ export const defaultPreferences: Preferences = {
   defaultSystemPrompt: "",
   expandReasoning: false,
   generateTitles: true,
-  defaultAgent: "grok",
+  defaultAgent: "patchbay",
   agentPaths: {},
   agentProviders: {},
   usageLimit: { enabled: true, percent: 95 },

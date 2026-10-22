@@ -443,8 +443,8 @@ async fn phone_starts_a_session_on_another_computer() {
 
     // What B offers, asked through A.
     let opts = p.client.rpc("remote.new_session_options", json!({ "host": bn })).await.unwrap();
-    assert!(opts["agents"].as_array().unwrap().iter().any(|x| x["id"] == "grok"));
-    assert_eq!(opts["defaultAgent"], "grok");
+    assert!(opts["agents"].as_array().unwrap().iter().any(|x| x["id"] == "patchbay"));
+    assert_eq!(opts["defaultAgent"], "patchbay");
 
     // Browsing stays inside the home folder, and lists only visible folders.
     let home = p.client.rpc("remote.list_dirs", json!({ "host": bn })).await.unwrap();
