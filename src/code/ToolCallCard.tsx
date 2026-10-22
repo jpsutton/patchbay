@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 import type { AcpPermissionRequest, AcpToolCall, AcpToolCallContent } from "../lib/ipc";
 import { api, errorText } from "../lib/ipc";
-import { useStore } from "../lib/store";
+import { mergeToolCall, useStore } from "../lib/store";
 import { DiffView, diffStats } from "./DiffView";
 import { Markdown } from "../components/Markdown";
 import { CopyButton } from "../components/CopyButton";
@@ -340,7 +340,8 @@ export function PermissionCard({
   /** Folder an "always allow" rule is saved for. */
   cwd: string;
 }) {
-  const tc = { ...request.toolCall, ...(live ?? {}) };
+  // The request is what the user is approving: its fields win over what was stored before.
+  const tc = mergeToolCall(live, request.toolCall);
   const rule = suggestRule(tc);
   // The session id routes the answer to whichever node runs the agent.
   const respond = (optionId: string) =>

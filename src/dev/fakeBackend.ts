@@ -383,7 +383,7 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
     const reqId = id();
     codeEmit(csid, {
       type: "update",
-      update: { sessionUpdate: "tool_call", toolCallId: planId, title: "Ready to code?", kind: "switch_mode", status: "pending", rawInput: { plan }, content: [{ type: "content", content: { type: "text", text: plan } }] },
+      update: { sessionUpdate: "tool_call", toolCallId: planId, title: "Ready to code?", kind: "switch_mode", rawInput: { plan }, content: [{ type: "content", content: { type: "text", text: plan } }] },
     });
     const choice = await new Promise<string | null>((resolve) => {
       pending.set(reqId, resolve);
@@ -441,8 +441,12 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
   codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: readId, title: "Read `README.md`", kind: "read", status: "completed", rawInput: { path: `${s.cwd}/README.md` }, content: [{ type: "content", content: { type: "text", text: "# demo\n\nOld intro." } }] } });
   const editId = id();
   const diff = { type: "diff" as const, path: `${s.cwd}/README.md`, oldText: "# demo\n\nOld intro.\n", newText: "# demo\n\nNew intro written by the agent.\n\n## Usage\n\nRun it.\n" };
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: editId, title: "Edit `README.md`", kind: "edit", status: "pending", rawInput: { file_path: "README.md" } } });
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: editId, content: [diff] } });
+  // Like the real backend: the announcement leaves out the defaults (`pending`, `other`), and the
+  // diff and full rawInput arrive only with the permission request.
+  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: editId, title: "Edit" } });
+  const editCall = { toolCallId: editId, title: "Edit `README.md`", kind: "edit", rawInput: { file_path: "README.md" }, content: [diff] };
+  // The backend passes a known call's permission-request fields on as an update.
+  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", ...editCall } });
   const reqId = id();
   const rule = db.rules.find((r) => r.toolKind === "edit" && (r.cwd === "*" || r.cwd === s.cwd));
   const choice = rule
@@ -454,7 +458,7 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
       requestId: reqId,
       request: {
         sessionId: "acp",
-        toolCall: { toolCallId: editId, title: "Edit `README.md`", kind: "edit" },
+        toolCall: { ...editCall, status: "pending" },
         options: [
           { optionId: "allow-edits-session", name: "Yes, allow all edits during this session", kind: "allow_always" },
           { optionId: "allow-once", name: "Yes", kind: "allow_once" },
