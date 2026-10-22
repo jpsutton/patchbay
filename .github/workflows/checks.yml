@@ -1,5 +1,7 @@
 # Checks on every pull request (into staging and into release): static checks,
-# the frontend's typecheck, build and notices, and the Rust unit tests on Linux.
+# the frontend's typecheck, build and notices, and the phone app's build. The
+# Rust unit tests on Linux run only on release PRs (staging collects many
+# changes before a release, and a full cold build takes about 20 minutes).
 # No packages; build.yml does those for release PRs.
 #
 # A pull request that only touches docs skips the heavy jobs. They still report
@@ -134,10 +136,13 @@ jobs:
       - name: Third-party notices are up to date
         run: pnpm notices && git diff --exit-code -- THIRD_PARTY_NOTICES.md
 
+  # Skipped on staging PRs; a skipped job still satisfies the required check.
   linux:
     needs: changes
     # Runs unless changes found docs only; if changes itself failed, this still runs.
-    if: ${{ !cancelled() && needs.changes.outputs.source != 'false' }}
+    if: >-
+      ${{ !cancelled() && needs.changes.outputs.source != 'false' &&
+          (github.event_name != 'pull_request' || github.base_ref == 'release') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
