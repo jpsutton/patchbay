@@ -58,8 +58,8 @@ const FAKE_AGENTS: AgentInfo[] = [
   fakeAgent("gemini", "Gemini CLI", "/usr/bin/gemini"),
   fakeAgent("antigravity", "Antigravity", null),
 ];
-/** Reasoning effort per fake session, for agents that report it as a config option. */
-const fakeConfig: Record<string, string> = {};
+/** Config option values per fake session, for agents that report them (effort, Fast mode, persona). */
+const fakeConfig: Record<string, Record<string, string>> = {};
 const fakeEffort = (value: string): AcpConfigOption => ({
   id: "effort",
   name: "Effort",
@@ -68,6 +68,22 @@ const fakeEffort = (value: string): AcpConfigOption => ({
   currentValue: value,
   options: ["low", "medium", "high"].map((v) => ({ value: v, name: v[0].toUpperCase() + v.slice(1) })),
 });
+/** Claude Code's other options, as its adapter sends them to a client without boolean options. */
+const fakeOptions = (csid: string): AcpConfigOption[] => {
+  const v = fakeConfig[csid] ?? {};
+  return [
+    fakeEffort(v.effort ?? "medium"),
+    {
+      id: "fast", name: "Fast mode", description: "Faster responses on supported models", category: "model_config",
+      type: "select", currentValue: v.fast ?? "off",
+      options: [{ value: "on", name: "On" }, { value: "off", name: "Off" }],
+    },
+    {
+      id: "agent", name: "Agent", description: "Main-thread agent persona", type: "select", currentValue: v.agent ?? "default",
+      options: [{ value: "default", name: "Default", description: "Standard Claude Code agent" }, { value: "reviewer", name: "reviewer" }],
+    },
+  ];
+};
 const DEMO_FILES = ["README.md", "Cargo.toml", "src/main.rs", "src/lib.rs", "src/code/acp.rs", "src/code/mcp.rs", "docs/guide.md", "package.json"];
 const id = () => crypto.randomUUID();
 const now = () => Date.now();
@@ -192,7 +208,7 @@ function fakeReady(csid: string, loaded = false) {
     modes: grok
       ? null
       : { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] },
-    configOptions: grok ? [] : [fakeEffort(fakeConfig[csid] ?? "medium")],
+    configOptions: grok ? [] : fakeOptions(csid),
     extensions: { statusLine: grok, rewind: grok, patchbayModels: grok, steering: FAKE_STEERING.has(db.code.find((c) => c.id === csid)?.agent ?? "grok"), forceSend: true },
   });
   codeEmit(csid, {
@@ -1160,8 +1176,9 @@ export function install() {
         }
         case "code_set_model": case "code_set_mode": return null;
         case "code_set_config_option": {
-          fakeConfig[a.id as string] = a.value as string;
-          codeEmit(a.id as string, { type: "config", models: null, modes: null, configOptions: [fakeEffort(a.value as string)] });
+          const csid = a.id as string;
+          fakeConfig[csid] = { ...fakeConfig[csid], [a.configId as string]: a.value as string };
+          codeEmit(csid, { type: "config", models: null, modes: null, configOptions: fakeOptions(csid) });
           return null;
         }
         case "list_agents": return FAKE_AGENTS;
