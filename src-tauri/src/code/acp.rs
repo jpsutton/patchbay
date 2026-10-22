@@ -417,6 +417,11 @@ fn enqueue(ctx: &TurnCtx, queue: &mut Queue, rank: Rank, msg: UserMessage) -> De
     Delivery::Queued
 }
 
+/// How long a forced send waits for the cancelled turn to end before saying the agent is slow
+/// to stop. Agents usually stop within a few seconds, once a running tool is killed.
+const FORCE_PATIENCE: std::time::Duration =
+    if cfg!(test) { std::time::Duration::from_millis(300) } else { std::time::Duration::from_secs(30) };
+
 /// Ask the agent to end the running turn; its `session/prompt` then returns `cancelled`.
 fn cancel_turn(conn: &Rc<acp::ClientSideConnection>, session_id: &str) {
     if let Ok(n) = from_json::<acp::CancelNotification>(json!({ "sessionId": session_id })) {
@@ -1082,6 +1087,11 @@ async fn run(
     // How many turns a forced send has cancelled. A steer sent before the latest one went into
     // a cancelled turn, whatever the agent answers.
     let mut forces: u64 = 0;
+    // Armed while a forced send waits on its cancel: an agent that ignores the cancel gets a
+    // notice instead of a silent wait. The message still goes when the turn ends.
+    let force_wait = tokio::time::sleep(FORCE_PATIENCE);
+    tokio::pin!(force_wait);
+    let mut force_armed = false;
 
     loop {
         tokio::select! {
@@ -1093,6 +1103,7 @@ async fn run(
             }
             Some(go_on) = done_rx.recv() => {
                 running = false;
+                force_armed = false;
                 let forced = std::mem::take(&mut forcing) && !auth_lost.get();
                 if !go_on && !forced {
                     drop_queue(&turns, &mut queue);
@@ -1120,6 +1131,14 @@ async fn run(
                 };
                 answer(reply, r);
             }
+            () = &mut force_wait, if force_armed => {
+                force_armed = false;
+                let secs = FORCE_PATIENCE.as_secs();
+                let message = format!(
+                    "The agent hasn't stopped its turn after {secs} seconds. Your message goes when it does; Stop drops it."
+                );
+                emit(&sink, &csid, CodeEvent::Notice { message });
+            }
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else { break };
                 match cmd {
@@ -1135,6 +1154,8 @@ async fn run(
                                 cancel_turn(&conn, &session_id);
                                 forcing = true;
                                 forces += 1;
+                                force_wait.as_mut().reset(tokio::time::Instant::now() + FORCE_PATIENCE);
+                                force_armed = true;
                             }
                         }
                     }
@@ -1177,6 +1198,8 @@ async fn run(
                                 cancel_turn(&conn, &session_id);
                                 forcing = true;
                                 forces += 1;
+                                force_wait.as_mut().reset(tokio::time::Instant::now() + FORCE_PATIENCE);
+                                force_armed = true;
                             }
                         } else {
                             match start_turn(&turns, msg) {
@@ -1189,6 +1212,7 @@ async fn run(
                         cancel_pending(&pending);
                         drop_queue(&turns, &mut queue);
                         forcing = false;
+                        force_armed = false;
                         cancel_turn(&conn, &session_id);
                     }
                     AgentCmd::SetModel { model_id, reply } => {
@@ -1912,7 +1936,7 @@ mod tests {
     /// refused. `--steering` advertises `_session/steering` (a `refuse` steer fails, a `slow` one
     /// is answered 0.3s late), and every prompt or steer is echoed as agent text
     /// (`prompt:<text>`, `steer:<text>`). `--slow-cancel` says `cancel` for each cancel and ends
-    /// the turn 0.3s later.
+    /// the turn 0.3s later; `--late-cancel` ends it 1s later, past a forced send's patience.
     const FAKE_AGENT: &str = r#"
 import json, os, sys, threading
 if "--login" in sys.argv:
@@ -1944,9 +1968,9 @@ def text_of(p):
 for line in sys.stdin:
     m = json.loads(line)
     if m.get("method") == "session/cancel":
-        if "--slow-cancel" in sys.argv:
+        if "--slow-cancel" in sys.argv or "--late-cancel" in sys.argv:
             say("cancel")
-            threading.Timer(0.3, finish, ["cancelled"]).start()
+            threading.Timer(1.0 if "--late-cancel" in sys.argv else 0.3, finish, ["cancelled"]).start()
         else:
             finish("cancelled")
         continue
@@ -2633,6 +2657,39 @@ for line in sys.stdin:
             ["prompt:hold", "cancel", "prompt:first", "prompt:third", "prompt:second", "prompt:normal"]
         );
         assert_eq!(stop_reasons(&events)[0], json!("cancelled"));
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An agent slow to stop a cancelled turn gets a notice, and the forced message still goes
+    /// once the turn ends.
+    #[test]
+    fn a_slow_cancel_gets_a_notice_and_the_forced_send_still_goes() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods", "--late-cancel"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        assert_eq!(force(&tx, "urgent"), Delivery::Queued);
+        wait_for(&events, "two turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 2);
+
+        let notices: Vec<_> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                CodeEvent::Notice { message } => Some(message.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("hasn't stopped its turn"));
+        assert_eq!(agent_heard(&events, 3), ["prompt:hold", "cancel", "prompt:urgent"]);
+        assert_eq!(stop_reasons(&events), [json!("cancelled"), json!("end_turn")]);
         no_errors(&events);
         tx.send(AgentCmd::Shutdown).unwrap();
         thread.join().unwrap();
