@@ -1378,7 +1378,7 @@ export function install() {
         }
         case "remote_cancel_join": phone.joining = null; phoneChanged(); return null;
         case "remote_leave": phone.member = false; phoneChanged(); return null;
-        case "remote_unlock": return true;
+        case "remote_unlock": case "remote_local_network": return true;
         case "remote_live": {
           const [working, waiting] = db.code;
           return {

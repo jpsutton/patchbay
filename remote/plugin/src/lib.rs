@@ -1,6 +1,6 @@
 //! Platform services for Patchbay Remote that need the phone's own APIs: sealing secrets with a
-//! key the Android Keystore holds, and a foreground service that keeps the gateway connection
-//! open while the app is in the background. Elsewhere (desktop builds, used for testing) sealing
+//! key the Android Keystore holds, a foreground service that keeps the gateway connection open
+//! while the app is in the background, and Android 17's local network permission. Elsewhere (desktop builds, used for testing) sealing
 //! is unavailable and keep-alive does nothing; an iOS build would implement the same calls.
 
 use tauri::plugin::{Builder, TauriPlugin};
@@ -70,6 +70,28 @@ impl<R: Runtime> Platform<R> {
         {
             let _ = (on, text);
             Ok(())
+        }
+    }
+
+    /// Ask for local network access where the phone requires it (Android 17), waiting for the
+    /// answer. True when granted or not needed.
+    pub async fn local_network(&self) -> Result<bool, String> {
+        #[cfg(target_os = "android")]
+        {
+            #[derive(serde::Deserialize)]
+            struct Answer {
+                granted: bool,
+            }
+            let r: Answer = self
+                .handle
+                .run_mobile_plugin_async("localNetwork", serde_json::json!({}))
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(r.granted)
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            Ok(true)
         }
     }
 }

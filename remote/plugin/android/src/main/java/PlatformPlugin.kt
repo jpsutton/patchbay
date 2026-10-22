@@ -2,12 +2,16 @@ package dev.patchbay.remote.platform
 
 import android.app.Activity
 import android.content.Intent
+import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import androidx.core.content.ContextCompat
+import app.tauri.PermissionState
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
+import app.tauri.annotation.Permission
+import app.tauri.annotation.PermissionCallback
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
@@ -32,8 +36,12 @@ class KeepAliveArgs {
 private const val KEY_ALIAS = "patchbay-remote"
 private const val IV_LEN = 12
 
-/** Keystore sealing and the keep-alive service, called from the app's Rust code. */
-@TauriPlugin
+/** Android 17's runtime permission for reaching home-network addresses; no constant before SDK 37. */
+private const val ACCESS_LOCAL_NETWORK = "android.permission.ACCESS_LOCAL_NETWORK"
+private const val LOCAL_NETWORK_SDK = 37
+
+/** Keystore sealing, the keep-alive service and the local network permission, called from the app's Rust code. */
+@TauriPlugin(permissions = [Permission(strings = [ACCESS_LOCAL_NETWORK], alias = "localNetwork")])
 class PlatformPlugin(private val activity: Activity) : Plugin(activity) {
 
     /** An AES key that never leaves the Keystore, created on first use. */
@@ -92,5 +100,23 @@ class PlatformPlugin(private val activity: Activity) : Plugin(activity) {
         } catch (e: Exception) {
             invoke.reject("keep-alive failed: ${e.message}")
         }
+    }
+
+    /**
+     * Ask for local network access where Android requires it (17 and later, for apps that target
+     * it). Without it, connections to the computer's LAN address silently time out.
+     */
+    @Command
+    fun localNetwork(invoke: Invoke) {
+        if (Build.VERSION.SDK_INT < LOCAL_NETWORK_SDK || getPermissionState("localNetwork") == PermissionState.GRANTED) {
+            invoke.resolve(JSObject().put("granted", true))
+        } else {
+            requestPermissionForAlias("localNetwork", invoke, "localNetworkAnswered")
+        }
+    }
+
+    @PermissionCallback
+    private fun localNetworkAnswered(invoke: Invoke) {
+        invoke.resolve(JSObject().put("granted", getPermissionState("localNetwork") == PermissionState.GRANTED))
     }
 }

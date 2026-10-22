@@ -2,6 +2,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Android 17: reaching a computer on the home network (Wi-Fi/Ethernet private addresses). -->
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
     <application>
         <service
