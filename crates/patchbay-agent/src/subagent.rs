@@ -13,6 +13,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::prompt;
+use crate::prompts::Prompts;
 use crate::session::Session;
 use crate::tools::Registry;
 use crate::turn;
@@ -141,7 +142,7 @@ impl Agents {
 }
 
 /// The notes as a part for the main agent's next message.
-pub fn notes_part(notes: &[Note]) -> Option<Part> {
+pub fn notes_part(notes: &[Note], p: Prompts) -> Option<Part> {
     if notes.is_empty() {
         return None;
     }
@@ -154,10 +155,7 @@ pub fn notes_part(notes: &[Note]) -> Option<Part> {
             )
         })
         .collect();
-    Some(Part::Text(prompt::reminder(&format!(
-        "Background subagents have finished. Their results are below; read them and carry on. Do not repeat them verbatim to the user unless asked.\n\n{}",
-        body.join("\n\n")
-    ))))
+    Some(Part::Text(prompt::reminder(&p.msg("notes_intro", &[("body", &body.join("\n\n"))]))))
 }
 
 /// Run the agent until it answers without asking for tools; returns its report. Messages left in
@@ -169,7 +167,7 @@ pub async fn run(parent: &Arc<Session>, agent: &Arc<SubAgent>, cancel: &Cancella
         if !inbox.is_empty() {
             child.state.lock().await.messages.push(Message::with_parts(
                 Role::User,
-                inbox.into_iter().map(|m| Part::Text(format!("Message from the main agent:\n{m}"))).collect(),
+                inbox.into_iter().map(|m| Part::Text(parent.prompts().msg("inbox", &[("text", &m)]))).collect(),
             ));
         }
         let (model_id, messages) = {
@@ -179,7 +177,7 @@ pub async fn run(parent: &Arc<Session>, agent: &Arc<SubAgent>, cancel: &Cancella
         let mc = parent.host.model_client(&model_id).await?;
         let mut system = mc.system_prefix.clone();
         system.extend(agent.system.clone());
-        let request = Request { system, messages, tools: agent.registry.specs(false), ..Default::default() };
+        let request = Request { system, messages, tools: agent.registry.specs(false, child.prompts()), ..Default::default() };
         let response = match mc.client.complete(&request, cancel, |_| {}).await {
             Ok(r) => r,
             Err(e) if e.cancelled => return Err("stopped".into()),
@@ -268,10 +266,13 @@ mod tests {
 
     #[test]
     fn notes_become_one_reminder() {
-        assert!(notes_part(&[]).is_none());
-        let p = notes_part(&[Note { agent_id: "agent_1".into(), description: "scan".into(), status: "completed", text: "found it".into() }]).unwrap();
+        assert!(notes_part(&[], Prompts::new(false)).is_none());
+        let note = || Note { agent_id: "agent_1".into(), description: "scan".into(), status: "completed", text: "found it".into() };
+        let p = notes_part(&[note()], Prompts::new(false)).unwrap();
         let Part::Text(t) = p else { panic!() };
         assert!(prompt::is_reminder(&t) && t.contains("<agent-id>agent_1</agent-id>") && t.contains("found it"));
+        let Some(Part::Text(min)) = notes_part(&[note()], Prompts::new(true)) else { panic!() };
+        assert!(min.len() < t.len() && min.contains("<agent-id>agent_1</agent-id>"));
     }
 
     #[test]

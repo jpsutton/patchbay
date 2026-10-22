@@ -69,6 +69,7 @@ fn card_text(text: &str) -> String {
 /// What the harness wants the model to know that the user did not say: files that changed under
 /// it, a model switch, a stale task list. `None` when there is nothing to add.
 async fn reminders(session: &Session, model_name: &str) -> Option<Part> {
+    let p = session.prompts();
     let mut notes: Vec<String> = Vec::new();
     {
         let files = session.files.lock().unwrap().clone();
@@ -88,15 +89,12 @@ async fn reminders(session: &Session, model_name: &str) -> Option<Part> {
             match now {
                 Some(n) => {
                     notified.insert(path.clone(), n);
-                    notes.push(format!(
-                        "{} changed since you read it (the user or a tool edited it). Read it again before you edit it.",
-                        path.display()
-                    ));
+                    notes.push(p.msg("file_changed", &[("path", &path.display().to_string())]));
                 }
                 None => {
                     notified.remove(&path);
                     session.files.lock().unwrap().remove(&path);
-                    notes.push(format!("{} was deleted since you read it.", path.display()));
+                    notes.push(p.msg("file_deleted", &[("path", &path.display().to_string())]));
                 }
             }
         }
@@ -105,17 +103,14 @@ async fn reminders(session: &Session, model_name: &str) -> Option<Part> {
     if let Some(prev) = &st.last_model
         && prev != &st.model_id
     {
-        notes.push(format!("The session's model was changed to {model_name}. Earlier replies came from a different model."));
+        notes.push(p.msg("model_changed", &[("model", model_name)]));
     }
     st.last_model = Some(st.model_id.clone());
     st.since_todo_write += 1;
     if st.since_todo_write >= 8 && st.todos.iter().any(|t| t.status != "completed") {
         st.since_todo_write = 0;
         let list: Vec<String> = st.todos.iter().map(|t| format!("- [{}] {}", t.status, t.content)).collect();
-        notes.push(format!(
-            "You have not used TodoWrite for a while. If the list below is out of date, update it; if the work is done, clear it. Current list:\n{}",
-            list.join("\n")
-        ));
+        notes.push(p.msg("todo_stale", &[("list", &list.join("\n"))]));
     }
     (!notes.is_empty()).then(|| Part::Text(prompt::reminder(&notes.join("\n\n"))))
 }
@@ -166,7 +161,10 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
     if let Some(r) = reminders(&session, &model_name).await {
         parts.push(r);
     }
-    parts.extend(notes_part(&session.agents.drain_notes()));
+    parts.extend(notes_part(&session.agents.drain_notes(), session.prompts()));
+    if let Some(nudge) = session.prompts().terse_nudge() {
+        parts.push(Part::Text(prompt::reminder(nudge)));
+    }
     let preview: String = parts
         .iter()
         .find_map(|p| if let Part::Text(t) = p { Some(t.trim().chars().take(80).collect()) } else { None })
@@ -215,11 +213,11 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
         }
         let mut system = mc.system_prefix.clone();
         let model_name = session.host.models().into_iter().find(|m| m.id == model_id).map(|m| m.name).unwrap_or(model_id.clone());
-        system.extend(prompt::system_blocks(&session.cwd, &model_name, &settings.instructions, mode));
+        system.extend(prompt::system_blocks(&session.cwd, &model_name, &settings.instructions, mode, session.prompts()));
         let request = Request {
             system,
             messages,
-            tools: registry.specs(mode == Mode::Plan),
+            tools: registry.specs(mode == Mode::Plan, session.prompts()),
             cache_key: Some(session.id.clone()),
             ..Default::default()
         };
@@ -281,7 +279,7 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
             if stop_reason == "end_turn" {
                 // Background subagents: read what has come in, and keep the prompt open for the rest.
                 loop {
-                    if let Some(part) = notes_part(&session.agents.drain_notes()) {
+                    if let Some(part) = notes_part(&session.agents.drain_notes(), session.prompts()) {
                         let msg = Message::with_parts(Role::User, vec![part]);
                         session.store.append(&Entry::Msg { m: msg.clone() });
                         session.state.lock().await.messages.push(msg);
@@ -308,7 +306,7 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
         if let Some(r) = reminders(&session, &model_name).await {
             parts.push(r);
         }
-        parts.extend(notes_part(&session.agents.drain_notes()));
+        parts.extend(notes_part(&session.agents.drain_notes(), session.prompts()));
         let msg = Message::with_parts(Role::User, parts);
         session.store.append(&Entry::Msg { m: msg.clone() });
         session.state.lock().await.messages.push(msg);
@@ -466,25 +464,18 @@ async fn run_call(
         ToolResult::text(&call, text, true)
     };
     let Some(tool) = tool else {
-        return fail(&session, format!("Unknown tool: {}", call.name));
+        return fail(&session, session.prompts().msg("unknown_tool", &[("name", &call.name)]));
     };
     if mode == Mode::Plan && !tool.allowed_in_plan() {
-        return fail(
-            &session,
-            format!("{} is not available in plan mode. Explore with Read, Glob and Grep, then call ExitPlanMode with your plan.", call.name),
-        );
+        return fail(&session, session.prompts().msg("not_in_plan_mode", &[("name", &call.name)]));
     }
     if tool.needs_permission(&call.arguments, &session) {
         match ask(&session, &card, &tool, &call, &cancel).await {
             Verdict::Allow => {}
             Verdict::Reject => {
-                return fail(
-                    &session,
-                    "The user declined this tool call, so it did not run. Do not retry it or work around it; ask what they would like instead."
-                        .into(),
-                );
+                return fail(&session, session.prompts().msg("declined", &[]));
             }
-            Verdict::Cancelled => return fail(&session, "The tool call was cancelled before it ran.".into()),
+            Verdict::Cancelled => return fail(&session, session.prompts().msg("cancelled_before_run", &[])),
         }
     }
     let card_id = card["toolCallId"].as_str().unwrap_or(&call.id).to_owned();
@@ -492,7 +483,7 @@ async fn run_call(
     let ctx = ToolCtx { session: session.clone(), call_id: card_id, cancel: cancel.clone() };
     let out: ToolOutput = tokio::select! {
         out = tool.run(call.arguments.clone(), &ctx) => out,
-        _ = cancel.cancelled() => ToolOutput::error("Interrupted by the user."),
+        _ = cancel.cancelled() => ToolOutput::error(session.prompts().msg("interrupted", &[])),
     };
     let text = out.text_of();
     let content = if out.ui.is_empty() { text_content(&text) } else { out.ui.clone() };

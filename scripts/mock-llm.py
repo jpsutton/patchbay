@@ -118,6 +118,8 @@ def _decide(user_text, images, after_tool, tools):
         name = find_tool(tools, {"command"})
         if name:
             return ("tool", name, {"command": "echo patchbay-ok && ls"})
+    if "!size" in user_text:
+        return ("text", f"request bytes: {len(json.dumps(LAST_BODY.get('body', {})))}")
     if "!search" in user_text:
         name = find_tool(tools, {"query"})
         if name:

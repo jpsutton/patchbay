@@ -54,6 +54,9 @@ pub struct Preferences {
     /// Appended to the agent's system prompt for every session (agents that accept one).
     pub agent_instructions: String,
     pub web_fetch: bool,
+    /// Send Patchbay's own agent's prompts in a shortened form to save input tokens (a session
+    /// can override it).
+    pub minify_prompts: bool,
     /// Default auto-compact threshold; a model's own setting wins.
     pub auto_compact_percent: Option<u8>,
     /// Extra model calls for session titles and recaps.
@@ -128,6 +131,7 @@ impl Default for Preferences {
             permission_mode: "default".into(),
             agent_instructions: String::new(),
             web_fetch: false,
+            minify_prompts: false,
             auto_compact_percent: None,
             background_summaries: true,
             claude_config: ClaudeConfig::default(),

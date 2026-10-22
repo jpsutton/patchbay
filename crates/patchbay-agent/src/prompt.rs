@@ -4,10 +4,8 @@ use std::path::{Path, PathBuf};
 
 use patchbay_llm::SystemBlock;
 
+use crate::prompts::Prompts;
 use crate::session::Mode;
-
-const SYSTEM: &str = include_str!("../prompts/system.md");
-const ENVIRONMENT: &str = include_str!("../prompts/environment.md");
 
 /// Text the harness injects into the conversation, wrapped so the model can tell it from the user.
 pub fn reminder(text: &str) -> String {
@@ -18,40 +16,40 @@ pub fn is_reminder(text: &str) -> bool {
     text.trim_start().starts_with("<system-reminder>")
 }
 
-pub fn system_blocks(cwd: &Path, model_name: &str, instructions: &str, mode: Mode) -> Vec<SystemBlock> {
+pub fn system_blocks(cwd: &Path, model_name: &str, instructions: &str, mode: Mode, p: Prompts) -> Vec<SystemBlock> {
     // Everything up to here is the same for every session, so the provider can cache it.
-    let mut blocks = vec![SystemBlock::cached(SYSTEM.trim())];
+    let mut persona = p.system().trim().to_owned();
+    if let Some(terse) = p.terse() {
+        persona.push_str("\n\n");
+        persona.push_str(terse.trim());
+    }
+    let mut blocks = vec![SystemBlock::cached(persona)];
 
-    let mut dynamic = environment(cwd, model_name);
+    let mut dynamic = environment(cwd, model_name, p);
     if mode == Mode::Plan {
-        dynamic.push_str(
-            "\n\n# Plan mode\n\nThe session is in plan mode. Do not change files or run commands that change anything. \
-Explore with Read, Glob and Grep, write the plan, then call ExitPlanMode with it.",
-        );
+        dynamic.push_str("\n\n");
+        dynamic.push_str(&p.msg("plan_mode", &[]));
     }
     if !instructions.trim().is_empty() {
-        dynamic.push_str("\n\n# The user's instructions\n\n");
-        dynamic.push_str(instructions.trim());
+        dynamic.push_str("\n\n");
+        dynamic.push_str(&p.msg("user_instructions", &[("text", instructions.trim())]));
     }
     for (path, text) in project_instructions(cwd) {
-        dynamic.push_str(&format!(
-            "\n\n# Project instructions ({})\n\nThese are background context from the project, followed unless the user says otherwise.\n\n{}",
-            path.display(),
-            text.trim()
-        ));
+        dynamic.push_str("\n\n");
+        dynamic.push_str(&p.msg("project_instructions", &[("path", &path.display().to_string()), ("text", text.trim())]));
     }
     blocks.push(SystemBlock::new(dynamic));
     blocks
 }
 
-fn environment(cwd: &Path, model_name: &str) -> String {
+fn environment(cwd: &Path, model_name: &str, p: Prompts) -> String {
     let git = cwd.ancestors().any(|d| d.join(".git").exists());
     let shell = if cfg!(windows) {
         "cmd".to_owned()
     } else {
         std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "bash".into())
     };
-    ENVIRONMENT
+    p.environment()
         .trim()
         .replace("{cwd}", &cwd.to_string_lossy())
         .replace("{git}", if git { "yes" } else { "no" })
@@ -126,12 +124,27 @@ mod tests {
 
     #[test]
     fn static_block_is_cached_and_dynamic_is_not() {
-        let b = system_blocks(Path::new("/tmp"), "m", " be terse ", Mode::Plan);
+        let b = system_blocks(Path::new("/tmp"), "m", " be terse ", Mode::Plan, Prompts::new(false));
         assert_eq!(b.len(), 2);
         assert_eq!(b[0].cache, patchbay_llm::Cache::Breakpoint);
         assert_eq!(b[1].cache, patchbay_llm::Cache::None);
         assert!(b[1].text.contains("plan mode") && b[1].text.contains("be terse"));
         assert!(!b[0].text.contains("be terse"));
+    }
+
+    #[test]
+    fn minified_blocks_are_shorter_and_keep_the_same_shape() {
+        let full = system_blocks(Path::new("/tmp"), "m", "be terse", Mode::Plan, Prompts::new(false));
+        let min = system_blocks(Path::new("/tmp"), "m", "be terse", Mode::Plan, Prompts::new(true));
+        assert_eq!(full.len(), min.len());
+        // The persona shrinks (its terse reply instruction is extra); the dynamic block shrinks.
+        assert!(min[0].text.starts_with(Prompts::new(true).system().trim()));
+        assert!(Prompts::new(true).system().len() < Prompts::new(false).system().len());
+        assert!(min[1].text.len() < full[1].text.len());
+        assert_eq!(min[0].cache, patchbay_llm::Cache::Breakpoint);
+        assert!(min[1].text.contains("be terse") && min[1].text.contains("ExitPlanMode") && min[1].text.contains("/tmp"));
+        // Only the minified form asks for terse replies.
+        assert!(min[0].text.contains("Reply terse") && !full[0].text.contains("Reply terse"));
     }
 
     #[test]

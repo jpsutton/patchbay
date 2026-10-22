@@ -11,10 +11,6 @@ use crate::store::Entry;
 
 /// Summary messages start with this, so rewinding and prompts can tell them from the user's.
 pub const SUMMARY_MARK: &str = "<conversation-summary>";
-const PROMPT: &str = include_str!("../prompts/compact.md");
-const SYSTEM: &str = "You summarize conversations between a user and a coding agent, faithfully and in detail.";
-const CONTINUE: &str = "The session continues from the conversation summarized above. Pick up where it left off. \
-Do not repeat finished work, and do not mention the summary unless asked.";
 /// Compact at this share of the window when neither the model nor the settings say otherwise.
 pub const DEFAULT_PERCENT: u8 = 85;
 /// Longest tool result text sent to the summarizer.
@@ -64,13 +60,15 @@ pub async fn compact(
         return Err("there is nothing to compact yet".into());
     }
     let mut messages = shrink(&history);
-    let mut ask = PROMPT.trim().to_owned();
+    let p = session.prompts();
+    let mut ask = p.compact().trim().to_owned();
     if let Some(f) = focus.map(str::trim).filter(|f| !f.is_empty()) {
-        ask.push_str(&format!("\n\nThe user asked that the summary pay particular attention to: {f}"));
+        ask.push_str("\n\n");
+        ask.push_str(&p.msg("compact_focus", &[("focus", f)]));
     }
     messages.push(Message::user(ask));
     let mut system = mc.system_prefix.clone();
-    system.push(SystemBlock::new(SYSTEM));
+    system.push(SystemBlock::new(p.msg("compact_system", &[])));
     let request = Request { system, messages, ..Default::default() };
     let summary = mc
         .client
@@ -80,7 +78,11 @@ pub async fn compact(
     if summary.trim().is_empty() {
         return Err("the model returned an empty summary".into());
     }
-    let message = Message::user(format!("{SUMMARY_MARK}\n{}\n</conversation-summary>\n\n{CONTINUE}", summary.trim()));
+    let message = Message::user(format!(
+        "{SUMMARY_MARK}\n{}\n</conversation-summary>\n\n{}",
+        summary.trim(),
+        p.msg("compact_continue", &[])
+    ));
     session.store.append(&Entry::Compacted { summary: message.clone() });
     {
         let mut st = session.state.lock().await;

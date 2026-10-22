@@ -178,9 +178,10 @@ returned and you must call WebFetch again with it."
             Ok(m) => m,
             Err(e) => return ToolOutput::error(e),
         };
+        let p = session.prompts();
         let mut req = Request::simple(
-            "You answer questions about a web page. Use only the page content. Be concise and quote sparingly.",
-            format!("Page ({url}):\n---\n{text}\n---\n\n{prompt}"),
+            &p.msg("web_answer_system", &[]),
+            p.msg("web_answer_user", &[("url", url.as_str()), ("text", &text), ("prompt", prompt)]),
         );
         for (i, b) in mc.system_prefix.iter().enumerate() {
             req.system.insert(i, b.clone());
@@ -275,7 +276,7 @@ fn search_query(input: &Value) -> Option<String> {
     Some(q)
 }
 
-fn format_results(body: &Value) -> String {
+fn format_results(body: &Value, p: crate::prompts::Prompts) -> String {
     let results = body["web"]["results"].as_array().cloned().unwrap_or_default();
     if results.is_empty() {
         return "No results.".into();
@@ -295,7 +296,8 @@ fn format_results(body: &Value) -> String {
             out.push_str(&format!("   - {}\n", plain(extra)));
         }
     }
-    out.push_str("\nWhen you use these results, cite the pages as Markdown links in a Sources section at the end of your answer.");
+    out.push('\n');
+    out.push_str(&p.msg("search_sources", &[]));
     out
 }
 
@@ -375,7 +377,7 @@ list of Markdown links to the pages you used. `allowed_domains` limits results t
             });
         }
         match resp.json::<Value>().await {
-            Ok(body) => ToolOutput::text(format_results(&body)),
+            Ok(body) => ToolOutput::text(format_results(&body, ctx.session.prompts())),
             Err(e) => ToolOutput::error(format!("Brave Search sent an unreadable answer: {e}")),
         }
     }
@@ -396,9 +398,10 @@ mod search_tests {
         let body = json!({"web": {"results": [
             {"title": "The <strong>Rust</strong> Book", "url": "https://doc.rust-lang.org/book/", "description": "Learn &amp; build", "age": "2 days ago", "extra_snippets": ["more"]},
         ]}});
-        let t = format_results(&body);
+        let t = format_results(&body, crate::prompts::Prompts::new(false));
         assert!(t.starts_with("1. The Rust Book\n   https://doc.rust-lang.org/book/\n   Learn & build (2 days ago)\n   - more"), "{t}");
         assert!(t.contains("Sources section"));
-        assert_eq!(format_results(&json!({"web": {"results": []}})), "No results.");
+        assert!(format_results(&body, crate::prompts::Prompts::new(true)).contains("Sources section at end"));
+        assert_eq!(format_results(&json!({"web": {"results": []}}), crate::prompts::Prompts::new(false)), "No results.");
     }
 }

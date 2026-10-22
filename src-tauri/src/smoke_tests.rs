@@ -253,6 +253,19 @@ fn smoke_code_agent_edit_with_permission() {
             .is_some()
     );
 
+    // The agent offers the compact-prompts option, and the app can switch it like any config option.
+    if smoke_agent() == "patchbay" {
+        let has_option = events.lock().unwrap().iter().any(|e| {
+            matches!(&e.event, CodeEvent::SessionReady { config_options, .. }
+                if config_options.as_array().is_some_and(|o| o.iter().any(|x| x["id"] == "minify_prompts" && x["currentValue"] == "off")))
+        });
+        assert!(has_option, "no minify_prompts option in sessionReady");
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(manager.set_config_option(&session.id, "minify_prompts".into(), "on".into()))
+            .expect("set the option");
+    }
+
     manager
         .send(
             &session.id,
@@ -714,6 +727,10 @@ fn live_claude_login() {
         auth_mode: AuthMode::ClaudeLogin,
     };
     db.upsert_provider(&provider, None).unwrap();
+    if std::env::var("PATCHBAY_LIVE_MINIFY").is_ok() {
+        crate::prefs::save(&db, &crate::prefs::Preferences { minify_prompts: true, ..Default::default() }).unwrap();
+        println!("(prompts minified)");
+    }
 
     // 1. The login works at all: a token, and the model list.
     let token = rt.block_on(crate::claude_auth::access_token()).expect("a Claude Code login is needed");
@@ -811,6 +828,10 @@ fn live_claude_login() {
     assert!(errors.is_empty(), "{errors:?}");
     assert!(tools.iter().any(|t| t.contains("live-ok")), "the Bash call did not run: {tools:?}");
     assert!(!text.trim().is_empty());
+
+    let (text, _, errors, _) = run("plain", "In two or three sentences: why use a mutex instead of an atomic counter?");
+    println!("5. reply style ({} chars): {text}", text.len());
+    assert!(errors.is_empty(), "{errors:?}");
 
     let (text, thought, errors, _) = run("effort", "Reply with just the word ok.");
     println!("4. agent with reasoning effort low: errors={errors:?} reply={text:?} thought_chars={}", thought.len());

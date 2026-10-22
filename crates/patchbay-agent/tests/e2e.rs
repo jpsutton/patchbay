@@ -97,6 +97,20 @@ impl Acp {
         }
     }
 
+    /// Like `call`, for a request that must fail: the error's message.
+    async fn call_err(&mut self, method: &str, params: Value) -> String {
+        let id = self.next;
+        self.next += 1;
+        self.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})).await;
+        loop {
+            let line = self.from.next_line().await.unwrap().expect("agent closed");
+            let m: Value = serde_json::from_str(&line).unwrap();
+            if m["id"] == json!(id) && m.get("method").is_none() {
+                return m["error"]["message"].as_str().unwrap_or("").to_owned();
+            }
+        }
+    }
+
     fn text_of(&self, kind: &str) -> String {
         self.updates
             .iter()
@@ -431,4 +445,51 @@ async fn a_worktree_subagent_edits_apart_from_the_checkout() {
     let worktrees = std::fs::read_dir(cwd.join("data/agent/worktrees")).unwrap().count();
     assert_eq!(worktrees, 1);
     let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
+async fn prompts_can_be_minified_per_session_and_the_choice_is_kept() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));
+    acp.call("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await;
+    // A client that does not ask gets the host's setting (off here), and is told about the option.
+    let s = acp.call("session/new", json!({"cwd": cwd, "mcpServers": []})).await;
+    let sid = s["sessionId"].as_str().unwrap().to_owned();
+    let opt = &s["configOptions"][0];
+    assert_eq!((opt["id"].as_str(), opt["currentValue"].as_str()), (Some("minify_prompts"), Some("off")));
+    assert_eq!(s["models"]["currentModelId"], "pb-mock", "legacy model list stays");
+
+    // The tool list the model sees: minified descriptions are shorter. `!tools` only lists names,
+    // so read the size the mock reports for the request instead.
+    let before = request_size(&mut acp, &sid).await;
+    let r = acp.call("session/set_config_option", json!({"sessionId": sid, "configId": "minify_prompts", "value": "on"})).await;
+    assert_eq!(r["configOptions"][0]["currentValue"], "on");
+    let after = request_size(&mut acp, &sid).await;
+    println!("request: {before} -> {after} bytes ({}% smaller)", 100 - after * 100 / before);
+    // The terse-reply instruction is part of the minified request, so it saves less than the texts alone.
+    assert!(after < before, "minified request {after} vs full {before} bytes");
+    assert!(acp.call_err("session/set_config_option", json!({"sessionId": sid, "configId": "minify_prompts", "value": "maybe"})).await.contains("on or off"));
+    assert!(acp.call_err("session/set_config_option", json!({"sessionId": sid, "configId": "nope", "value": "on"})).await.contains("unknown config option"));
+
+    // With the option on, each prompt carries the terse reminder, and with it off it does not.
+    let store = std::fs::read_to_string(cwd.join("data/agent/sessions").join(format!("{sid}.jsonl"))).unwrap();
+    assert_eq!(store.matches("TERSE MODE ACTIVE").count(), 1, "only the prompt sent after switching on gets it");
+
+    // The choice survives a reload; a caller can also ask for it when it opens a session.
+    let mut again = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));
+    again.call("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await;
+    let loaded = again.call("session/load", json!({"sessionId": sid, "cwd": cwd, "mcpServers": []})).await;
+    assert_eq!(loaded["configOptions"][0]["currentValue"], "on");
+    let fresh = again.call("session/new", json!({"cwd": cwd, "mcpServers": [], "_meta": {"minifyPrompts": true}})).await;
+    assert_eq!(fresh["configOptions"][0]["currentValue"], "on");
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+/// Bytes of the request the model gets for a trivial prompt, as the mock reports them.
+async fn request_size(acp: &mut Acp, sid: &str) -> usize {
+    prompt(acp, sid, "!size").await;
+    let text = acp.text_of("agent_message_chunk");
+    let n = text.rsplit("request bytes: ").next().unwrap().split(|c: char| !c.is_ascii_digit()).next().unwrap();
+    n.parse().unwrap_or_else(|_| panic!("no size in {text:?}"))
 }

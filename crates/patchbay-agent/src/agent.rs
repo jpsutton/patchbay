@@ -17,6 +17,23 @@ use crate::turn;
 
 type Sessions = Arc<Mutex<HashMap<String, Arc<Session>>>>;
 
+/// The ACP config option that turns minified prompts on and off.
+const MINIFY_OPTION: &str = "minify_prompts";
+
+fn config_options(s: &Session) -> Value {
+    json!([{
+        "id": MINIFY_OPTION,
+        "name": "Compact prompts",
+        "description": "Send the agent's own prompts in a shortened form to save input tokens, and ask it to reply tersely, like caveman.",
+        "type": "select",
+        "currentValue": if s.minifying() { "on" } else { "off" },
+        "options": [
+            {"value": "off", "name": "Off", "description": "Full prompts"},
+            {"value": "on", "name": "On", "description": "Terse prompts and terse replies"},
+        ],
+    }])
+}
+
 struct Agent {
     host: Arc<dyn Host>,
     peer: Peer,
@@ -121,6 +138,26 @@ impl Agent {
                 s.update(json!({"sessionUpdate": "current_mode_update", "currentModeId": mode.id()}));
                 Ok(json!({}))
             }
+            "session/set_config_option" => {
+                let s = self.need_session(&params)?;
+                match param_str(&params, "configId")? {
+                    MINIFY_OPTION => {
+                        let on = match param_str(&params, "value")? {
+                            "on" | "true" => true,
+                            "off" | "false" => false,
+                            other => return Err(RpcError::invalid_params(format!("{other:?} is not on or off"))),
+                        };
+                        *s.minify.lock().unwrap() = Some(on);
+                        let (model, mode) = {
+                            let st = s.state.lock().await;
+                            (st.model_id.clone(), st.mode)
+                        };
+                        s.save_meta(&model, mode);
+                        Ok(json!({"configOptions": config_options(&s)}))
+                    }
+                    other => Err(RpcError::invalid_params(format!("unknown config option {other}"))),
+                }
+            }
             "patchbay/rewind/points" => {
                 let s = self.need_session(&params)?;
                 let points: Vec<Value> = s
@@ -197,6 +234,7 @@ impl Agent {
     async fn session_info(&self, s: &Session) -> Value {
         let st = s.state.lock().await;
         json!({
+            "configOptions": config_options(s),
             "models": {
                 "currentModelId": st.model_id,
                 "availableModels": self.host.models().iter().map(|m| json!({"modelId": m.id, "name": m.name})).collect::<Vec<_>>(),
@@ -231,6 +269,9 @@ impl Agent {
             .ok_or_else(|| RpcError::internal("add a provider and model in Settings first"))?;
         let id = uuid::Uuid::new_v4().to_string();
         let s = Session::new(id.clone(), cwd, self.host.clone(), self.peer.clone(), model.clone(), Mode::Default);
+        if let Some(on) = params["_meta"]["minifyPrompts"].as_bool() {
+            *s.minify.lock().unwrap() = Some(on);
+        }
         s.save_meta(&model, Mode::Default);
         s.keep_open.store(self.subagents_cap.load(Ordering::SeqCst), Ordering::SeqCst);
         self.attach_mcp(&s, params).await;
@@ -264,6 +305,8 @@ impl Agent {
         let mode = restored.mode.unwrap_or(Mode::Default);
         let s = Session::new(id.clone(), cwd, self.host.clone(), self.peer.clone(), model.clone(), mode);
         s.keep_open.store(self.subagents_cap.load(Ordering::SeqCst), Ordering::SeqCst);
+        // The session's own choice is remembered; a caller may set it again on load.
+        *s.minify.lock().unwrap() = params["_meta"]["minifyPrompts"].as_bool().or(restored.minify);
         *s.prompts.lock().unwrap() = session::prompts_of(&restored.messages);
         s.state.lock().await.messages = restored.messages;
         s.replay(&entries);

@@ -13,14 +13,10 @@ use crate::session::{Mode, Session};
 use crate::subagent::{self, Kind, Note, Status, SubAgent};
 use crate::prompt;
 
-const SUBAGENT: &str = include_str!("../../prompts/subagent.md");
 const READ_ONLY: [&str; 5] = ["Read", "Glob", "Grep", "WebFetch", "WebSearch"];
 /// What a subagent never gets: it cannot ask the user, plan, track tasks for the main agent or
 /// start subagents of its own.
 const WITHHELD: [&str; 7] = ["Task", "SendMessage", "TaskStop", "TodoWrite", "ExitPlanMode", "AskUserQuestion", "KillShell"];
-const FORK_NOTE: &str = "You are a fork of the main agent: its conversation above is yours to read, but you are a separate run. \
-Do exactly the directive below and then stop. Do not start subagents. Finish with a short report of what you found or did; \
-that report is all the main agent sees.";
 
 fn valid_name(n: &str) -> bool {
     !n.is_empty() && n.len() <= 40 && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -152,6 +148,7 @@ do with one Grep or Read."
         };
 
         let settings = parent.host.settings();
+        let p = parent.prompts();
         let mut registry = Registry::builtin(settings.web_fetch, parent.host.web_search_key().is_some());
         if kind != Kind::Explore {
             for t in parent.mcp.lock().await.tools() {
@@ -168,16 +165,21 @@ do with one Grep or Read."
                 let mut h = parent.state.lock().await.messages.clone();
                 // The last message is the one holding this very call, which has no result yet.
                 h.pop();
-                (prompt::system_blocks(&cwd, &model_name, &settings.instructions, mode), h)
+                (prompt::system_blocks(&cwd, &model_name, &settings.instructions, mode, p), h)
             }
             _ => {
-                let mut s = vec![SystemBlock::cached(SUBAGENT.trim())];
-                s.extend(prompt::system_blocks(&cwd, &model_name, "", mode).pop());
+                let mut persona = p.subagent().trim().to_owned();
+                if let Some(terse) = p.terse() {
+                    persona.push_str("\n\n");
+                    persona.push_str(terse.trim());
+                }
+                let mut s = vec![SystemBlock::cached(persona)];
+                s.extend(prompt::system_blocks(&cwd, &model_name, "", mode, p).pop());
                 (s, Vec::new())
             }
         };
         let first = if kind == Kind::Fork {
-            Message::with_parts(Role::User, vec![Part::Text(prompt::reminder(FORK_NOTE)), Part::Text(task.to_owned())])
+            Message::with_parts(Role::User, vec![Part::Text(prompt::reminder(&p.msg("fork_note", &[]))), Part::Text(task.to_owned())])
         } else {
             Message::user(task)
         };
@@ -203,11 +205,7 @@ do with one Grep or Read."
 
         if bool_arg(&input, "run_in_background") {
             spawn_background(parent.clone(), agent);
-            return ToolOutput::text(format!(
-                "Subagent {handle} ({}) started in the background. Its report arrives as a task notification; carry on, and do not poll. \
-Stop it with TaskStop, or send it a message with SendMessage.",
-                kind.label()
-            ));
+            return ToolOutput::text(p.msg("bg_started", &[("handle", &handle), ("kind", kind.label())]));
         }
         let result = subagent::run(parent, &agent, &ctx.cancel).await;
         if ctx.cancel.is_cancelled() {
@@ -216,7 +214,7 @@ Stop it with TaskStop, or send it a message with SendMessage.",
         }
         let failed = result.is_err();
         let (_, text) = conclude(parent, &agent, result).await;
-        let out = format!("{text}\n\n[subagent {handle}; continue it with SendMessage]");
+        let out = format!("{text}\n\n{}", p.msg("continue_hint", &[("handle", &handle)]));
         if failed { ToolOutput::error(out) } else { ToolOutput::text(out) }
     }
 }
@@ -276,7 +274,7 @@ whole history and the message as its next instruction, and its new report comes 
         if bool_arg(&input, "run_in_background") {
             let label = agent.kind.label();
             spawn_background(parent.clone(), agent);
-            return ToolOutput::text(format!("{to} ({label}) is continuing in the background; its report arrives as a task notification."));
+            return ToolOutput::text(parent.prompts().msg("bg_continuing", &[("to", to), ("kind", label)]));
         }
         let result = subagent::run(parent, &agent, &ctx.cancel).await;
         if ctx.cancel.is_cancelled() {

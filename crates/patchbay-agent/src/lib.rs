@@ -11,6 +11,7 @@ mod extract;
 mod host;
 mod mcp;
 mod prompt;
+mod prompts;
 mod rpc;
 mod session;
 mod store;

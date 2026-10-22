@@ -30,11 +30,14 @@ pub struct Settings {
     pub auto_compact_percent: u8,
     /// The user's own instructions, appended to the system prompt.
     pub instructions: String,
+    /// Send the agent's own prompts in their minified form (fewer input tokens). A session can
+    /// override this.
+    pub minify_prompts: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { web_fetch: true, auto_compact_percent: 0, instructions: String::new() }
+        Settings { web_fetch: true, auto_compact_percent: 0, instructions: String::new(), minify_prompts: false }
     }
 }
 

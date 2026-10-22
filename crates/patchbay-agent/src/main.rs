@@ -3,7 +3,9 @@
 //! Models come from the JSON file named by `PATCHBAY_AGENT_MODELS`:
 //! `[{"id": "m", "name": "M", "format": "chat_completions|responses|anthropic|gemini",
 //!    "base_url": "...", "model": "...", "key": "..."}]`. Sessions are stored under
-//! `PATCHBAY_AGENT_DATA` (default: the system temp directory).
+//! `PATCHBAY_AGENT_DATA` (default: the system temp directory). `PATCHBAY_AGENT_MINIFY=1` starts
+//! sessions with minified prompts; a client can also set `_meta.minifyPrompts` on `session/new`
+//! or the `minify_prompts` config option.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,7 +48,9 @@ impl Host for FileHost {
     }
 
     fn settings(&self) -> Settings {
-        Settings::default()
+        // `PATCHBAY_AGENT_MINIFY=1` makes sessions start with minified prompts.
+        let minify_prompts = std::env::var("PATCHBAY_AGENT_MINIFY").is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "on"));
+        Settings { minify_prompts, ..Settings::default() }
     }
 }
 

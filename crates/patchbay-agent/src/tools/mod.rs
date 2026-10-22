@@ -142,8 +142,17 @@ impl Registry {
         self.tools.iter().find(|t| t.spec().name == name).cloned()
     }
 
-    pub fn specs(&self, plan_mode: bool) -> Vec<ToolSpec> {
-        self.tools.iter().filter(|t| !plan_mode || t.allowed_in_plan()).map(|t| t.spec()).collect()
+    /// The tools to offer, with minified descriptions when `p` asks for them.
+    pub fn specs(&self, plan_mode: bool, p: crate::prompts::Prompts) -> Vec<ToolSpec> {
+        self.tools
+            .iter()
+            .filter(|t| !plan_mode || t.allowed_in_plan())
+            .map(|t| {
+                let mut s = t.spec();
+                s.description = p.tool_description(&s.name, std::mem::take(&mut s.description));
+                s
+            })
+            .collect()
     }
 }
 

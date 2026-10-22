@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::host::Host;
+use crate::prompts::Prompts;
 use crate::mcp::McpSet;
 use crate::rpc::Peer;
 use crate::store::{Entry, Store, effective};
@@ -113,6 +114,8 @@ pub struct Session {
     pub card_prefix: String,
     /// The client keeps `session/prompt` open for background subagents (`_meta.subagents`).
     pub keep_open: AtomicBool,
+    /// This session's own choice about minified prompts; `None` follows the host's setting.
+    pub minify: Mutex<Option<bool>>,
 }
 
 pub fn stamp_of(path: &Path) -> Option<Stamp> {
@@ -156,7 +159,18 @@ impl Session {
             agents: Default::default(),
             card_prefix: String::new(),
             keep_open: AtomicBool::new(false),
+            minify: Mutex::new(None),
         })
+    }
+
+    /// Whether prompts go out minified: the session's own choice, else the host's setting.
+    pub fn minifying(&self) -> bool {
+        (*self.minify.lock().unwrap()).unwrap_or_else(|| self.host.settings().minify_prompts)
+    }
+
+    /// The prompt texts to use, in the form this session wants.
+    pub fn prompts(&self) -> Prompts {
+        Prompts::new(self.minifying())
     }
 
     /// A subagent's own session: same client, model and MCP servers, but its own history, files,
@@ -189,6 +203,8 @@ impl Session {
             agents: Default::default(),
             card_prefix: prefix,
             keep_open: AtomicBool::new(false),
+            // A subagent speaks the way its parent does, whatever the setting becomes later.
+            minify: Mutex::new(Some(self.minifying())),
         })
     }
 
@@ -206,6 +222,7 @@ impl Session {
             cwd: self.cwd.to_string_lossy().into_owned(),
             model: model.to_owned(),
             mode: mode.id().to_owned(),
+            minify: *self.minify.lock().unwrap(),
         });
     }
 
@@ -255,6 +272,7 @@ impl Session {
 
 /// The state a stored session ends in.
 pub struct Restored {
+    pub minify: Option<bool>,
     pub cwd: Option<String>,
     pub model: Option<String>,
     pub mode: Option<Mode>,
@@ -284,10 +302,11 @@ pub fn prompts_of(messages: &[Message]) -> Vec<PromptRec> {
 }
 
 pub fn restore(entries: &[Entry]) -> Restored {
-    let mut r = Restored { cwd: None, model: None, mode: None, messages: Vec::new() };
+    let mut r = Restored { minify: None, cwd: None, model: None, mode: None, messages: Vec::new() };
     for e in &effective(entries) {
         match e {
-            Entry::Meta { cwd, model, mode } => {
+            Entry::Meta { cwd, model, mode, minify } => {
+                r.minify = *minify;
                 r.cwd = Some(cwd.clone());
                 r.model = Some(model.clone());
                 r.mode = Mode::parse(mode);
@@ -309,7 +328,7 @@ mod tests {
     #[test]
     fn compaction_replaces_history_on_restore() {
         let entries = vec![
-            Entry::Meta { cwd: "/p".into(), model: "m".into(), mode: "plan".into() },
+            Entry::Meta { cwd: "/p".into(), model: "m".into(), mode: "plan".into(), minify: Some(true) },
             Entry::Msg { m: Message::user("one") },
             Entry::Msg { m: Message::assistant("two") },
             Entry::Compacted { summary: Message::user("summary") },
@@ -319,5 +338,6 @@ mod tests {
         assert_eq!(r.messages.len(), 2);
         assert_eq!(r.messages[0].text(), "summary");
         assert_eq!(r.mode, Some(Mode::Plan));
+        assert_eq!(r.minify, Some(true));
     }
 }

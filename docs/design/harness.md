@@ -80,6 +80,25 @@ One JSON line per entry in `<data>/agent/sessions/<id>.jsonl`: settings, message
 
 The reference this was built from (`docs/HARNESS-SPEC-generic.md`) describes more than a desktop app needs. Not built: the coordinator/worker harness, `Workflow`, team messaging, `ScheduleWakeup`, `Monitor`, deferred tools with `ToolSearch`, `Skill`, artifacts, lean and classic tool descriptions and the persona variants for other surfaces. Subagents are one level deep, live in memory (they don't survive a restart) and have no `model` override.
 
+## Prompts
+
+All prompt text is in `crates/patchbay-agent/prompts/`, loaded by `prompts.rs`:
+
+| File | Holds |
+|---|---|
+| `system.md`, `environment.md`, `compact.md`, `subagent.md` | the big prompts, each with a minified twin `*.min.md` |
+| `messages.json` | the short fragments (reminders, refusals, notes to subagents, the compaction wrapper, the WebFetch answering prompt) as `{full, min}` pairs with `{placeholders}` |
+| `tools.min.json` | the minified description of each tool; the full one sits with the tool's schema in `tools/` |
+| `terse.md` | the reply-style instruction used only when minifying (it has no full form) |
+
+**Minified prompts** are optional. They shrink what the agent sends and ask the model to answer tersely. The minified texts follow the `caveman-compress` rules of the caveman plugin: no articles, filler, hedging or pleasantries; fragments are fine; code spans, paths, tool names, numbers and `{placeholders}` stay exact. They cut the prompt files and tool descriptions by about a fifth, and a whole first request by about 11%, because the tools' JSON schemas don't shrink. Two more pieces go with them, from the caveman plugin's reply rules: `terse.md`, a short reply-style instruction added to the static system block, and a one-line `TERSE MODE ACTIVE` reminder added to each user prompt (a system prompt alone is often forgotten; the reminder is what makes it stick). Replies come back in fragments without articles or filler, with code, commands, paths and errors exact, and normal prose for security warnings and irreversible-action confirmations. In a live test on a Claude login the same question got a reply about 45% shorter. The instruction costs about as much as the prompt texts save, so the saving on a request is small (about 6% on a first request) and the real gain is in the replies. Tests keep each pair honest: the minified form must be shorter, keep every code span, placeholder and heading, name only real tools, and every message the code asks for must exist.
+
+Who decides:
+1. The session, if it chose: the ACP config option `minify_prompts` (`session/set_config_option`, values `on` and `off`, listed in `configOptions` of `session/new` and `session/load`), or `_meta.minifyPrompts` on `session/new` and `session/load`. The choice is saved with the session.
+2. Otherwise the host's `Settings::minify_prompts`: in the app, Settings → Coding agents → Patchbay → "Compact prompts" (it applies to the next request, with no restart); for the `patchbay-agent` stdio binary, `PATCHBAY_AGENT_MINIFY=1`.
+
+A subagent uses its parent's form from the moment it starts. Adding a prompt means adding both forms; adding a message means a `{full, min}` pair in `messages.json`.
+
 ## Tests
 
 - `cargo test` in each crate: adapter fixtures, SSE decoding, tools, store, compaction, MCP against a tiny stdio server.

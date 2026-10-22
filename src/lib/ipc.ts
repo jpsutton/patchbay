@@ -595,6 +595,7 @@ export interface Preferences {
   permissionMode: "default" | "auto" | "always-approve";
   agentInstructions: string;
   webFetch: boolean;
+  minifyPrompts: boolean;
   autoCompactPercent: number | null;
   backgroundSummaries: boolean;
   claudeConfig: ClaudeConfig;
@@ -622,6 +623,7 @@ export const defaultPreferences: Preferences = {
   permissionMode: "default",
   agentInstructions: "",
   webFetch: false,
+  minifyPrompts: false,
   autoCompactPercent: null,
   backgroundSummaries: true,
   claudeConfig: { skills: true, instructions: true, agents: true, mcpServers: true, hooks: true, plugins: true },

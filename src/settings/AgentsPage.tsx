@@ -154,6 +154,12 @@ function PatchbayModelSettings() {
         <Toggle label="Web fetch tool" checked={prefs.webFetch} onChange={(webFetch) => update({ webFetch })} />
       </Row>
       <Row
+        label="Compact prompts"
+        hint="Send the agent's own prompts and tool descriptions in a shortened form (about a fifth less prompt text) and ask it to reply tersely, like the caveman plugin: no articles, filler or hedging, code and errors exact. Saves input and output tokens. Each session can switch it in its own options."
+      >
+        <Toggle label="Compact prompts" checked={prefs.minifyPrompts} onChange={(minifyPrompts) => update({ minifyPrompts })} />
+      </Row>
+      <Row
         label="Web search (Brave)"
         hint={
           search?.configured

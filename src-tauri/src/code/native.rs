@@ -63,6 +63,7 @@ impl Host for AppHost {
         let prefs = crate::prefs::load(&self.db);
         Settings {
             web_fetch: prefs.web_fetch,
+            minify_prompts: prefs.minify_prompts,
             auto_compact_percent: prefs.auto_compact_percent.unwrap_or(0),
             instructions: prefs.agent_instructions,
         }
