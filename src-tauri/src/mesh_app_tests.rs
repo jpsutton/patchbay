@@ -164,6 +164,11 @@ async fn remote_session_commands_and_terminal() {
     assert!(files.iter().any(|f| f == "app.txt"), "{files:?}");
     let attach = b.state.mesh.rpc(&an, "code.attach", json!({ "id": s.id })).await.unwrap();
     assert_eq!(attach["running"], false);
+    // A forced send from B checks first that A has a running agent that can take one.
+    let err = code_prompt(&b.state, s.id.clone(), "now".into(), vec![], None, None, Some(true)).await.unwrap_err();
+    assert!(err.0.contains("isn't running"), "{}", err.0);
+    let err = code_send_now(&b.state, s.id.clone(), "queued".into()).await.unwrap_err();
+    assert!(err.0.contains("isn't running"), "{}", err.0);
     // A sign-in from B goes to A, which has no agent running for the session yet.
     let err = code_authenticate(&b.state, s.id.clone(), "oauth".into(), Some("k".into())).await.unwrap_err();
     assert!(err.0.contains("agent is not running"), "{}", err.0);

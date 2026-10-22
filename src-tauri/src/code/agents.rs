@@ -166,6 +166,9 @@ pub struct Extensions {
     /// A message sent mid-turn joins the running turn, through `interject` or the steering
     /// extension the agent advertises; otherwise Patchbay queues it. Known once the agent starts.
     pub steering: bool,
+    /// The host can cancel the running turn to send a message next (Ctrl+Enter, "Send now").
+    /// Always set once the agent starts; older hosts leave it out.
+    pub force_send: bool,
 }
 
 /// What makes an agent ask Patchbay before acting, so the session's approval mode decides
@@ -586,7 +589,7 @@ fn prepare_grok(
         args,
         env,
         env_remove: vec!["XAI_API_KEY".into(), "GROK_CODE_XAI_API_KEY".into()],
-        ext: Extensions { status_line: true, rewind: true, patchbay_models: true, interject: true, steering: false },
+        ext: Extensions { status_line: true, rewind: true, patchbay_models: true, interject: true, steering: false, force_send: false },
         session_meta,
         initial_model: None,
         login_hint: "",
