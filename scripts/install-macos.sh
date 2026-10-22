@@ -45,7 +45,11 @@ curl -fL --progress-bar -o "$work/$dmg" "$base/$dmg"
 (cd "$work" && grep " $dmg\$" SHA256SUMS | shasum -a 256 -c -s) || die "checksum mismatch for $dmg"
 
 mkdir "$mnt"
-hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mnt" "$work/$dmg"
+# The .dmg carries the Apache-2.0 license as a license agreement, which hdiutil pages
+# through less and then asks to accept on stdin. Under curl | bash that stdin is the
+# rest of this script, so answer it here and skip the pager.
+PAGER="cat" hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mnt" "$work/$dmg" \
+  <<<y >/dev/null
 [[ -d $mnt/Patchbay.app ]] || die "Patchbay.app not found in $dmg"
 
 if pgrep -xq Patchbay; then
