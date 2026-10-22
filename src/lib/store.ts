@@ -33,8 +33,10 @@ import { notifyInBackground } from "./notify";
 import { activityOf, strongest, type Activity } from "./activity";
 import { isRemoteApp } from "./platform";
 import { isForegroundUpdate } from "./codeWorking";
+import { appendUserChunk } from "./harness";
 
 export { codeWorking, FOREGROUND_IDLE_MS, hasActiveForegroundTools } from "./codeWorking";
+export { harnessTags } from "./harness";
 
 export type Mode = "chat" | "code";
 
@@ -47,7 +49,11 @@ export type Entry =
   | { kind: "thought"; text: string }
   | { kind: "tool"; id: string }
   | { kind: "error"; text: string }
-  | { kind: "info"; text: string };
+  | { kind: "info"; text: string }
+  /** A replayed user-role message the agent's harness wrote (a reminder, a slash command's output). */
+  | { kind: "harness"; text: string }
+  /** A replayed marker that the user stopped the turn. */
+  | { kind: "cancelled" };
 
 /** A prompt waiting for the running turn to end (agents that can't take one mid-turn). */
 export interface QueuedPrompt {
@@ -449,7 +455,7 @@ function reduceUpdate(s: CodeState, u: AcpUpdate): CodeState {
       if (s.busy) return s;
       return {
         ...s,
-        entries: appendText(s.entries, "user", withoutNote(textOf((u as unknown as { content: { type: string; text?: string } }).content))),
+        entries: appendUserChunk(s.entries, withoutNote(textOf((u as unknown as { content: { type: string; text?: string } }).content))),
       };
     case "agent_message_chunk": {
       const c = (u as unknown as { content: { type: string; text?: string; data?: string; mimeType?: string } }).content;

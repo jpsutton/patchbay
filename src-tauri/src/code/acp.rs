@@ -1386,8 +1386,34 @@ fn exited(
     anyhow!("agent process exited ({code})\n{tail}")
 }
 
+/// `data.errorKind` values with which claude-agent-acp reports a sign-in that failed mid-session.
+/// It sends them as a plain internal error (`-32603`) and keeps `-32000` for "Please run /login".
+const AUTH_ERROR_KINDS: [&str; 2] = ["authentication_failed", "oauth_org_not_allowed"];
+
 fn is_auth_required(e: &acp::Error) -> bool {
-    i32::from(e.code) == -32000
+    match i32::from(e.code) {
+        -32000 => true,
+        -32603 => e
+            .data
+            .as_ref()
+            .and_then(|d| d["errorKind"].as_str())
+            .is_some_and(|k| AUTH_ERROR_KINDS.contains(&k)),
+        _ => false,
+    }
+}
+
+/// An internal error's message without JSON-RPC's generic "Internal error:" prefix, or `None`
+/// for other errors.
+fn internal_error_reason(e: &acp::Error) -> Option<&str> {
+    if i32::from(e.code) != -32603 {
+        return None;
+    }
+    let m = e
+        .message
+        .strip_prefix("Internal error:")
+        .unwrap_or(&e.message)
+        .trim();
+    (!m.is_empty()).then_some(m)
 }
 
 /// For ACP's `auth_required` error: how to sign in. Patchbay's own hint for the agent comes
@@ -1410,10 +1436,13 @@ fn auth_message(e: &acp::Error, init: &Value, login_hint: &str, again: bool) -> 
         .or(init["agentInfo"]["name"].as_str())
         .unwrap_or("The agent");
     let when = if again { "again" } else { "first" };
-    if how.is_empty() {
-        format!("{name} needs you to sign in {when} ({e}).")
-    } else {
-        format!("{name} needs you to sign in {when}. {how}")
+    // An internal error carries the agent's reason (an expired login, say) and nothing else
+    // does, so show it even next to the hint.
+    match (internal_error_reason(e), how.is_empty()) {
+        (Some(why), true) => format!("{name} needs you to sign in {when} ({why})."),
+        (Some(why), false) => format!("{name} needs you to sign in {when} ({why}). {how}"),
+        (None, true) => format!("{name} needs you to sign in {when} ({e})."),
+        (None, false) => format!("{name} needs you to sign in {when}. {how}"),
     }
 }
 
@@ -1819,7 +1848,9 @@ mod tests {
     /// An ACP agent that refuses `session/new` until `authenticate` gets method `api-key` with
     /// key `sk-test` in codex-acp's shape, so the string shape Patchbay tries first is refused.
     /// The prompt `expire` signs it out again, and prompts fail with `auth_required` until the
-    /// next sign-in. To clients that run terminal sign-ins it also offers `tui`, whose command
+    /// next sign-in. `expire-oauth` does the same with claude-agent-acp's `-32603` and
+    /// `errorKind`, and `crash` fails with a `-32603` that isn't about signing in. To clients
+    /// that run terminal sign-ins it also offers `tui`, whose command
     /// (this script with `--login`) leaves a `signed-in` file that a new process starts with.
     /// `--no-methods` starts it signed in, with no auth methods.
     ///
@@ -1893,8 +1924,17 @@ for line in sys.stdin:
         if held is not None:
             err(i, "a turn is already running")
             continue
-        if t == "expire":
+        if t in ("expire", "expire-oauth"):
             authed = False
+        if t == "crash":
+            send({"jsonrpc": "2.0", "id": i, "error": {"code": -32603, "message": "Internal error: boom",
+                  "data": {"errorKind": "unknown"}}})
+            continue
+        if not authed and t == "expire-oauth":
+            send({"jsonrpc": "2.0", "id": i, "error": {"code": -32603,
+                  "message": "Internal error: Failed to authenticate: OAuth session expired",
+                  "data": {"errorKind": "authentication_failed"}}})
+            continue
         if not authed:
             err(i, "Authentication required")
             continue
@@ -2128,6 +2168,43 @@ for line in sys.stdin:
             })
             .collect();
         assert_eq!(errors, ["Fake Agent needs you to sign in again. Run `fake login`."]);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// claude-agent-acp reports an expired login as an internal error tagged `errorKind`. That
+    /// asks for a sign-in, with the reason minus "Internal error:"; other internal errors don't.
+    #[test]
+    fn internal_error_with_an_auth_error_kind_asks_for_a_sign_in() {
+        let dir = std::env::temp_dir().join(format!("pb-auth-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent(&dir) else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        wait_for(&events, "authRequired", |evs| auth_events(evs) == 1);
+        authenticate(&tx, "api-key", Some("sk-test")).unwrap();
+        wait_for(&events, "sessionReady", |evs| {
+            evs.iter()
+                .any(|e| matches!(e, CodeEvent::SessionReady { .. }))
+        });
+
+        send_prompt(&tx, "crash");
+        wait_for(&events, "promptDone", |evs| {
+            evs.iter().filter(|e| prompt_done(e)).count() == 1
+        });
+        assert_eq!(auth_events(&events.lock().unwrap()), 1);
+        assert_eq!(count(&events, |e| matches!(e, CodeEvent::Error { .. })), 1);
+
+        send_prompt(&tx, "expire-oauth");
+        wait_for(&events, "promptDone", |evs| {
+            evs.iter().filter(|e| prompt_done(e)).count() == 2
+        });
+        assert_eq!(auth_events(&events.lock().unwrap()), 2);
+        assert_eq!(count(&events, |e| matches!(e, CodeEvent::Error { .. })), 1);
+        let (message, _) = last_auth(&events);
+        let want = "Fake Agent needs you to sign in again (Failed to authenticate: OAuth session expired). Opens";
+        assert!(message.starts_with(want), "{message}");
         tx.send(AgentCmd::Shutdown).unwrap();
         thread.join().unwrap();
         let _ = std::fs::remove_dir_all(dir);
