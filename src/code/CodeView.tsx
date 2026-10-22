@@ -1132,6 +1132,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
               </ul>
             )}
             <Composer
+              draftKey={`code:${session.id}`}
               busy={working}
               // Hosts that steer or queue say whether the agent steers; an older host would send a
               // second prompt into the running turn.

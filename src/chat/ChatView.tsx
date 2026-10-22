@@ -546,6 +546,7 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
       </div>
       <div className="mx-auto w-full max-w-3xl px-6 pb-3 pt-2">
         <Composer
+          draftKey={`chat:${activeId ?? "new"}`}
           busy={running}
           onEditLast={editLast}
           onStop={() => activeId && api.cancelChat(activeId)}
