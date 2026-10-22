@@ -1,6 +1,9 @@
 # Checks on every pull request (into staging and into release): static checks,
 # the frontend's typecheck, build and notices, and the Rust unit tests on Linux.
 # No packages; build.yml does those for release PRs.
+#
+# A pull request that only touches docs skips the heavy jobs. They still report
+# (as skipped), which satisfies the required checks, so the PR can merge.
 name: checks
 
 on:
@@ -10,6 +13,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read   # list the pull request's files
 
 concurrency:
   group: checks-${{ github.event.pull_request.number || github.ref }}
@@ -19,6 +23,38 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Whether the pull request changes anything besides docs. Docs are Markdown
+  # (except THIRD_PARTY_NOTICES.md, which frontend checks), docs/, LICENSE and
+  # NOTICE. Anything else, a manual run, or a PR too big to list counts as source.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      source: ${{ steps.files.outputs.source }}
+    steps:
+      - id: files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          CHANGED: ${{ github.event.pull_request.changed_files }}
+        run: |
+          set -euo pipefail
+          source=false
+          if [ -z "$PR" ] || [ "$CHANGED" -ge 3000 ]; then
+            source=true
+          else
+            # Renames list both names, so moving a source file into docs/ counts.
+            while IFS= read -r f; do
+              case $f in
+                THIRD_PARTY_NOTICES.md) source=true ;;
+                docs/*|*.md|LICENSE|NOTICE) ;;
+                *) source=true ;;
+              esac
+            done < <(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" \
+                       -q '.[] | .filename, (.previous_filename // empty)')
+          fi
+          echo "source=$source" >> "$GITHUB_OUTPUT"
+          [ "$source" = true ] || echo "Docs only: skipping the build and test jobs" >> "$GITHUB_STEP_SUMMARY"
+
   # release only takes what staging has: changes go feature branch -> staging
   # -> release.
   source-branch:
@@ -54,6 +90,9 @@ jobs:
           echo "Releases as v$version" >> "$GITHUB_STEP_SUMMARY"
 
   static:
+    needs: changes
+    # Runs unless changes found docs only; if changes itself failed, this still runs.
+    if: ${{ !cancelled() && needs.changes.outputs.source != 'false' }}
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     steps:
@@ -77,6 +116,9 @@ jobs:
           args: -color
 
   frontend:
+    needs: changes
+    # Runs unless changes found docs only; if changes itself failed, this still runs.
+    if: ${{ !cancelled() && needs.changes.outputs.source != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -93,6 +135,9 @@ jobs:
         run: pnpm notices && git diff --exit-code -- THIRD_PARTY_NOTICES.md
 
   linux:
+    needs: changes
+    # Runs unless changes found docs only; if changes itself failed, this still runs.
+    if: ${{ !cancelled() && needs.changes.outputs.source != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -119,6 +164,9 @@ jobs:
   # The phone app (remote/) on Linux: its frontend builds and its backend compiles. The APK
   # itself builds on release pull requests (build.yml).
   remote:
+    needs: changes
+    # Runs unless changes found docs only; if changes itself failed, this still runs.
+    if: ${{ !cancelled() && needs.changes.outputs.source != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
