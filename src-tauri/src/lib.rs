@@ -487,6 +487,16 @@ async fn attachment_thumbnail(state: &AppState, id: String) -> CmdResult<String>
     Ok(tokio::task::spawn_blocking(move || attachments::thumbnail(&att)).await??)
 }
 
+/// An image attachment as a data URL, at the size the agent was sent.
+async fn attachment_image(state: &AppState, id: String) -> CmdResult<String> {
+    let att = state
+        .db
+        .get_attachment(&id)?
+        .ok_or_else(|| CmdError("attachment not found".into()))?;
+    let dir = state.data_dir.clone();
+    Ok(tokio::task::spawn_blocking(move || attachments::image_data_url(&dir, &att)).await??)
+}
+
 // ---------------- code ----------------
 //
 // A Code session runs on one node, its host. Commands for a session hosted elsewhere in the mesh

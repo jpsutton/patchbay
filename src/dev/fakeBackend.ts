@@ -923,12 +923,14 @@ export function install() {
           db.attachments.push(att);
           return att;
         }
-        case "attachment_thumbnail": {
+        case "attachment_thumbnail":
+        case "attachment_image": {
+          const n = cmd === "attachment_image" ? 512 : 64;
           const c = document.createElement("canvas");
-          c.width = c.height = 64;
+          c.width = c.height = n;
           const g = c.getContext("2d")!;
-          g.fillStyle = "#e5534b"; g.fillRect(0, 0, 64, 64);
-          g.fillStyle = "#fff"; g.fillRect(16, 16, 32, 32);
+          g.fillStyle = "#e5534b"; g.fillRect(0, 0, n, n);
+          g.fillStyle = "#fff"; g.fillRect(n / 4, n / 4, n / 2, n / 2);
           return c.toDataURL();
         }
 

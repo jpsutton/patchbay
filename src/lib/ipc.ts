@@ -732,6 +732,7 @@ export const api = {
   addAttachmentBytes: (name: string, dataBase64: string) =>
     invoke<Attachment>("add_attachment_bytes", { name, dataBase64 }),
   attachmentThumbnail: (id: string) => invoke<string>("attachment_thumbnail", { id }),
+  attachmentImage: (id: string) => invoke<string>("attachment_image", { id }),
 
   listCodeSessions: () => invoke<CodeSession[]>("list_code_sessions"),
   /** With `host`, the session runs on that computer, in its folder `cwd`. */
