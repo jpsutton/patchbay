@@ -119,7 +119,9 @@ fn uuid_like() -> String {
 }
 
 async fn open(acp: &mut Acp, cwd: &PathBuf) -> String {
-    let init = acp.call("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await;
+    let init = acp
+        .call("initialize", json!({"protocolVersion": 1, "clientCapabilities": {"_meta": {"subagents": true}}}))
+        .await;
     assert_eq!(init["agentCapabilities"]["loadSession"], true);
     let s = acp.call("session/new", json!({"cwd": cwd, "mcpServers": []})).await;
     assert_eq!(s["models"]["currentModelId"], "pb-mock");
@@ -323,5 +325,110 @@ async fn searches_the_web_through_brave() {
     assert_eq!(r["stopReason"], "end_turn");
     assert_eq!(acp.asked[0]["toolCall"]["kind"], "fetch");
     assert!(acp.text_of("agent_message_chunk").contains("BRAVE-MOCK-HIT & more"), "{}", acp.text_of("agent_message_chunk"));
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
+async fn subagents_run_side_by_side_and_report_back() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::Anthropic, cwd.join("data"));
+    let sid = open(&mut acp, &cwd).await;
+    let r = prompt(&mut acp, &sid, "search twice !par").await;
+    assert_eq!(r["stopReason"], "end_turn");
+    let text = acp.text_of("agent_message_chunk");
+    assert!(text.contains("PAR-A") && text.contains("PAR-B"), "{text}");
+    // Their sub-calls would carry a prefixed id; here both Task cards finished.
+    let done = acp.updates.iter().filter(|u| u["sessionUpdate"] == "tool_call_update" && u["status"] == "completed").count();
+    assert!(done >= 2, "{done}");
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_background_subagent_keeps_the_prompt_open_until_it_reports() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));
+    let sid = open(&mut acp, &cwd).await;
+    let r = prompt(&mut acp, &sid, "start one !bg").await;
+    assert_eq!(r["stopReason"], "end_turn");
+    // The main agent got the notification and answered it within the same prompt.
+    let text = acp.text_of("agent_message_chunk");
+    assert!(text.contains("BG-DONE"), "{text}");
+    let store = std::fs::read_to_string(cwd.join("data/agent/sessions").join(format!("{sid}.jsonl"))).unwrap();
+    assert!(store.contains("<task-notification>") && store.contains("<agent-id>scout</agent-id>"), "{store}");
+    // On replay the notification is not shown as something the user said.
+    let mut again = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));
+    again.call("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await;
+    again.call("session/load", json!({"sessionId": sid, "cwd": cwd, "mcpServers": []})).await;
+    assert!(!again.text_of("user_message_chunk").contains("task-notification"));
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_background_subagent_waits_for_the_next_prompt_without_the_capability() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));
+    acp.call("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await;
+    let s = acp.call("session/new", json!({"cwd": cwd, "mcpServers": []})).await;
+    let sid = s["sessionId"].as_str().unwrap().to_owned();
+    let r = prompt(&mut acp, &sid, "start one !bg").await;
+    assert_eq!(r["stopReason"], "end_turn");
+    // Give the subagent a moment, then the next prompt carries its report.
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    prompt(&mut acp, &sid, "what did it say?").await;
+    let store = std::fs::read_to_string(cwd.join("data/agent/sessions").join(format!("{sid}.jsonl"))).unwrap();
+    assert!(store.contains("BG-DONE") && store.contains("<task-notification>"), "{store}");
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_fork_starts_from_the_conversation() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::Responses, cwd.join("data"));
+    let sid = open(&mut acp, &cwd).await;
+    let r = prompt(&mut acp, &sid, "branch off !fork").await;
+    assert_eq!(r["stopReason"], "end_turn");
+    assert!(acp.text_of("agent_message_chunk").contains("FORK-OK"), "{}", acp.text_of("agent_message_chunk"));
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_named_subagent_can_be_continued() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::Gemini, cwd.join("data"));
+    let sid = open(&mut acp, &cwd).await;
+    prompt(&mut acp, &sid, "make one !named").await;
+    assert!(acp.text_of("agent_message_chunk").contains("NAMED-OK"), "{}", acp.text_of("agent_message_chunk"));
+    prompt(&mut acp, &sid, "tell it !msg").await;
+    assert!(acp.text_of("agent_message_chunk").contains("MSG-OK"), "{}", acp.text_of("agent_message_chunk"));
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_worktree_subagent_edits_apart_from_the_checkout() {
+    let cwd = workdir();
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git").arg("-C").arg(&cwd).args(args).status().unwrap().success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(cwd.join("README.md"), "hi").unwrap();
+    git(&["add", "."]);
+    git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]);
+    let mut acp = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));
+    let sid = open(&mut acp, &cwd).await;
+    let r = prompt(&mut acp, &sid, "isolated !wt").await;
+    assert_eq!(r["stopReason"], "end_turn");
+    assert!(!cwd.join("patchbay-test.txt").exists(), "the edit must not land in the main checkout");
+    assert!(acp.text_of("agent_message_chunk").contains("git worktree"), "{}", acp.text_of("agent_message_chunk"));
+    // The subagent's edit asked first, with a card that has its own id.
+    assert!(acp.asked.iter().any(|a| a["toolCall"]["toolCallId"].as_str().is_some_and(|id| id.starts_with("agent_1:"))), "{:?}", acp.asked);
+    let worktrees = std::fs::read_dir(cwd.join("data/agent/worktrees")).unwrap().count();
+    assert_eq!(worktrees, 1);
     let _ = std::fs::remove_dir_all(cwd);
 }

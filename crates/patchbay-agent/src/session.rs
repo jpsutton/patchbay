@@ -106,6 +106,13 @@ pub struct Session {
     pub shells: shell::Registry,
     pub mcp: tokio::sync::Mutex<Arc<McpSet>>,
     pub store: Store,
+    /// Subagents this session started.
+    pub agents: crate::subagent::Agents,
+    /// Prefix of this session's tool-call ids on the client ("" for the main session), so a
+    /// subagent's calls never collide with the main agent's.
+    pub card_prefix: String,
+    /// The client keeps `session/prompt` open for background subagents (`_meta.subagents`).
+    pub keep_open: AtomicBool,
 }
 
 pub fn stamp_of(path: &Path) -> Option<Stamp> {
@@ -146,6 +153,42 @@ impl Session {
             shells: shell::Registry::default(),
             mcp: tokio::sync::Mutex::new(Arc::new(McpSet::default())),
             store,
+            agents: Default::default(),
+            card_prefix: String::new(),
+            keep_open: AtomicBool::new(false),
+        })
+    }
+
+    /// A subagent's own session: same client, model and MCP servers, but its own history, files,
+    /// shells and working directory. `prefix` keeps its tool-call ids apart.
+    pub async fn child(&self, cwd: PathBuf, prefix: String, messages: Vec<Message>, mode: Mode) -> Arc<Session> {
+        let model_id = self.state.lock().await.model_id.clone();
+        Arc::new(Session {
+            id: self.id.clone(),
+            cwd,
+            host: self.host.clone(),
+            peer: self.peer.clone(),
+            state: tokio::sync::Mutex::new(State {
+                messages,
+                model_id,
+                mode,
+                todos: Vec::new(),
+                context_tokens: 0,
+                last_model: None,
+                since_todo_write: 0,
+            }),
+            cancel: Mutex::new(None),
+            busy: AtomicBool::new(false),
+            files: Mutex::default(),
+            notified: Mutex::default(),
+            prompts: Mutex::default(),
+            extra_usage: Mutex::default(),
+            shells: shell::Registry::default(),
+            mcp: tokio::sync::Mutex::new(self.mcp.lock().await.clone()),
+            store: Store::disabled(),
+            agents: Default::default(),
+            card_prefix: prefix,
+            keep_open: AtomicBool::new(false),
         })
     }
 

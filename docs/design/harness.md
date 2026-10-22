@@ -44,7 +44,22 @@ Usage goes out as `usage_update` (context fill, `_meta.autoCompactPercent`) and 
 
 ### Tools
 
-`Read` (text with line numbers, images, PDFs as text, notebooks as cells), `Write`, `Edit`, `NotebookEdit` (all need a prior read and stop when the file changed since), `Glob`, `Grep` (the `ignore` and `regex` crates, no `rg` binary), `Bash` (a process group, persistent working directory, timeout, background mode with `BashOutput` and `KillShell`), `TodoWrite` (shown as the plan), `WebFetch` (HTML to Markdown, answered by the session model; cross-host redirects are returned, not followed), `Task` (an `explore` or `general-purpose` subagent that runs inside the turn, one level deep), `AskUserQuestion`, `ExitPlanMode` and the tools of the user's MCP servers (`mcp__server__tool`). The MCP client is small and local: stdio and streamable HTTP, `tools/list` and `tools/call`.
+`Read` (text with line numbers, images, PDFs as text, notebooks as cells), `Write`, `Edit`, `NotebookEdit` (all need a prior read and stop when the file changed since), `Glob`, `Grep` (the `ignore` and `regex` crates, no `rg` binary), `Bash` (a process group, persistent working directory, timeout, background mode with `BashOutput` and `KillShell`), `TodoWrite` (shown as the plan), `WebFetch` (HTML to Markdown, answered by the session model; cross-host redirects are returned, not followed), `WebSearch` (Brave Search; offered only when an API key is set, see below), `Task`, `SendMessage` and `TaskStop` (subagents, see below), `AskUserQuestion`, `ExitPlanMode` and the tools of the user's MCP servers (`mcp__server__tool`). The MCP client is small and local: stdio and streamable HTTP, `tools/list` and `tools/call`.
+
+### Web search
+
+`WebSearch` calls the Brave Search API (`/res/v1/web/search`). The key comes from the `BRAVE_API_KEY` environment variable, else the OS keychain, else the database when there is no keychain; Settings → Coding agents → Patchbay sets and removes it. Without a key the tool is not offered. Domain filters become `site:` and `-site:` operators; results come back as numbered plain text with a reminder to end the answer with a Sources list of Markdown links. Each search asks first (kind `fetch`), like WebFetch. `PATCHBAY_BRAVE_URL` points the tool at another host, for the mock server in the tests.
+
+### Subagents
+
+A subagent is a child `Session` (`session.rs`): same client, model and MCP servers, but its own history, files, shells, working directory and tool-call id prefix (`agent_1:`), so its calls never collide with the main agent's cards. Its tool calls show in the transcript with a "↳" prefix and ask for permission like any other. It lives in memory only.
+
+- **Types.** `explore` is read-only (Read, Glob, Grep, WebFetch, WebSearch). `general-purpose` starts fresh with every tool except the ones that talk to the user or start subagents. `fork` starts with the main agent's conversation (up to, but not including, the message holding the call) and its system prompt, and does one directive. In plan mode only `explore` starts. A subagent can't start subagents, so there is one level.
+- **Parallel.** Several `explore` or background calls in one message run side by side. Ones that may edit files take turns.
+- **Background.** `run_in_background` returns at once; the report comes back as a `<task-notification>` reminder on the main agent's next step. When the main agent has nothing left to do, the agent keeps `session/prompt` open until the background subagents finish and then runs another step with their reports; this is the `_meta.subagents` client capability `acp.rs` already advertises. A client without it gets the reports on the next prompt instead. Stop on the user's cancel stops them too, and so does Send now.
+- **Named and resumable.** A subagent gets an id (`agent_N`) and optionally a name. `SendMessage` queues a message for one that runs, or continues a finished one from its whole history (in the turn, or in the background). `TaskStop` stops a background one.
+- **Isolation.** `isolation: "worktree"` runs it in a new git worktree under `<data>/agent/worktrees/`, on a branch `patchbay/agent_N-…`. When it finishes untouched the worktree and branch are removed; otherwise they stay, and the report says where, so the changes can be reviewed and merged. Paths there are outside the project, so Auto edits does not pre-approve them.
+- Their tokens count toward the turn's usage.
 
 ### Plan mode, compaction, rewind, reminders
 
@@ -59,10 +74,10 @@ One JSON line per entry in `<data>/agent/sessions/<id>.jsonl`: settings, message
 
 ## What is left out
 
-The reference this was built from (`docs/HARNESS-SPEC-generic.md`) describes more than a desktop app needs. Not built: the coordinator/worker harness, `Workflow`, team messaging, `ScheduleWakeup`, `Monitor`, deferred tools with `ToolSearch`, `Skill`, artifacts, lean and classic tool descriptions, the persona variants for other surfaces, and `WebSearch` (it needs a search backend or a provider-native tool; add it when there is one). Subagents run in the turn and one level deep; fork and background subagents are open.
+The reference this was built from (`docs/HARNESS-SPEC-generic.md`) describes more than a desktop app needs. Not built: the coordinator/worker harness, `Workflow`, team messaging, `ScheduleWakeup`, `Monitor`, deferred tools with `ToolSearch`, `Skill`, artifacts, lean and classic tool descriptions and the persona variants for other surfaces. Subagents are one level deep, live in memory (they don't survive a restart) and have no `model` override.
 
 ## Tests
 
 - `cargo test` in each crate: adapter fixtures, SSE decoding, tools, store, compaction, MCP against a tiny stdio server.
-- `cargo test -- --ignored` against `scripts/mock-llm.py`, which speaks all four formats: tool round trips per format (`patchbay-llm`), and the agent over ACP per format, plan mode, compaction and reload, rewind, change reminders, questions and subagents (`patchbay-agent`).
+- `cargo test -- --ignored` against `scripts/mock-llm.py`, which speaks all four formats: tool round trips per format (`patchbay-llm`), and the agent over ACP per format, plan mode, compaction and reload, rewind, change reminders, questions and subagents (`patchbay-agent`), plus web search against the mock's Brave endpoint, parallel, background, fork, named and worktree subagents.
 - `cargo test --lib smoke -- --ignored` in `src-tauri` drives the agent through `CodeManager`: edit with permission, usage, resume, rewind, rules and MCP.

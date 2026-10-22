@@ -21,6 +21,8 @@ struct Agent {
     host: Arc<dyn Host>,
     peer: Peer,
     sessions: Sessions,
+    /// The client keeps `session/prompt` open for background subagents.
+    subagents_cap: std::sync::atomic::AtomicBool,
 }
 
 /// Serve ACP on `reader` and `writer` until the client hangs up.
@@ -30,7 +32,7 @@ pub async fn serve(
     writer: impl AsyncWrite + Unpin + Send + 'static,
 ) {
     let (peer, mut incoming) = rpc::connect(reader, writer);
-    let agent = Arc::new(Agent { host, peer, sessions: Sessions::default() });
+    let agent = Arc::new(Agent { host, peer, sessions: Sessions::default(), subagents_cap: Default::default() });
     while let Some(msg) = incoming.recv().await {
         match msg {
             Incoming::Request { method, params, reply } => {
@@ -40,9 +42,11 @@ pub async fn serve(
             Incoming::Notification { method, params } => {
                 if method == "session/cancel"
                     && let Some(s) = params["sessionId"].as_str().and_then(|id| agent.session(id))
-                    && let Some(t) = s.cancel.lock().unwrap().as_ref()
                 {
-                    t.cancel();
+                    if let Some(t) = s.cancel.lock().unwrap().as_ref() {
+                        t.cancel();
+                    }
+                    s.agents.stop_background();
                 }
             }
         }
@@ -53,6 +57,7 @@ pub async fn serve(
             t.cancel();
         }
         s.shells.kill_all();
+        s.agents.stop_background();
     }
 }
 
@@ -73,7 +78,9 @@ impl Agent {
     async fn handle(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         // Extension methods may arrive with ACP's leading underscore.
         match method.trim_start_matches('_') {
-            "initialize" => Ok(json!({
+            "initialize" => {
+                self.subagents_cap.store(params["clientCapabilities"]["_meta"]["subagents"].as_bool().unwrap_or(false), Ordering::SeqCst);
+                Ok(json!({
                 "protocolVersion": 1,
                 "agentCapabilities": {
                     "loadSession": true,
@@ -82,7 +89,8 @@ impl Agent {
                 },
                 "agentInfo": {"name": "patchbay", "title": "Patchbay", "version": env!("CARGO_PKG_VERSION")},
                 "authMethods": [],
-            })),
+                }))
+            }
             "authenticate" => Ok(json!({})),
             "session/new" => self.new_session(&params).await,
             "session/load" => self.load_session(&params).await,
@@ -224,6 +232,7 @@ impl Agent {
         let id = uuid::Uuid::new_v4().to_string();
         let s = Session::new(id.clone(), cwd, self.host.clone(), self.peer.clone(), model.clone(), Mode::Default);
         s.save_meta(&model, Mode::Default);
+        s.keep_open.store(self.subagents_cap.load(Ordering::SeqCst), Ordering::SeqCst);
         self.attach_mcp(&s, params).await;
         self.sessions.lock().unwrap().insert(id.clone(), s.clone());
         let mut info = self.session_info(&s).await;
@@ -254,6 +263,7 @@ impl Agent {
             .ok_or_else(|| RpcError::internal("add a provider and model in Settings first"))?;
         let mode = restored.mode.unwrap_or(Mode::Default);
         let s = Session::new(id.clone(), cwd, self.host.clone(), self.peer.clone(), model.clone(), mode);
+        s.keep_open.store(self.subagents_cap.load(Ordering::SeqCst), Ordering::SeqCst);
         *s.prompts.lock().unwrap() = session::prompts_of(&restored.messages);
         s.state.lock().await.messages = restored.messages;
         s.replay(&entries);

@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::compact;
 use crate::prompt;
 use crate::session::{Mode, PromptRec, Session, Totals, stamp_of};
+use crate::subagent::notes_part;
 use crate::store::Entry;
 use crate::tools::{Registry, Tool, ToolCtx, ToolOutput, clip_middle};
 
@@ -165,6 +166,7 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
     if let Some(r) = reminders(&session, &model_name).await {
         parts.push(r);
     }
+    parts.extend(notes_part(&session.agents.drain_notes()));
     let preview: String = parts
         .iter()
         .find_map(|p| if let Part::Text(t) = p { Some(t.trim().chars().take(80).collect()) } else { None })
@@ -182,7 +184,7 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
     }
 
     let mut totals = Totals::default();
-    for step in 0..MAX_STEPS {
+    'steps: for step in 0..MAX_STEPS {
         if cancel.is_cancelled() {
             return Ok(TurnResult { stop_reason: "cancelled", usage: totals });
         }
@@ -276,6 +278,28 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
                 StopReason::Refusal => "refusal",
                 _ => "end_turn",
             };
+            if stop_reason == "end_turn" {
+                // Background subagents: read what has come in, and keep the prompt open for the rest.
+                loop {
+                    if let Some(part) = notes_part(&session.agents.drain_notes()) {
+                        let msg = Message::with_parts(Role::User, vec![part]);
+                        session.store.append(&Entry::Msg { m: msg.clone() });
+                        session.state.lock().await.messages.push(msg);
+                        continue 'steps;
+                    }
+                    if session.agents.pending() > 0 && session.keep_open.load(std::sync::atomic::Ordering::SeqCst) {
+                        tokio::select! {
+                            _ = cancel.cancelled() => {
+                                session.agents.stop_background();
+                                return Ok(TurnResult { stop_reason: "cancelled", usage: totals });
+                            }
+                            _ = session.agents.wait() => {}
+                        }
+                        continue;
+                    }
+                    break;
+                }
+            }
             return Ok(TurnResult { stop_reason, usage: totals });
         }
 
@@ -284,6 +308,7 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
         if let Some(r) = reminders(&session, &model_name).await {
             parts.push(r);
         }
+        parts.extend(notes_part(&session.agents.drain_notes()));
         let msg = Message::with_parts(Role::User, parts);
         session.store.append(&Entry::Msg { m: msg.clone() });
         session.state.lock().await.messages.push(msg);
@@ -308,7 +333,7 @@ fn card(tool: Option<&Arc<dyn Tool>>, call: &ToolCall, session: &Session) -> Val
         None => (call.name.clone(), "other", Vec::new()),
     };
     json!({
-        "toolCallId": call.id,
+        "toolCallId": format!("{}{}", session.card_prefix, call.id),
         "title": title,
         "kind": kind,
         "status": "pending",
@@ -349,7 +374,7 @@ pub(crate) async fn execute(
     while i < calls.len() {
         // Consecutive read-only calls that need no approval run side by side.
         let parallel = |k: usize| {
-            tools[k].as_ref().is_some_and(|t| t.read_only() && !t.needs_permission(&calls[k].arguments, session))
+            tools[k].as_ref().is_some_and(|t| t.concurrent(&calls[k].arguments) && !t.needs_permission(&calls[k].arguments, session))
         };
         let mut j = i + 1;
         if parallel(i) {
@@ -462,8 +487,9 @@ async fn run_call(
             Verdict::Cancelled => return fail(&session, "The tool call was cancelled before it ran.".into()),
         }
     }
-    session.update(json!({"sessionUpdate": "tool_call_update", "toolCallId": call.id, "status": "in_progress"}));
-    let ctx = ToolCtx { session: session.clone(), call_id: call.id.clone(), cancel: cancel.clone() };
+    let card_id = card["toolCallId"].as_str().unwrap_or(&call.id).to_owned();
+    session.update(json!({"sessionUpdate": "tool_call_update", "toolCallId": card_id, "status": "in_progress"}));
+    let ctx = ToolCtx { session: session.clone(), call_id: card_id, cancel: cancel.clone() };
     let out: ToolOutput = tokio::select! {
         out = tool.run(call.arguments.clone(), &ctx) => out,
         _ = cancel.cancelled() => ToolOutput::error("Interrupted by the user."),

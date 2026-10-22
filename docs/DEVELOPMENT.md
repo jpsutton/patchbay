@@ -46,7 +46,7 @@ To try it, `pnpm build`, then `target/debug/patchbayd --data-dir /tmp/pb --liste
 
 `scripts/mock-llm.py` is a mock server that speaks OpenAI Chat Completions, OpenAI Responses, Anthropic Messages and Gemini. It rejects non-standard per-message fields as strictly as Fireworks does, and echoes back what the model received: the text, the number of images and the names of attached files.
 
-When the request includes tools, the mock also triggers tool calls. Put `!run` in the prompt for a shell call, `!edit` for a file edit, `!ask` for a multiple-choice question or `!task` for a subagent. `!tools` lists the tool names it was offered.
+When the request includes tools, the mock also triggers tool calls. Put `!run` in the prompt for a shell call, `!edit` for a file edit, `!ask` for a multiple-choice question, `!search` for a web search (it also serves Brave's API with the key `brave-test-key`), and `!task`, `!par`, `!bg`, `!fork`, `!named`, `!msg` and `!wt` for the subagent kinds. `!tools` lists the tool names it was offered.
 
 `scripts/mock-mcp.py` is a minimal stdio MCP server with one `pb_echo` tool. It is used by the MCP smoke test.
 

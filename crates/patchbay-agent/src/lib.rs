@@ -13,6 +13,7 @@ mod prompt;
 mod rpc;
 mod session;
 mod store;
+mod subagent;
 mod tools;
 mod turn;
 

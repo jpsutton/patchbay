@@ -52,6 +52,8 @@ pub fn effective(entries: &[Entry]) -> Vec<Entry> {
 pub struct Store {
     path: PathBuf,
     file: Mutex<Option<std::fs::File>>,
+    /// A store that keeps nothing (subagents live in memory).
+    disabled: bool,
 }
 
 pub fn sessions_dir(data_dir: &Path) -> PathBuf {
@@ -60,7 +62,11 @@ pub fn sessions_dir(data_dir: &Path) -> PathBuf {
 
 impl Store {
     pub fn new(data_dir: &Path, id: &str) -> Store {
-        Store { path: sessions_dir(data_dir).join(format!("{id}.jsonl")), file: Mutex::new(None) }
+        Store { path: sessions_dir(data_dir).join(format!("{id}.jsonl")), file: Mutex::new(None), disabled: false }
+    }
+
+    pub fn disabled() -> Store {
+        Store { path: PathBuf::new(), file: Mutex::new(None), disabled: true }
     }
 
     pub fn exists(&self) -> bool {
@@ -68,6 +74,9 @@ impl Store {
     }
 
     pub fn append(&self, entry: &Entry) {
+        if self.disabled {
+            return;
+        }
         let mut guard = self.file.lock().unwrap();
         if guard.is_none() {
             if let Some(dir) = self.path.parent() {

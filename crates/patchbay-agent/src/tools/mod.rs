@@ -78,6 +78,10 @@ pub trait Tool: Send + Sync {
     fn read_only(&self) -> bool {
         false
     }
+    /// Whether this call may run beside other calls of the same step.
+    fn concurrent(&self, _input: &Value) -> bool {
+        self.read_only()
+    }
     /// Plan mode offers only tools that report true.
     fn allowed_in_plan(&self) -> bool {
         self.read_only()
@@ -113,6 +117,8 @@ impl Registry {
             Arc::new(misc::ExitPlanMode),
             Arc::new(ask::AskUserQuestion),
             Arc::new(task::Task),
+            Arc::new(task::SendMessage),
+            Arc::new(task::TaskStop),
         ];
         if web_fetch {
             tools.push(Arc::new(web::WebFetch));

@@ -1,18 +1,76 @@
-//! Task: hand a self-contained job to a subagent and get its report back.
+//! Task, SendMessage and TaskStop: start subagents, talk to them, stop them.
+
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use async_trait::async_trait;
-use patchbay_llm::{Message, Part, Request, Role, SystemBlock, ToolSpec};
+use patchbay_llm::{Message, Part, Role, SystemBlock, ToolSpec};
 use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 
 use super::*;
-use crate::{prompt, turn};
+use crate::session::{Mode, Session};
+use crate::subagent::{self, Kind, Note, Status, SubAgent};
+use crate::prompt;
 
 const SUBAGENT: &str = include_str!("../../prompts/subagent.md");
-/// Most model requests one subagent may make.
-const MAX_STEPS: usize = 40;
 const READ_ONLY: [&str; 5] = ["Read", "Glob", "Grep", "WebFetch", "WebSearch"];
-/// What a subagent never gets: it cannot ask the user, plan, or start subagents of its own.
-const WITHHELD: [&str; 4] = ["Task", "TodoWrite", "ExitPlanMode", "AskUserQuestion"];
+/// What a subagent never gets: it cannot ask the user, plan, track tasks for the main agent or
+/// start subagents of its own.
+const WITHHELD: [&str; 7] = ["Task", "SendMessage", "TaskStop", "TodoWrite", "ExitPlanMode", "AskUserQuestion", "KillShell"];
+const FORK_NOTE: &str = "You are a fork of the main agent: its conversation above is yours to read, but you are a separate run. \
+Do exactly the directive below and then stop. Do not start subagents. Finish with a short report of what you found or did; \
+that report is all the main agent sees.";
+
+fn valid_name(n: &str) -> bool {
+    !n.is_empty() && n.len() <= 40 && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn kind_of(input: &Value) -> Kind {
+    match str_arg(input, "subagent_type") {
+        Some("explore") => Kind::Explore,
+        Some("fork") => Kind::Fork,
+        _ => Kind::General,
+    }
+}
+
+/// How an agent run ended, for the main agent: the report, plus where its worktree is.
+async fn conclude(parent: &Arc<Session>, agent: &Arc<SubAgent>, result: Result<String, String>) -> (Status, String) {
+    let (status, mut text) = match result {
+        Ok(t) => (Status::Done, t),
+        Err(e) if e == "stopped" => (Status::Stopped, "The subagent was stopped before it finished.".to_owned()),
+        Err(e) => (Status::Failed(e.clone()), e),
+    };
+    let worktree = agent.worktree.lock().unwrap().take();
+    if let Some(w) = worktree {
+        if let Ok(Some(note)) = tokio::task::spawn_blocking(move || subagent::finish_worktree(&w)).await {
+            text.push_str(&format!("\n\n{note}"));
+        }
+    }
+    *agent.status.lock().unwrap() = status.clone();
+    let _ = parent;
+    (status, text)
+}
+
+/// Run `agent` in the background; its report becomes a notification.
+fn spawn_background(parent: Arc<Session>, agent: Arc<SubAgent>) {
+    agent.background.store(true, Ordering::SeqCst);
+    tokio::spawn(async move {
+        let token = agent.cancel.lock().unwrap().clone();
+        let result = subagent::run(&parent, &agent, &token).await;
+        let (status, text) = conclude(&parent, &agent, result).await;
+        parent.agents.push_note(Note {
+            agent_id: agent.name.clone().unwrap_or_else(|| agent.id.clone()),
+            description: agent.description.clone(),
+            status: match status {
+                Status::Done => "completed",
+                Status::Stopped => "stopped",
+                _ => "failed",
+            },
+            text,
+        });
+    });
+}
 
 pub struct Task;
 
@@ -21,19 +79,26 @@ impl Tool for Task {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "Task".into(),
-            description: "Start a subagent for a self-contained job and wait for its report. Use `explore` \
-(read-only: Read, Glob, Grep, WebFetch) to find things across many files or answer a question about the \
-code; use `general-purpose` for a multi-step job that needs the shell or edits. A subagent starts with \
-no memory of this conversation, so give it the whole task: the goal, where to look, what to report. It \
-cannot ask you questions. Only its final message comes back. Do not use it for a lookup you can do \
-with one Grep or Read."
+            description: "Start a subagent for a self-contained job. Types: `explore` (read-only: Read, Glob, \
+Grep, WebFetch, WebSearch) to find things across many files or answer a question about the code; \
+`general-purpose` for a multi-step job that needs the shell or edits; `fork` to branch off from this \
+conversation with everything said so far as context, for one directive. Others start with no memory of the \
+conversation, so give them the whole task: the goal, where to look, what to report. Start several \
+`explore` subagents in one message to search in parallel. Set `run_in_background` to carry on while it \
+works: its report arrives later as a task notification, so do not wait or poll. Give it a `name` to send it \
+follow-ups with SendMessage. `isolation: \"worktree\"` runs it in its own git worktree so its edits do not touch \
+this checkout. A subagent cannot ask the user questions or start subagents. Do not use it for a lookup you can \
+do with one Grep or Read."
                 .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "description": {"type": "string", "description": "A short label for the job (3-5 words)"},
                     "prompt": {"type": "string", "description": "The full task for the subagent"},
-                    "subagent_type": {"type": "string", "enum": ["explore", "general-purpose"], "description": "Defaults to general-purpose"}
+                    "subagent_type": {"type": "string", "enum": ["explore", "general-purpose", "fork"], "description": "Defaults to general-purpose"},
+                    "name": {"type": "string", "description": "Makes the subagent addressable by SendMessage (letters, digits, - and _)"},
+                    "run_in_background": {"type": "boolean", "description": "Return at once; the report comes as a notification"},
+                    "isolation": {"type": "string", "enum": ["worktree"], "description": "Run in a separate git worktree"}
                 },
                 "required": ["description", "prompt"]
             }),
@@ -48,6 +113,11 @@ with one Grep or Read."
         true
     }
 
+    /// Searches and background jobs run side by side; ones that may edit files take turns.
+    fn concurrent(&self, input: &Value) -> bool {
+        kind_of(input) == Kind::Explore || bool_arg(input, "run_in_background")
+    }
+
     fn title(&self, input: &Value) -> String {
         format!("Subagent: {}", str_arg(input, "description").unwrap_or("task"))
     }
@@ -56,55 +126,206 @@ with one Grep or Read."
         let Some(task) = str_arg(&input, "prompt").filter(|p| !p.trim().is_empty()) else {
             return ToolOutput::error("prompt is required");
         };
-        let explore = str_arg(&input, "subagent_type") == Some("explore");
-        let session = &ctx.session;
-        let (model_id, mode) = {
-            let st = session.state.lock().await;
-            (st.model_id.clone(), st.mode)
+        let parent = &ctx.session;
+        let description = str_arg(&input, "description").unwrap_or("subagent task").to_owned();
+        let mode = parent.state.lock().await.mode;
+        // In plan mode nothing may change, so only searching subagents start.
+        let kind = if mode == Mode::Plan { Kind::Explore } else { kind_of(&input) };
+        let name = match str_arg(&input, "name").filter(|n| !n.is_empty()) {
+            Some(n) if !valid_name(n) => return ToolOutput::error("name may use letters, digits, - and _ (up to 40)"),
+            Some(n) if parent.agents.name_taken(n) => return ToolOutput::error(format!("a subagent named {n} already exists; pick another name or SendMessage it")),
+            Some(n) => Some(n.to_owned()),
+            None => None,
         };
-        let settings = session.host.settings();
-        let mc = match session.host.model_client(&model_id).await {
-            Ok(m) => m,
-            Err(e) => return ToolOutput::error(e),
+        let id = parent.agents.next_id();
+
+        let (worktree, cwd) = if str_arg(&input, "isolation") == Some("worktree") && kind != Kind::Explore {
+            let (data, cwd) = (parent.host.data_dir(), parent.shells.cwd(&parent.cwd));
+            let id2 = id.clone();
+            match tokio::task::spawn_blocking(move || subagent::create_worktree(&cwd, &data, &id2)).await {
+                Ok(Ok((w, dir))) => (Some(w), dir),
+                Ok(Err(e)) => return ToolOutput::error(e),
+                Err(e) => return ToolOutput::error(e.to_string()),
+            }
+        } else {
+            (None, parent.cwd.clone())
         };
-        let mut registry = Registry::builtin(settings.web_fetch, session.host.web_search_key().is_some());
-        registry.retain(|name| {
-            if explore || mode == crate::session::Mode::Plan { READ_ONLY.contains(&name) } else { !WITHHELD.contains(&name) }
-        });
-        let mut system = mc.system_prefix.clone();
-        system.push(SystemBlock::cached(SUBAGENT.trim()));
-        let name = session.host.models().into_iter().find(|m| m.id == model_id).map(|m| m.name).unwrap_or(model_id);
-        let env = prompt::system_blocks(&session.cwd, &name, "", mode).pop();
-        system.extend(env);
-        let mut messages = vec![Message::user(task)];
-        for _ in 0..MAX_STEPS {
-            let request = Request { system: system.clone(), messages: messages.clone(), tools: registry.specs(false), ..Default::default() };
-            let response = match mc.client.complete(&request, &ctx.cancel, |_| {}).await {
-                Ok(r) => r,
-                Err(e) if e.cancelled => return ToolOutput::error("Cancelled."),
-                Err(e) => return ToolOutput::error(format!("The subagent failed: {e}")),
-            };
-            if let Some(u) = response.usage {
-                let mut t = session.extra_usage.lock().unwrap();
-                t.input += u.input;
-                t.cached_read += u.cached_read;
-                t.cache_write += u.cache_write;
-                t.output += u.output;
-                t.reasoning += u.reasoning;
+
+        let settings = parent.host.settings();
+        let mut registry = Registry::builtin(settings.web_fetch, parent.host.web_search_key().is_some());
+        if kind != Kind::Explore {
+            for t in parent.mcp.lock().await.tools() {
+                registry.push(t);
             }
-            let calls: Vec<_> = response.message.tool_calls().cloned().collect();
-            let text = response.message.text();
-            messages.push(response.message);
-            if calls.is_empty() {
-                return if text.trim().is_empty() {
-                    ToolOutput::error("The subagent finished without a report.")
-                } else {
-                    ToolOutput::text(text)
-                };
-            }
-            let results = turn::execute(session, &registry, calls, &ctx.cancel, "↳ ").await;
-            messages.push(Message::with_parts(Role::User, results.into_iter().map(Part::ToolResult).collect()));
         }
-        ToolOutput::error("The subagent used up its step limit before it finished.")
+        registry.retain(|n| if kind == Kind::Explore { READ_ONLY.contains(&n) } else { !WITHHELD.contains(&n) });
+
+        let model_id = parent.state.lock().await.model_id.clone();
+        let model_name = parent.host.models().into_iter().find(|m| m.id == model_id).map(|m| m.name).unwrap_or(model_id);
+        let (system, mut history) = match kind {
+            // The main agent's own prompt and everything said before this step.
+            Kind::Fork => {
+                let mut h = parent.state.lock().await.messages.clone();
+                // The last message is the one holding this very call, which has no result yet.
+                h.pop();
+                (prompt::system_blocks(&cwd, &model_name, &settings.instructions, mode), h)
+            }
+            _ => {
+                let mut s = vec![SystemBlock::cached(SUBAGENT.trim())];
+                s.extend(prompt::system_blocks(&cwd, &model_name, "", mode).pop());
+                (s, Vec::new())
+            }
+        };
+        let first = if kind == Kind::Fork {
+            Message::with_parts(Role::User, vec![Part::Text(prompt::reminder(FORK_NOTE)), Part::Text(task.to_owned())])
+        } else {
+            Message::user(task)
+        };
+        history.push(first);
+        let child_mode = if kind == Kind::Explore { Mode::Plan } else { Mode::Default };
+        let child = parent.child(cwd, format!("{id}:"), history, child_mode).await;
+        let agent = Arc::new(SubAgent {
+            id: id.clone(),
+            name: name.clone(),
+            kind,
+            description,
+            child,
+            system,
+            registry,
+            status: std::sync::Mutex::new(Status::Running),
+            inbox: Default::default(),
+            cancel: std::sync::Mutex::new(CancellationToken::new()),
+            worktree: std::sync::Mutex::new(worktree),
+            background: Default::default(),
+        });
+        parent.agents.add(agent.clone());
+        let handle = name.as_deref().map(|n| format!("{id} \"{n}\"")).unwrap_or_else(|| id.clone());
+
+        if bool_arg(&input, "run_in_background") {
+            spawn_background(parent.clone(), agent);
+            return ToolOutput::text(format!(
+                "Subagent {handle} ({}) started in the background. Its report arrives as a task notification; carry on, and do not poll. \
+Stop it with TaskStop, or send it a message with SendMessage.",
+                kind.label()
+            ));
+        }
+        let result = subagent::run(parent, &agent, &ctx.cancel).await;
+        if ctx.cancel.is_cancelled() {
+            let _ = conclude(parent, &agent, Err("stopped".into())).await;
+            return ToolOutput::error("Cancelled.");
+        }
+        let failed = result.is_err();
+        let (_, text) = conclude(parent, &agent, result).await;
+        let out = format!("{text}\n\n[subagent {handle}; continue it with SendMessage]");
+        if failed { ToolOutput::error(out) } else { ToolOutput::text(out) }
+    }
+}
+
+pub struct SendMessage;
+
+#[async_trait]
+impl Tool for SendMessage {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "SendMessage".into(),
+            description: "Send a message to a subagent you started, by its id or name. A subagent still running in \
+the background reads the message before its next step. One that has finished is continued with its \
+whole history and the message as its next instruction, and its new report comes back. Set \
+`run_in_background` to continue a finished one without waiting."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string", "description": "The subagent's id or name"},
+                    "message": {"type": "string", "description": "What to tell it"},
+                    "run_in_background": {"type": "boolean", "description": "Continue a finished subagent in the background"}
+                },
+                "required": ["to", "message"]
+            }),
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        "think"
+    }
+
+    fn allowed_in_plan(&self) -> bool {
+        true
+    }
+
+    fn title(&self, input: &Value) -> String {
+        format!("Message {}", str_arg(input, "to").unwrap_or("a subagent"))
+    }
+
+    async fn run(&self, input: Value, ctx: &ToolCtx) -> ToolOutput {
+        let (Some(to), Some(message)) = (str_arg(&input, "to"), str_arg(&input, "message").filter(|m| !m.trim().is_empty())) else {
+            return ToolOutput::error("to and message are required");
+        };
+        let parent = &ctx.session;
+        let Some(agent) = parent.agents.find(to) else {
+            return ToolOutput::error(format!("No subagent {to}. Start one with Task."));
+        };
+        if *agent.status.lock().unwrap() == Status::Running {
+            agent.inbox.lock().unwrap().push(message.to_owned());
+            return ToolOutput::text(format!("Message queued for {to}; it reads it before its next step."));
+        }
+        // Continue a finished subagent from where it stopped.
+        agent.child.state.lock().await.messages.push(Message::user(message));
+        *agent.status.lock().unwrap() = Status::Running;
+        *agent.cancel.lock().unwrap() = CancellationToken::new();
+        if bool_arg(&input, "run_in_background") {
+            let label = agent.kind.label();
+            spawn_background(parent.clone(), agent);
+            return ToolOutput::text(format!("{to} ({label}) is continuing in the background; its report arrives as a task notification."));
+        }
+        let result = subagent::run(parent, &agent, &ctx.cancel).await;
+        if ctx.cancel.is_cancelled() {
+            let _ = conclude(parent, &agent, Err("stopped".into())).await;
+            return ToolOutput::error("Cancelled.");
+        }
+        let failed = result.is_err();
+        let (_, text) = conclude(parent, &agent, result).await;
+        if failed { ToolOutput::error(text) } else { ToolOutput::text(text) }
+    }
+}
+
+pub struct TaskStop;
+
+#[async_trait]
+impl Tool for TaskStop {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "TaskStop".into(),
+            description: "Stop a subagent that is still running in the background, by its id or name.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"task_id": {"type": "string", "description": "The subagent's id or name"}},
+                "required": ["task_id"]
+            }),
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        "execute"
+    }
+
+    fn allowed_in_plan(&self) -> bool {
+        true
+    }
+
+    fn title(&self, input: &Value) -> String {
+        format!("Stop {}", str_arg(input, "task_id").unwrap_or("a subagent"))
+    }
+
+    async fn run(&self, input: Value, ctx: &ToolCtx) -> ToolOutput {
+        let Some(id) = str_arg(&input, "task_id") else { return ToolOutput::error("task_id is required") };
+        match ctx.session.agents.find(id) {
+            Some(a) if *a.status.lock().unwrap() == Status::Running => {
+                a.cancel.lock().unwrap().cancel();
+                ToolOutput::text(format!("Stopping {id}."))
+            }
+            Some(_) => ToolOutput::text(format!("{id} is not running.")),
+            None => ToolOutput::error(format!("No subagent {id}.")),
+        }
     }
 }
