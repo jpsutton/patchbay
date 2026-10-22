@@ -466,10 +466,10 @@ function reduceUpdate(s: CodeState, u: AcpUpdate): CodeState {
     case "tool_call":
     case "tool_call_update": {
       let tc = u as unknown as AcpToolCall;
-      // ACP defaults for an announcement (the backend fills them too); in an update an absent
-      // field means unchanged.
-      if (u.sessionUpdate === "tool_call") tc = { ...tc, status: tc.status ?? "pending", kind: tc.kind ?? "other" };
       const exists = !!s.toolCalls[tc.toolCallId];
+      // ACP defaults for a new call's announcement (the backend fills them too). In an update, or
+      // a re-announcement of a known call, an absent field means unchanged.
+      if (u.sessionUpdate === "tool_call" && !exists) tc = { ...tc, status: tc.status ?? "pending", kind: tc.kind ?? "other" };
       return stamp({
         ...s,
         toolCalls: { ...s.toolCalls, [tc.toolCallId]: mergeToolCall(s.toolCalls[tc.toolCallId], tc) },
@@ -569,11 +569,14 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
       break;
     case "permission": {
       // The request may carry fields no update did (a diff, rawInput): keep them with the call
-      // so they outlast the request and reach the Changes panel.
+      // so they outlast the request and reach the Changes panel. A call no update announced yet
+      // gets its transcript entry here, since the later announcement finds it known.
       const tc = e.request.toolCall;
+      const known = !!s.toolCalls[tc.toolCallId];
       next = {
         ...s,
         toolCalls: { ...s.toolCalls, [tc.toolCallId]: mergeToolCall(s.toolCalls[tc.toolCallId], tc) },
+        entries: known ? s.entries : [...s.entries, { kind: "tool", id: tc.toolCallId }],
         permissions: [...s.permissions, { requestId: e.requestId, request: e.request }],
       };
       notifyCode(id, "needs your approval");

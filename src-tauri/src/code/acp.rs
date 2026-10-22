@@ -691,6 +691,18 @@ mod tool_call_tests {
     }
 
     #[test]
+    fn reannounced_tool_call_keeps_its_status_and_kind() {
+        let (c, events, _tx) = client();
+        notify(&c, json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Edit", "kind": "edit", "status": "completed" }));
+        notify(&c, json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Edit a.rs" }));
+        let u = last_update(&events);
+        assert!(u.get("status").is_none() && u.get("kind").is_none(), "{u}");
+        let stored = &c.tool_calls.borrow()["t1"];
+        assert_eq!((stored["status"].clone(), stored["kind"].clone()), (json!("completed"), json!("edit")));
+        assert_eq!(stored["title"], "Edit a.rs");
+    }
+
+    #[test]
     fn permission_request_fields_win_and_are_kept() {
         let (c, events, _tx) = client();
         notify(&c, json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Edit", "kind": "edit", "rawInput": { "old": 1 } }));
@@ -799,7 +811,10 @@ impl acp::Client for UiClient {
             return Ok(());
         }
         let mut update = serde_json::to_value(&args.update).unwrap_or(Value::Null);
-        if update["sessionUpdate"] == "tool_call" {
+        // Defaults only for a new call: re-announcing a known one leaves out what didn't change.
+        if update["sessionUpdate"] == "tool_call"
+            && update["toolCallId"].as_str().is_some_and(|id| !self.tool_calls.borrow().contains_key(id))
+        {
             fill_tool_call_defaults(&mut update);
         }
         if matches!(update["sessionUpdate"].as_str(), Some("tool_call" | "tool_call_update")) {
