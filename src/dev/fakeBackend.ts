@@ -25,6 +25,8 @@ import type {
   AgentId,
   AgentInfo,
   AuthChoice,
+  WireFrame,
+  WireLogStatus,
 } from "../lib/ipc";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -209,6 +211,21 @@ function codeEmit(codeSessionId: string, event: CodeEnvelope["event"]) {
   emit("code://event", { codeSessionId, event } satisfies CodeEnvelope);
 }
 
+/** The ACP wire log (`code/wire.rs`): a few sample frames once turned on. */
+const fakeWire: { until: number | null; frames: WireFrame[] } = { until: null, frames: [] };
+
+function fakeWireStatus(): WireLogStatus {
+  if (fakeWire.until !== null && Date.now() >= fakeWire.until) fakeWire.until = null;
+  const remainingSecs = fakeWire.until === null ? 0 : Math.floor((fakeWire.until - Date.now()) / 1000);
+  return { on: fakeWire.until !== null, remainingSecs, frames: fakeWire.frames.length, dropped: 0 };
+}
+
+function fakeWireRecord(agent: string, dir: "in" | "out", frame: unknown) {
+  if (!fakeWireStatus().on) return;
+  const seq = (fakeWire.frames[fakeWire.frames.length - 1]?.seq ?? 0) + 1;
+  fakeWire.frames.push({ seq, at: Date.now(), session: "fake", agent, dir, text: JSON.stringify(frame) });
+}
+
 /** `?long=<turns>`: a seeded session whose load replays a long transcript with images in it. */
 const longTurns = Number(new URLSearchParams(location.search).get("long") ?? 0);
 let longSessionId: string | null = null;
@@ -354,7 +371,43 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
       codeEmit(csid, { type: "update", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: w } } });
     }
   };
+  fakeWireRecord(s.agent, "out", { jsonrpc: "2.0", id: 3, method: "session/prompt", params: { sessionId: "acp", prompt: [{ type: "text", text }] } });
   codeEmit(csid, { type: "update", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Planning the change." } } });
+  // Frames ACP can't decode (see `code/wire.rs`): an unknown update type, a tool status outside
+  // the four known ones, and a permission option of an unknown kind.
+  if (text.startsWith("/odd")) {
+    const raw = { sessionUpdate: "turn_summary", summary: { files: 2, note: "Edited README.md" } };
+    fakeWireRecord(s.agent, "in", { jsonrpc: "2.0", method: "session/update", params: { sessionId: "acp", update: raw } });
+    for (let n = 0; n < 2; n++) {
+      codeEmit(csid, { type: "unrecognized", message: `The agent sent an update Patchbay doesn't know ("turn_summary")`, raw });
+    }
+    const toolId = id();
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: toolId, title: "Run `npm test`", kind: "execute", status: "cancelled", rawInput: { command: "npm test" } } });
+    const reqId = id();
+    const toolId2 = id();
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: toolId2, title: "Edit `README.md`", kind: "edit", status: "pending", content: [{ type: "diff", path: `${s.cwd}/README.md`, oldText: "Old intro." }] } });
+    const choice = await new Promise<string | null>((resolve) => {
+      pending.set(reqId, resolve);
+      codeEmit(csid, {
+        type: "permission",
+        requestId: reqId,
+        request: {
+          sessionId: "acp",
+          toolCall: { toolCallId: toolId2, title: "Edit `README.md`", kind: "edit" },
+          options: [
+            { optionId: "once", name: "Allow", kind: "allow_once" },
+            { optionId: "session", name: "Allow for this session", kind: "allow_for_session" as "allow_once" },
+            { optionId: "no", name: "Reject", kind: "reject_once" },
+          ],
+        },
+      });
+    });
+    codeEmit(csid, { type: "permissionResolved", requestId: reqId });
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: toolId2, status: choice === "no" ? "failed" : "completed" } });
+    await say(`Picked: ${choice}`);
+    codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
   // A plan that waits for approval, the way Claude Code's `ExitPlanMode` asks.
   if (text.startsWith("/plan-approve")) {
     const plan = `# Tidy the README\n\n## Steps\n\n1. Read \`README.md\`.\n2. Rewrite the intro.\n`;
@@ -1003,6 +1056,22 @@ export function install() {
             observedAt: now - 240,
           };
         }
+        case "wire_log_status":
+          return fakeWireStatus();
+        case "wire_log_set":
+          fakeWire.until = a.on ? Date.now() + 30 * 60_000 : null;
+          if (a.on && fakeWire.frames.length === 0) {
+            fakeWireRecord("claude-code", "out", { jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: 1, _meta: { apiKey: "[redacted]" } } });
+            fakeWireRecord("claude-code", "in", { jsonrpc: "2.0", id: 0, result: { protocolVersion: 1, agentInfo: { name: "claude-code-acp", version: "1.0" } } });
+          }
+          return fakeWireStatus();
+        case "wire_log_frames":
+          return fakeWire.frames.slice(-((a.last as number | null) ?? fakeWire.frames.length));
+        case "wire_log_clear":
+          fakeWire.frames = [];
+          return fakeWireStatus();
+        case "wire_log_save":
+          return "/home/you/.local/share/patchbay/diagnostics/acp-wire-20261021-120000.jsonl";
         case "code_permission_respond": {
           const r = pending.get(a.requestId as string);
           pending.delete(a.requestId as string);

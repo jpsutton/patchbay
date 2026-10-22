@@ -700,6 +700,40 @@ async fn plan_limits(state: &AppState) -> CmdResult<Option<code::plan_limits::Pl
     Ok(state.code.plan.latest())
 }
 
+// The ACP wire log (Settings > Diagnostics): this computer's agents only, kept in memory.
+
+async fn wire_log_status(_state: &AppState) -> CmdResult<code::wire::Status> {
+    Ok(code::wire::status())
+}
+
+async fn wire_log_set(_state: &AppState, on: bool) -> CmdResult<code::wire::Status> {
+    Ok(code::wire::set(on))
+}
+
+/// The recorded frames, oldest first; with `last`, only the newest that many.
+async fn wire_log_frames(
+    _state: &AppState,
+    session: Option<String>,
+    last: Option<usize>,
+) -> CmdResult<Vec<code::wire::Frame>> {
+    let mut frames = code::wire::frames(session.as_deref());
+    if let Some(n) = last {
+        frames.drain(..frames.len().saturating_sub(n));
+    }
+    Ok(frames)
+}
+
+async fn wire_log_clear(_state: &AppState) -> CmdResult<code::wire::Status> {
+    code::wire::clear();
+    Ok(code::wire::status())
+}
+
+/// Write the log to a file under the data folder; returns its path.
+async fn wire_log_save(state: &AppState) -> CmdResult<String> {
+    let path = code::wire::save(&state.data_dir.join("diagnostics"))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// Whether the session runs Claude Code on its own sign-in, which may be a Claude plan with
 /// usage limits (not on a Patchbay provider, which bills by the token).
 fn on_claude_plan(state: &AppState, prefs: &prefs::Preferences, id: &str) -> bool {

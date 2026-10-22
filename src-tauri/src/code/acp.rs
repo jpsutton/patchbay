@@ -133,6 +133,12 @@ pub enum CodeEvent {
     },
     /// A sign-in asked for mid-session worked; the session goes on, and the user resends.
     AuthResolved,
+    /// Something the agent sent that Patchbay can't show (an update type or content it doesn't
+    /// know): a dim line in the transcript, with the raw payload.
+    Unrecognized {
+        message: String,
+        raw: Value,
+    },
 }
 
 /// A sign-in method the agent advertised in `initialize`, as the UI offers it.
@@ -414,6 +420,8 @@ pub type McpProvider = Box<dyn FnOnce(&Value) -> (Vec<Value>, Vec<String>) + Sen
 pub struct SpawnSpec {
     pub sink: Sink,
     pub code_session_id: String,
+    /// The agent's id (`AgentKind`), for the wire log and diagnostics.
+    pub agent: String,
     pub launch: Launch,
     pub cwd: PathBuf,
     /// Existing ACP session to `session/load`; `None` creates a new one.
@@ -604,13 +612,9 @@ fn merge_fields(into: &mut Value, from: &Value) {
     }
 }
 
-#[async_trait::async_trait(?Send)]
-impl acp::Client for UiClient {
-    async fn request_permission(
-        &self,
-        args: acp::RequestPermissionRequest,
-    ) -> acp::Result<acp::RequestPermissionResponse> {
-        let raw = serde_json::to_value(&args).unwrap_or(Value::Null);
+impl UiClient {
+    /// Ask the UI (or a saved rule) about a permission request; returns the ACP response.
+    async fn permission(&self, raw: Value) -> Value {
         let tool_call = self.merged_tool_call(&raw["toolCall"]);
         if let Some((option_id, description)) = (self.auto_approve)(&tool_call, &raw["options"]) {
             emit(
@@ -621,8 +625,7 @@ impl acp::Client for UiClient {
                     description,
                 },
             );
-            return serde_json::from_value(json!({ "outcome": { "outcome": "selected", "optionId": option_id } }))
-                .map_err(|_| acp::Error::internal_error());
+            return json!({ "outcome": { "outcome": "selected", "optionId": option_id } });
         }
         let request_id = crate::db::new_id();
         let (tx, rx) = oneshot::channel();
@@ -635,7 +638,7 @@ impl acp::Client for UiClient {
             &self.code_session_id,
             CodeEvent::Permission {
                 request_id: request_id.clone(),
-                request: serde_json::to_value(&args).unwrap_or(Value::Null),
+                request: raw,
             },
         );
         let choice = rx.await.ok().flatten();
@@ -649,17 +652,13 @@ impl acp::Client for UiClient {
             Some(option_id) => json!({ "outcome": "selected", "optionId": option_id }),
             None => json!({ "outcome": "cancelled" }),
         };
-        let resp: acp::RequestPermissionResponse =
-            serde_json::from_value(json!({ "outcome": outcome }))
-                .map_err(|_| acp::Error::internal_error())?;
-        Ok(resp)
+        json!({ "outcome": outcome })
     }
 
-    async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<()> {
-        if self.acp_session.borrow().as_deref().is_some_and(|sid| *args.session_id.0 != *sid) {
-            return Ok(());
+    fn update(&self, session_id: &str, update: Value) {
+        if self.acp_session.borrow().as_deref().is_some_and(|sid| session_id != sid) {
+            return;
         }
-        let update = serde_json::to_value(&args.update).unwrap_or(Value::Null);
         if matches!(update["sessionUpdate"].as_str(), Some("tool_call" | "tool_call_update"))
             && let Some(id) = update["toolCallId"].as_str()
         {
@@ -686,12 +685,94 @@ impl acp::Client for UiClient {
             }
             _ => emit(&self.sink, &self.code_session_id, CodeEvent::Update { update }),
         }
+    }
+
+    /// A `session/update` the ACP types can't decode (see `wire::reroute`). The UI takes the
+    /// kinds it knows as they are, unknown values included; the rest show as a dim line.
+    fn raw_update(&self, params: Value) {
+        let session_id = params["sessionId"].as_str().unwrap_or_default();
+        if self.acp_session.borrow().as_deref().is_some_and(|sid| session_id != sid) {
+            return;
+        }
+        let update = params["update"].clone();
+        match unknown_update(&update) {
+            None => self.update(session_id, update),
+            Some(message) => emit(&self.sink, &self.code_session_id, CodeEvent::Unrecognized { message, raw: update }),
+        }
+    }
+}
+
+/// Why the UI can't show `update` (one ACP couldn't decode), or `None` when it can as is.
+fn unknown_update(update: &Value) -> Option<String> {
+    let kind = update["sessionUpdate"].as_str().unwrap_or("?");
+    match kind {
+        "agent_message_chunk" | "agent_thought_chunk" | "user_message_chunk" => {
+            let ty = update["content"]["type"].as_str().unwrap_or("?");
+            let shown = ty == "text" || (ty == "image" && kind == "agent_message_chunk");
+            (!shown).then(|| format!("The agent sent content Patchbay can't show ({kind}, type \"{ty}\")"))
+        }
+        "tool_call" | "tool_call_update" if !update["toolCallId"].is_string() => {
+            Some(format!("The agent sent a tool call Patchbay can't show ({kind} without an id)"))
+        }
+        "plan" if !update["entries"].is_array() => Some("The agent sent a plan Patchbay can't show".into()),
+        "tool_call" | "tool_call_update" | "plan" | "current_mode_update" | "available_commands_update"
+        | "config_option_update" | "usage_update" | "session_info_update" => None,
+        _ => Some(format!("The agent sent an update Patchbay doesn't know (\"{kind}\")")),
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl acp::Client for UiClient {
+    async fn request_permission(
+        &self,
+        args: acp::RequestPermissionRequest,
+    ) -> acp::Result<acp::RequestPermissionResponse> {
+        let raw = serde_json::to_value(&args).unwrap_or(Value::Null);
+        serde_json::from_value(self.permission(raw).await).map_err(|_| acp::Error::internal_error())
+    }
+
+    async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<()> {
+        self.update(&args.session_id.0, serde_json::to_value(&args.update).unwrap_or(Value::Null));
         Ok(())
     }
 
+    async fn ext_method(&self, args: acp::ExtRequest) -> acp::Result<acp::ExtResponse> {
+        if &*args.method != super::wire::RAW_PERMISSION {
+            return Err(acp::Error::method_not_found());
+        }
+        // A permission request the ACP types can't decode (an unknown option kind, say). The UI
+        // shows unknown values as they are (an unknown kind as a plain button); without a tool
+        // call or usable options there is nothing to show or choose.
+        let raw: Value = serde_json::from_str(args.params.get()).unwrap_or_default();
+        let usable = raw["toolCall"]["toolCallId"].is_string()
+            && raw["options"].as_array().is_some_and(|o| {
+                !o.is_empty() && o.iter().all(|o| o["optionId"].is_string() && o["name"].is_string())
+            });
+        let resp = if usable {
+            self.permission(raw).await
+        } else {
+            emit(
+                &self.sink,
+                &self.code_session_id,
+                CodeEvent::Unrecognized {
+                    message: "The agent asked for a permission Patchbay can't show; it was declined".into(),
+                    raw,
+                },
+            );
+            json!({ "outcome": { "outcome": "cancelled" } })
+        };
+        let resp = serde_json::value::to_raw_value(&resp).map_err(|_| acp::Error::internal_error())?;
+        Ok(acp::ExtResponse::new(resp.into()))
+    }
+
     async fn ext_notification(&self, args: acp::ExtNotification) -> acp::Result<()> {
+        let method = args.method.trim_start_matches('_');
+        if method == super::wire::RAW_UPDATE {
+            if let Ok(v) = serde_json::from_str::<Value>(args.params.get()) {
+                self.raw_update(v);
+            }
         // `x.ai/session_notification` carries Grok Build's own session updates.
-        if args.method.trim_start_matches('_') == "x.ai/session_notification"
+        } else if method == "x.ai/session_notification"
             && let Ok(v) = serde_json::from_str::<Value>(args.params.get())
             && v["update"]["sessionUpdate"] == "session_status"
         {
@@ -750,6 +831,7 @@ async fn run(
     let SpawnSpec {
         sink,
         code_session_id: csid,
+        agent,
         launch,
         cwd,
         resume,
@@ -821,10 +903,12 @@ async fn run(
         cmds,
         acp_session: acp_session.clone(),
     };
+    // Through the wire tap: it logs frames when asked, and passes on raw the ones ACP can't decode.
+    let (to_agent, from_agent) = super::wire::tap(super::wire::Tap { session: csid.clone(), agent }, stdin, stdout);
     let (conn, io) = acp::ClientSideConnection::new(
         client,
-        stdin.compat_write(),
-        stdout.compat(),
+        to_agent.compat_write(),
+        from_agent.compat(),
         |fut| {
             tokio::task::spawn_local(fut);
         },
@@ -1903,6 +1987,14 @@ for line in sys.stdin:
             send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1-child",
                   "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "child:work"}}}})
             say("subagents:" + str(subagents))
+        if t == "odd":
+            def upd(u):
+                send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": u}})
+            upd({"sessionUpdate": "brand_new", "x": 1})
+            upd({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Run", "status": "cancelled"})
+            send({"jsonrpc": "2.0", "id": "p1", "method": "session/request_permission", "params": {"sessionId": "s1",
+                  "toolCall": {"toolCallId": "t1"}, "options": [{"optionId": "a", "name": "Allow", "kind": "allow_for_session"}]}})
+            send({"jsonrpc": "2.0", "id": "p2", "method": "session/request_permission", "params": {"sessionId": "s1", "options": []}})
         if t in ("hold", "brief"):
             held = i
             if t == "brief":
@@ -1958,6 +2050,7 @@ for line in sys.stdin:
         let (tx, thread) = super::spawn(SpawnSpec {
             sink: Arc::new(move |e: Envelope| ev.lock().unwrap().push(e.event)),
             code_session_id: "cs".into(),
+            agent: "fake".into(),
             launch: crate::code::agents::Launch {
                 program: python.into(),
                 args: std::iter::once(script.to_string_lossy().into_owned())
@@ -2409,6 +2502,41 @@ for line in sys.stdin:
         wait_for(&events, "promptDone", |evs| evs.iter().any(prompt_done));
         assert_eq!(agent_heard(&events, 2), ["prompt:subagent", "subagents:True"]);
         no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn undecodable_frames_reach_the_ui() {
+        let dir = std::env::temp_dir().join(format!("pb-odd-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        send_prompt(&tx, "odd");
+        wait_for(&events, "promptDone", |evs| evs.iter().any(prompt_done));
+        wait_for(&events, "both permissions", |evs| {
+            let n = |f: fn(&CodeEvent) -> bool| evs.iter().filter(|e| f(e)).count();
+            n(|e| matches!(e, CodeEvent::Permission { .. })) == 1 && n(|e| matches!(e, CodeEvent::Unrecognized { .. })) == 2
+        });
+        let evs = events.lock().unwrap();
+        let unknown: Vec<&str> = evs
+            .iter()
+            .filter_map(|e| match e {
+                CodeEvent::Unrecognized { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(unknown[0].contains("\"brand_new\""), "{unknown:?}");
+        assert!(unknown[1].contains("permission"), "{unknown:?}");
+        // Unknown values the UI can show go through as they are.
+        assert!(evs.iter().any(|e| matches!(e, CodeEvent::Update { update } if update["status"] == "cancelled")));
+        assert!(evs.iter().any(
+            |e| matches!(e, CodeEvent::Permission { request, .. } if request["options"][0]["kind"] == "allow_for_session")
+        ));
+        drop(evs);
         tx.send(AgentCmd::Shutdown).unwrap();
         thread.join().unwrap();
         let _ = std::fs::remove_dir_all(dir);

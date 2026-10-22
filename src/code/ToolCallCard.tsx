@@ -52,8 +52,11 @@ function StatusMark({ status, background }: { status: string; background?: boole
           running
         </span>
       );
-    default:
+    case "pending":
       return <span className="text-[12px] text-faint">pending</span>;
+    default:
+      // A status ACP doesn't define (e.g. `cancelled`), as the agent sent it.
+      return <span className="text-[12px] text-faint">{status}</span>;
   }
 }
 
@@ -148,7 +151,7 @@ export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withI
       {cmd && <CommandBlock cmd={cmd} />}
       {withImages && images.length > 0 && <ToolImages images={images} label={tc.title || "Tool output"} />}
       {diffs.map((d, i) => (
-        <DiffView key={i} path={d.path} oldText={d.oldText} newText={d.newText} />
+        <DiffView key={i} path={d.path ?? ""} oldText={d.oldText} newText={d.newText ?? ""} />
       ))}
       {terminals.length > 0 && !tc.terminalOutput && (
         <div className="flex items-center gap-2 text-[12px] text-muted">
@@ -194,7 +197,7 @@ export function ToolCallCard({ tc, autoApproved }: { tc: AcpToolCall; autoApprov
   const images = imagesOf(tc);
   const stats = (tc.content ?? [])
     .filter((c): c is Extract<AcpToolCallContent, { type: "diff" }> => c.type === "diff")
-    .map((d) => diffStats(d.oldText, d.newText))
+    .map((d) => diffStats(d.oldText, d.newText ?? ""))
     .reduce((a, b) => ({ add: a.add + b.add, del: a.del + b.del }), { add: 0, del: 0 });
   return (
     <div>
@@ -365,9 +368,9 @@ export function PermissionCard({
   const plan = planDocOf(tc);
   // The one-off "allow" leads as the primary button; broader allows follow it.
   const allows = request.options
-    .filter((o) => !o.kind.startsWith("reject"))
+    .filter((o) => !o.kind?.startsWith("reject"))
     .sort((x, y) => Number(x.kind !== "allow_once") - Number(y.kind !== "allow_once"));
-  const rejects = request.options.filter((o) => o.kind.startsWith("reject"));
+  const rejects = request.options.filter((o) => o.kind?.startsWith("reject"));
   const btn = (o: (typeof request.options)[number]) => (
     <button
       key={o.optionId}

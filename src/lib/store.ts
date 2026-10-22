@@ -47,7 +47,9 @@ export type Entry =
   | { kind: "thought"; text: string }
   | { kind: "tool"; id: string }
   | { kind: "error"; text: string }
-  | { kind: "info"; text: string };
+  | { kind: "info"; text: string }
+  /** Something the agent sent that Patchbay can't show, with its raw payload; `count` in a row. */
+  | { kind: "unrecognized"; text: string; raw: unknown; count?: number };
 
 /** A prompt waiting for the running turn to end (agents that can't take one mid-turn). */
 export interface QueuedPrompt {
@@ -561,6 +563,15 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
     case "notice":
       next = { ...s, entries: [...s.entries, { kind: "info", text: e.message }] };
       break;
+    case "unrecognized": {
+      // A run of the same kind (an unknown chunk type, say) shows as one line, with the latest.
+      const last = s.entries[s.entries.length - 1];
+      next =
+        last?.kind === "unrecognized" && last.text === e.message
+          ? { ...s, entries: [...s.entries.slice(0, -1), { ...last, raw: e.raw, count: (last.count ?? 1) + 1 }] }
+          : { ...s, entries: [...s.entries, { kind: "unrecognized", text: e.message, raw: e.raw }] };
+      break;
+    }
     case "update":
       next = reduceUpdate(s, e.update);
       break;
