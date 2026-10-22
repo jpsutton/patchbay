@@ -19,32 +19,43 @@ fn same_host(a: &reqwest::Url, b: &reqwest::Url) -> bool {
     strip(a) == strip(b)
 }
 
-/// The page as plain text: HTML becomes Markdown, everything else passes through.
-fn page_text(content_type: &str, body: &str) -> String {
-    if content_type.contains("html") {
-        htmd::convert(body).unwrap_or_else(|_| body.to_owned())
-    } else {
-        body.to_owned()
+/// The page as plain text. HTML becomes the main content as Markdown, without the navigation,
+/// banners, sidebars, footers and scripts around it; everything else passes through.
+fn page_text(content_type: &str, body: &str, url: &reqwest::Url) -> String {
+    if !content_type.contains("html") {
+        return body.to_owned();
     }
+    let page = crate::extract::extract(body, Some(url));
+    let mut out = String::new();
+    if let Some(t) = &page.title {
+        out.push_str(&format!("Title: {t}\n"));
+    }
+    out.push_str(&format!("URL: {url}\n\n{}", page.markdown));
+    out
 }
+
+/// Most of a page returned as it is, when no question was asked about it.
+const MAX_RETURNED_CHARS: usize = 40_000;
 
 #[async_trait]
 impl Tool for WebFetch {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "WebFetch".into(),
-            description: "Fetch a URL, convert the page to Markdown and answer `prompt` about it. It fails \
-for pages that need a login and for localhost. HTTP links are upgraded to HTTPS. If the page redirects to \
-another host, the new URL is returned and you must call WebFetch again with it. Results are specific to \
-your prompt; quote at most a sentence or two from a page."
+            description: "Fetch a URL and keep what matters: the page's main content as Markdown, without \
+navigation, banners, sidebars, footers, scripts and styles. With `prompt`, a small model answers it from the \
+page and you get the answer (quote at most a sentence or two). Without `prompt` you get the cleaned page \
+itself, up to about 40,000 characters, for when you need the text. It fails for pages that need a login and \
+for localhost. HTTP links are upgraded to HTTPS. If the page redirects to another host, the new URL is \
+returned and you must call WebFetch again with it."
                 .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "url": {"type": "string", "description": "The URL to fetch"},
-                    "prompt": {"type": "string", "description": "What to find out from the page"}
+                    "prompt": {"type": "string", "description": "What to find out from the page; leave out to get the cleaned page"}
                 },
-                "required": ["url", "prompt"]
+                "required": ["url"]
             }),
         }
     }
@@ -66,9 +77,10 @@ your prompt; quote at most a sentence or two from a page."
     }
 
     async fn run(&self, input: Value, ctx: &ToolCtx) -> ToolOutput {
-        let (Some(url), Some(prompt)) = (str_arg(&input, "url"), str_arg(&input, "prompt")) else {
-            return ToolOutput::error("url and prompt are required");
+        let Some(url) = str_arg(&input, "url") else {
+            return ToolOutput::error("url is required");
         };
+        let prompt = str_arg(&input, "prompt").map(str::trim).filter(|p| !p.is_empty());
         let mut url = match reqwest::Url::parse(url) {
             Ok(u) => u,
             Err(e) => return ToolOutput::error(format!("Invalid URL: {e}")),
@@ -135,7 +147,13 @@ your prompt; quote at most a sentence or two from a page."
             }
             break (ct, String::from_utf8_lossy(&bytes).into_owned());
         };
-        let mut text = page_text(&content_type, &body);
+        let mut text = page_text(&content_type, &body, &url);
+        let raw = json!({"url": url.as_str(), "bytes": body.len(), "kept_chars": text.chars().count()});
+        let Some(prompt) = prompt else {
+            let mut out = super::ToolOutput::text(clip_middle(&text, MAX_RETURNED_CHARS));
+            out.raw = raw;
+            return out;
+        };
         if text.chars().count() > MAX_PAGE_CHARS {
             text = text.chars().take(MAX_PAGE_CHARS).collect::<String>() + "\n…[page truncated]";
         }
@@ -153,7 +171,11 @@ your prompt; quote at most a sentence or two from a page."
             req.system.insert(i, b.clone());
         }
         match mc.client.complete_text(&req, &ctx.cancel).await {
-            Ok(answer) => ToolOutput::text(answer),
+            Ok(answer) => {
+                let mut out = ToolOutput::text(answer);
+                out.raw = raw;
+                out
+            }
             Err(e) => ToolOutput::error(format!("Could not read the page: {e}")),
         }
     }
@@ -165,9 +187,12 @@ mod tests {
 
     #[test]
     fn converts_html_and_passes_text() {
-        let md = page_text("text/html; charset=utf-8", "<h1>Title</h1><p>Hello <b>world</b></p>");
-        assert!(md.contains("# Title") && md.contains("**world**"), "{md}");
-        assert_eq!(page_text("text/plain", "<b>raw</b>"), "<b>raw</b>");
+        let url = reqwest::Url::parse("https://example.com/a").unwrap();
+        let html = "<html><head><title>T</title></head><body><nav>MENU-JUNK</nav><h1>Title</h1><p>Hello <b>world</b></p></body></html>";
+        let md = page_text("text/html; charset=utf-8", html, &url);
+        assert!(md.starts_with("Title: T\nURL: https://example.com/a\n\n"), "{md}");
+        assert!(md.contains("# Title") && md.contains("**world**") && !md.contains("MENU-JUNK"), "{md}");
+        assert_eq!(page_text("text/plain", "<b>raw</b>", &url), "<b>raw</b>");
     }
 
     #[test]

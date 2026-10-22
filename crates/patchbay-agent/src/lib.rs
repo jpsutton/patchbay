@@ -7,6 +7,7 @@
 
 mod agent;
 mod compact;
+mod extract;
 mod host;
 mod mcp;
 mod prompt;
