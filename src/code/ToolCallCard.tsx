@@ -3,6 +3,7 @@ import type { AcpPermissionRequest, AcpToolCall, AcpToolCallContent } from "../l
 import { api, errorText } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { DiffView, diffStats } from "./DiffView";
+import { hunkStarts } from "./hunkStarts";
 import { Markdown } from "../components/Markdown";
 import { CopyButton } from "../components/CopyButton";
 import { AgentImage } from "../components/AgentImage";
@@ -131,31 +132,6 @@ function CommandBlock({ cmd }: { cmd: string }) {
       </span>
     </div>
   );
-}
-
-const lineCount = (t: string | null) => (t ? t.split("\n").length : 0);
-
-/**
- * Where each diff starts in its file. Claude Code sends one diff per hunk, holding just that hunk,
- * and puts each hunk's new start line in `locations`: the i-th diff for a path pairs with the i-th
- * location for that path. The old start follows from the earlier hunks' net line change. A diff
- * with no located line (a whole-file diff) starts at line 1, as before.
- */
-function hunkStarts(
-  diffs: Extract<AcpToolCallContent, { type: "diff" }>[],
-  locations: AcpToolCall["locations"],
-): ({ oldStart: number; newStart: number } | undefined)[] {
-  const seen = new Map<string, number>();
-  const shift = new Map<string, number>();
-  return diffs.map((d) => {
-    const n = seen.get(d.path) ?? 0;
-    seen.set(d.path, n + 1);
-    const delta = shift.get(d.path) ?? 0;
-    shift.set(d.path, delta + lineCount(d.newText) - lineCount(d.oldText));
-    const line = (locations ?? []).filter((l) => l.path === d.path)[n]?.line;
-    if (typeof line !== "number" || line < 1) return undefined;
-    return { newStart: line, oldStart: Math.max(1, line - delta) };
-  });
 }
 
 export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withImages?: boolean }) {
