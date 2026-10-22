@@ -1,8 +1,9 @@
 import { useState, type ReactNode } from "react";
 import type { AcpPermissionRequest, AcpToolCall, AcpToolCallContent } from "../lib/ipc";
 import { api, errorText } from "../lib/ipc";
-import { useStore } from "../lib/store";
+import { mergeToolCall, useStore } from "../lib/store";
 import { DiffView, diffStats } from "./DiffView";
+import { hunkStarts } from "./hunkStarts";
 import { Markdown } from "../components/Markdown";
 import { CopyButton } from "../components/CopyButton";
 import { AgentImage } from "../components/AgentImage";
@@ -138,6 +139,7 @@ export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withI
   const cmd = tc.kind === "execute" ? commandOf(tc) : null;
   const images = imagesOf(tc);
   const diffs = content.filter((c): c is Extract<AcpToolCallContent, { type: "diff" }> => c.type === "diff");
+  const starts = hunkStarts(diffs, tc.locations);
   const terminals = content.filter((c): c is Extract<AcpToolCallContent, { type: "terminal" }> => c.type === "terminal");
   const texts = content.map(textOfContent).filter((t): t is string => !!t);
   // Patchbay doesn't host ACP terminals, so their output only reaches us as raw tool output.
@@ -148,7 +150,7 @@ export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withI
       {cmd && <CommandBlock cmd={cmd} />}
       {withImages && images.length > 0 && <ToolImages images={images} label={tc.title || "Tool output"} />}
       {diffs.map((d, i) => (
-        <DiffView key={i} path={d.path} oldText={d.oldText} newText={d.newText} />
+        <DiffView key={i} path={d.path} oldText={d.oldText} newText={d.newText} {...starts[i]} />
       ))}
       {terminals.length > 0 && !tc.terminalOutput && (
         <div className="flex items-center gap-2 text-[12px] text-muted">
@@ -340,7 +342,8 @@ export function PermissionCard({
   /** Folder an "always allow" rule is saved for. */
   cwd: string;
 }) {
-  const tc = { ...request.toolCall, ...(live ?? {}) };
+  // The request is what the user is approving: its fields win over what was stored before.
+  const tc = mergeToolCall(live, request.toolCall);
   const rule = suggestRule(tc);
   // The session id routes the answer to whichever node runs the agent.
   const respond = (optionId: string) =>

@@ -95,6 +95,13 @@ export function codeToMarkdown(session: CodeSession, entries: Entry[], toolCalls
       case "info":
         out.push(`_${e.text}_`, "");
         break;
+      // Not prompts: the harness's own messages stay folded, a cancel is a note.
+      case "harness":
+        out.push("<details><summary>Added by the agent</summary>", "", "````", e.text, "````", "", "</details>", "");
+        break;
+      case "cancelled":
+        out.push("_Turn cancelled_", "");
+        break;
     }
   }
   return out.join("\n");

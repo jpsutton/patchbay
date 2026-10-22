@@ -565,11 +565,17 @@ fn hide_modes(modes: &mut Value, hide: &[&str]) {
 }
 
 impl UiClient {
-    fn merged_tool_call(&self, tc: &Value) -> Value {
-        let id = tc["toolCallId"].as_str().unwrap_or_default();
-        let mut out = self.tool_calls.borrow().get(id).cloned().unwrap_or_else(|| json!({}));
-        merge_fields(&mut out, tc);
-        out
+    /// Merge a tool call's fields into what's known about it, the newer fields winning, and
+    /// return the result.
+    fn merge_tool_call(&self, tc: &Value) -> Value {
+        let Some(id) = tc["toolCallId"].as_str() else { return tc.clone() };
+        let mut map = self.tool_calls.borrow_mut();
+        let entry = map.entry(id.to_owned()).or_insert_with(|| json!({}));
+        merge_fields(entry, tc);
+        if let Some(o) = entry.as_object_mut() {
+            o.remove("sessionUpdate");
+        }
+        entry.clone()
     }
 
     /// The agent switched itself into one of its own approval policies (Claude does when a plan
@@ -594,6 +600,19 @@ impl UiClient {
     }
 }
 
+/// Fill in the ACP defaults a `tool_call` announcement may leave out. The schema crate skips
+/// default values when it serializes, so a call announced as `pending` / `other` arrives with
+/// neither field. Only for announcements: in a `tool_call_update` an absent field means unchanged.
+fn fill_tool_call_defaults(update: &mut Value) {
+    if let Some(o) = update.as_object_mut() {
+        for (k, v) in [("status", "pending"), ("kind", "other")] {
+            if o.get(k).is_none_or(Value::is_null) {
+                o.insert(k.into(), json!(v));
+            }
+        }
+    }
+}
+
 fn merge_fields(into: &mut Value, from: &Value) {
     if let (Some(dst), Some(src)) = (into.as_object_mut(), from.as_object()) {
         for (k, v) in src {
@@ -604,14 +623,146 @@ fn merge_fields(into: &mut Value, from: &Value) {
     }
 }
 
+#[cfg(test)]
+mod tool_call_tests {
+    use super::*;
+    use acp::Client as _;
+
+    /// A client whose sink records events and answers each permission request with "allow".
+    fn client() -> (UiClient, Arc<Mutex<Vec<CodeEvent>>>, mpsc::UnboundedSender<AgentCmd>) {
+        let events: Arc<Mutex<Vec<CodeEvent>>> = Arc::default();
+        let pending: PendingPermissions = Arc::default();
+        let (seen, answers) = (events.clone(), pending.clone());
+        let sink: Sink = Arc::new(move |env: Envelope| {
+            if let CodeEvent::Permission { request_id, .. } = &env.event
+                && let Some((_, tx)) = answers.lock().unwrap().remove(request_id)
+            {
+                let _ = tx.send(Some("allow".into()));
+            }
+            seen.lock().unwrap().push(env.event);
+        });
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let client = UiClient {
+            sink,
+            code_session_id: "c".into(),
+            pending,
+            auto_approve: Arc::new(|_, _| None),
+            tool_calls: RefCell::default(),
+            config_ids: Rc::default(),
+            approvals: ApprovalSetup::default(),
+            cmds: tx.downgrade(),
+            acp_session: Rc::default(),
+        };
+        (client, events, tx)
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(f)
+    }
+
+    fn notify(c: &UiClient, update: Value) {
+        let n = serde_json::from_value(json!({ "sessionId": "s", "update": update })).unwrap();
+        block_on(c.session_notification(n)).unwrap();
+    }
+
+    fn last_update(events: &Mutex<Vec<CodeEvent>>) -> Value {
+        match events.lock().unwrap().last() {
+            Some(CodeEvent::Update { update }) => update.clone(),
+            other => panic!("expected an update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn announced_tool_call_gets_spec_defaults() {
+        let (c, events, _tx) = client();
+        notify(&c, json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Run", "status": "pending", "kind": "other" }));
+        let u = last_update(&events);
+        assert_eq!((u["status"].clone(), u["kind"].clone()), (json!("pending"), json!("other")));
+
+        notify(&c, json!({ "sessionUpdate": "tool_call", "toolCallId": "t2", "title": "Edit", "kind": "edit", "status": "in_progress" }));
+        let u = last_update(&events);
+        assert_eq!((u["status"].clone(), u["kind"].clone()), (json!("in_progress"), json!("edit")));
+
+        // An update leaves out what didn't change.
+        notify(&c, json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t2", "title": "Edit a.rs" }));
+        let u = last_update(&events);
+        assert!(u.get("status").is_none() && u.get("kind").is_none(), "{u}");
+        assert_eq!(c.tool_calls.borrow()["t2"]["status"], "in_progress");
+    }
+
+    #[test]
+    fn reannounced_tool_call_keeps_its_status_and_kind() {
+        let (c, events, _tx) = client();
+        notify(&c, json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Edit", "kind": "edit", "status": "completed" }));
+        notify(&c, json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Edit a.rs" }));
+        let u = last_update(&events);
+        assert!(u.get("status").is_none() && u.get("kind").is_none(), "{u}");
+        let stored = &c.tool_calls.borrow()["t1"];
+        assert_eq!((stored["status"].clone(), stored["kind"].clone()), (json!("completed"), json!("edit")));
+        assert_eq!(stored["title"], "Edit a.rs");
+    }
+
+    #[test]
+    fn permission_request_fields_win_and_are_kept() {
+        let (c, events, _tx) = client();
+        notify(&c, json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Edit", "kind": "edit", "rawInput": { "old": 1 } }));
+        let req = serde_json::from_value(json!({
+            "sessionId": "s",
+            "toolCall": {
+                "toolCallId": "t1",
+                "title": "Edit `a.rs`",
+                "rawInput": { "file_path": "a.rs" },
+                "content": [{ "type": "diff", "path": "/w/a.rs", "oldText": "a", "newText": "b" }]
+            },
+            "options": [{ "optionId": "allow", "name": "Yes", "kind": "allow_once" }]
+        }))
+        .unwrap();
+        block_on(c.request_permission(req)).unwrap();
+
+        let sent = events.lock().unwrap().iter().find_map(|e| match e {
+            CodeEvent::Permission { request, .. } => Some(request["toolCall"].clone()),
+            _ => None,
+        });
+        let tc = sent.expect("a permission event");
+        assert_eq!(tc["title"], "Edit `a.rs`");
+        assert_eq!(tc["rawInput"], json!({ "file_path": "a.rs" }));
+        assert_eq!(tc["kind"], "edit");
+        assert_eq!(tc["status"], "pending");
+        assert_eq!(tc["content"][0]["type"], "diff");
+        assert!(tc.get("sessionUpdate").is_none());
+        // The stored call keeps the request's fields once the request is answered, and the UI
+        // gets them as an update too.
+        assert_eq!(c.tool_calls.borrow()["t1"], tc);
+        let evs = events.lock().unwrap();
+        let upd = evs.iter().find_map(|e| match e {
+            CodeEvent::Update { update } if update["sessionUpdate"] == "tool_call_update" => Some(update.clone()),
+            _ => None,
+        });
+        assert_eq!(upd.expect("a tool_call_update")["content"][0]["newText"], "b");
+    }
+}
+
 #[async_trait::async_trait(?Send)]
 impl acp::Client for UiClient {
     async fn request_permission(
         &self,
         args: acp::RequestPermissionRequest,
     ) -> acp::Result<acp::RequestPermissionResponse> {
-        let raw = serde_json::to_value(&args).unwrap_or(Value::Null);
-        let tool_call = self.merged_tool_call(&raw["toolCall"]);
+        let mut raw = serde_json::to_value(&args).unwrap_or(Value::Null);
+        // The request may carry fields no notification did (a diff, rawInput): keep them with the
+        // call, and show the UI the merged call, the request's fields winning. A call the
+        // transcript already shows also gets them as an update, so they outlast the request (or
+        // reach the UI at all when a rule answers it).
+        let known = raw["toolCall"]["toolCallId"]
+            .as_str()
+            .is_some_and(|id| self.tool_calls.borrow().contains_key(id));
+        let tool_call = self.merge_tool_call(&raw["toolCall"]);
+        if known {
+            let mut update = raw["toolCall"].clone();
+            update["sessionUpdate"] = json!("tool_call_update");
+            emit(&self.sink, &self.code_session_id, CodeEvent::Update { update });
+        }
+        raw["toolCall"] = tool_call.clone();
         if let Some((option_id, description)) = (self.auto_approve)(&tool_call, &raw["options"]) {
             emit(
                 &self.sink,
@@ -635,7 +786,7 @@ impl acp::Client for UiClient {
             &self.code_session_id,
             CodeEvent::Permission {
                 request_id: request_id.clone(),
-                request: serde_json::to_value(&args).unwrap_or(Value::Null),
+                request: raw,
             },
         );
         let choice = rx.await.ok().flatten();
@@ -659,13 +810,15 @@ impl acp::Client for UiClient {
         if self.acp_session.borrow().as_deref().is_some_and(|sid| *args.session_id.0 != *sid) {
             return Ok(());
         }
-        let update = serde_json::to_value(&args.update).unwrap_or(Value::Null);
-        if matches!(update["sessionUpdate"].as_str(), Some("tool_call" | "tool_call_update"))
-            && let Some(id) = update["toolCallId"].as_str()
+        let mut update = serde_json::to_value(&args.update).unwrap_or(Value::Null);
+        // Defaults only for a new call: re-announcing a known one leaves out what didn't change.
+        if update["sessionUpdate"] == "tool_call"
+            && update["toolCallId"].as_str().is_some_and(|id| !self.tool_calls.borrow().contains_key(id))
         {
-            let mut map = self.tool_calls.borrow_mut();
-            let entry = map.entry(id.to_owned()).or_insert_with(|| json!({}));
-            merge_fields(entry, &update);
+            fill_tool_call_defaults(&mut update);
+        }
+        if matches!(update["sessionUpdate"].as_str(), Some("tool_call" | "tool_call_update")) {
+            self.merge_tool_call(&update);
         }
         match update["sessionUpdate"].as_str() {
             Some("config_option_update") => {
@@ -1386,8 +1539,34 @@ fn exited(
     anyhow!("agent process exited ({code})\n{tail}")
 }
 
+/// `data.errorKind` values with which claude-agent-acp reports a sign-in that failed mid-session.
+/// It sends them as a plain internal error (`-32603`) and keeps `-32000` for "Please run /login".
+const AUTH_ERROR_KINDS: [&str; 2] = ["authentication_failed", "oauth_org_not_allowed"];
+
 fn is_auth_required(e: &acp::Error) -> bool {
-    i32::from(e.code) == -32000
+    match i32::from(e.code) {
+        -32000 => true,
+        -32603 => e
+            .data
+            .as_ref()
+            .and_then(|d| d["errorKind"].as_str())
+            .is_some_and(|k| AUTH_ERROR_KINDS.contains(&k)),
+        _ => false,
+    }
+}
+
+/// An internal error's message without JSON-RPC's generic "Internal error:" prefix, or `None`
+/// for other errors.
+fn internal_error_reason(e: &acp::Error) -> Option<&str> {
+    if i32::from(e.code) != -32603 {
+        return None;
+    }
+    let m = e
+        .message
+        .strip_prefix("Internal error:")
+        .unwrap_or(&e.message)
+        .trim();
+    (!m.is_empty()).then_some(m)
 }
 
 /// For ACP's `auth_required` error: how to sign in. Patchbay's own hint for the agent comes
@@ -1410,10 +1589,13 @@ fn auth_message(e: &acp::Error, init: &Value, login_hint: &str, again: bool) -> 
         .or(init["agentInfo"]["name"].as_str())
         .unwrap_or("The agent");
     let when = if again { "again" } else { "first" };
-    if how.is_empty() {
-        format!("{name} needs you to sign in {when} ({e}).")
-    } else {
-        format!("{name} needs you to sign in {when}. {how}")
+    // An internal error carries the agent's reason (an expired login, say) and nothing else
+    // does, so show it even next to the hint.
+    match (internal_error_reason(e), how.is_empty()) {
+        (Some(why), true) => format!("{name} needs you to sign in {when} ({why})."),
+        (Some(why), false) => format!("{name} needs you to sign in {when} ({why}). {how}"),
+        (None, true) => format!("{name} needs you to sign in {when} ({e})."),
+        (None, false) => format!("{name} needs you to sign in {when}. {how}"),
     }
 }
 
@@ -1819,7 +2001,9 @@ mod tests {
     /// An ACP agent that refuses `session/new` until `authenticate` gets method `api-key` with
     /// key `sk-test` in codex-acp's shape, so the string shape Patchbay tries first is refused.
     /// The prompt `expire` signs it out again, and prompts fail with `auth_required` until the
-    /// next sign-in. To clients that run terminal sign-ins it also offers `tui`, whose command
+    /// next sign-in. `expire-oauth` does the same with claude-agent-acp's `-32603` and
+    /// `errorKind`, and `crash` fails with a `-32603` that isn't about signing in. To clients
+    /// that run terminal sign-ins it also offers `tui`, whose command
     /// (this script with `--login`) leaves a `signed-in` file that a new process starts with.
     /// `--no-methods` starts it signed in, with no auth methods.
     ///
@@ -1893,8 +2077,17 @@ for line in sys.stdin:
         if held is not None:
             err(i, "a turn is already running")
             continue
-        if t == "expire":
+        if t in ("expire", "expire-oauth"):
             authed = False
+        if t == "crash":
+            send({"jsonrpc": "2.0", "id": i, "error": {"code": -32603, "message": "Internal error: boom",
+                  "data": {"errorKind": "unknown"}}})
+            continue
+        if not authed and t == "expire-oauth":
+            send({"jsonrpc": "2.0", "id": i, "error": {"code": -32603,
+                  "message": "Internal error: Failed to authenticate: OAuth session expired",
+                  "data": {"errorKind": "authentication_failed"}}})
+            continue
         if not authed:
             err(i, "Authentication required")
             continue
@@ -2128,6 +2321,43 @@ for line in sys.stdin:
             })
             .collect();
         assert_eq!(errors, ["Fake Agent needs you to sign in again. Run `fake login`."]);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// claude-agent-acp reports an expired login as an internal error tagged `errorKind`. That
+    /// asks for a sign-in, with the reason minus "Internal error:"; other internal errors don't.
+    #[test]
+    fn internal_error_with_an_auth_error_kind_asks_for_a_sign_in() {
+        let dir = std::env::temp_dir().join(format!("pb-auth-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent(&dir) else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        wait_for(&events, "authRequired", |evs| auth_events(evs) == 1);
+        authenticate(&tx, "api-key", Some("sk-test")).unwrap();
+        wait_for(&events, "sessionReady", |evs| {
+            evs.iter()
+                .any(|e| matches!(e, CodeEvent::SessionReady { .. }))
+        });
+
+        send_prompt(&tx, "crash");
+        wait_for(&events, "promptDone", |evs| {
+            evs.iter().filter(|e| prompt_done(e)).count() == 1
+        });
+        assert_eq!(auth_events(&events.lock().unwrap()), 1);
+        assert_eq!(count(&events, |e| matches!(e, CodeEvent::Error { .. })), 1);
+
+        send_prompt(&tx, "expire-oauth");
+        wait_for(&events, "promptDone", |evs| {
+            evs.iter().filter(|e| prompt_done(e)).count() == 2
+        });
+        assert_eq!(auth_events(&events.lock().unwrap()), 2);
+        assert_eq!(count(&events, |e| matches!(e, CodeEvent::Error { .. })), 1);
+        let (message, _) = last_auth(&events);
+        let want = "Fake Agent needs you to sign in again (Failed to authenticate: OAuth session expired). Opens";
+        assert!(message.starts_with(want), "{message}");
         tx.send(AgentCmd::Shutdown).unwrap();
         thread.join().unwrap();
         let _ = std::fs::remove_dir_all(dir);
