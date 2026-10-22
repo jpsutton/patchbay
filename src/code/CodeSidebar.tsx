@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { AGENT_LABELS, api, type AgentInfo, type CodeSession } from "../lib/ipc";
 import { memberName, remoteHost, useStore } from "../lib/store";
 import { ArchivedToggle, SectionLabel, SidebarItem } from "../components/SidebarItem";
@@ -10,6 +10,9 @@ import { installedAgents, newSessionIn } from "./CodeView";
 import { ContextMenu } from "../components/ItemMenu";
 
 const COLLAPSED_KEY = "patchbay.codeSidebar.collapsed";
+const ORDER_KEY = "patchbay.codeSidebar.order";
+/** How far the pointer moves before a press on a folder becomes a drag. */
+const DRAG_THRESHOLD = 4;
 
 function loadCollapsed(): Set<string> {
   try {
@@ -22,6 +25,24 @@ function loadCollapsed(): Set<string> {
 function saveCollapsed(s: Set<string>) {
   try {
     localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...s]));
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+/** Folder keys in the order the user arranged them, top first. */
+function loadOrder(): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(ORDER_KEY) ?? "[]");
+    return Array.isArray(v) ? (v as string[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveOrder(o: string[]) {
+  try {
+    localStorage.setItem(ORDER_KEY, JSON.stringify(o));
   } catch {
     /* storage unavailable */
   }
@@ -62,6 +83,12 @@ export function CodeSidebar() {
   const mesh = useStore((s) => s.mesh);
   const [collapsed, setCollapsed] = useState(loadCollapsed);
   const [showArchived, setShowArchived] = useState(false);
+  const [order, setOrder] = useState(loadOrder);
+  /** While dragging a folder: which one, and the slot it would drop into. */
+  const [drag, setDrag] = useState<{ key: string; index: number } | null>(null);
+  const folderEls = useRef(new Map<string, HTMLDivElement>());
+  /** Set when a press turned into a drag, so the click that ends it doesn't toggle the folder. */
+  const dragged = useRef(false);
   /** Right-click on a folder's "+": which agent to start there. */
   const [agentMenu, setAgentMenu] = useState<{
     x: number;
@@ -75,7 +102,7 @@ export function CodeSidebar() {
   const archived = useMemo(() => matching.filter((s) => s.archivedAt != null), [matching]);
   const pinned = useMemo(() => hits.filter((s) => s.pinned), [hits]);
 
-  const groups = useMemo<Group[]>(() => {
+  const byRecency = useMemo<Group[]>(() => {
     // The same path on two computers is two folders.
     const by = new Map<string, { cwd: string; host: string | null; list: CodeSession[] }>();
     for (const s of hits) {
@@ -103,6 +130,78 @@ export function CodeSidebar() {
       .sort((a, b) => b.latest - a.latest);
   }, [hits, mesh]);
 
+  // Folders keep the order the user gave them. A folder seen for the first time goes on top.
+  const groups = useMemo<Group[]>(() => {
+    const rank = new Map(order.map((k, i) => [k, i]));
+    const fresh = byRecency.filter((g) => !rank.has(g.key));
+    const known = byRecency.filter((g) => rank.has(g.key)).sort((a, b) => rank.get(a.key)! - rank.get(b.key)!);
+    return [...fresh, ...known];
+  }, [byRecency, order]);
+
+  // Record first-seen folders so later activity doesn't move them. Folders that
+  // drop out of view (all archived, or a computer offline) keep their place.
+  useEffect(() => {
+    const fresh = groups.filter((g) => !order.includes(g.key)).map((g) => g.key);
+    if (fresh.length === 0) return;
+    const next = [...fresh, ...order];
+    saveOrder(next);
+    setOrder(next);
+  }, [groups, order]);
+
+  /** Move `key` so it sits just above the visible folder now at `index` (or last, past the end). */
+  const moveFolder = (key: string, index: number) => {
+    const visible = groups.map((g) => g.key);
+    const from = visible.indexOf(key);
+    if (from < 0 || index < 0 || index === from || index === from + 1) return;
+    const next = order.filter((k) => k !== key);
+    const before = visible[index];
+    if (before !== undefined) next.splice(next.indexOf(before), 0, key);
+    else next.splice(next.indexOf(visible[visible.length - 1]) + 1, 0, key);
+    saveOrder(next);
+    setOrder(next);
+  };
+
+  /** Which slot the pointer is over: the folder whose upper half it is in, or past the last one. */
+  const slotAt = (y: number) => {
+    const i = groups.findIndex((g) => {
+      const r = folderEls.current.get(g.key)?.getBoundingClientRect();
+      return r != null && y < r.top + r.height / 2;
+    });
+    return i < 0 ? groups.length : i;
+  };
+
+  const startDrag = (e: ReactPointerEvent<HTMLButtonElement>, key: string) => {
+    if (e.button !== 0) return;
+    const startY = e.clientY;
+    const el = e.currentTarget;
+    let index: number | null = null;
+    dragged.current = false;
+    el.setPointerCapture(e.pointerId);
+    const move = (ev: PointerEvent) => {
+      if (index == null) {
+        if (Math.abs(ev.clientY - startY) < DRAG_THRESHOLD) return;
+        document.body.style.cursor = "grabbing";
+        document.body.style.userSelect = "none";
+        dragged.current = true;
+      }
+      index = slotAt(ev.clientY);
+      setDrag({ key, index });
+    };
+    const up = (ev: PointerEvent) => {
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
+      if (index == null) return;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      setDrag(null);
+      if (ev.type === "pointerup") moveFolder(key, index);
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+  };
+
   const toggle = (cwd: string) =>
     setCollapsed((prev) => {
       const next = new Set(prev);
@@ -111,6 +210,10 @@ export function CodeSidebar() {
       saveCollapsed(next);
       return next;
     });
+
+  // No line where the drop would leave the folder in place.
+  const from = drag ? groups.findIndex((g) => g.key === drag.key) : -1;
+  const dropAt = drag && drag.index !== from && drag.index !== from + 1 ? drag.index : null;
 
   if (sessions.length === 0) {
     return <div className="px-4 py-2 text-xs text-muted">No code sessions yet</div>;
@@ -186,17 +289,39 @@ export function CodeSidebar() {
         </div>
       )}
       {pinned.length > 0 && groups.length > 0 && <SectionLabel>Folders</SectionLabel>}
-      {groups.map((g) => {
+      {groups.map((g, i) => {
         // While searching, show every match regardless of collapsed folders.
         const isCollapsed = !query.trim() && collapsed.has(g.key);
         const hasActive = g.sessions.some((s) => s.id === activeId);
         return (
-          <div key={g.key} className="mb-1">
+          <div
+            key={g.key}
+            ref={(el) => {
+              if (el) folderEls.current.set(g.key, el);
+              else folderEls.current.delete(g.key);
+            }}
+            className={`relative mb-1 ${drag?.key === g.key ? "opacity-50" : ""}`}
+          >
+            {dropAt === i && <DropLine top />}
+            {dropAt === groups.length && i === groups.length - 1 && <DropLine />}
             <div className="group/header mx-2 mt-2 flex items-center gap-1 rounded-lg py-1 pl-2.5 pr-1 hover:bg-panel-2/50">
               <button
                 className="flex min-w-0 flex-1 items-baseline gap-1.5 text-left"
-                onClick={() => toggle(g.key)}
-                title={g.host ? `${g.cwd} on ${memberName(mesh, g.host)}` : g.cwd}
+                onPointerDown={(e) => startDrag(e, g.key)}
+                onClick={() => {
+                  if (dragged.current) {
+                    dragged.current = false;
+                    return;
+                  }
+                  toggle(g.key);
+                }}
+                onKeyDown={(e) => {
+                  // Alt+Up/Down moves the folder without a pointer.
+                  if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
+                  e.preventDefault();
+                  moveFolder(g.key, e.key === "ArrowUp" ? i - 1 : i + 2);
+                }}
+                title={`${g.host ? `${g.cwd} on ${memberName(mesh, g.host)}` : g.cwd}\nDrag to reorder`}
                 aria-expanded={!isCollapsed}
               >
                 <span className="shrink-0 truncate text-[13px] font-medium text-fg/90">{g.label}</span>
@@ -253,5 +378,14 @@ export function CodeSidebar() {
       <ArchivedToggle count={archived.length} open={showArchived} onToggle={() => setShowArchived(!showArchived)} />
       {showArchived && archived.map((s) => item(s, true))}
     </>
+  );
+}
+
+/** Where a dragged folder will land: a line along the top or bottom edge of a folder. */
+function DropLine({ top }: { top?: boolean }) {
+  return (
+    <div
+      className={`pointer-events-none absolute left-3 right-3 h-0.5 rounded-full bg-accent ${top ? "top-0.5" : "-bottom-1"}`}
+    />
   );
 }
