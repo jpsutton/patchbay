@@ -55,6 +55,10 @@ impl Host for AppHost {
         self.data_dir.clone()
     }
 
+    fn web_search_key(&self) -> Option<String> {
+        providers::web_search_key(&self.db).map(|(k, _)| k)
+    }
+
     fn settings(&self) -> Settings {
         let prefs = crate::prefs::load(&self.db);
         Settings {

@@ -33,6 +33,10 @@ impl Host for TestHost {
     fn data_dir(&self) -> PathBuf {
         self.data.clone()
     }
+
+    fn web_search_key(&self) -> Option<String> {
+        Some("brave-test-key".into())
+    }
 }
 
 /// A minimal ACP client over the agent's pipes.
@@ -304,5 +308,20 @@ async fn a_subagent_reports_back() {
     assert!(acp.text_of("agent_message_chunk").contains("SUBAGENT-OK"), "{}", acp.text_of("agent_message_chunk"));
     // Its tokens count toward the turn: more than the two main requests alone (59 each).
     assert!(r["usage"]["outputTokens"].as_u64().unwrap() >= 51, "{r}");
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
+async fn searches_the_web_through_brave() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));
+    // The mock serves Brave's API on the same host as the model.
+    unsafe { std::env::set_var("PATCHBAY_BRAVE_URL", std::env::var("PATCHBAY_MOCK_URL").unwrap_or_else(|_| "http://127.0.0.1:8765/v1".into()).trim_end_matches("/v1")) };
+    let sid = open(&mut acp, &cwd).await;
+    let r = prompt(&mut acp, &sid, "look it up !search").await;
+    assert_eq!(r["stopReason"], "end_turn");
+    assert_eq!(acp.asked[0]["toolCall"]["kind"], "fetch");
+    assert!(acp.text_of("agent_message_chunk").contains("BRAVE-MOCK-HIT & more"), "{}", acp.text_of("agent_message_chunk"));
     let _ = std::fs::remove_dir_all(cwd);
 }

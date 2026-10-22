@@ -677,6 +677,10 @@ export const api = {
   deleteModel: (id: string) => invoke<void>("delete_model", { id }),
   getPreferences: () => invoke<Preferences>("get_preferences"),
   setPreferences: (prefs: Preferences) => invoke<void>("set_preferences", { prefs }),
+  webSearchStatus: () =>
+    invoke<{ configured: boolean; source: "env" | "keychain" | "database" | null }>("web_search_status"),
+  setWebSearchKey: (key: string) => invoke<void>("set_web_search_key", { key }),
+  clearWebSearchKey: () => invoke<void>("clear_web_search_key"),
   getSetting: (key: string) => invoke<string | null>("get_setting", { key }),
   setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),
 

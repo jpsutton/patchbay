@@ -178,3 +178,177 @@ mod tests {
         assert!(same_host(&a, &b) && !same_host(&a, &c));
     }
 }
+
+// --- WebSearch (Brave Search) ---
+
+pub struct WebSearch;
+
+/// Brave marks matches with <strong> and escapes entities; show plain text.
+fn plain(s: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            c if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+}
+
+fn brave_base() -> String {
+    // Overridable so tests can point at a mock.
+    std::env::var("PATCHBAY_BRAVE_URL").unwrap_or_else(|_| "https://api.search.brave.com".into())
+}
+
+/// The query with domain filters as Brave's `site:` operators.
+fn search_query(input: &Value) -> Option<String> {
+    let mut q = str_arg(input, "query")?.trim().to_owned();
+    let list = |key: &str| -> Vec<String> {
+        input[key].as_array().into_iter().flatten().filter_map(Value::as_str).map(|d| d.trim().to_owned()).filter(|d| !d.is_empty() && !d.contains('*')).collect()
+    };
+    let allowed = list("allowed_domains");
+    if !allowed.is_empty() {
+        q.push_str(&format!(" ({})", allowed.iter().map(|d| format!("site:{d}")).collect::<Vec<_>>().join(" OR ")));
+    }
+    for d in list("blocked_domains") {
+        q.push_str(&format!(" -site:{d}"));
+    }
+    Some(q)
+}
+
+fn format_results(body: &Value) -> String {
+    let results = body["web"]["results"].as_array().cloned().unwrap_or_default();
+    if results.is_empty() {
+        return "No results.".into();
+    }
+    let mut out = String::new();
+    for (i, r) in results.iter().enumerate() {
+        out.push_str(&format!("{}. {}\n   {}\n", i + 1, plain(r["title"].as_str().unwrap_or("")), r["url"].as_str().unwrap_or("")));
+        let desc = plain(r["description"].as_str().unwrap_or(""));
+        if !desc.is_empty() {
+            out.push_str(&format!("   {desc}"));
+            if let Some(age) = r["age"].as_str() {
+                out.push_str(&format!(" ({age})"));
+            }
+            out.push('\n');
+        }
+        for extra in r["extra_snippets"].as_array().into_iter().flatten().filter_map(Value::as_str).take(2) {
+            out.push_str(&format!("   - {}\n", plain(extra)));
+        }
+    }
+    out.push_str("\nWhen you use these results, cite the pages as Markdown links in a Sources section at the end of your answer.");
+    out
+}
+
+#[async_trait]
+impl Tool for WebSearch {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "WebSearch".into(),
+            description: "Search the web (Brave Search) for current information past your training data: recent \
+events, new library versions, documentation. Returns titles, URLs and snippets; use WebFetch to read a page. \
+Include the current year in queries about recent things. After answering from results, end with a \"Sources:\" \
+list of Markdown links to the pages you used. `allowed_domains` limits results to those sites and \
+`blocked_domains` removes them (no wildcards)."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The search query"},
+                    "allowed_domains": {"type": "array", "items": {"type": "string"}},
+                    "blocked_domains": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["query"]
+            }),
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        "fetch"
+    }
+
+    fn allowed_in_plan(&self) -> bool {
+        true
+    }
+
+    fn title(&self, input: &Value) -> String {
+        format!("Search the web: {}", str_arg(input, "query").unwrap_or(""))
+    }
+
+    fn needs_permission(&self, _: &Value, _: &crate::session::Session) -> bool {
+        true
+    }
+
+    async fn run(&self, input: Value, ctx: &ToolCtx) -> ToolOutput {
+        let Some(query) = search_query(&input).filter(|q| q.trim().len() >= 2) else {
+            return ToolOutput::error("query is required (at least two characters)");
+        };
+        let Some(key) = ctx.session.host.web_search_key() else {
+            return ToolOutput::error("Web search has no API key. Add a Brave Search API key in Settings.");
+        };
+        let http = match reqwest::Client::builder().timeout(Duration::from_secs(20)).build() {
+            Ok(c) => c,
+            Err(e) => return ToolOutput::error(e.to_string()),
+        };
+        let req = http
+            .get(format!("{}/res/v1/web/search", brave_base()))
+            .query(&[("q", query.as_str()), ("count", "10"), ("extra_snippets", "true")])
+            .header("accept", "application/json")
+            .header("x-subscription-token", key);
+        let resp = tokio::select! {
+            _ = ctx.cancel.cancelled() => return ToolOutput::error("Cancelled."),
+            r = req.send() => match r {
+                Ok(r) => r,
+                Err(e) => return ToolOutput::error(format!("Search failed: {e}")),
+            },
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            let detail = serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v["error"]["detail"].as_str().or(v["error"]["message"].as_str()).map(str::to_owned))
+                .unwrap_or_else(|| text.chars().take(200).collect());
+            return ToolOutput::error(match status.as_u16() {
+                401 | 403 | 422 => format!("Brave Search refused the API key ({status}). Check it in Settings. {detail}"),
+                429 => format!("Brave Search rate limit reached. Wait a moment, or check your plan. {detail}"),
+                _ => format!("Brave Search failed ({status}). {detail}"),
+            });
+        }
+        match resp.json::<Value>().await {
+            Ok(body) => ToolOutput::text(format_results(&body)),
+            Err(e) => ToolOutput::error(format!("Brave Search sent an unreadable answer: {e}")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn builds_queries_with_site_filters() {
+        let q = search_query(&json!({"query": "rust async", "allowed_domains": ["docs.rs", "rust-lang.org"], "blocked_domains": ["spam.com", "*.bad.com"]})).unwrap();
+        assert_eq!(q, "rust async (site:docs.rs OR site:rust-lang.org) -site:spam.com");
+    }
+
+    #[test]
+    fn formats_results_as_plain_text() {
+        let body = json!({"web": {"results": [
+            {"title": "The <strong>Rust</strong> Book", "url": "https://doc.rust-lang.org/book/", "description": "Learn &amp; build", "age": "2 days ago", "extra_snippets": ["more"]},
+        ]}});
+        let t = format_results(&body);
+        assert!(t.starts_with("1. The Rust Book\n   https://doc.rust-lang.org/book/\n   Learn & build (2 days ago)\n   - more"), "{t}");
+        assert!(t.contains("Sources section"));
+        assert_eq!(format_results(&json!({"web": {"results": []}})), "No results.");
+    }
+}

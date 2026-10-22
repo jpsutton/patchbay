@@ -62,6 +62,42 @@ pub fn keyring_delete(account: &str) {
     }
 }
 
+const WEB_SEARCH_ACCOUNT: &str = "web-search.brave";
+const WEB_SEARCH_INLINE: &str = "web_search.inline_key";
+
+/// The Brave Search API key and where it came from: the `BRAVE_API_KEY` environment variable,
+/// else the keychain, else the database (when no keychain is available).
+pub fn web_search_key(db: &Db) -> Option<(String, &'static str)> {
+    let env = std::env::var("BRAVE_API_KEY").ok().map(|k| k.trim().to_owned()).filter(|k| !k.is_empty());
+    if let Some(k) = env {
+        return Some((k, "env"));
+    }
+    if let Some(k) = keyring_get(WEB_SEARCH_ACCOUNT) {
+        return Some((k, "keychain"));
+    }
+    db.get_setting(WEB_SEARCH_INLINE).ok().flatten().filter(|k| !k.is_empty()).map(|k| (k, "database"))
+}
+
+pub fn set_web_search_key(db: &Db, key: &str) -> Result<()> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err(anyhow!("the key is empty"));
+    }
+    if keyring_set(WEB_SEARCH_ACCOUNT, key) {
+        db.set_setting(WEB_SEARCH_INLINE, "")?;
+    } else {
+        tracing::warn!("keyring unavailable; storing the web search key in the database");
+        db.set_setting(WEB_SEARCH_INLINE, key)?;
+    }
+    Ok(())
+}
+
+pub fn clear_web_search_key(db: &Db) -> Result<()> {
+    keyring_delete(WEB_SEARCH_ACCOUNT);
+    db.set_setting(WEB_SEARCH_INLINE, "")?;
+    Ok(())
+}
+
 pub fn list_with_key_flag(db: &Db) -> Result<Vec<Provider>> {
     Ok(db
         .list_providers()?

@@ -144,10 +144,52 @@ function UsageLimit() {
 function PatchbayModelSettings() {
   const prefs = useStore((s) => s.prefs);
   const update = useStore((s) => s.updatePrefs);
+  const [search, setSearch] = useState<{ configured: boolean; source: string | null } | null>(null);
+  useEffect(() => {
+    api.webSearchStatus().then(setSearch).catch(() => setSearch(null));
+  }, []);
   return (
     <>
       <Row label="Web fetch tool" hint="Let the agent download web pages you or it reference.">
         <Toggle label="Web fetch tool" checked={prefs.webFetch} onChange={(webFetch) => update({ webFetch })} />
+      </Row>
+      <Row
+        label="Web search (Brave)"
+        hint={
+          search?.configured
+            ? `A Brave Search API key is set (${search.source === "env" ? "from BRAVE_API_KEY" : search.source === "database" ? "stored in the database: no keychain" : "in the keychain"}). The agent can search the web.`
+            : "Paste a Brave Search API key to let the agent search the web. It is stored in the OS keychain."
+        }
+      >
+        <div className="flex flex-col items-end gap-1">
+          <Deferred
+            value=""
+            placeholder={search?.configured ? "Replace the key" : "Brave Search API key"}
+            mono
+            onCommit={async (v) => {
+              const key = v.trim();
+              if (!key) return null;
+              try {
+                await api.setWebSearchKey(key);
+                setSearch(await api.webSearchStatus());
+                return null;
+              } catch (e) {
+                return errorText(e);
+              }
+            }}
+          />
+          {search?.configured && search.source !== "env" && (
+            <button
+              className="text-xs text-accent-ink underline underline-offset-2"
+              onClick={async () => {
+                await api.clearWebSearchKey();
+                setSearch(await api.webSearchStatus());
+              }}
+            >
+              Remove the key
+            </button>
+          )}
+        </div>
       </Row>
       <Row label="Auto-compact at (%)" hint="Default for models without their own setting. Blank = 85.">
         <Deferred

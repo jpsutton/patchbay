@@ -305,6 +305,20 @@ async fn set_preferences(state: &AppState, prefs: prefs::Preferences) -> CmdResu
     Ok(())
 }
 
+/// Whether web search has a Brave API key, and where it comes from (`env`, `keychain`, `database`).
+async fn web_search_status(state: &AppState) -> CmdResult<serde_json::Value> {
+    let found = providers::web_search_key(&state.db);
+    Ok(serde_json::json!({ "configured": found.is_some(), "source": found.map(|(_, s)| s) }))
+}
+
+async fn set_web_search_key(state: &AppState, key: String) -> CmdResult<()> {
+    Ok(providers::set_web_search_key(&state.db, &key)?)
+}
+
+async fn clear_web_search_key(state: &AppState) -> CmdResult<()> {
+    Ok(providers::clear_web_search_key(&state.db)?)
+}
+
 async fn get_setting(state: &AppState, key: String) -> CmdResult<Option<String>> {
     Ok(state.db.get_setting(&key)?)
 }

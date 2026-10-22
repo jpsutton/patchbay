@@ -10,7 +10,7 @@ use crate::{prompt, turn};
 const SUBAGENT: &str = include_str!("../../prompts/subagent.md");
 /// Most model requests one subagent may make.
 const MAX_STEPS: usize = 40;
-const READ_ONLY: [&str; 4] = ["Read", "Glob", "Grep", "WebFetch"];
+const READ_ONLY: [&str; 5] = ["Read", "Glob", "Grep", "WebFetch", "WebSearch"];
 /// What a subagent never gets: it cannot ask the user, plan, or start subagents of its own.
 const WITHHELD: [&str; 4] = ["Task", "TodoWrite", "ExitPlanMode", "AskUserQuestion"];
 
@@ -67,7 +67,7 @@ with one Grep or Read."
             Ok(m) => m,
             Err(e) => return ToolOutput::error(e),
         };
-        let mut registry = Registry::builtin(settings.web_fetch);
+        let mut registry = Registry::builtin(settings.web_fetch, session.host.web_search_key().is_some());
         registry.retain(|name| {
             if explore || mode == crate::session::Mode::Plan { READ_ONLY.contains(&name) } else { !WITHHELD.contains(&name) }
         });

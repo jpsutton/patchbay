@@ -98,7 +98,7 @@ pub struct Registry {
 }
 
 impl Registry {
-    pub fn builtin(web_fetch: bool) -> Registry {
+    pub fn builtin(web_fetch: bool, web_search: bool) -> Registry {
         let mut tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(fs::Read),
             Arc::new(fs::Write),
@@ -116,6 +116,9 @@ impl Registry {
         ];
         if web_fetch {
             tools.push(Arc::new(web::WebFetch));
+        }
+        if web_search {
+            tools.push(Arc::new(web::WebSearch));
         }
         Registry { tools }
     }

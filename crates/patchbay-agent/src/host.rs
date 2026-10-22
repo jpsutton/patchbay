@@ -54,6 +54,11 @@ pub trait Host: Send + Sync + 'static {
     /// Where sessions are stored.
     fn data_dir(&self) -> PathBuf;
 
+    /// The Brave Search API key; WebSearch is offered when there is one.
+    fn web_search_key(&self) -> Option<String> {
+        None
+    }
+
     fn settings(&self) -> Settings {
         Settings::default()
     }

@@ -207,7 +207,7 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
         }
         let messages = session.state.lock().await.messages.clone();
         let mcp = session.mcp.lock().await.clone();
-        let mut registry = Registry::builtin(settings.web_fetch);
+        let mut registry = Registry::builtin(settings.web_fetch, session.host.web_search_key().is_some());
         for t in mcp.tools() {
             registry.push(t);
         }

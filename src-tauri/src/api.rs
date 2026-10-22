@@ -112,6 +112,9 @@ commands! {
     set_preferences(prefs);
     get_setting(key);
     set_setting(key, value);
+    web_search_status();
+    set_web_search_key(key);
+    clear_web_search_key();
     list_conversations();
     create_conversation(model_ref);
     update_conversation(id, title, model_ref, system_prompt, pinned, archived);

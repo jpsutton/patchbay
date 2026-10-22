@@ -875,6 +875,9 @@ export function install() {
           db.settings.preferences = JSON.stringify(a.prefs);
           return null;
         }
+        case "web_search_status": return { configured: !!db.settings["web_search.key"], source: db.settings["web_search.key"] ? "keychain" : null };
+        case "set_web_search_key": db.settings["web_search.key"] = a.key as string; return null;
+        case "clear_web_search_key": delete db.settings["web_search.key"]; return null;
         case "get_setting": return db.settings[a.key as string] ?? null;
         case "set_setting": db.settings[a.key as string] = a.value as string; return null;
 

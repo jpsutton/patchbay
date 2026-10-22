@@ -111,6 +111,10 @@ def _decide(user_text, images, after_tool, tools):
         name = find_tool(tools, {"command"})
         if name:
             return ("tool", name, {"command": "echo patchbay-ok && ls"})
+    if "!search" in user_text:
+        name = find_tool(tools, {"query"})
+        if name:
+            return ("tool", name, {"query": "patchbay search test"})
     if "!ask" in user_text:
         name = find_tool(tools, {"questions"})
         if name:
@@ -177,6 +181,13 @@ class Handler(BaseHTTPRequestHandler):
         return f"authorization={'yes' if auth else 'no'} x-api-key={'yes' if xkey else 'no'} anthropic-version={ver}"
 
     def do_GET(self):
+        if self.path.split("?")[0].endswith("/res/v1/web/search"):
+            # Brave Search: needs the subscription token, answers with a tiny result set.
+            if self.headers.get("x-subscription-token") != "brave-test-key":
+                return self._json(403, {"error": {"detail": "Subscription token invalid"}})
+            return self._json(200, {"web": {"results": [
+                {"title": "Mock <strong>result</strong>", "url": "https://example.com/mock", "description": "BRAVE-MOCK-HIT &amp; more", "age": "1 day ago"},
+            ]}})
         if self.path.rstrip("/").endswith("/models"):
             log("GET", self.path, self._auth_summary())
             return self._json(200, {"object": "list", "data": [{"id": m, "object": "model"} for m in MODELS]})
