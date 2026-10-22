@@ -33,7 +33,7 @@ import { PermissionCard, PlanDocCard, planDocOf, ToolCallCard, ToolGroup } from 
 import { SignInCard } from "./SignInCard";
 import { TranscriptRows, type TranscriptRow } from "./TranscriptRows";
 import { DiffView, diffStats } from "./DiffView";
-import { collectChanges, normalizePath, type FileChange } from "./changes";
+import { changesKey, collectChanges, normalizePath, type FileChange } from "./changes";
 import { todoPlanOf } from "../lib/todoPlan";
 import { CopyButton, copyText } from "../components/CopyButton";
 import { ExportMenu } from "../components/ExportMenu";
@@ -428,13 +428,13 @@ type Run = { i: number; e: Entry } | { tools: { i: number; e: Entry }[] };
  * Consecutive tool calls form one run, drawn as a single box with hairlines between rows. A call
  * waiting on a permission stays on its own, so its card can't hide inside a group, and so does a
  * plan document, which reads as part of the conversation. A saved to-do write shows as the plan
- * panel instead of a card.
+ * panel instead of a card (only for the agents whose plan it is: `agent`).
  */
-function runsOf(entries: Entry[], s: Pick<CodeState, "toolCalls" | "permissions">): Run[] {
+function runsOf(entries: Entry[], s: Pick<CodeState, "toolCalls" | "permissions">, agent?: AgentId): Run[] {
   const out: Run[] = [];
   entries.forEach((e, i) => {
     const tc = e.kind === "tool" ? s.toolCalls[e.id] : undefined;
-    if (tc && todoPlanOf(tc)) return;
+    if (tc && todoPlanOf(tc, agent)) return;
     const groupable =
       !!tc && !planDocOf(tc) && !s.permissions.some((p) => p.request.toolCall.toolCallId === tc.toolCallId);
     const last = out[out.length - 1];
@@ -462,7 +462,8 @@ function ChangesPanel({ changes, cwd, onClose }: { changes: FileChange[]; cwd: s
   const [sel, setSel] = useState<string | null>(null);
   const cur = changes.find((c) => c.path === sel) ?? changes[0];
   const root = normalizePath(cwd, "/");
-  const rel = (p: string) => (p.startsWith(root + "/") ? p.slice(root.length + 1) : p);
+  const prefix = root.endsWith("/") ? root : root + "/";
+  const rel = (p: string) => (p.startsWith(prefix) && p.length > prefix.length ? p.slice(prefix.length) : p);
   const stats = changes.map((c) =>
     c.parts
       .map((p) => diffStats(p.oldText, p.newText))
@@ -585,17 +586,21 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   }, [activeId, meshLoaded]);
 
   const earlierRuns = useMemo(
+    // Earlier turns ran under other agents: their cards all show.
     () => (state?.earlier ? runsOf(state.earlier.entries, { toolCalls: state.earlier.toolCalls, permissions: [] }) : []),
     [state?.earlier],
   );
   const historyRuns = useMemo(
-    () => (state?.history ? runsOf(state.history.entries, { toolCalls: state.history.toolCalls, permissions: [] }) : []),
-    [state?.history],
+    () =>
+      state?.history
+        ? runsOf(state.history.entries, { toolCalls: state.history.toolCalls, permissions: [] }, session?.agent)
+        : [],
+    [state?.history, session?.agent],
   );
   const entryRuns = useMemo(
-    () => (state ? runsOf(state.entries, state) : []),
+    () => (state ? runsOf(state.entries, state, session?.agent) : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [state?.entries, state?.toolCalls, state?.permissions],
+    [state?.entries, state?.toolCalls, state?.permissions, session?.agent],
   );
   // Stable for the memoized entries; it calls the latest `editAndResend`, set on each render.
   const editRef = useRef<(i: number, text: string, atts: Attachment[]) => Promise<boolean>>(null);
@@ -604,10 +609,18 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     [],
   );
 
-  const changes = useMemo(
-    () => (state && session ? collectChanges(state.entries, state.toolCalls, session.cwd) : []),
-    [state?.entries, state?.toolCalls, session?.cwd],
-  );
+  // The header's badge needs the count even with the panel shut, so this always runs; the key
+  // keeps it from redoing the work when only text or non-diff tool output changed.
+  const changesCache = useRef<{ key: unknown[]; value: FileChange[] } | null>(null);
+  const changes = useMemo(() => {
+    if (!state || !session) return [];
+    const key = [session.cwd, ...changesKey(state.entries, state.toolCalls)];
+    const hit = changesCache.current;
+    if (hit && hit.key.length === key.length && hit.key.every((k, i) => k === key[i])) return hit.value;
+    const value = collectChanges(state.entries, state.toolCalls, session.cwd);
+    changesCache.current = { key, value };
+    return value;
+  }, [state?.entries, state?.toolCalls, session?.cwd]);
 
   useViewAction((a) => {
     if (!activeId) return;

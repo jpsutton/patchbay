@@ -5,7 +5,7 @@
 import type { AcpToolCall, AcpToolCallContent } from "../lib/ipc";
 import type { Entry } from "../lib/store";
 import { collectChanges, normalizePath, type FileChange } from "./changes.ts";
-import { todoPlanOf } from "../lib/todoPlan.ts";
+import { planUpdateOf, todoPlanOf } from "../lib/todoPlan.ts";
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(msg);
@@ -32,6 +32,13 @@ function changes(...calls: Partial<AcpToolCall>[]): FileChange[] {
 eq(normalizePath("src/a.ts", CWD), "/work/demo/src/a.ts", "relative path");
 eq(normalizePath("./src//b/../a.ts", CWD), "/work/demo/src/a.ts", "dotted path");
 eq(normalizePath("/work/demo/src/a.ts", CWD), "/work/demo/src/a.ts", "absolute path");
+eq(normalizePath("src/a.ts", "/"), "/src/a.ts", "relative to root");
+eq(normalizePath("/", "/"), "/", "root itself");
+eq(normalizePath("c:\\proj\\a.ts", CWD), normalizePath("C:/proj/a.ts", CWD), "drive letter case");
+eq(normalizePath("a.ts", "c:\\proj"), "C:/proj/a.ts", "relative to a drive");
+eq(normalizePath("\\\\server\\share\\a.ts", CWD), "//server/share/a.ts", "UNC kept");
+eq(normalizePath("//server/share/../../x", CWD), "//server/share/x", "UNC: .. stops at the share");
+assert(normalizePath("\\\\server\\share\\a.ts", CWD) !== normalizePath("/server/share/a.ts", CWD), "UNC apart from POSIX");
 {
   const c = changes(
     { content: [diff("src/a.ts", "x\n", "y\n")] },
@@ -110,6 +117,87 @@ const FILE = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn";
   assert(c[0].parts[0].newText.includes("\nD\n") && !c[0].parts[0].newText.includes("\nd\n"), "write then edit: edit applied");
 }
 
+// A Write over an existing file: the pending `oldText: null` full text, then (same call) its hunks.
+{
+  const p = `${CWD}/notes.md`;
+  const c = changes({
+    content: [diff(p, null, "# Notes\n- one\n- two, revised\n"), diff(p, "# Notes\n- one\n- two", "# Notes\n- one\n- two, revised")],
+    locations: [{ path: p }, { path: p }],
+  });
+  eq(c[0].status, "modified", "write over existing: modified, not added");
+  eq(c[0].parts, [{ oldText: "# Notes\n- one\n- two\n", newText: "# Notes\n- one\n- two, revised\n", oldStart: 1, newStart: 1 }], "write over existing: its hunk");
+}
+// The same as two frames seen as calls: the null text, then a hunk not in it.
+{
+  const p = `${CWD}/notes2.md`;
+  const c = changes(
+    { status: "pending", content: [diff(p, null, "# Notes\n- two, revised\n")], locations: [{ path: p }] },
+    { content: [diff(p, "# Notes\n- two", "# Notes\n- two, revised")], locations: [{ path: p, line: 1 }] },
+  );
+  eq(c[0].status, "modified", "write preview then hunk: modified");
+  eq(c[0].parts.length, 1, "write preview then hunk: one part");
+  eq(c[0].parts[0].oldText, "# Notes\n- two\n", "write preview then hunk: real old text");
+}
+// A pending Write alone is still the last word: added.
+eq(changes({ status: "pending", content: [diff(`${CWD}/w.md`, null, "x\n")] })[0].status, "added", "pending write alone: added");
+
+// No line hint: text that occurs more than once isn't merged into the first occurrence.
+{
+  const c = changes(
+    { content: [diff(`${CWD}/dup.ts`, "a\nx\nb\nx\nc", "a\nx\nb\nx\nc\nd")] },
+    { content: [diff(`${CWD}/dup.ts`, "x", "y")] },
+  );
+  eq(c[0].parts.length, 2, "ambiguous text: separate region");
+  eq(c[0].parts[0].newText, "a\nx\nb\nx\nc\nd\n", "ambiguous text: first region untouched");
+  eq(c[0].parts.map((p) => p.newStart), [null, null], "ambiguous text: no made-up line numbers");
+}
+// No line hint, unique text: merged.
+{
+  const c = changes(
+    { content: [diff(`${CWD}/uniq.ts`, "a\nb\nc", "a\nB\nc")] },
+    { content: [diff(`${CWD}/uniq.ts`, "B", "BB")] },
+  );
+  eq(c[0].parts, [{ oldText: "a\nb\nc\n", newText: "a\nBB\nc\n", oldStart: 1, newStart: 1 }], "unique text: merged");
+}
+// A wide diff holding two earlier regions merges both, with no line twice.
+{
+  const c = changes(
+    { content: [diff(`${CWD}/two.ts`, "one", "ONE")] },
+    { content: [diff(`${CWD}/two.ts`, "two", "TWO")] },
+    { content: [diff(`${CWD}/two.ts`, "ONE\nmid\nTWO", "ONE\nMID\nTWO")] },
+  );
+  eq(c[0].parts, [{ oldText: "one\nmid\ntwo\n", newText: "ONE\nMID\nTWO\n", oldStart: 1, newStart: 1 }], "wide diff merges every region inside");
+}
+// The same with known lines.
+{
+  const p = `${CWD}/two2.ts`;
+  const c = changes(
+    { content: [diff(p, "b", "B"), diff(p, "d", "D")], locations: [{ path: p, line: 2 }, { path: p, line: 4 }] },
+    { content: [diff(p, "a\nB\nc\nD\ne", "a\nB\nC\nD\ne")], locations: [{ path: p, line: 1 }] },
+  );
+  eq(c[0].parts, [{ oldText: "a\nb\nc\nd\ne\n", newText: "a\nB\nC\nD\ne\n", oldStart: 1, newStart: 1 }], "wide hunk merges every region inside");
+}
+
+// CRLF file, LF hunk: they meet, and the text shown keeps the file's own lines.
+{
+  const p = `${CWD}/crlf.txt`;
+  const c = changes(
+    { content: [diff(p, "a\r\nb\r\nc\r\n", "a\r\nB\r\nc\r\n")] },
+    { content: [diff(p, "B\nc", "B\nC")], locations: [{ path: p, line: 2 }] },
+  );
+  eq(c[0].parts.length, 1, "crlf: merged");
+  eq(c[0].parts[0].oldText, "a\r\nb\r\nc\r\n", "crlf: old text kept");
+  eq(c[0].parts[0].newText, "a\r\nB\nC\n", "crlf: new text applied");
+}
+{
+  const p = `${CWD}/crlf2.txt`;
+  const c = changes(
+    { content: [diff(p, "x\r\ny\r\n", "x\r\nY\r\n")] },
+    { content: [diff(p, "Y", "YY")] },
+  );
+  eq(c[0].parts.length, 1, "crlf no hint: merged");
+}
+
 // Hunks that can't be placed stay separate rather than paired.
 {
   const c = changes(
@@ -118,6 +206,7 @@ const FILE = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn";
   );
   eq(c[0].parts.length, 2, "unplaced fragments stay apart");
   eq(c[0].parts.map((p) => p.oldText), ["one\n", "two\n"], "unplaced fragments keep their own old text");
+  eq(c[0].parts.map((p) => [p.oldStart, p.newStart]), [[null, null], [null, null]], "unplaced fragments: no line numbers");
 }
 
 // Codex: whole files; deletion is `newText: ""`.
@@ -128,6 +217,22 @@ const FILE = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn";
   );
   eq(c.map((f) => f.status), ["deleted", "modified"], "codex: deletion");
   eq(c[0].parts[0].newText, "", "codex: deleted file has no new text");
+}
+// A deletion after earlier edits (several regions) is still a deletion.
+{
+  const p = `${CWD}/del.txt`;
+  const c = changes(
+    { content: [diff(p, "b", "B"), diff(p, "d", "D")], locations: [{ path: p, line: 2 }, { path: p, line: 4 }] },
+    { content: [diff(p, "a\nB\nc\nD\n", "")] },
+  );
+  eq(c[0].status, "deleted", "deleted after edits");
+  eq(c[0].parts, [{ oldText: "a\nb\nc\nd\n", newText: "", oldStart: 1, newStart: 1 }], "deleted after edits: original text removed");
+}
+{
+  const p = `${CWD}/del2.txt`;
+  const c = changes({ content: [diff(p, "one", "ONE")] }, { content: [diff(p, "two", "TWO")] }, { content: [diff(p, "ONE\nzz\nTWO\nq\nq", "")] });
+  eq(c[0].status, "deleted", "deleted with unplaced regions");
+  eq(c[0].parts.length, 1, "deleted: one part");
 }
 // Created then deleted in one session: nothing to show.
 eq(changes({ content: [diff(`${CWD}/tmp.txt`, null, "x\n")] }, { content: [diff(`${CWD}/tmp.txt`, "x\n", "")] }).length, 0, "created then deleted");
@@ -141,23 +246,40 @@ const todos = [
   { content: "Fix it", status: "in_progress", priority: "high" },
   { content: "Old idea", status: "cancelled", priority: "low" },
 ];
+const OC = "opencode" as const;
 const tw = (x: Partial<AcpToolCall>) => ({ toolCallId: "w", title: "todowrite", kind: "other", status: "pending", rawInput: {}, ...x }) as AcpToolCall;
 
-eq(todoPlanOf(tw({})), null, "pending write: no plan");
-eq(todoPlanOf(tw({ status: "in_progress", rawInput: { todos } })), null, "proposed list: no plan");
-eq(todoPlanOf(tw({ status: "failed", rawInput: { todos } })), null, "rejected write: no plan");
+eq(todoPlanOf(tw({}), OC), null, "pending write: no plan");
+eq(todoPlanOf(tw({ status: "in_progress", rawInput: { todos } }), OC), null, "proposed list: no plan");
+eq(todoPlanOf(tw({ status: "failed", rawInput: { todos } }), OC), null, "rejected write: no plan");
 eq(
-  todoPlanOf(tw({ status: "completed", title: "2 todos", rawInput: { todos: [] }, rawOutput: { metadata: { todos } } })),
+  todoPlanOf(tw({ status: "completed", title: "2 todos", rawInput: { todos: [] }, rawOutput: { metadata: { todos } } }), OC),
   todos,
   "completed write: saved list, cancelled kept",
 );
-eq(todoPlanOf(tw({ status: "completed", title: "2 todos", rawInput: { todos } })), todos, "replayed write: list from rawInput");
-eq(todoPlanOf(tw({ status: "completed", title: "0 todos", rawOutput: { metadata: { todos: [] } } })), [], "empty list clears");
+eq(todoPlanOf(tw({ status: "completed", title: "2 todos", rawInput: { todos } }), OC), todos, "replayed write: list from rawInput");
+eq(todoPlanOf(tw({ status: "completed", title: "0 todos", rawOutput: { metadata: { todos: [] } } }), OC), [], "empty list clears");
 eq(
-  todoPlanOf(tw({ status: "completed", title: "1 todos", rawOutput: { metadata: { todos: [{ content: "x" }] } } })),
+  todoPlanOf(tw({ status: "completed", title: "1 todos", rawOutput: { metadata: { todos: [{ content: "x" }] } } }), OC),
   [{ content: "x", status: "pending", priority: "medium" }],
   "missing fields default",
 );
-eq(todoPlanOf(tw({ status: "completed", title: "Read file", rawInput: { todos } })), null, "other tools: no plan");
+eq(todoPlanOf(tw({ status: "completed", title: "Read file", rawInput: { todos } }), OC), null, "other tools: no plan");
+
+eq(todoPlanOf(tw({ status: "completed", title: "2 todos", rawInput: { todos } }), "kilo"), todos, "kilo too");
+eq(todoPlanOf(tw({ status: "completed", title: "todowrite", rawInput: { todos } }), "claude-code"), null, "other agents' todowrite: no plan");
+eq(todoPlanOf(tw({ status: "completed", title: "2 todos", rawInput: { todos } }), undefined), null, "unknown agent: no plan");
+
+// Only the frame that completes a write sets the plan; a late repeat of an older one doesn't.
+{
+  const done = tw({ status: "completed", title: "2 todos", rawOutput: { metadata: { todos } } });
+  const running = tw({ status: "in_progress", rawInput: { todos } });
+  eq(planUpdateOf(running, done, OC), todos, "completing frame sets the plan");
+  eq(planUpdateOf(undefined, done, OC), todos, "replay announce sets the plan");
+  eq(planUpdateOf(done, done, OC), null, "late repeat of a completed write: no plan");
+  const noOut = tw({ status: "completed", title: "2 todos", rawInput: { todos } });
+  eq(planUpdateOf(noOut, done, OC), todos, "saved list arriving after completion sets it");
+  eq(planUpdateOf(running, done, "codex"), null, "completing frame, other agent: no plan");
+}
 
 console.log("changes selftest: ok");
