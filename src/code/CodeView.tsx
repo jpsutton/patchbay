@@ -30,6 +30,7 @@ import { Markdown } from "../components/Markdown";
 import { EditMessage } from "../components/EditMessage";
 import { UsageBar } from "../components/UsageBar";
 import { TerminalPane } from "../terminal/TerminalPane";
+import { QuestionCard } from "./QuestionCard";
 import { PermissionCard, PlanDocCard, planDocOf, ToolCallCard, ToolGroup } from "./ToolCallCard";
 import { DiffView, diffStats } from "./DiffView";
 import { CopyButton, copyText } from "../components/CopyButton";
@@ -694,7 +695,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     return true;
   };
 
-  const needsYou = (s?.permissions.length ?? 0) > 0;
+  const needsYou = (s?.permissions.length ?? 0) > 0 || (s?.questions.length ?? 0) > 0;
   // The status light: amber = needs you, blue = working, green = ready, red = stopped.
   const dot = needsYou
     ? "bg-accent signal-pulse shadow-[0_0_0_3px_rgb(242_165_65/0.18)]"
@@ -1005,7 +1006,10 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     cwd={session.cwd}
                   />
                 ))}
-                {working && s?.permissions.length === 0 && (
+                {s?.questions.map((q) => (
+                  <QuestionCard key={q.requestId} requestId={q.requestId} form={q.form} sessionId={session.id} />
+                ))}
+                {working && s?.permissions.length === 0 && s.questions.length === 0 && (
                   <div className="flex items-center gap-2 text-xs text-muted">
                     <span className="signal-pulse h-1.5 w-1.5 rounded-full bg-live" /> Working…
                   </div>

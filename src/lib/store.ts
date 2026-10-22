@@ -9,6 +9,7 @@ import {
   type AcpModels,
   type AcpModes,
   type AcpPermissionRequest,
+  type AgentQuestionForm,
   type AcpPlanEntry,
   type AcpToolCall,
   type AcpUpdate,
@@ -60,6 +61,7 @@ export interface CodeState {
   models: AcpModels | null;
   modes: AcpModes | null;
   permissions: { requestId: string; request: AcpPermissionRequest }[];
+  questions: { requestId: string; form: AgentQuestionForm }[];
   usage: UsageView | null;
   commands: AcpCommand[];
   capabilities: AgentCapabilities | null;
@@ -106,6 +108,7 @@ const emptyCode = (): CodeState => ({
   models: null,
   modes: null,
   permissions: [],
+  questions: [],
   usage: null,
   commands: [],
   capabilities: null,
@@ -494,7 +497,7 @@ export const useStore = create<Store>((set, get) => ({
       const session = codeSessions.find((c) => c.id === id);
       if (!session || remoteHost(session, mesh)) continue;
       const stale = s.configRev < agentConfigRev || (!!s.extensions.patchbayModels && s.catalogRev < catalogRev);
-      if (s.status === "ready" && !s.busy && s.permissions.length === 0 && stale) {
+      if (s.status === "ready" && !s.busy && s.permissions.length === 0 && s.questions.length === 0 && stale) {
         startAgent(id).then(() =>
           get().pushCodeEntry(id, { kind: "info", text: "Restarted the agent to apply changed settings" }),
         );
@@ -638,6 +641,7 @@ export const useStore = create<Store>((set, get) => ({
           status: e.state,
           busy: e.state === "exited" ? false : s.busy,
           permissions: e.state === "exited" ? [] : s.permissions,
+          questions: e.state === "exited" ? [] : s.questions,
           // Commands an agent backgrounded end with it.
           toolCalls: e.state === "exited" ? endBackground(s.toolCalls) : s.toolCalls,
         };
@@ -671,6 +675,7 @@ export const useStore = create<Store>((set, get) => ({
           configOptions: e.configOptions ?? [],
           extensions: e.extensions ?? { statusLine: false, rewind: false },
           approvalGaps: e.approvalGaps ?? [],
+          questions: [],
         };
         break;
       }
@@ -698,6 +703,13 @@ export const useStore = create<Store>((set, get) => ({
         break;
       case "permissionResolved":
         next = { ...s, permissions: s.permissions.filter((p) => p.requestId !== e.requestId) };
+        break;
+      case "question":
+        next = { ...s, questions: [...s.questions, { requestId: e.requestId, form: e.form }] };
+        notifyCode(id, "has a question for you");
+        break;
+      case "questionResolved":
+        next = { ...s, questions: s.questions.filter((q) => q.requestId !== e.requestId) };
         break;
       case "promptDone":
         next = {

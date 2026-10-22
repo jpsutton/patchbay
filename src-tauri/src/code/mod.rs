@@ -8,6 +8,7 @@ pub mod agents;
 pub mod grok_config;
 pub mod mcp;
 pub mod permissions;
+pub mod questions;
 pub mod titles;
 
 use std::collections::HashMap;
@@ -17,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Result, anyhow};
 use tokio::sync::{mpsc, oneshot};
 
-use self::acp::{AgentCmd, PendingPermissions, Sink, SpawnSpec};
+use self::acp::{AgentCmd, PendingPermissions, PendingQuestions, Sink, SpawnSpec};
 use crate::db::Db;
 
 struct Agent {
@@ -29,6 +30,7 @@ struct Agent {
 pub struct CodeManager {
     agents: Mutex<HashMap<String, Agent>>,
     pub pending: PendingPermissions,
+    pub questions: PendingQuestions,
     /// Sessions whose agent is in the middle of a turn.
     busy: Mutex<std::collections::HashSet<String>>,
     /// Sessions being handed to another node: no restarts until the handover settles.
@@ -157,6 +159,7 @@ impl CodeManager {
             cwd: PathBuf::from(&session.cwd),
             resume: session.acp_session_id.clone(),
             pending: self.pending.clone(),
+            questions: self.questions.clone(),
             on_session: {
                 let csid = csid.clone();
                 Box::new(move |sid| {
@@ -257,6 +260,16 @@ impl CodeManager {
     pub fn respond_permission(&self, request_id: &str, option_id: Option<String>) {
         if let Some((_, tx)) = self.pending.lock().unwrap().remove(request_id) {
             let _ = tx.send(option_id);
+        }
+    }
+
+    /// Answer a question card. A reply that isn't the card's shape is ignored, so the card stays.
+    pub fn respond_question(&self, request_id: &str, answers: serde_json::Value) {
+        let Ok(reply) = serde_json::from_value::<questions::QuestionReply>(serde_json::json!({ "answers": answers })) else {
+            return;
+        };
+        if let Some((_, tx)) = self.questions.lock().unwrap().remove(request_id) {
+            let _ = tx.send(reply);
         }
     }
 

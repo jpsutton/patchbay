@@ -755,6 +755,7 @@ export function install() {
           r?.((a.optionId as string) ?? null);
           return null;
         }
+        case "code_question_respond": return null;
 
         case "term_open": {
           setTimeout(() => send<TermEvent>(a.onEvent, { type: "data", data: btoa(`demo@patchbay:${a.cwd}$ `) }), 50);
