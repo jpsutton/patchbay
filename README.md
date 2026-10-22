@@ -42,7 +42,7 @@ Patchbay is a desktop app in the style of Claude Desktop. Bring your own provide
 - Link your computers into a **mesh** (Settings → Mesh). Chats, Code sessions, prompts, providers and MCP servers sync between them live, API keys included, encrypted.
 - Drive a Code session running on another computer from this one, or move it over, uncommitted changes and all. If that computer goes offline, take the session over from its last checkpoint.
 - Computers connect directly over a network you already have, such as Tailscale, ZeroTier, a VPN or a Cloudflare Tunnel. No cloud service sits in the middle, and every new computer needs the mesh's passphrase plus your approval.
-- **Patchbay Remote**, the Android app, follows and drives your computers' chats and Code sessions from your phone, without holding your API keys. Install it from Patchbay's own F-Droid repository.
+- **Patchbay Remote**, the Android app, follows and drives your computers' chats and Code sessions from your phone, without holding your API keys. Install it from Patchbay's own F-Droid repository; see [Android](#android).
 
 See [docs/mesh.md](docs/mesh.md) for setup and details.
 
@@ -63,6 +63,7 @@ Download Patchbay from the [Releases page](https://github.com/jpsutton/patchbay/
 | Linux | `.deb` (Ubuntu 24.04 or newer, Debian 13), `.rpm` (Fedora, openSUSE), AppImage, and an Arch Linux package repository. Needs glibc 2.39 or newer. |
 | Windows | Installer (`.exe`) and `.msi` |
 | macOS | `.dmg` (Apple silicon) |
+| Android | Patchbay Remote, the phone app: `.apk` (arm64, Android 8.0 or newer) and an F-Droid repository |
 
 Windows and macOS builds aren't signed by Microsoft or Apple yet, so your system will warn you the first time you open them.
 
@@ -108,6 +109,25 @@ sudo pacman-key --lsign-key 0D3A064DDF8B635FD85894E9B3A7618B4B88E5D7
 ```bash
 sudo pacman -Sy patchbay
 ```
+
+### Android
+
+Patchbay Remote drives your computers' chats and Code sessions from your phone. It needs at least one computer in a [mesh](docs/mesh.md) to connect through. It runs on Android 8.0 or newer, on 64-bit ARM phones.
+
+The easiest way to install and update it is Patchbay's F-Droid repository, which works in F-Droid, Droid-ify and Neo Store:
+
+1. On the phone, open [jpsutton.github.io/patchbay/fdroid](https://jpsutton.github.io/patchbay/fdroid/) and tap **Add to F-Droid**.
+2. Install **Patchbay Remote** from that repository. New releases then show up as regular app updates.
+
+To add the repository by hand, use the address `https://jpsutton.github.io/patchbay/fdroid/repo` and check that its fingerprint is:
+
+```
+D634BFC58A496FCEA75C541E594E68578D9070BEF965C92752F2EBEA1EA25E8F
+```
+
+You can also download `patchbay-remote-<version>-arm64.apk` from the [Releases page](https://github.com/jpsutton/patchbay/releases/latest) and install it directly, or let [Obtainium](https://obtainium.imranr.dev) follow the releases. Android asks you to allow installs from your browser or Obtainium the first time.
+
+To join the phone to your mesh, see [From your phone](docs/mesh.md#from-your-phone).
 
 ### Checking a download
 
