@@ -35,10 +35,7 @@ jobs:
           submodules: true
       - run: scripts/ci/deps-ubuntu.sh
       # The protoc Grok Build pins (vendor/grok-build/bin/protoc), the same on every platform.
-      - uses: arduino/setup-protoc@v3
-        with:
-          version: '29.3'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - run: scripts/ci/install-protoc.sh 29.3
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -154,10 +151,7 @@ jobs:
             src-tauri -> target
             vendor/grok-build -> ../../target/grok
       # The protoc Grok Build pins (vendor/grok-build/bin/protoc), the same on every platform.
-      - uses: arduino/setup-protoc@v3
-        with:
-          version: '29.3'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - run: scripts/ci/install-protoc.sh 29.3
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -196,10 +190,7 @@ jobs:
             src-tauri -> target
             vendor/grok-build -> ../../target/grok
       # The protoc Grok Build pins (vendor/grok-build/bin/protoc), the same on every platform.
-      - uses: arduino/setup-protoc@v3
-        with:
-          version: '29.3'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - run: scripts/ci/install-protoc.sh 29.3
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
