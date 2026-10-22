@@ -355,9 +355,7 @@ const EntryView = memo(function EntryView({
 });
 
 /** A dim line for something the agent sent that Patchbay can't show; opens to the raw payload. */
-function UnrecognizedEntry({ text, raw, count }: { text: string; raw: unknown; count?: number }) {
-  const json = JSON.stringify(raw, null, 2) ?? "null";
-  const shown = json.length > 20_000 ? `${json.slice(0, 20_000)}\n…[${json.length - 20_000} more characters]` : json;
+function UnrecognizedEntry({ text, raw, count }: { text: string; raw: string; count?: number }) {
   return (
     <details className="group text-[12px] text-faint">
       <summary className="cursor-pointer list-none text-center hover:text-muted">
@@ -366,7 +364,7 @@ function UnrecognizedEntry({ text, raw, count }: { text: string; raw: unknown; c
         <span className="ml-1 group-open:hidden">· show</span>
       </summary>
       <pre className="mt-1.5 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12px] leading-5 text-muted">
-        {shown}
+        {raw}
       </pre>
     </details>
   );

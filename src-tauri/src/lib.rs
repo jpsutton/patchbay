@@ -715,12 +715,8 @@ async fn wire_log_frames(
     _state: &AppState,
     session: Option<String>,
     last: Option<usize>,
-) -> CmdResult<Vec<code::wire::Frame>> {
-    let mut frames = code::wire::frames(session.as_deref());
-    if let Some(n) = last {
-        frames.drain(..frames.len().saturating_sub(n));
-    }
-    Ok(frames)
+) -> CmdResult<Vec<std::sync::Arc<code::wire::Frame>>> {
+    Ok(code::wire::frames(session.as_deref(), last))
 }
 
 async fn wire_log_clear(_state: &AppState) -> CmdResult<code::wire::Status> {

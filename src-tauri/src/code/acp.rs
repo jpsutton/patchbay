@@ -690,7 +690,13 @@ impl UiClient {
     /// A `session/update` the ACP types can't decode (see `wire::reroute`). The UI takes the
     /// kinds it knows as they are, unknown values included; the rest show as a dim line.
     fn raw_update(&self, params: Value) {
-        let session_id = params["sessionId"].as_str().unwrap_or_default();
+        let Some(session_id) = params["sessionId"].as_str() else {
+            // No session to check it against: show it in this one rather than drop it unseen.
+            tracing::warn!("the agent sent a session/update without a session id");
+            let message = "The agent sent an update without a session id".to_owned();
+            emit(&self.sink, &self.code_session_id, CodeEvent::Unrecognized { message, raw: params });
+            return;
+        };
         if self.acp_session.borrow().as_deref().is_some_and(|sid| session_id != sid) {
             return;
         }
@@ -1992,6 +1998,7 @@ for line in sys.stdin:
                 send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": u}})
             upd({"sessionUpdate": "brand_new", "x": 1})
             upd({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Run", "status": "cancelled"})
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {"update": {"sessionUpdate": "plan", "entries": []}}})
             send({"jsonrpc": "2.0", "id": "p1", "method": "session/request_permission", "params": {"sessionId": "s1",
                   "toolCall": {"toolCallId": "t1"}, "options": [{"optionId": "a", "name": "Allow", "kind": "allow_for_session"}]}})
             send({"jsonrpc": "2.0", "id": "p2", "method": "session/request_permission", "params": {"sessionId": "s1", "options": []}})
@@ -2519,7 +2526,7 @@ for line in sys.stdin:
         wait_for(&events, "promptDone", |evs| evs.iter().any(prompt_done));
         wait_for(&events, "both permissions", |evs| {
             let n = |f: fn(&CodeEvent) -> bool| evs.iter().filter(|e| f(e)).count();
-            n(|e| matches!(e, CodeEvent::Permission { .. })) == 1 && n(|e| matches!(e, CodeEvent::Unrecognized { .. })) == 2
+            n(|e| matches!(e, CodeEvent::Permission { .. })) == 1 && n(|e| matches!(e, CodeEvent::Unrecognized { .. })) == 3
         });
         let evs = events.lock().unwrap();
         let unknown: Vec<&str> = evs
@@ -2530,7 +2537,8 @@ for line in sys.stdin:
             })
             .collect();
         assert!(unknown[0].contains("\"brand_new\""), "{unknown:?}");
-        assert!(unknown[1].contains("permission"), "{unknown:?}");
+        assert!(unknown[1].contains("without a session id"), "{unknown:?}");
+        assert!(unknown[2].contains("permission"), "{unknown:?}");
         // Unknown values the UI can show go through as they are.
         assert!(evs.iter().any(|e| matches!(e, CodeEvent::Update { update } if update["status"] == "cancelled")));
         assert!(evs.iter().any(
