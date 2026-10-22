@@ -137,7 +137,9 @@ jobs:
 
   windows:
     runs-on: windows-latest
-    timeout-minutes: 90
+    # The sidecar, the app and patchbayd build one after another, and a timed-out run saves no
+    # Rust cache for the next one: 90 minutes ran out in 0.9.2 and 0.10.0.
+    timeout-minutes: 150
     defaults:
       run:
         shell: bash
