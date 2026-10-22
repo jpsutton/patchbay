@@ -565,11 +565,17 @@ fn hide_modes(modes: &mut Value, hide: &[&str]) {
 }
 
 impl UiClient {
-    fn merged_tool_call(&self, tc: &Value) -> Value {
-        let id = tc["toolCallId"].as_str().unwrap_or_default();
-        let mut out = self.tool_calls.borrow().get(id).cloned().unwrap_or_else(|| json!({}));
-        merge_fields(&mut out, tc);
-        out
+    /// Merge a tool call's fields into what's known about it, the newer fields winning, and
+    /// return the result.
+    fn merge_tool_call(&self, tc: &Value) -> Value {
+        let Some(id) = tc["toolCallId"].as_str() else { return tc.clone() };
+        let mut map = self.tool_calls.borrow_mut();
+        let entry = map.entry(id.to_owned()).or_insert_with(|| json!({}));
+        merge_fields(entry, tc);
+        if let Some(o) = entry.as_object_mut() {
+            o.remove("sessionUpdate");
+        }
+        entry.clone()
     }
 
     /// The agent switched itself into one of its own approval policies (Claude does when a plan
@@ -594,6 +600,19 @@ impl UiClient {
     }
 }
 
+/// Fill in the ACP defaults a `tool_call` announcement may leave out. The schema crate skips
+/// default values when it serializes, so a call announced as `pending` / `other` arrives with
+/// neither field. Only for announcements: in a `tool_call_update` an absent field means unchanged.
+fn fill_tool_call_defaults(update: &mut Value) {
+    if let Some(o) = update.as_object_mut() {
+        for (k, v) in [("status", "pending"), ("kind", "other")] {
+            if o.get(k).is_none_or(Value::is_null) {
+                o.insert(k.into(), json!(v));
+            }
+        }
+    }
+}
+
 fn merge_fields(into: &mut Value, from: &Value) {
     if let (Some(dst), Some(src)) = (into.as_object_mut(), from.as_object()) {
         for (k, v) in src {
@@ -604,14 +623,134 @@ fn merge_fields(into: &mut Value, from: &Value) {
     }
 }
 
+#[cfg(test)]
+mod tool_call_tests {
+    use super::*;
+    use acp::Client as _;
+
+    /// A client whose sink records events and answers each permission request with "allow".
+    fn client() -> (UiClient, Arc<Mutex<Vec<CodeEvent>>>, mpsc::UnboundedSender<AgentCmd>) {
+        let events: Arc<Mutex<Vec<CodeEvent>>> = Arc::default();
+        let pending: PendingPermissions = Arc::default();
+        let (seen, answers) = (events.clone(), pending.clone());
+        let sink: Sink = Arc::new(move |env: Envelope| {
+            if let CodeEvent::Permission { request_id, .. } = &env.event
+                && let Some((_, tx)) = answers.lock().unwrap().remove(request_id)
+            {
+                let _ = tx.send(Some("allow".into()));
+            }
+            seen.lock().unwrap().push(env.event);
+        });
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let client = UiClient {
+            sink,
+            code_session_id: "c".into(),
+            pending,
+            auto_approve: Arc::new(|_, _| None),
+            tool_calls: RefCell::default(),
+            config_ids: Rc::default(),
+            approvals: ApprovalSetup::default(),
+            cmds: tx.downgrade(),
+            acp_session: Rc::default(),
+        };
+        (client, events, tx)
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(f)
+    }
+
+    fn notify(c: &UiClient, update: Value) {
+        let n = serde_json::from_value(json!({ "sessionId": "s", "update": update })).unwrap();
+        block_on(c.session_notification(n)).unwrap();
+    }
+
+    fn last_update(events: &Mutex<Vec<CodeEvent>>) -> Value {
+        match events.lock().unwrap().last() {
+            Some(CodeEvent::Update { update }) => update.clone(),
+            other => panic!("expected an update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn announced_tool_call_gets_spec_defaults() {
+        let (c, events, _tx) = client();
+        notify(&c, json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Run", "status": "pending", "kind": "other" }));
+        let u = last_update(&events);
+        assert_eq!((u["status"].clone(), u["kind"].clone()), (json!("pending"), json!("other")));
+
+        notify(&c, json!({ "sessionUpdate": "tool_call", "toolCallId": "t2", "title": "Edit", "kind": "edit", "status": "in_progress" }));
+        let u = last_update(&events);
+        assert_eq!((u["status"].clone(), u["kind"].clone()), (json!("in_progress"), json!("edit")));
+
+        // An update leaves out what didn't change.
+        notify(&c, json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t2", "title": "Edit a.rs" }));
+        let u = last_update(&events);
+        assert!(u.get("status").is_none() && u.get("kind").is_none(), "{u}");
+        assert_eq!(c.tool_calls.borrow()["t2"]["status"], "in_progress");
+    }
+
+    #[test]
+    fn permission_request_fields_win_and_are_kept() {
+        let (c, events, _tx) = client();
+        notify(&c, json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Edit", "kind": "edit", "rawInput": { "old": 1 } }));
+        let req = serde_json::from_value(json!({
+            "sessionId": "s",
+            "toolCall": {
+                "toolCallId": "t1",
+                "title": "Edit `a.rs`",
+                "rawInput": { "file_path": "a.rs" },
+                "content": [{ "type": "diff", "path": "/w/a.rs", "oldText": "a", "newText": "b" }]
+            },
+            "options": [{ "optionId": "allow", "name": "Yes", "kind": "allow_once" }]
+        }))
+        .unwrap();
+        block_on(c.request_permission(req)).unwrap();
+
+        let sent = events.lock().unwrap().iter().find_map(|e| match e {
+            CodeEvent::Permission { request, .. } => Some(request["toolCall"].clone()),
+            _ => None,
+        });
+        let tc = sent.expect("a permission event");
+        assert_eq!(tc["title"], "Edit `a.rs`");
+        assert_eq!(tc["rawInput"], json!({ "file_path": "a.rs" }));
+        assert_eq!(tc["kind"], "edit");
+        assert_eq!(tc["status"], "pending");
+        assert_eq!(tc["content"][0]["type"], "diff");
+        assert!(tc.get("sessionUpdate").is_none());
+        // The stored call keeps the request's fields once the request is answered, and the UI
+        // gets them as an update too.
+        assert_eq!(c.tool_calls.borrow()["t1"], tc);
+        let evs = events.lock().unwrap();
+        let upd = evs.iter().find_map(|e| match e {
+            CodeEvent::Update { update } if update["sessionUpdate"] == "tool_call_update" => Some(update.clone()),
+            _ => None,
+        });
+        assert_eq!(upd.expect("a tool_call_update")["content"][0]["newText"], "b");
+    }
+}
+
 #[async_trait::async_trait(?Send)]
 impl acp::Client for UiClient {
     async fn request_permission(
         &self,
         args: acp::RequestPermissionRequest,
     ) -> acp::Result<acp::RequestPermissionResponse> {
-        let raw = serde_json::to_value(&args).unwrap_or(Value::Null);
-        let tool_call = self.merged_tool_call(&raw["toolCall"]);
+        let mut raw = serde_json::to_value(&args).unwrap_or(Value::Null);
+        // The request may carry fields no notification did (a diff, rawInput): keep them with the
+        // call, and show the UI the merged call, the request's fields winning. A call the
+        // transcript already shows also gets them as an update, so they outlast the request (or
+        // reach the UI at all when a rule answers it).
+        let known = raw["toolCall"]["toolCallId"]
+            .as_str()
+            .is_some_and(|id| self.tool_calls.borrow().contains_key(id));
+        let tool_call = self.merge_tool_call(&raw["toolCall"]);
+        if known {
+            let mut update = raw["toolCall"].clone();
+            update["sessionUpdate"] = json!("tool_call_update");
+            emit(&self.sink, &self.code_session_id, CodeEvent::Update { update });
+        }
+        raw["toolCall"] = tool_call.clone();
         if let Some((option_id, description)) = (self.auto_approve)(&tool_call, &raw["options"]) {
             emit(
                 &self.sink,
@@ -635,7 +774,7 @@ impl acp::Client for UiClient {
             &self.code_session_id,
             CodeEvent::Permission {
                 request_id: request_id.clone(),
-                request: serde_json::to_value(&args).unwrap_or(Value::Null),
+                request: raw,
             },
         );
         let choice = rx.await.ok().flatten();
@@ -659,13 +798,12 @@ impl acp::Client for UiClient {
         if self.acp_session.borrow().as_deref().is_some_and(|sid| *args.session_id.0 != *sid) {
             return Ok(());
         }
-        let update = serde_json::to_value(&args.update).unwrap_or(Value::Null);
-        if matches!(update["sessionUpdate"].as_str(), Some("tool_call" | "tool_call_update"))
-            && let Some(id) = update["toolCallId"].as_str()
-        {
-            let mut map = self.tool_calls.borrow_mut();
-            let entry = map.entry(id.to_owned()).or_insert_with(|| json!({}));
-            merge_fields(entry, &update);
+        let mut update = serde_json::to_value(&args.update).unwrap_or(Value::Null);
+        if update["sessionUpdate"] == "tool_call" {
+            fill_tool_call_defaults(&mut update);
+        }
+        if matches!(update["sessionUpdate"].as_str(), Some("tool_call" | "tool_call_update")) {
+            self.merge_tool_call(&update);
         }
         match update["sessionUpdate"].as_str() {
             Some("config_option_update") => {

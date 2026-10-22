@@ -404,7 +404,7 @@ type TerminalMeta = {
   terminal_exit?: { exit_code?: number | null };
 };
 
-function mergeToolCall(prev: AcpToolCall | undefined, upd: AcpToolCall): AcpToolCall {
+export function mergeToolCall(prev: AcpToolCall | undefined, upd: AcpToolCall): AcpToolCall {
   const out: AcpToolCall = { ...(prev ?? { toolCallId: upd.toolCallId }) };
   for (const [k, v] of Object.entries(upd)) {
     if (k === "sessionUpdate" || k === "_meta" || v === undefined || v === null) continue;
@@ -465,7 +465,10 @@ function reduceUpdate(s: CodeState, u: AcpUpdate): CodeState {
       });
     case "tool_call":
     case "tool_call_update": {
-      const tc = u as unknown as AcpToolCall;
+      let tc = u as unknown as AcpToolCall;
+      // ACP defaults for an announcement (the backend fills them too); in an update an absent
+      // field means unchanged.
+      if (u.sessionUpdate === "tool_call") tc = { ...tc, status: tc.status ?? "pending", kind: tc.kind ?? "other" };
       const exists = !!s.toolCalls[tc.toolCallId];
       return stamp({
         ...s,
@@ -564,10 +567,18 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
     case "update":
       next = reduceUpdate(s, e.update);
       break;
-    case "permission":
-      next = { ...s, permissions: [...s.permissions, { requestId: e.requestId, request: e.request }] };
+    case "permission": {
+      // The request may carry fields no update did (a diff, rawInput): keep them with the call
+      // so they outlast the request and reach the Changes panel.
+      const tc = e.request.toolCall;
+      next = {
+        ...s,
+        toolCalls: { ...s.toolCalls, [tc.toolCallId]: mergeToolCall(s.toolCalls[tc.toolCallId], tc) },
+        permissions: [...s.permissions, { requestId: e.requestId, request: e.request }],
+      };
       notifyCode(id, "needs your approval");
       break;
+    }
     case "permissionResolved":
       next = { ...s, permissions: s.permissions.filter((p) => p.requestId !== e.requestId) };
       break;
