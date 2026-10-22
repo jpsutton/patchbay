@@ -266,6 +266,27 @@ async function fakeLongReplay(csid: string) {
   (window as unknown as { __longReplayMs: number }).__longReplayMs = performance.now() - t0;
 }
 
+/** `?harness=1`: a seeded session whose load replays Claude Code's harness messages and a cancel. */
+const harnessDemo = new URLSearchParams(location.search).has("harness");
+let harnessSessionId: string | null = null;
+
+function fakeHarnessReplay(csid: string) {
+  const user = (text: string) => codeEmit(csid, { type: "update", update: { sessionUpdate: "user_message_chunk", content: { type: "text", text } } });
+  const agent = (text: string) => codeEmit(csid, { type: "update", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } });
+  user("<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>opus</command-args>");
+  user("<local-command-stdout>Set model to Opus</local-command-stdout>");
+  // A prompt and a reminder in one message, the reminder split across chunks.
+  user("Fix the flaky upload test.\n<system-reminder>\nThe user opened ");
+  user("src/upload.test.ts in the IDE.\n</system-reminder>");
+  agent("Looking at the upload test now.");
+  user("[Request interrupted by user]");
+  user("Use <b>bold</b> in the summary instead.");
+  agent("Sure, here is the **summary**.");
+  user('<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>Background build finished</summary>\n</task-notification>');
+  agent("The background build passed.");
+  user("[Request interrupted by user for tool use]");
+}
+
 async function fakeChat(a: Record<string, unknown>, regenerate?: string) {
   const convId = a.conversationId as string;
   const ch = a.onEvent;
@@ -362,7 +383,7 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
     const reqId = id();
     codeEmit(csid, {
       type: "update",
-      update: { sessionUpdate: "tool_call", toolCallId: planId, title: "Ready to code?", kind: "switch_mode", status: "pending", rawInput: { plan }, content: [{ type: "content", content: { type: "text", text: plan } }] },
+      update: { sessionUpdate: "tool_call", toolCallId: planId, title: "Ready to code?", kind: "switch_mode", rawInput: { plan }, content: [{ type: "content", content: { type: "text", text: plan } }] },
     });
     const choice = await new Promise<string | null>((resolve) => {
       pending.set(reqId, resolve);
@@ -382,6 +403,29 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
     codeEmit(csid, { type: "permissionResolved", requestId: reqId });
     codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: planId, status: choice === "default" ? "completed" : "failed" } });
     await say(choice === "default" ? "Starting on it." : "Okay, still planning.");
+    codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
+  // An edit sent the way Claude Code sends one: a diff per hunk, each hunk's new start line in `locations`.
+  if (text.startsWith("/hunks")) {
+    const path = `${s.cwd}/src/main.ts`;
+    codeEmit(csid, {
+      type: "update",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: id(),
+        title: "Edit `src/main.ts`",
+        kind: "edit",
+        status: "completed",
+        rawInput: { file_path: path },
+        content: [
+          { type: "diff", path, oldText: "import { a } from \"./a\";\nimport { b } from \"./b\";\n\nconst x = 1;", newText: "import { a } from \"./a\";\nimport { b } from \"./b\";\nimport { c } from \"./c\";\n\nconst x = 1;" },
+          { type: "diff", path, oldText: "function run() {\n  a();\n  b();\n  return x;\n}", newText: "function run() {\n  a();\n  b();\n  c();\n  return x;\n}" },
+        ],
+        locations: [{ path, line: 10 }, { path, line: 40 }],
+      },
+    });
+    await say("Done.");
     codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
     return;
   }
@@ -420,8 +464,12 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
   codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: readId, title: "Read `README.md`", kind: "read", status: "completed", rawInput: { path: `${s.cwd}/README.md` }, content: [{ type: "content", content: { type: "text", text: "# demo\n\nOld intro." } }] } });
   const editId = id();
   const diff = { type: "diff" as const, path: `${s.cwd}/README.md`, oldText: "# demo\n\nOld intro.\n", newText: "# demo\n\nNew intro written by the agent.\n\n## Usage\n\nRun it.\n" };
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: editId, title: "Edit `README.md`", kind: "edit", status: "pending", rawInput: { file_path: "README.md" } } });
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: editId, content: [diff] } });
+  // Like the real backend: the announcement leaves out the defaults (`pending`, `other`), and the
+  // diff and full rawInput arrive only with the permission request.
+  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: editId, title: "Edit" } });
+  const editCall = { toolCallId: editId, title: "Edit `README.md`", kind: "edit", rawInput: { file_path: "README.md" }, content: [diff] };
+  // The backend passes a known call's permission-request fields on as an update.
+  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", ...editCall } });
   const reqId = id();
   const rule = db.rules.find((r) => r.toolKind === "edit" && (r.cwd === "*" || r.cwd === s.cwd));
   const choice = rule
@@ -433,7 +481,7 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
       requestId: reqId,
       request: {
         sessionId: "acp",
-        toolCall: { toolCallId: editId, title: "Edit `README.md`", kind: "edit" },
+        toolCall: { ...editCall, status: "pending" },
         options: [
           { optionId: "allow-edits-session", name: "Yes, allow all edits during this session", kind: "allow_always" },
           { optionId: "allow-once", name: "Yes", kind: "allow_once" },
@@ -593,6 +641,10 @@ export function install() {
   if (longTurns > 0) {
     seed("/home/demo/Projects/ips-amp-admin", "Long transcript", 10, "edit");
     longSessionId = db.code[db.code.length - 1].id;
+  }
+  if (harnessDemo) {
+    seed("/home/demo/Projects/uploads", "Claude Code replay", 5, "edit");
+    harnessSessionId = db.code[db.code.length - 1].id;
   }
   if (meshDemo) {
     meshMember();
@@ -816,7 +868,10 @@ export function install() {
                 return;
               }
               if (csid === longSessionId) void fakeLongReplay(csid).then(() => fakeReady(csid, true));
-              else fakeReady(csid);
+              else if (csid === harnessSessionId) {
+                fakeHarnessReplay(csid);
+                fakeReady(csid, true);
+              } else fakeReady(csid);
             }, 400);
           }, 10);
           return null;
