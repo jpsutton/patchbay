@@ -4,6 +4,7 @@ import {
   errorText,
   type AgentCapabilities,
   type AgentExtensions,
+  type AgentId,
   type AcpCommand,
   type AcpConfigOption,
   type AcpModels,
@@ -34,6 +35,7 @@ import { activityOf, strongest, type Activity } from "./activity";
 import { isRemoteApp } from "./platform";
 import { isForegroundUpdate } from "./codeWorking";
 import { appendUserChunk } from "./harness";
+import { planUpdateOf } from "./todoPlan";
 
 export { codeWorking, FOREGROUND_IDLE_MS, hasActiveForegroundTools } from "./codeWorking";
 export { harnessTags } from "./harness";
@@ -441,7 +443,7 @@ function endBackground(calls: Record<string, AcpToolCall>): Record<string, AcpTo
   );
 }
 
-function reduceUpdate(s: CodeState, u: AcpUpdate): CodeState {
+function reduceUpdate(s: CodeState, u: AcpUpdate, agent: AgentId | undefined): CodeState {
   const stamp = (next: CodeState): CodeState => {
     const prev =
       u.sessionUpdate === "tool_call_update"
@@ -472,14 +474,19 @@ function reduceUpdate(s: CodeState, u: AcpUpdate): CodeState {
     case "tool_call":
     case "tool_call_update": {
       let tc = u as unknown as AcpToolCall;
-      const exists = !!s.toolCalls[tc.toolCallId];
+      const prev = s.toolCalls[tc.toolCallId];
+      const exists = !!prev;
       // ACP defaults for a new call's announcement (the backend fills them too). In an update, or
       // a re-announcement of a known call, an absent field means unchanged.
       if (u.sessionUpdate === "tool_call" && !exists) tc = { ...tc, status: tc.status ?? "pending", kind: tc.kind ?? "other" };
+      const merged = mergeToolCall(prev, tc);
+      // OpenCode's and Kilo's to-do writes are their plan; the transcript hides their cards.
+      const todos = planUpdateOf(prev, merged, agent);
       return stamp({
         ...s,
-        toolCalls: { ...s.toolCalls, [tc.toolCallId]: mergeToolCall(s.toolCalls[tc.toolCallId], tc) },
+        toolCalls: { ...s.toolCalls, [tc.toolCallId]: merged },
         entries: exists ? s.entries : [...s.entries, { kind: "tool", id: tc.toolCallId }],
+        plan: todos ?? s.plan,
       });
     }
     case "plan":
@@ -571,7 +578,7 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
       next = { ...s, entries: [...s.entries, { kind: "info", text: e.message }] };
       break;
     case "update":
-      next = reduceUpdate(s, e.update);
+      next = reduceUpdate(s, e.update, useStore.getState().codeSessions.find((x) => x.id === id)?.agent);
       break;
     case "permission": {
       // The request may carry fields no update did (a diff, rawInput): keep them with the call
