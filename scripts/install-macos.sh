@@ -48,7 +48,7 @@ mkdir "$mnt"
 # The .dmg carries the Apache-2.0 license as a license agreement, which hdiutil pages
 # through less and then asks to accept on stdin. Under curl | bash that stdin is the
 # rest of this script, so answer it here and skip the pager.
-PAGER=cat hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mnt" "$work/$dmg" \
+PAGER="cat" hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mnt" "$work/$dmg" \
   <<<y >/dev/null
 [[ -d $mnt/Patchbay.app ]] || die "Patchbay.app not found in $dmg"
 
