@@ -169,6 +169,9 @@ fn tidy(md: &str, base: Option<&reqwest::Url>) -> String {
     let invisible = Regex::new("[\u{200b}\u{200c}\u{200d}\u{feff}]").unwrap();
     let link = Regex::new(r"\]\(([^)\s]+)").unwrap();
     let md = invisible.replace_all(md, "");
+    // A `javascript:` link does nothing outside a browser: keep its text, lose the link.
+    let js_link = Regex::new(r"(?i)\[([^\]]*)\]\(\s*javascript:[^)]*\)").unwrap();
+    let md = js_link.replace_all(&md, "$1");
     let md = empty_link.replace_all(&md, "");
     let md = match base {
         Some(base) => link
@@ -267,6 +270,14 @@ mod tests {
         let md = extract("<html><body><p>Just a short note.</p></body></html>", None).markdown;
         assert_eq!(md, "Just a short note.");
         assert_eq!(extract("", None).markdown, "");
+    }
+
+    #[test]
+    fn javascript_links_lose_their_target() {
+        let html = format!("<html><body><main><p>{} <a href=\"javascript:void(0)\">Click me</a> <a onclick=\"evil()\" style=\"color:red\" href=\"/ok\">fine</a></p></main></body></html>", "Plenty of ordinary words to make this the main content of the page. ".repeat(6));
+        let md = extract(&html, Some(&reqwest::Url::parse("https://e.com/").unwrap())).markdown;
+        assert!(md.contains("Click me") && !md.contains("javascript:") && !md.contains("evil()") && !md.contains("color:red"), "{md}");
+        assert!(md.contains("[fine](https://e.com/ok)"), "{md}");
     }
 
     #[test]

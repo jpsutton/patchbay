@@ -34,6 +34,15 @@ fn page_text(content_type: &str, body: &str, url: &reqwest::Url) -> String {
     out
 }
 
+/// Whether a response is text a model can read: HTML, plain text, JSON, XML and the like. A
+/// missing content type counts, since plain servers often omit it.
+fn is_text(content_type: &str) -> bool {
+    let ct = content_type.to_ascii_lowercase();
+    ct.is_empty()
+        || ct.starts_with("text/")
+        || ["json", "xml", "xhtml", "javascript", "yaml", "markdown", "csv", "x-www-form-urlencoded"].iter().any(|t| ct.contains(t))
+}
+
 /// Most of a page returned as it is, when no question was asked about it.
 const MAX_RETURNED_CHARS: usize = 40_000;
 
@@ -138,6 +147,12 @@ returned and you must call WebFetch again with it."
                 return ToolOutput::error(format!("Fetch failed: HTTP {}", resp.status()));
             }
             let ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_owned();
+            if !is_text(&ct) {
+                return ToolOutput::error(format!(
+                    "WebFetch reads HTML and text pages only; this URL returned {}. Download it with Bash if you need the file.",
+                    if ct.is_empty() { "an unknown content type" } else { &ct }
+                ));
+            }
             let bytes = match resp.bytes().await {
                 Ok(b) => b,
                 Err(e) => return ToolOutput::error(format!("Fetch failed: {e}")),
@@ -193,6 +208,16 @@ mod tests {
         assert!(md.starts_with("Title: T\nURL: https://example.com/a\n\n"), "{md}");
         assert!(md.contains("# Title") && md.contains("**world**") && !md.contains("MENU-JUNK"), "{md}");
         assert_eq!(page_text("text/plain", "<b>raw</b>", &url), "<b>raw</b>");
+    }
+
+    #[test]
+    fn only_text_responses_are_read() {
+        for ok in ["text/html; charset=utf-8", "application/json", "application/xhtml+xml", "text/plain", "application/ld+json", ""] {
+            assert!(is_text(ok), "{ok}");
+        }
+        for no in ["application/pdf", "image/png", "application/octet-stream", "application/zip", "video/mp4"] {
+            assert!(!is_text(no), "{no}");
+        }
     }
 
     #[test]
