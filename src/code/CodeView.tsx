@@ -727,6 +727,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const ready = status === "ready";
   // Broader than prompt-RPC `s.busy`: Claude (and similar) keep streaming after PromptDone.
   const working = s ? codeWorking(s) : false;
+  // Cancel the running turn to send now. Not on the phone yet: its app doesn't pass it on.
+  const forceSend = !!s?.extensions.forceSend && !isRemoteApp();
   // Commands the agent backgrounded: its turn is over, but they still run (and it resumes when
   // they end).
   const background = Object.values(s?.toolCalls ?? {}).filter((tc) => tc.background);
@@ -760,12 +762,14 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     }
   };
 
-  const send = async (text: string, atts: Attachment[], mentions: string[] = []) => {
+  /** `force`: mid-turn, cancel the running turn and send this next. */
+  const send = async (text: string, atts: Attachment[], mentions: string[] = [], force = false) => {
     if (!activeId) return;
     const promptId = crypto.randomUUID();
     // Events still waiting may end the turn: apply them before deciding.
     flushCodeEvents(activeId);
-    // Mid-turn the agent steers it in or Patchbay queues it; its `userPrompt` event shows which.
+    // Mid-turn the agent steers it in or Patchbay queues it (forced: queued first, behind a
+    // cancel); its `userPrompt` event shows which.
     const midTurn = !!useStore.getState().code[activeId]?.busy;
     if (!midTurn) {
       pushCodeEntry(activeId, { kind: "user", text, attachments: atts, promptId });
@@ -780,6 +784,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
         atts.map((a) => a.id),
         mentions.map((m) => `${root}/${m}`),
         promptId,
+        force,
       );
       refreshCodeSessions();
     } catch (e) {
@@ -1197,6 +1202,15 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     <span className="min-w-0 flex-1 truncate text-muted">
                       {q.text.trim() || q.attachments?.map((a) => a.name).join(", ")}
                     </span>
+                    {forceSend && (
+                      <button
+                        className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-accent-ink hover:bg-panel-2"
+                        onClick={() => api.codeSendNow(session.id, q.promptId).catch((e) => setToast(errorText(e)))}
+                        title="Stop the current turn and send this now"
+                      >
+                        Send now
+                      </button>
+                    )}
                     <button
                       className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted hover:bg-panel-2 hover:text-fg"
                       onClick={() => api.codeUnqueue(session.id, q.promptId).catch((e) => setToast(errorText(e)))}
@@ -1232,6 +1246,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
               }}
               onStop={() => api.codeCancel(session.id)}
               onSend={send}
+              onForceSend={forceSend ? (t, a, m) => send(t, a, m, true) : undefined}
               placeholder={
                 reconnecting
                   ? "Reconnecting…"

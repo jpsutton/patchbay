@@ -151,6 +151,14 @@ const FAKE_STEERING = new Set(["grok", "claude-code", "codex"]);
 /** Sessions mid-turn, and the prompts queued behind each turn. */
 const fakeTurns = new Set<string>();
 const fakeQueues: Record<string, { promptId: string; text: string; mentions: string[] }[]> = {};
+/** Sessions whose running turn a forced send cancelled. */
+const fakeCut = new Set<string>();
+
+/** Cancel the running turn for a forced send; the front of the queue goes next. */
+function fakeInterrupt(csid: string) {
+  fakeCut.add(csid);
+  for (const [k, r] of pending) { r(null); pending.delete(k); }
+}
 
 function fakeEcho(csid: string, promptId: string, text: string, delivery: PromptDelivery) {
   codeEmit(csid, { type: "userPrompt", promptId, text, origin: ME, attachments: [], delivery });
@@ -161,6 +169,7 @@ async function runFakeTurns(csid: string, promptId: string, text: string, mentio
   fakeEcho(csid, promptId, text, "sent");
   fakeTurns.add(csid);
   await fakeAgentTurn(csid, text, mentions);
+  if (fakeCut.delete(csid)) codeEmit(csid, { type: "promptDone", stopReason: "cancelled" });
   fakeTurns.delete(csid);
   const next = fakeQueues[csid]?.shift();
   if (next) void runFakeTurns(csid, next.promptId, next.text, next.mentions);
@@ -184,7 +193,7 @@ function fakeReady(csid: string, loaded = false) {
       ? null
       : { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] },
     configOptions: grok ? [] : [fakeEffort(fakeConfig[csid] ?? "medium")],
-    extensions: { statusLine: grok, rewind: grok, patchbayModels: grok, steering: FAKE_STEERING.has(db.code.find((c) => c.id === csid)?.agent ?? "grok") },
+    extensions: { statusLine: grok, rewind: grok, patchbayModels: grok, steering: FAKE_STEERING.has(db.code.find((c) => c.id === csid)?.agent ?? "grok"), forceSend: true },
   });
   codeEmit(csid, {
     type: "update",
@@ -386,14 +395,18 @@ async function fakeChat(a: Record<string, unknown>, regenerate?: string) {
 
 async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []) {
   const s = db.code.find((c) => c.id === csid)!;
+  // A forced send cut this turn short: it runs out silently, as if the agent stopped.
+  const turnEmit = (e: CodeEnvelope["event"]) => {
+    if (!fakeCut.has(csid)) codeEmit(csid, e);
+  };
   const say = async (t: string) => {
     for (const w of t.split(/(?<=\s)/)) {
       await sleep(15);
-      codeEmit(csid, { type: "update", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: w } } });
+      turnEmit({ type: "update", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: w } } });
     }
   };
   fakeWireRecord(s.agent, "out", { jsonrpc: "2.0", id: 3, method: "session/prompt", params: { sessionId: "acp", prompt: [{ type: "text", text }] } });
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Planning the change." } } });
+  turnEmit({ type: "update", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Planning the change." } } });
   // Frames ACP can't decode (see `code/wire.rs`): an unknown update type, a tool status outside
   // the four known ones, and a permission option of an unknown kind.
   if (text.startsWith("/odd")) {
@@ -434,13 +447,13 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
     const plan = `# Tidy the README\n\n## Steps\n\n1. Read \`README.md\`.\n2. Rewrite the intro.\n`;
     const planId = id();
     const reqId = id();
-    codeEmit(csid, {
+    turnEmit({
       type: "update",
       update: { sessionUpdate: "tool_call", toolCallId: planId, title: "Ready to code?", kind: "switch_mode", rawInput: { plan }, content: [{ type: "content", content: { type: "text", text: plan } }] },
     });
     const choice = await new Promise<string | null>((resolve) => {
       pending.set(reqId, resolve);
-      codeEmit(csid, {
+      turnEmit({
         type: "permission",
         requestId: reqId,
         request: {
@@ -454,9 +467,9 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
       });
     });
     codeEmit(csid, { type: "permissionResolved", requestId: reqId });
-    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: planId, status: choice === "default" ? "completed" : "failed" } });
+    turnEmit({ type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: planId, status: choice === "default" ? "completed" : "failed" } });
     await say(choice === "default" ? "Starting on it." : "Okay, still planning.");
-    codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
+    turnEmit({ type: "promptDone", stopReason: "end_turn" });
     return;
   }
   // An edit sent the way Claude Code sends one: a diff per hunk, each hunk's new start line in `locations`.
@@ -485,7 +498,7 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
   // A plan document written as a tool call, the way Cursor's plan mode does it.
   if (text.startsWith("/plan")) {
     const plan = `# Tidy the README\n\n## Problem\n\nThe intro is out of date.\n\n## Steps\n\n1. Read \`README.md\`.\n2. Rewrite the intro.\n3. Check the links still work.\n`;
-    codeEmit(csid, {
+    turnEmit({
       type: "update",
       update: {
         sessionUpdate: "tool_call",
@@ -497,7 +510,7 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
       },
     });
     await say("The plan is ready. Say the word and I'll start.");
-    codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
+    turnEmit({ type: "promptDone", stopReason: "end_turn" });
     return;
   }
   // Claude Code's diffs: an Edit's hunks (start lines in `locations`), a Write that first sends
@@ -563,7 +576,7 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
     codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
     return;
   }
-  codeEmit(csid, {
+  turnEmit({
     type: "update",
     update: {
       sessionUpdate: "plan",
@@ -577,22 +590,22 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
   await say(`Working on: ${text}\n`);
   if (mentions.length) await say(`\nMentioned files: ${mentions.map((m) => `\`${m}\``).join(", ")}\n`);
   const readId = id();
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: readId, title: "Read `README.md`", kind: "read", status: "completed", rawInput: { path: `${s.cwd}/README.md` }, content: [{ type: "content", content: { type: "text", text: "# demo\n\nOld intro." } }] } });
+  turnEmit({ type: "update", update: { sessionUpdate: "tool_call", toolCallId: readId, title: "Read `README.md`", kind: "read", status: "completed", rawInput: { path: `${s.cwd}/README.md` }, content: [{ type: "content", content: { type: "text", text: "# demo\n\nOld intro." } }] } });
   const editId = id();
   const diff = { type: "diff" as const, path: `${s.cwd}/README.md`, oldText: "# demo\n\nOld intro.\n", newText: "# demo\n\nNew intro written by the agent.\n\n## Usage\n\nRun it.\n" };
   // Like the real backend: the announcement leaves out the defaults (`pending`, `other`), and the
   // diff and full rawInput arrive only with the permission request.
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: editId, title: "Edit" } });
+  turnEmit({ type: "update", update: { sessionUpdate: "tool_call", toolCallId: editId, title: "Edit" } });
   const editCall = { toolCallId: editId, title: "Edit `README.md`", kind: "edit", rawInput: { file_path: "README.md" }, content: [diff] };
   // The backend passes a known call's permission-request fields on as an update.
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", ...editCall } });
+  turnEmit({ type: "update", update: { sessionUpdate: "tool_call_update", ...editCall } });
   const reqId = id();
   const rule = db.rules.find((r) => r.toolKind === "edit" && (r.cwd === "*" || r.cwd === s.cwd));
   const choice = rule
-    ? (codeEmit(csid, { type: "autoApproved", toolCallId: editId, description: "Auto-approved: all edit calls in this folder" }), "allow-once")
+    ? (turnEmit({ type: "autoApproved", toolCallId: editId, description: "Auto-approved: all edit calls in this folder" }), "allow-once")
     : await new Promise<string | null>((resolve) => {
     pending.set(reqId, resolve);
-    codeEmit(csid, {
+    turnEmit({
       type: "permission",
       requestId: reqId,
       request: {
@@ -608,27 +621,27 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
   });
   if (!rule) codeEmit(csid, { type: "permissionResolved", requestId: reqId });
   if (!choice || choice.startsWith("reject")) {
-    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: editId, status: "failed" } });
+    turnEmit({ type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: editId, status: "failed" } });
     await say("Okay, I won't make that edit.");
-    codeEmit(csid, { type: "promptDone", stopReason: choice ? "end_turn" : "cancelled" });
+    turnEmit({ type: "promptDone", stopReason: choice ? "end_turn" : "cancelled" });
     return;
   }
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: editId, status: "completed" } });
+  turnEmit({ type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: editId, status: "completed" } });
   const runId = id();
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: runId, title: "Execute `ls`", kind: "execute", status: "in_progress", rawInput: { command: "ls" } } });
+  turnEmit({ type: "update", update: { sessionUpdate: "tool_call", toolCallId: runId, title: "Execute `ls`", kind: "execute", status: "in_progress", rawInput: { command: "ls" } } });
   await sleep(300);
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: runId, status: "completed", content: [{ type: "content", content: { type: "text", text: "README.md\nsrc\nCargo.toml" } }] } });
+  turnEmit({ type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: runId, status: "completed", content: [{ type: "content", content: { type: "text", text: "README.md\nsrc\nCargo.toml" } }] } });
   const termId = id();
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: termId, title: "Execute `cargo check`", kind: "execute", status: "completed", rawInput: { command: "cargo check" }, content: [{ type: "terminal", terminalId: "term-1" }], rawOutput: { stdout: "Finished `dev` profile in 0.6s", exit_code: 0 } } });
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "plan", entries: [
+  turnEmit({ type: "update", update: { sessionUpdate: "tool_call", toolCallId: termId, title: "Execute `cargo check`", kind: "execute", status: "completed", rawInput: { command: "cargo check" }, content: [{ type: "terminal", terminalId: "term-1" }], rawOutput: { stdout: "Finished `dev` profile in 0.6s", exit_code: 0 } } });
+  turnEmit({ type: "update", update: { sessionUpdate: "plan", entries: [
     { content: "Read README.md", priority: "high", status: "completed" },
     { content: "Edit README.md", priority: "high", status: "completed" },
     { content: "Run ls", priority: "medium", status: "completed" },
   ] } });
   await say("Done. I updated the README intro and added a **Usage** section.");
   fakeUsage.input += 9000; fakeUsage.cachedRead += 6000; fakeUsage.output += 700;
-  codeEmit(csid, { type: "usage", usage: { totals: { ...fakeUsage }, contextTokens: Math.min(118000, fakeUsage.input / 2), contextWindow: 128000, autoCompactPercent: 85 } });
-  codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
+  turnEmit({ type: "usage", usage: { totals: { ...fakeUsage }, contextTokens: Math.min(118000, fakeUsage.input / 2), contextWindow: 128000, autoCompactPercent: 85 } });
+  turnEmit({ type: "promptDone", stopReason: "end_turn" });
 }
 const fakeUsage = { input: 0, cachedRead: 0, cacheWrite: 0, output: 0, reasoning: 0, costUsd: null as number | null, apiMs: 0 };
 
@@ -1031,6 +1044,12 @@ export function install() {
           }
           const promptId = (a.promptId as string) || id();
           const mentions = (a.mentions as string[]) ?? [];
+          if (fakeTurns.has(s.id) && a.force) {
+            (fakeQueues[s.id] ??= []).unshift({ promptId, text: a.text as string, mentions });
+            fakeEcho(s.id, promptId, a.text as string, "queued");
+            fakeInterrupt(s.id);
+            return null;
+          }
           if (fakeTurns.has(s.id)) {
             if (FAKE_STEERING.has(s.agent)) {
               fakeEcho(s.id, promptId, a.text as string, "steered");
@@ -1050,6 +1069,15 @@ export function install() {
           if (i >= 0) {
             q.splice(i, 1);
             codeEmit(a.id as string, { type: "unqueued", promptIds: [a.promptId as string], restore: false });
+          }
+          return null;
+        }
+        case "code_send_now": {
+          const q = fakeQueues[a.id as string] ?? [];
+          const i = q.findIndex((x) => x.promptId === a.promptId);
+          if (i >= 0 && fakeTurns.has(a.id as string)) {
+            q.unshift(...q.splice(i, 1));
+            fakeInterrupt(a.id as string);
           }
           return null;
         }
@@ -1124,6 +1152,7 @@ export function install() {
         case "plugin:clipboard-manager|write_text": return navigator.clipboard.writeText(a.text as string).then(() => null);
         case "plugin:clipboard-manager|read_text": return navigator.clipboard.readText();
         case "code_cancel": {
+          fakeCut.delete(a.id as string);
           for (const [k, r] of pending) { r(null); pending.delete(k); }
           const dropped = (fakeQueues[a.id as string] ?? []).splice(0);
           if (dropped.length) codeEmit(a.id as string, { type: "unqueued", promptIds: dropped.map((d) => d.promptId), restore: true });

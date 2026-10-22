@@ -1125,7 +1125,26 @@ export function isSendKey(e: { key: string; shiftKey: boolean; ctrlKey: boolean;
   // Phone soft keyboards: Enter inserts a line; send with the button (and Mod+Enter if a
   // hardware keyboard is attached). Desktop still follows the preference.
   if (isRemoteApp()) return e.ctrlKey || e.metaKey;
-  return sendKey === "mod-enter" ? e.ctrlKey || e.metaKey : !e.shiftKey && !e.ctrlKey && !e.metaKey;
+  // With Enter to send, Mod+Enter sends too (and force-sends mid-turn); Shift+Enter breaks the line.
+  return sendKey === "mod-enter" ? e.ctrlKey || e.metaKey : !e.shiftKey;
+}
+
+/**
+ * True when this keydown should send now, cancelling the agent's running turn. Mod+Enter, or
+ * Mod+Shift+Enter where Mod+Enter is already the send key. Check it before {@link isSendKey}.
+ */
+export function isForceSendKey(e: { key: string; shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }, sendKey: Preferences["sendKey"]) {
+  if (e.key !== "Enter" || !(e.ctrlKey || e.metaKey)) return false;
+  return modEnterSends(sendKey) ? e.shiftKey : true;
+}
+
+/** How to say the force-send key in a tooltip. */
+export function forceSendKeyLabel(sendKey: Preferences["sendKey"]) {
+  return modEnterSends(sendKey) ? "Ctrl+Shift+Enter" : "Ctrl+Enter";
+}
+
+function modEnterSends(sendKey: Preferences["sendKey"]) {
+  return isRemoteApp() || sendKey === "mod-enter";
 }
 
 /**

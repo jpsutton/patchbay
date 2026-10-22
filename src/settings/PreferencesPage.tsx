@@ -200,7 +200,7 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
         </Row>
         <Row
           label="Send messages with"
-          hint="The other combination (and Shift+Enter) inserts a new line. On the phone app, Enter always inserts a line — send with the button."
+          hint={`Shift+Enter inserts a new line, and so does Enter when ${MOD}+Enter sends. While a Code agent works, ${MOD}+Enter (${MOD}+Shift+Enter when ${MOD}+Enter sends) stops its turn and sends now. On the phone app, Enter always inserts a line — send with the button.`}
         >
           <Choice
             value={prefs.sendKey}

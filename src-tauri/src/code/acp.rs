@@ -213,13 +213,17 @@ impl UserMessage {
 
 pub enum AgentCmd {
     /// A new turn when the agent is idle. Mid-turn, steered into the running turn when the agent
-    /// can take that, else queued until the turn ends.
+    /// can take that, else queued until the turn ends. `force` cancels the running turn instead
+    /// and sends the prompt next, ahead of anything queued.
     Prompt {
         msg: UserMessage,
+        force: bool,
         reply: Option<oneshot::Sender<Result<Delivery>>>,
     },
     /// Drop a queued prompt.
     Unqueue { prompt_id: String },
+    /// Send a queued prompt now: cancel the running turn and send it next.
+    SendNow { prompt_id: String },
     Cancel,
     SetModel { model_id: String, reply: oneshot::Sender<Result<()>> },
     SetMode { mode_id: String, reply: oneshot::Sender<Result<()>> },
@@ -259,6 +263,7 @@ impl AgentCmd {
                 origin: String::new(),
                 attachments: json!([]),
             },
+            force: false,
             reply: None,
         }
     }
@@ -395,17 +400,51 @@ fn start_turn(ctx: &TurnCtx, msg: UserMessage) -> Result<Delivery> {
     Ok(Delivery::Sent)
 }
 
-fn enqueue(ctx: &TurnCtx, queue: &mut std::collections::VecDeque<UserMessage>, msg: UserMessage) -> Delivery {
+/// Where a held prompt waits: forced sends first, in the order they were sent, then steers that
+/// a forced send cut off, then everything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Rank {
+    Forced,
+    Rescued,
+    Normal,
+}
+
+type Queue = std::collections::VecDeque<(Rank, UserMessage)>;
+
+/// Put `msg` behind every prompt of its rank or better.
+fn hold(queue: &mut Queue, rank: Rank, msg: UserMessage) {
+    let i = queue.iter().position(|(r, _)| *r > rank).unwrap_or(queue.len());
+    queue.insert(i, (rank, msg));
+}
+
+fn enqueue(ctx: &TurnCtx, queue: &mut Queue, rank: Rank, msg: UserMessage) -> Delivery {
     emit(&ctx.sink, &ctx.csid, msg.event(Delivery::Queued));
-    queue.push_back(msg);
+    hold(queue, rank, msg);
     Delivery::Queued
 }
 
-fn drop_queue(ctx: &TurnCtx, queue: &mut std::collections::VecDeque<UserMessage>) {
+/// How long a forced send waits for the cancelled turn to end before saying the agent is slow
+/// to stop. Agents usually stop within a few seconds, once a running tool is killed.
+const FORCE_PATIENCE: std::time::Duration =
+    if cfg!(test) { std::time::Duration::from_millis(300) } else { std::time::Duration::from_secs(30) };
+
+/// Ask the agent to end the running turn; its `session/prompt` then returns `cancelled`.
+fn cancel_turn(conn: &Rc<acp::ClientSideConnection>, session_id: &str) {
+    if let Ok(n) = from_json::<acp::CancelNotification>(json!({ "sessionId": session_id })) {
+        // A turn's `session/prompt` goes out from its own task. Spawning the cancel behind it
+        // keeps it from overtaking a prompt that was just sent.
+        let conn = conn.clone();
+        tokio::task::spawn_local(async move {
+            let _ = conn.cancel(n).await;
+        });
+    }
+}
+
+fn drop_queue(ctx: &TurnCtx, queue: &mut Queue) {
     if queue.is_empty() {
         return;
     }
-    let prompt_ids = queue.drain(..).map(|m| m.id).collect();
+    let prompt_ids = queue.drain(..).map(|(_, m)| m.id).collect();
     emit(&ctx.sink, &ctx.csid, CodeEvent::Unqueued { prompt_ids, restore: true });
 }
 
@@ -1115,6 +1154,7 @@ async fn run(
     let can_load = capabilities["loadSession"].as_bool().unwrap_or(false);
     let steer = Steer::of(&init_v, extensions.interject);
     extensions.steering = steer.is_some();
+    extensions.force_send = true;
     let (mcp_servers, mcp_skipped) = mcp(&init_v);
     if !mcp_skipped.is_empty() {
         emit(
@@ -1269,7 +1309,8 @@ async fn run(
     // One turn at a time: a prompt sent mid-turn is steered in or queued here, never sent as a
     // second `session/prompt` (agents cancel, refuse or garble those).
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<bool>();
-    type SteerReply = (UserMessage, Option<oneshot::Sender<Result<Delivery>>>, Result<Value>);
+    // The steered message, its reply, the agent's answer, and `forces` when it was sent.
+    type SteerReply = (UserMessage, Option<oneshot::Sender<Result<Delivery>>>, Result<Value>, u64);
     let (steered_tx, mut steered_rx) = mpsc::unbounded_channel::<SteerReply>();
     let turns = TurnCtx {
         conn: conn.clone(),
@@ -1283,73 +1324,139 @@ async fn run(
         done: done_tx,
     };
     let mut running = false;
-    let mut queue = std::collections::VecDeque::<UserMessage>::new();
+    let mut queue = Queue::new();
+    // A forced send cancelled the running turn: the front of the queue goes when it returns.
+    let mut forcing = false;
+    // How many turns a forced send has cancelled. A steer sent before the latest one went into
+    // a cancelled turn, whatever the agent answers.
+    let mut forces: u64 = 0;
+    // Armed while a forced send waits on its cancel: an agent that ignores the cancel gets a
+    // notice instead of a silent wait. The message still goes when the turn ends.
+    let force_wait = tokio::time::sleep(FORCE_PATIENCE);
+    tokio::pin!(force_wait);
+    let mut force_armed = false;
 
     loop {
         tokio::select! {
+            // A turn that has ended is seen before any command: a forced send then starts a turn
+            // instead of cancelling one that is already over.
+            biased;
             status = child.wait() => {
                 return Err(exited(status, &stderr_tail));
             }
             Some(go_on) = done_rx.recv() => {
                 running = false;
-                if !go_on {
+                force_armed = false;
+                let forced = std::mem::take(&mut forcing) && !auth_lost.get();
+                if !go_on && !forced {
                     drop_queue(&turns, &mut queue);
-                } else if let Some(next) = queue.pop_front() {
+                } else if let Some((_, next)) = queue.pop_front() {
                     match start_turn(&turns, next) {
                         Ok(_) => running = true,
                         Err(e) => emit(&sink, &csid, CodeEvent::Error { message: format!("{e:#}") }),
                     }
                 }
             }
-            Some((msg, reply, resp)) = steered_rx.recv() => {
+            Some((msg, reply, resp, sent_at)) = steered_rx.recv() => {
                 let outcome = resp.map(|v| steer_outcome(&v)).unwrap_or_else(|e| {
                     tracing::warn!("steering failed, queueing the message instead: {e:#}");
                     Steered::No
                 });
+                // A forced send cancelled the turn it went into: it goes again, right after the
+                // forced prompts.
+                let cut_off = forcing || sent_at != forces;
                 // Shown as steered already; a queued or sent event moves it where it went.
                 let r = match outcome {
-                    Steered::Yes => Ok(Delivery::Steered),
-                    _ if running => Ok(enqueue(&turns, &mut queue, msg)),
+                    Steered::Yes if !cut_off => Ok(Delivery::Steered),
+                    _ if running && cut_off => Ok(enqueue(&turns, &mut queue, Rank::Rescued, msg)),
+                    _ if running => Ok(enqueue(&turns, &mut queue, Rank::Normal, msg)),
                     _ => start_turn(&turns, msg).inspect(|_| running = true),
                 };
                 answer(reply, r);
             }
+            () = &mut force_wait, if force_armed => {
+                force_armed = false;
+                let secs = FORCE_PATIENCE.as_secs();
+                let message = format!(
+                    "The agent hasn't stopped its turn after {secs} seconds. Your message goes when it does; Stop drops it."
+                );
+                emit(&sink, &csid, CodeEvent::Notice { message });
+            }
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else { break };
                 match cmd {
-                    AgentCmd::Prompt { msg, reply } => {
+                    AgentCmd::Prompt { msg, force: true, reply } => {
                         if !running {
                             answer(reply, start_turn(&turns, msg).inspect(|_| running = true));
-                        } else if let Some((method, params)) = steer.and_then(|s| s.request(&session_id, &msg.blocks)) {
+                        } else {
+                            // Never steered: the user wants this turn over. The cancelled turn's
+                            // output stays in the transcript. Forced sends go in the order sent.
+                            answer(reply, Ok(enqueue(&turns, &mut queue, Rank::Forced, msg)));
+                            if !forcing {
+                                cancel_pending(&pending);
+                                cancel_turn(&conn, &session_id);
+                                forcing = true;
+                                forces += 1;
+                                force_wait.as_mut().reset(tokio::time::Instant::now() + FORCE_PATIENCE);
+                                force_armed = true;
+                            }
+                        }
+                    }
+                    AgentCmd::Prompt { msg, force: false, reply } => {
+                        if !running {
+                            answer(reply, start_turn(&turns, msg).inspect(|_| running = true));
+                        } else if let Some((method, params)) =
+                            steer.filter(|_| !forcing).and_then(|s| s.request(&session_id, &msg.blocks))
+                        {
                             // Shown at once, ahead of the agent's answer to it. The agent's reply
-                            // comes on `steered_rx`, so the loop goes on meanwhile.
+                            // comes on `steered_rx`, so the loop goes on meanwhile. Not while a
+                            // forced send is cancelling the turn: it would go down with it.
                             emit(&sink, &csid, msg.event(Delivery::Steered));
-                            let (conn, steered) = (conn.clone(), steered_tx.clone());
+                            let (conn, steered, sent_at) = (conn.clone(), steered_tx.clone(), forces);
                             tokio::task::spawn_local(async move {
                                 let resp = ext(&conn, method, params).await;
-                                let _ = steered.send((msg, reply, resp));
+                                let _ = steered.send((msg, reply, resp, sent_at));
                             });
                         } else {
-                            answer(reply, Ok(enqueue(&turns, &mut queue, msg)));
+                            answer(reply, Ok(enqueue(&turns, &mut queue, Rank::Normal, msg)));
                         }
                     }
                     AgentCmd::Unqueue { prompt_id } => {
-                        if let Some(i) = queue.iter().position(|m| m.id == prompt_id) {
+                        if let Some(i) = queue.iter().position(|(_, m)| m.id == prompt_id) {
                             queue.remove(i);
                             emit(&sink, &csid, CodeEvent::Unqueued { prompt_ids: vec![prompt_id], restore: false });
+                        }
+                    }
+                    AgentCmd::SendNow { prompt_id } => {
+                        let Some(i) = queue.iter().position(|(_, m)| m.id == prompt_id) else { continue };
+                        let (rank, msg) = queue.remove(i).expect("found above");
+                        if running {
+                            // Already forced: it keeps its place among the others.
+                            match rank {
+                                Rank::Forced => queue.insert(i, (rank, msg)),
+                                _ => hold(&mut queue, Rank::Forced, msg),
+                            }
+                            if !forcing {
+                                cancel_pending(&pending);
+                                cancel_turn(&conn, &session_id);
+                                forcing = true;
+                                forces += 1;
+                                force_wait.as_mut().reset(tokio::time::Instant::now() + FORCE_PATIENCE);
+                                force_armed = true;
+                            }
+                        } else {
+                            match start_turn(&turns, msg) {
+                                Ok(_) => running = true,
+                                Err(e) => emit(&sink, &csid, CodeEvent::Error { message: format!("{e:#}") }),
+                            }
                         }
                     }
                     AgentCmd::Cancel => {
                         cancel_pending(&pending);
                         drop_queue(&turns, &mut queue);
-                        if let Ok(n) = from_json::<acp::CancelNotification>(json!({ "sessionId": session_id })) {
-                            // A turn's `session/prompt` goes out from its own task. Spawning the
-                            // cancel behind it keeps it from overtaking a prompt that was just sent.
-                            let conn = conn.clone();
-                            tokio::task::spawn_local(async move {
-                                let _ = conn.cancel(n).await;
-                            });
-                        }
+                        forcing = false;
+                        force_armed = false;
+                        cancel_turn(&conn, &session_id);
                     }
                     AgentCmd::SetModel { model_id, reply } => {
                         let ids = config_ids.borrow().clone();
@@ -1503,7 +1610,7 @@ fn refuse_until_signed_in(cmd: AgentCmd) {
             let _ = reply.send(Err(anyhow!("a sign-in is already in progress")));
         }
         AgentCmd::Prompt { reply, .. } => answer(reply, Err(anyhow!("the agent isn't signed in yet"))),
-        AgentCmd::Unqueue { .. } | AgentCmd::Cancel | AgentCmd::Shutdown => {}
+        AgentCmd::Unqueue { .. } | AgentCmd::SendNow { .. } | AgentCmd::Cancel | AgentCmd::Shutdown => {}
     }
 }
 
@@ -2100,9 +2207,10 @@ mod tests {
     /// Turns: a prompt `hold` runs until a `release` steer or a cancel, and `brief` for half a
     /// second. `subagent` streams `child:work` under another session id, as a subagent would,
     /// then says whether `initialize` advertised `_meta.subagents`. A second prompt mid-turn is
-    /// refused. `--steering` advertises `_session/steering` (a `refuse` steer fails), and every
-    /// prompt or steer is echoed as agent text
-    /// (`prompt:<text>`, `steer:<text>`).
+    /// refused. `--steering` advertises `_session/steering` (a `refuse` steer fails, a `slow` one
+    /// is answered 0.3s late), and every prompt or steer is echoed as agent text
+    /// (`prompt:<text>`, `steer:<text>`). `--slow-cancel` says `cancel` for each cancel and ends
+    /// the turn 0.3s later; `--late-cancel` ends it 1s later, past a forced send's patience.
     const FAKE_AGENT: &str = r#"
 import json, os, sys, threading
 if "--login" in sys.argv:
@@ -2134,7 +2242,11 @@ def text_of(p):
 for line in sys.stdin:
     m = json.loads(line)
     if m.get("method") == "session/cancel":
-        finish("cancelled")
+        if "--slow-cancel" in sys.argv or "--late-cancel" in sys.argv:
+            say("cancel")
+            threading.Timer(1.0 if "--late-cancel" in sys.argv else 0.3, finish, ["cancelled"]).start()
+        else:
+            finish("cancelled")
         continue
     if "id" not in m or "method" not in m:
         continue
@@ -2211,6 +2323,9 @@ for line in sys.stdin:
             send({"jsonrpc": "2.0", "id": i, "result": {"outcome": idle or "startedNewTurn"}})
         elif t == "refuse":
             send({"jsonrpc": "2.0", "id": i, "result": {"outcome": "failed"}})
+        elif t == "slow":
+            say("steer:" + t)
+            threading.Timer(0.3, send, [{"jsonrpc": "2.0", "id": i, "result": {"outcome": "injected"}}]).start()
         else:
             say("steer:" + t)
             send({"jsonrpc": "2.0", "id": i, "result": {"outcome": "injected"}})
@@ -2520,6 +2635,20 @@ for line in sys.stdin:
         text: &str,
         blocks: Option<Vec<serde_json::Value>>,
     ) -> Delivery {
+        deliver(tx, text, blocks, false)
+    }
+
+    /// A prompt sent with Ctrl+Enter: it cancels the running turn to go next.
+    fn force(tx: &tokio::sync::mpsc::UnboundedSender<AgentCmd>, text: &str) -> Delivery {
+        deliver(tx, text, None, true)
+    }
+
+    fn deliver(
+        tx: &tokio::sync::mpsc::UnboundedSender<AgentCmd>,
+        text: &str,
+        blocks: Option<Vec<serde_json::Value>>,
+        force: bool,
+    ) -> Delivery {
         let (reply, rx) = tokio::sync::oneshot::channel();
         let msg = UserMessage {
             id: text.into(),
@@ -2528,7 +2657,7 @@ for line in sys.stdin:
             origin: "me".into(),
             attachments: json!([]),
         };
-        tx.send(AgentCmd::Prompt { msg, reply: Some(reply) }).unwrap();
+        tx.send(AgentCmd::Prompt { msg, force, reply: Some(reply) }).unwrap();
         rx.blocking_recv().unwrap().unwrap()
     }
 
@@ -2695,6 +2824,202 @@ for line in sys.stdin:
         let handed_back =
             |e: &CodeEvent| matches!(e, CodeEvent::Unqueued { prompt_ids, restore: true } if prompt_ids == &["next", "and next"]);
         assert_eq!(count(&events, handed_back), 1);
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn stop_reasons(events: &Events) -> Vec<serde_json::Value> {
+        let evs = events.lock().unwrap();
+        evs.iter()
+            .filter_map(|e| match e {
+                CodeEvent::PromptDone { stop_reason } => Some(stop_reason.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn force_send_cancels_the_turn_instead_of_steering() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods", "--steering"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        // Idle, a forced send is just a send.
+        assert_eq!(force(&tx, "hold"), Delivery::Sent);
+        assert_eq!(prompt(&tx, "also this"), Delivery::Steered);
+        assert_eq!(force(&tx, "urgent"), Delivery::Queued);
+        wait_for(&events, "two turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 2);
+
+        // The cancelled turn's output stays; the forced prompt is the next turn.
+        assert_eq!(agent_heard(&events, 3), ["prompt:hold", "steer:also this", "prompt:urgent"]);
+        assert_eq!(stop_reasons(&events), [json!("cancelled"), json!("end_turn")]);
+        assert_eq!(
+            deliveries(&events),
+            [
+                ("hold".into(), Delivery::Sent),
+                ("also this".into(), Delivery::Steered),
+                ("urgent".into(), Delivery::Queued),
+                ("urgent".into(), Delivery::Sent),
+            ]
+        );
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn send_now_jumps_the_queue() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        assert_eq!(prompt(&tx, "first"), Delivery::Queued);
+        assert_eq!(prompt(&tx, "second"), Delivery::Queued);
+        tx.send(AgentCmd::SendNow { prompt_id: "second".into() }).unwrap();
+        // The rest of the queue still follows, after the one sent now.
+        wait_for(&events, "three turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 3);
+
+        assert_eq!(agent_heard(&events, 3), ["prompt:hold", "prompt:second", "prompt:first"]);
+        assert_eq!(stop_reasons(&events), [json!("cancelled"), json!("end_turn"), json!("end_turn")]);
+        assert_eq!(count(&events, |e| matches!(e, CodeEvent::Unqueued { .. })), 0);
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The agent takes a steer, then a forced send cancels that turn before the agent's answer
+    /// comes back: the steered message went down with the turn, so it goes again.
+    #[test]
+    fn a_steer_cut_off_by_a_forced_send_goes_again() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods", "--steering"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        // Answered 0.3s late, by when `brief` (0.5s) is running.
+        let (reply, slow) = tokio::sync::oneshot::channel();
+        let msg = UserMessage {
+            id: "slow".into(),
+            blocks: vec![json!({ "type": "text", "text": "slow" })],
+            text: "slow".into(),
+            origin: "me".into(),
+            attachments: json!([]),
+        };
+        tx.send(AgentCmd::Prompt { msg, force: false, reply: Some(reply) }).unwrap();
+        assert_eq!(force(&tx, "brief"), Delivery::Queued);
+        assert_eq!(slow.blocking_recv().unwrap().unwrap(), Delivery::Queued);
+        wait_for(&events, "three turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 3);
+
+        assert_eq!(agent_heard(&events, 4), ["prompt:hold", "steer:slow", "prompt:brief", "prompt:slow"]);
+        assert_eq!(stop_reasons(&events), [json!("cancelled"), json!("end_turn"), json!("end_turn")]);
+        assert_eq!(
+            deliveries(&events),
+            [
+                ("hold".into(), Delivery::Sent),
+                ("slow".into(), Delivery::Steered),
+                ("brief".into(), Delivery::Queued),
+                ("brief".into(), Delivery::Sent),
+                ("slow".into(), Delivery::Queued),
+                ("slow".into(), Delivery::Sent),
+            ]
+        );
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// While a forced send's cancel is in flight, the turn is still running but on its way out:
+    /// a plain prompt waits behind the forced one instead of steering into it.
+    #[test]
+    fn a_prompt_during_a_forced_cancel_waits() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let flags = ["--no-methods", "--steering", "--slow-cancel"];
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &flags, "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        assert_eq!(force(&tx, "urgent"), Delivery::Queued);
+        assert_eq!(prompt(&tx, "later"), Delivery::Queued);
+        wait_for(&events, "three turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 3);
+
+        assert_eq!(agent_heard(&events, 4), ["prompt:hold", "cancel", "prompt:urgent", "prompt:later"]);
+        assert_eq!(stop_reasons(&events), [json!("cancelled"), json!("end_turn"), json!("end_turn")]);
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Forced sends and "Send now" go in the order they were made, ahead of the plain queue, and
+    /// the turn gets one cancel however many pile up behind it.
+    #[test]
+    fn forced_sends_keep_their_order() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods", "--slow-cancel"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        assert_eq!(prompt(&tx, "normal"), Delivery::Queued);
+        assert_eq!(force(&tx, "first"), Delivery::Queued);
+        assert_eq!(prompt(&tx, "third"), Delivery::Queued);
+        tx.send(AgentCmd::SendNow { prompt_id: "third".into() }).unwrap();
+        assert_eq!(force(&tx, "second"), Delivery::Queued);
+        wait_for(&events, "five turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 5);
+
+        assert_eq!(
+            agent_heard(&events, 6),
+            ["prompt:hold", "cancel", "prompt:first", "prompt:third", "prompt:second", "prompt:normal"]
+        );
+        assert_eq!(stop_reasons(&events)[0], json!("cancelled"));
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An agent slow to stop a cancelled turn gets a notice, and the forced message still goes
+    /// once the turn ends.
+    #[test]
+    fn a_slow_cancel_gets_a_notice_and_the_forced_send_still_goes() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods", "--late-cancel"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        assert_eq!(force(&tx, "urgent"), Delivery::Queued);
+        wait_for(&events, "two turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 2);
+
+        let notices: Vec<_> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                CodeEvent::Notice { message } => Some(message.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("hasn't stopped its turn"));
+        assert_eq!(agent_heard(&events, 3), ["prompt:hold", "cancel", "prompt:urgent"]);
+        assert_eq!(stop_reasons(&events), [json!("cancelled"), json!("end_turn")]);
         no_errors(&events);
         tx.send(AgentCmd::Shutdown).unwrap();
         thread.join().unwrap();
