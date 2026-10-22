@@ -32,6 +32,7 @@ const CODE_METHODS: &[&str] = &[
     "code.set_agent",
     "code.rewind",
     "code.permission",
+    "code.question",
     "code.files",
     "code.auto_title",
 ];

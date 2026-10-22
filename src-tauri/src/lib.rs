@@ -106,6 +106,7 @@ struct RemoteTerm {
 struct LiveAgent {
     ready: Option<serde_json::Value>,
     permissions: Vec<(String, serde_json::Value)>,
+    questions: Vec<(String, serde_json::Value)>,
     usage: Option<serde_json::Value>,
     /// The agent's `authRequired` event while it waits for a sign-in.
     auth: Option<serde_json::Value>,
@@ -708,6 +709,14 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
                         l.permissions.retain(|(r, _)| r != request_id);
                     }
                 }
+                CodeEvent::Question { request_id, .. } => {
+                    live.entry(id).or_default().questions.push((request_id.clone(), ev))
+                }
+                CodeEvent::QuestionResolved { request_id } => {
+                    if let Some(l) = live.get_mut(&id) {
+                        l.questions.retain(|(r, _)| r != request_id);
+                    }
+                }
                 CodeEvent::Status { state, .. } if state == "exited" => {
                     live.remove(&id);
                 }
@@ -919,6 +928,7 @@ fn code_attach_local(state: &AppState, id: &str) -> serde_json::Value {
         events.extend(l.ready.clone());
         events.extend(l.auth.clone());
         events.extend(l.permissions.iter().map(|(_, e)| e.clone()));
+        events.extend(l.questions.iter().map(|(_, e)| e.clone()));
         events.extend(l.usage.clone());
     }
     serde_json::json!({ "running": running, "busy": state.code.is_busy(id), "events": events })
@@ -1263,6 +1273,24 @@ async fn code_permission_respond(
     Ok(())
 }
 
+/// Answer a question card. The card stays up until this arrives.
+async fn code_question_respond(
+    state: &AppState,
+    request_id: String,
+    answers: serde_json::Value,
+    id: Option<String>,
+) -> CmdResult<()> {
+    if let Some(id) = id
+        && let Some(host) = remote_host(state, &id)?
+    {
+        let params = serde_json::json!({ "requestId": request_id, "answers": answers });
+        state.mesh.rpc(&host, "code.question", params).await?;
+        return Ok(());
+    }
+    state.code.respond_question(&request_id, answers);
+    Ok(())
+}
+
 
 // ---------------- moving sessions between nodes ----------------
 
@@ -1545,6 +1573,10 @@ impl mesh::RpcHandler for MeshRpc {
             "code.permission" => {
                 let opt = p["optionId"].as_str().map(str::to_owned);
                 state.code.respond_permission(param(&p, "requestId")?, opt);
+                Ok(Value::Null)
+            }
+            "code.question" => {
+                state.code.respond_question(param(&p, "requestId")?, p["answers"].clone());
                 Ok(Value::Null)
             }
             "code.auto_title" => Ok(json!(code_auto_title_local(state, &id()?).await?)),

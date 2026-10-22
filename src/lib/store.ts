@@ -10,6 +10,7 @@ import {
   type AcpModels,
   type AcpModes,
   type AcpPermissionRequest,
+  type AgentQuestionForm,
   type AcpPlanEntry,
   type AcpToolCall,
   type AcpUpdate,
@@ -91,6 +92,7 @@ export interface CodeState {
   models: AcpModels | null;
   modes: AcpModes | null;
   permissions: { requestId: string; request: AcpPermissionRequest }[];
+  questions: { requestId: string; form: AgentQuestionForm }[];
   usage: UsageView | null;
   commands: AcpCommand[];
   capabilities: AgentCapabilities | null;
@@ -143,6 +145,7 @@ const emptyCode = (): CodeState => ({
   models: null,
   modes: null,
   permissions: [],
+  questions: [],
   usage: null,
   commands: [],
   capabilities: null,
@@ -528,6 +531,7 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
         status: e.state,
         busy: e.state === "exited" ? false : s.busy,
         permissions: e.state === "exited" ? [] : s.permissions,
+        questions: e.state === "exited" ? [] : s.questions,
         auth: e.state === "exited" ? null : s.auth,
         // The agent's queue goes with it; this window gets back what it wrote.
         queued: e.state === "exited" ? [] : s.queued,
@@ -566,6 +570,7 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
         extensions: e.extensions ?? { statusLine: false, rewind: false },
         approvalGaps: e.approvalGaps ?? [],
         auth: null,
+        questions: [],
       };
       break;
     }
@@ -634,6 +639,13 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
     }
     case "permissionResolved":
       next = { ...s, permissions: s.permissions.filter((p) => p.requestId !== e.requestId) };
+      break;
+    case "question":
+      next = { ...s, questions: [...s.questions, { requestId: e.requestId, form: e.form }] };
+      notifyCode(id, "has a question for you");
+      break;
+    case "questionResolved":
+      next = { ...s, questions: s.questions.filter((q) => q.requestId !== e.requestId) };
       break;
     case "promptDone":
       next = {
@@ -771,7 +783,7 @@ export const useStore = create<Store>((set, get) => ({
       if (!session || remoteHost(session, mesh)) continue;
       const stale = s.configRev < agentConfigRev || (!!s.extensions.patchbayModels && s.catalogRev < catalogRev);
       // A queued prompt goes out as soon as the turn ends: a restart would drop it.
-      if (s.status === "ready" && !s.busy && s.permissions.length === 0 && s.queued.length === 0 && stale) {
+      if (s.status === "ready" && !s.busy && s.permissions.length === 0 && s.queued.length === 0 && s.questions.length === 0 && stale) {
         startAgent(id).then(() =>
           get().pushCodeEntry(id, { kind: "info", text: "Restarted the agent to apply changed settings" }),
         );

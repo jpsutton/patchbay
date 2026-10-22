@@ -21,6 +21,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use super::agents::{ApprovalSetup, Extensions, Launch};
+use super::questions::{self, QuestionForm, QuestionReply};
 
 pub const EVENT: &str = "code://event";
 
@@ -63,6 +64,16 @@ pub enum CodeEvent {
     },
     #[serde(rename_all = "camelCase")]
     PermissionResolved {
+        request_id: String,
+    },
+    /// A form the agent is waiting on. It stays until the user submits it.
+    #[serde(rename_all = "camelCase")]
+    Question {
+        request_id: String,
+        form: Value,
+    },
+    #[serde(rename_all = "camelCase")]
+    QuestionResolved {
         request_id: String,
     },
     /// A saved rule answered a permission request.
@@ -210,6 +221,9 @@ impl UserMessage {
         }
     }
 }
+
+/// Question cards awaiting a submit: request id -> (code session id, reply).
+pub type PendingQuestions = Arc<Mutex<HashMap<String, (String, oneshot::Sender<QuestionReply>)>>>;
 
 pub enum AgentCmd {
     /// A new turn when the agent is idle. Mid-turn, steered into the running turn when the agent
@@ -499,6 +513,7 @@ pub struct SpawnSpec {
     /// Existing ACP session to `session/load`; `None` creates a new one.
     pub resume: Option<String>,
     pub pending: PendingPermissions,
+    pub questions: PendingQuestions,
     /// Called with the ACP session id once known.
     pub on_session: Box<dyn Fn(String) + Send>,
     pub auto_approve: AutoApprove,
@@ -509,6 +524,7 @@ struct UiClient {
     sink: Sink,
     code_session_id: String,
     pending: PendingPermissions,
+    questions: PendingQuestions,
     auto_approve: AutoApprove,
     /// Latest known fields per tool call; permission requests may carry only a partial update.
     tool_calls: RefCell<HashMap<String, Value>>,
@@ -726,6 +742,7 @@ mod tool_call_tests {
             sink,
             code_session_id: "c".into(),
             pending,
+            questions: Arc::default(),
             auto_approve: Arc::new(|_, _| None),
             tool_calls: RefCell::default(),
             config_ids: Rc::default(),
@@ -822,7 +839,38 @@ mod tool_call_tests {
     }
 }
 
+fn ext_json(body: &Value) -> acp::Result<acp::ExtResponse> {
+    let raw = serde_json::value::to_raw_value(body).map_err(|_| acp::Error::internal_error())?;
+    Ok(acp::ExtResponse::new(raw.into()))
+}
+
 impl UiClient {
+    /// Show the card and wait until the user submits it. `None` when the agent process is gone.
+    async fn ask(&self, form: QuestionForm) -> Option<QuestionReply> {
+        let request_id = crate::db::new_id();
+        let (tx, rx) = oneshot::channel();
+        self.questions
+            .lock()
+            .unwrap()
+            .insert(request_id.clone(), (self.code_session_id.clone(), tx));
+        emit(
+            &self.sink,
+            &self.code_session_id,
+            CodeEvent::Question {
+                request_id: request_id.clone(),
+                form: serde_json::to_value(&form).unwrap_or(Value::Null),
+            },
+        );
+        let reply = rx.await.ok();
+        self.questions.lock().unwrap().remove(&request_id);
+        emit(
+            &self.sink,
+            &self.code_session_id,
+            CodeEvent::QuestionResolved { request_id },
+        );
+        reply
+    }
+
     /// Ask the UI (or a saved rule) about a permission request; returns the ACP response.
     async fn permission(&self, mut raw: Value) -> Value {
         // The request may carry fields no notification did (a diff, rawInput): keep them with the
@@ -839,6 +887,14 @@ impl UiClient {
             emit(&self.sink, &self.code_session_id, CodeEvent::Update { update });
         }
         raw["toolCall"] = tool_call.clone();
+        if let Some(form) = questions::from_permission(&tool_call, &raw["options"]) {
+            let reply = self.ask(form.clone()).await;
+            let option_id = reply.as_ref().and_then(|r| questions::permission_option(&form, &r.answers));
+            return match option_id {
+                Some(id) => json!({ "outcome": { "outcome": "selected", "optionId": id } }),
+                None => json!({ "outcome": { "outcome": "cancelled" } }),
+            };
+        }
         if let Some((option_id, description)) = (self.auto_approve)(&tool_call, &raw["options"]) {
             emit(
                 &self.sink,
@@ -968,7 +1024,23 @@ impl acp::Client for UiClient {
     }
 
     async fn ext_method(&self, args: acp::ExtRequest) -> acp::Result<acp::ExtResponse> {
+        let method = args.method.trim_start_matches('_');
         if &*args.method != super::wire::RAW_PERMISSION {
+            let raw = serde_json::from_str::<Value>(args.params.get()).unwrap_or(Value::Null);
+            if let Some(form) = questions::from_ext(method, &raw) {
+                let reply = self.ask(form.clone()).await;
+                let body = match reply {
+                    Some(r) if method.contains("ask_user_question") => questions::grok_response(&r.answers),
+                    Some(r) => questions::elicitation_response(&form, &r.answers),
+                    None if method.contains("ask_user_question") => json!({ "outcome": "cancelled" }),
+                    None => json!({ "action": "cancel" }),
+                };
+                return ext_json(&body);
+            }
+            // A form we can't draw (a URL prompt, an empty schema) must not sit forever.
+            if method.contains("elicitation") {
+                return ext_json(&json!({ "action": "cancel" }));
+            }
             return Err(acp::Error::method_not_found());
         }
         // A permission request the ACP types can't decode (an unknown option kind, say). The UI
@@ -1019,6 +1091,25 @@ impl acp::Client for UiClient {
     }
 }
 
+/// Copy the agent's stdout, rewriting form-elicitation calls onto the extension channel.
+fn relay_stdout(stdout: tokio::process::ChildStdout) -> tokio::io::DuplexStream {
+    let (client, mut agent_side) = tokio::io::duplex(1024 * 1024);
+    tokio::task::spawn_local(async move {
+        use tokio::io::AsyncWriteExt;
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let line = questions::rewrite_client_method(&line);
+            if agent_side.write_all(line.as_bytes()).await.is_err() {
+                break;
+            }
+            if agent_side.write_all(b"\n").await.is_err() {
+                break;
+            }
+        }
+    });
+    client
+}
+
 fn from_json<T: serde::de::DeserializeOwned>(v: Value) -> Result<T> {
     serde_json::from_value(v).context("build ACP request")
 }
@@ -1067,6 +1158,7 @@ async fn run(
         cwd,
         resume,
         pending,
+        questions,
         on_session,
         auto_approve,
         mcp,
@@ -1123,7 +1215,7 @@ async fn run(
                 .spawn()
                 .with_context(|| format!("start agent {}", program.display()))?;
             let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
-            let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+            let stdout = relay_stdout(child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?);
             let stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
             let tail = stderr_tail.clone();
             tokio::task::spawn_local(async move {
@@ -1147,6 +1239,7 @@ async fn run(
         sink: sink.clone(),
         code_session_id: csid.clone(),
         pending: pending.clone(),
+        questions: questions.clone(),
         auto_approve,
         tool_calls: RefCell::default(),
         config_ids: config_ids.clone(),
@@ -1183,6 +1276,7 @@ async fn run(
         "terminal": false,
         "auth": { "terminal": true },
         "_meta": { "terminal_output": true, "terminal-auth": true, "subagents": true },
+        "elicitation": { "form": {} },
     });
     if extensions.status_line {
         // Ask Grok Build for `session_status` updates (context fill, session token totals).
@@ -1331,6 +1425,10 @@ async fn run(
     }
     emit(&sink, &csid, CodeEvent::Status { state: "ready".into(), message: None });
 
+    let drop_questions = |questions: &PendingQuestions| {
+        let mut map = questions.lock().unwrap();
+        map.retain(|_, (session, _)| session != &csid);
+    };
     let cancel_pending = |pending: &PendingPermissions| {
         let mut map = pending.lock().unwrap();
         let ids: Vec<String> = map
@@ -1567,6 +1665,7 @@ async fn run(
         }
     }
     cancel_pending(&pending);
+    drop_questions(&questions);
     close(io_task, conn, &mut child).await;
     Ok(())
 }
@@ -2434,6 +2533,7 @@ for line in sys.stdin:
             cwd: dir.to_owned(),
             resume: None,
             pending: Arc::default(),
+            questions: Arc::default(),
             on_session: Box::new(|_| {}),
             auto_approve: Arc::new(|_, _| None),
             mcp: Box::new(|_| (Vec::new(), Vec::new())),

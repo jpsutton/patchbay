@@ -442,6 +442,8 @@ export type CodeEvent =
   | { type: "update"; update: AcpUpdate }
   | { type: "permission"; requestId: string; request: AcpPermissionRequest }
   | { type: "permissionResolved"; requestId: string }
+  | { type: "question"; requestId: string; form: AgentQuestionForm }
+  | { type: "questionResolved"; requestId: string }
   | { type: "promptDone"; stopReason: string }
   | { type: "error"; message: string }
   | { type: "usage"; usage: UsageView }
@@ -550,6 +552,31 @@ export type AcpUpdate =
   | { sessionUpdate: "current_mode_update"; currentModeId: string }
   | { sessionUpdate: "available_commands_update"; availableCommands: AcpCommand[] }
   | { sessionUpdate: string; [k: string]: unknown };
+
+export interface AgentQuestionOption {
+  id: string;
+  label: string;
+  description?: string | null;
+}
+
+export interface AgentQuestion {
+  id: string;
+  prompt: string;
+  multi: boolean;
+  freeText: boolean;
+  skippable: boolean;
+  options: AgentQuestionOption[];
+}
+
+export interface AgentQuestionForm {
+  questions: AgentQuestion[];
+}
+
+export interface AgentQuestionAnswer {
+  id: string;
+  picks: string[];
+  note: string;
+}
 
 export interface AcpPermissionOption {
   optionId: string;
@@ -869,6 +896,8 @@ export const api = {
   wireLogSave: () => invoke<string>("wire_log_save"),
   codePermissionRespond: (requestId: string, optionId: string | null, sessionId?: string) =>
     invoke<void>("code_permission_respond", { requestId, optionId, id: sessionId }),
+  codeQuestionRespond: (requestId: string, answers: AgentQuestionAnswer[], sessionId?: string) =>
+    invoke<void>("code_question_respond", { requestId, answers, id: sessionId }),
   codeAttach: (id: string) => invoke<CodeAttach>("code_attach", { id }),
   /** Move a session to `target` into folder `cwd` there; resolves to a note for the user, if any. */
   codeMove: (id: string, target: string, cwd: string) => invoke<string | null>("code_move", { id, target, cwd }),

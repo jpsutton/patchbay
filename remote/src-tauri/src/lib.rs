@@ -842,6 +842,18 @@ async fn code_permission_respond(
 }
 
 #[tauri::command]
+async fn code_question_respond(
+    r: Shared<'_>,
+    request_id: String,
+    answers: Value,
+    id: Option<String>,
+) -> CmdResult<()> {
+    let id = id.ok_or_else(|| CmdError("which session?".into()))?;
+    r.code("code.question", json!({ "id": id, "requestId": request_id, "answers": answers })).await?;
+    Ok(())
+}
+
+#[tauri::command]
 async fn code_usage(r: Shared<'_>, id: String) -> CmdResult<Value> {
     Ok(r.client.rpc("remote.usage", json!({ "id": id })).await?)
 }
@@ -1007,6 +1019,7 @@ pub fn run() {
             code_set_config_option,
             code_rewind,
             code_permission_respond,
+            code_question_respond,
             code_usage,
             list_project_files,
         ])
