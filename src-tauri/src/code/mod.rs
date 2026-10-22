@@ -10,6 +10,7 @@ pub mod mcp;
 pub mod permissions;
 pub mod plan_limits;
 pub mod titles;
+pub mod wire;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -199,6 +200,7 @@ impl CodeManager {
         let (tx, thread) = acp::spawn(SpawnSpec {
             sink,
             code_session_id: csid.clone(),
+            agent: session.agent.clone(),
             launch,
             cwd: PathBuf::from(&session.cwd),
             resume: session.acp_session_id.clone(),
