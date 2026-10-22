@@ -135,7 +135,7 @@ export function PlanUsageBlade({ className }: { className: string }) {
       )}
       <div className="mt-1 flex items-baseline justify-between border-t border-line px-3 pb-1 pt-2 text-[12px] text-muted">
         <span>{limit != null ? `Claude Code stops at ${limit}%` : "Usage limit off"}</span>
-        <button className="text-accent-ink hover:underline" onClick={() => openSettingsAt("agents")}>
+        <button className="text-accent-ink hover:underline" onClick={() => openSettingsAt("agent:claude-code")}>
           Change
         </button>
       </div>

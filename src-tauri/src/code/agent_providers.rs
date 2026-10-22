@@ -55,7 +55,7 @@ fn claude_code(db: &Db, model_ref: &str) -> Result<Setup> {
     let r = providers::resolve(db, model_ref)?;
     if !takes_kind(AgentKind::ClaudeCode, &r.provider.kind) {
         bail!(
-            "Claude Code needs an Anthropic-compatible provider, and {} isn't one. Pick another model in Settings → Coding agents.",
+            "Claude Code needs an Anthropic-compatible provider, and {} isn't one. Pick another model in Settings → Coding agents → Claude Code.",
             r.provider.name
         );
     }
