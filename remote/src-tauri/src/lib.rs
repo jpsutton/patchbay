@@ -295,6 +295,13 @@ async fn remote_keep_alive(r: Shared<'_>, on: bool) -> CmdResult<()> {
     r.app.platform().keep_alive(on, &text).map_err(CmdError)
 }
 
+/// Ask for local network access (Android 17), so a computer's LAN address can be reached. True
+/// when granted or not needed.
+#[tauri::command]
+async fn remote_local_network(app: AppHandle) -> CmdResult<bool> {
+    app.platform().local_network().await.map_err(CmdError)
+}
+
 /// Ask for the phone's fingerprint, face or screen lock. True when it passed (or none exists).
 #[tauri::command]
 async fn remote_unlock(app: AppHandle, reason: String) -> CmdResult<bool> {
@@ -825,6 +832,7 @@ pub fn run() {
             remote_status,
             remote_join,
             remote_cancel_join,
+            remote_local_network,
             remote_leave,
             remote_kick,
             remote_set_foreground,

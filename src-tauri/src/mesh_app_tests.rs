@@ -246,6 +246,31 @@ fn phone() -> Phone {
     Phone { client, events }
 }
 
+/// A phone that leaves keeps its keys, and the computers keep its record. Joining again must
+/// still raise a request to approve, not hand it the session of an already admitted phone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn phone_rejoins_after_leaving() {
+    let a = node("alpha6");
+    a.state.mesh.create(PASS, "a").unwrap();
+    until("listener", 5, || a.state.mesh.bound_port().is_some()).await;
+    let url = format!("127.0.0.1:{}", a.state.mesh.bound_port().unwrap());
+    let p = phone();
+    let pid = p.client.node_id();
+    let requested = || a.state.mesh.status()["pending"].as_array().unwrap().iter().any(|r| r["nodeId"] == pid);
+    p.client.join(&url, PASS, "pocket").unwrap();
+    until("phone's join request", 10, requested).await;
+    a.state.mesh.approve(&pid).unwrap();
+    until("phone online", 10, || p.client.status()["phase"] == "online").await;
+
+    p.client.leave();
+    assert!(!members::get(&a.state.db, &pid).unwrap().unwrap().is_removed());
+    p.client.join(&url, PASS, "pocket").unwrap();
+    until("phone's second join request", 10, requested).await;
+    a.state.mesh.approve(&pid).unwrap();
+    until("phone admitted again", 10, || p.client.is_member()).await;
+    until("phone online again", 10, || p.client.status()["phase"] == "online").await;
+}
+
 fn emit(n: &Node, id: &str, event: code::acp::CodeEvent) {
     code_sink(&n.state)(code::acp::Envelope { code_session_id: id.to_owned(), event });
 }

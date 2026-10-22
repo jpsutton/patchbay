@@ -3,21 +3,19 @@ import type { Preferences } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { isWeb } from "../lib/platform";
 import { input } from "./ProviderPage";
-import { AgentsPage } from "./AgentsPage";
 import { DiagnosticsPage } from "./DiagnosticsPage";
 import { McpPage } from "./McpPage";
 import { MeshPage } from "./MeshPage";
 import { PromptsPage } from "./PromptsPage";
 import { UsagePage } from "./UsagePage";
 
-export type PrefSection = "general" | "chat" | "prompts" | "agents" | "code" | "mcp" | "terminal" | "mesh" | "usage" | "diagnostics";
+export type PrefSection = "general" | "chat" | "prompts" | "agents" | "mcp" | "terminal" | "mesh" | "usage" | "diagnostics";
 
 export const PREF_SECTIONS: { id: PrefSection; label: string }[] = [
   { id: "general", label: "General" },
   { id: "chat", label: "Chat" },
   { id: "prompts", label: "Prompts" },
   { id: "agents", label: "Coding agents" },
-  { id: "code", label: "Grok Build" },
   { id: "mcp", label: "MCP servers" },
   { id: "terminal", label: "Terminal" },
   { id: "mesh", label: "Mesh" },
@@ -121,7 +119,7 @@ export function Deferred({
   );
 }
 
-function LongText({
+export function LongText({
   value,
   onCommit,
   placeholder,
@@ -272,7 +270,6 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
 
   if (section === "prompts") return <PromptsPage />;
   if (section === "mcp") return <McpPage />;
-  if (section === "agents") return <AgentsPage />;
   if (section === "mesh") return <MeshPage />;
   if (section === "usage") return <UsagePage />;
   if (section === "diagnostics") return <DiagnosticsPage />;
@@ -300,106 +297,6 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
             onCommit={(v) => update({ defaultSystemPrompt: v })}
           />
         </div>
-      </div>
-    );
-  }
-
-  if (section === "code") {
-    return (
-      <div className="flex max-w-xl flex-col">
-        <p className="pb-2 text-xs text-muted">
-          The approval mode applies to every coding agent; each session can change it in its header. The other
-          settings here are for Grok Build. Custom instructions reach Claude Code too. MCP servers and always-allow rules
-          (under Coding agents) apply to every agent.
-        </p>
-        <Row
-          label="Default approval mode"
-          hint={
-            prefs.permissionMode === "always-approve" ? (
-              <span className="text-danger">
-                New sessions run edits, commands and network access without asking. Plans and questions still reach you,
-                and deny rules in an agent's own config still apply.
-              </span>
-            ) : prefs.permissionMode === "auto" ? (
-              "New sessions read and edit inside the project without asking; deletes, shell, network and anything outside the project still ask."
-            ) : (
-              "New sessions ask before anything the agent asks permission for."
-            )
-          }
-        >
-          <Choice
-            value={prefs.permissionMode}
-            onChange={(v) => set("permissionMode", v)}
-            options={[
-              { value: "default", label: "Ask first" },
-              { value: "auto", label: "Auto edits" },
-              { value: "always-approve", label: "Approve all" },
-            ]}
-          />
-        </Row>
-        <Row label="Web fetch tool" hint="Let the agent download web pages you or it reference.">
-          <Toggle label="Web fetch tool" checked={prefs.webFetch} onChange={(v) => set("webFetch", v)} />
-        </Row>
-        <Row
-          label="Background titles and recaps"
-          hint="Extra model calls that name sessions and summarize turns. Turn off to save tokens."
-        >
-          <Toggle
-            label="Background titles and recaps"
-            checked={prefs.backgroundSummaries}
-            onChange={(v) => set("backgroundSummaries", v)}
-          />
-        </Row>
-        <Row label="Auto-compact at (%)" hint="Default for models without their own setting. Blank = 85.">
-          <Deferred
-            value={prefs.autoCompactPercent == null ? "" : String(prefs.autoCompactPercent)}
-            placeholder="85"
-            mono
-            width="w-24"
-            onCommit={(v) => {
-              const t = v.trim();
-              if (t && !/^\d+$/.test(t)) return Promise.resolve("Enter a whole number");
-              return update({ autoCompactPercent: t ? Number(t) : null });
-            }}
-          />
-        </Row>
-        <div className="pt-3">
-          <div className="text-sm">Custom instructions</div>
-          <div className="mt-0.5 text-xs text-muted">
-            Appended to the agent's system prompt in every Code session, alongside the project's AGENTS.md.
-          </div>
-          <LongText
-            value={prefs.agentInstructions}
-            placeholder="e.g. Run the test suite after changing code. Never commit without asking."
-            onCommit={(v) => update({ agentInstructions: v })}
-          />
-        </div>
-        <div className="pt-4">
-          <div className="text-sm">From your Claude Code setup</div>
-          <div className="mt-0.5 text-xs text-muted">
-            What the agent loads from <span className="font-mono">~/.claude</span> and each project's{" "}
-            <span className="font-mono">.claude/</span> folder, alongside its own configuration.
-          </div>
-        </div>
-        {(
-          [
-            ["skills", "Skills and slash commands", "Skills from .claude/skills and commands from .claude/commands."],
-            ["plugins", "Plugins", "Installed Claude Code plugins, including the skills, agents, hooks and MCP servers they bundle."],
-            ["instructions", "Instructions", "CLAUDE.md files and .claude/rules, added to the agent's instructions."],
-            ["agents", "Subagents", "Agent definitions from .claude/agents."],
-            ["mcpServers", "MCP servers", "Servers from Claude's MCP configuration, in addition to the ones set in Patchbay."],
-            ["hooks", "Hooks", "Hooks from Claude's settings. These run commands on your machine during sessions."],
-          ] as const
-        ).map(([key, label, hint]) => (
-          <Row key={key} label={label} hint={hint}>
-            <Toggle
-              label={`Claude Code ${label}`}
-              checked={prefs.claudeConfig[key]}
-              onChange={(v) => update({ claudeConfig: { ...prefs.claudeConfig, [key]: v } })}
-            />
-          </Row>
-        ))}
-        <p className="pt-2 text-xs text-muted">Idle sessions restart to pick up changes; busy ones restart when their turn ends.</p>
       </div>
     );
   }

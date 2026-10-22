@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
-import { api } from "../lib/ipc";
+import { AGENT_LABELS, api, type AgentId } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { ProviderPage } from "./ProviderPage";
 import { ModelPage } from "./ModelPage";
+import { AgentPage, AgentsPage, useAgentList } from "./AgentsPage";
 import { PREF_SECTIONS, PreferencesPage, type PrefSection } from "./PreferencesPage";
 
 type Selection =
   | { kind: "section"; id: PrefSection }
+  | { kind: "agent"; id: AgentId }
   | { kind: "provider"; id: string }
   | { kind: "model"; id: string }
   | { kind: "new" };
@@ -18,14 +20,16 @@ export function Settings() {
   const refreshCatalog = useStore((s) => s.refreshCatalog);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const askConfirm = useStore((s) => s.askConfirm);
+  const agentList = useAgentList();
   // With no models yet, land where setup starts.
   const [sel, setSel] = useState<Selection>(() => {
     const st = useStore.getState();
     const wanted = PREF_SECTIONS.find((x) => x.id === st.settingsSection);
-    if (wanted) {
-      useStore.setState({ settingsSection: null });
-      return { kind: "section", id: wanted.id };
-    }
+    // "agent:<id>" opens that agent's page.
+    const agent = st.settingsSection?.startsWith("agent:") ? (st.settingsSection.slice(6) as AgentId) : null;
+    if (wanted || agent) useStore.setState({ settingsSection: null });
+    if (wanted) return { kind: "section", id: wanted.id };
+    if (agent && agent in AGENT_LABELS) return { kind: "agent", id: agent };
     return models.length > 0
       ? { kind: "section", id: "general" }
       : providers[0]
@@ -68,11 +72,13 @@ export function Settings() {
   const title =
     sel.kind === "section"
       ? PREF_SECTIONS.find((x) => x.id === sel.id)?.label
-      : sel.kind === "new"
-        ? "New provider"
-        : sel.kind === "model"
-          ? "Model"
-          : (selProvider?.name ?? "Provider");
+      : sel.kind === "agent"
+        ? AGENT_LABELS[sel.id]
+        : sel.kind === "new"
+          ? "New provider"
+          : sel.kind === "model"
+            ? "Model"
+            : (selProvider?.name ?? "Provider");
 
   return (
     <div
@@ -89,15 +95,28 @@ export function Settings() {
               Preferences
             </div>
             {PREF_SECTIONS.map((x) => (
-              <button
-                key={x.id}
-                className={`mx-2 flex w-[calc(100%-1rem)] items-center rounded-md px-3 py-1.5 text-left text-xs ${
-                  sel.kind === "section" && sel.id === x.id ? "bg-panel-2 text-fg" : "text-fg/85 hover:bg-panel-2/60"
-                }`}
-                onClick={() => setSel({ kind: "section", id: x.id })}
-              >
-                {x.label}
-              </button>
+              <div key={x.id}>
+                <button
+                  className={`mx-2 flex w-[calc(100%-1rem)] items-center rounded-md px-3 py-1.5 text-left text-xs ${
+                    sel.kind === "section" && sel.id === x.id ? "bg-panel-2 text-fg" : "text-fg/85 hover:bg-panel-2/60"
+                  }`}
+                  onClick={() => setSel({ kind: "section", id: x.id })}
+                >
+                  {x.label}
+                </button>
+                {x.id === "agents" &&
+                  (agentList.agents?.map((a) => a.id) ?? (Object.keys(AGENT_LABELS) as AgentId[])).map((id) => (
+                    <button
+                      key={id}
+                      className={`mx-2 flex w-[calc(100%-1rem)] items-center rounded-md py-1 pl-7 pr-2 text-left text-xs ${
+                        sel.kind === "agent" && sel.id === id ? "bg-panel-2 text-fg" : "text-fg/85 hover:bg-panel-2/60"
+                      }`}
+                      onClick={() => setSel({ kind: "agent", id })}
+                    >
+                      {AGENT_LABELS[id]}
+                    </button>
+                  ))}
+              </div>
             ))}
             <div className="px-4 pb-1.5 pt-5 font-mono text-[11px] uppercase tracking-[0.06em] text-faint">
               Providers & models
@@ -201,7 +220,15 @@ export function Settings() {
             </div>
           </div>
           <div className="flex-1 overflow-y-auto px-5 pt-4">
-            {sel.kind === "section" ? (
+            {sel.kind === "section" && sel.id === "agents" ? (
+              <div className="pb-4">
+                <AgentsPage list={agentList} onOpen={(id) => setSel({ kind: "agent", id })} />
+              </div>
+            ) : sel.kind === "agent" ? (
+              <div className="pb-4">
+                <AgentPage key={sel.id} id={sel.id} list={agentList} />
+              </div>
+            ) : sel.kind === "section" ? (
               <div className="pb-4">
                 <PreferencesPage section={sel.id} />
               </div>

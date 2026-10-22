@@ -4261,7 +4261,7 @@ checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "patchbay"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4316,7 +4316,7 @@ dependencies = [
 
 [[package]]
 name = "patchbay-mesh"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { api, errorText, type AgentId, type AgentInfo } from "../lib/ipc";
+import { AGENT_LABELS, api, errorText, type AgentId, type AgentInfo } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { PermissionRulesList } from "./PermissionRules";
-import { Deferred, Row, Toggle } from "./PreferencesPage";
+import { Choice, Deferred, LongText, Row, Toggle } from "./PreferencesPage";
 import { input } from "./ProviderPage";
 
 const SOURCE: Record<NonNullable<AgentInfo["source"]>, string> = {
@@ -12,11 +12,47 @@ const SOURCE: Record<NonNullable<AgentInfo["source"]>, string> = {
   npx: "npx, downloaded on first use",
 };
 
+/** The installed agents, loaded once per Settings visit and shared by the overview and each agent's page. */
+export function useAgentList() {
+  const [agents, setAgents] = useState<AgentInfo[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [wanted, setWanted] = useState(false);
+  const load = () =>
+    api.listAgents().then(
+      (a) => {
+        setAgents(a);
+        setError(null);
+      },
+      (e) => setError(errorText(e)),
+    );
+  useEffect(() => {
+    if (wanted) load();
+  }, [wanted]);
+  return { agents, error, reload: load, want: () => setWanted(true) };
+}
+
+export type AgentList = ReturnType<typeof useAgentList>;
+
+function StatusDot({ on }: { on: boolean }) {
+  return <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${on ? "bg-ok" : "bg-faint"}`} aria-hidden />;
+}
+
+function Loading({ list }: { list: AgentList }) {
+  if (list.error) {
+    return (
+      <p className="py-2 text-xs text-danger" role="alert">
+        {list.error}
+      </p>
+    );
+  }
+  return list.agents ? null : <p className="py-3 text-xs text-muted">Looking for agents…</p>;
+}
+
 /**
- * Whether an agent uses its own sign-in (the default) or Patchbay's providers. Claude Code speaks
- * only the Anthropic Messages API, so it is offered Anthropic-compatible providers only.
+ * Where an agent's models come from: its own setup (the default) or Patchbay's providers. Claude
+ * Code speaks only the Anthropic Messages API, so it is offered Anthropic-compatible providers only.
  */
-function ProviderChoice({ agent }: { agent: AgentId }) {
+function ProviderChoice({ agent, label }: { agent: AgentId; label: string }) {
   const prefs = useStore((s) => s.prefs);
   const update = useStore((s) => s.updatePrefs);
   const providers = useStore((s) => s.providers);
@@ -33,21 +69,24 @@ function ProviderChoice({ agent }: { agent: AgentId }) {
     return update({ agentProviders });
   };
 
+  const hint = missing ? (
+    <span className="text-danger">That model is gone from Settings; pick another.</span>
+  ) : claude ? (
+    value ? (
+      "Every request runs on this model, including subagents and background tasks. It's billed by that provider, not your Claude plan."
+    ) : (
+      "Claude Code uses the Claude account or API key you signed in with in a terminal, and picks its own models. Pick one of your Anthropic-compatible models to run everything on it instead."
+    )
+  ) : value ? (
+    `Your Patchbay providers are added to ${label}'s own, with this model as its default.`
+  ) : (
+    `${label} uses the providers and sign-in you set up in ${label} itself. Pick a model to add your Patchbay providers too, with that model as its default.`
+  );
+
   return (
-    <Row
-      label="Models"
-      hint={
-        missing ? (
-          <span className="text-danger">That model is gone from Settings; pick another.</span>
-        ) : claude ? (
-          "Its own sign-in, or one of your Anthropic-compatible models for everything it runs."
-        ) : (
-          "Its own sign-in, or your Patchbay providers too, with the chosen model as its default."
-        )
-      }
-    >
+    <Row label="Models" hint={hint}>
       <select className={`${input} w-56`} value={value} onChange={(e) => choose(e.target.value)}>
-        <option value="">Its own sign-in</option>
+        <option value="">{label}'s own setup</option>
         {usable.map((p) => {
           const list = models.filter((m) => m.providerId === p.id);
           return list.length === 0 ? null : (
@@ -66,7 +105,6 @@ function ProviderChoice({ agent }: { agent: AgentId }) {
   );
 }
 
-/** Settings → Coding agents: which ACP agents are installed, the default, and path overrides. */
 /** Claude Code on a Claude plan: stop its turns before they run into extra usage. */
 function UsageLimit() {
   const limit = useStore((s) => s.prefs.usageLimit);
@@ -102,114 +140,243 @@ function UsageLimit() {
   );
 }
 
-export function AgentsPage() {
+/** Settings Grok Build reads from the config Patchbay writes for it. */
+function GrokSettings() {
   const prefs = useStore((s) => s.prefs);
   const update = useStore((s) => s.updatePrefs);
-  const [agents, setAgents] = useState<AgentInfo[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  return (
+    <>
+      <Row label="Web fetch tool" hint="Let the agent download web pages you or it reference.">
+        <Toggle label="Web fetch tool" checked={prefs.webFetch} onChange={(webFetch) => update({ webFetch })} />
+      </Row>
+      <Row
+        label="Background titles and recaps"
+        hint="Extra model calls that name sessions and summarize turns. Turn off to save tokens."
+      >
+        <Toggle
+          label="Background titles and recaps"
+          checked={prefs.backgroundSummaries}
+          onChange={(backgroundSummaries) => update({ backgroundSummaries })}
+        />
+      </Row>
+      <Row label="Auto-compact at (%)" hint="Default for models without their own setting. Blank = 85.">
+        <Deferred
+          value={prefs.autoCompactPercent == null ? "" : String(prefs.autoCompactPercent)}
+          placeholder="85"
+          mono
+          width="w-24"
+          onCommit={(v) => {
+            const t = v.trim();
+            if (t && !/^\d+$/.test(t)) return Promise.resolve("Enter a whole number");
+            return update({ autoCompactPercent: t ? Number(t) : null });
+          }}
+        />
+      </Row>
+      <div className="pt-4">
+        <div className="text-sm">From your Claude Code setup</div>
+        <div className="mt-0.5 text-xs text-muted">
+          What Grok Build loads from <span className="font-mono">~/.claude</span> and each project's{" "}
+          <span className="font-mono">.claude/</span> folder, alongside its own configuration.
+        </div>
+      </div>
+      {(
+        [
+          ["skills", "Skills and slash commands", "Skills from .claude/skills and commands from .claude/commands."],
+          ["plugins", "Plugins", "Installed Claude Code plugins, including the skills, agents, hooks and MCP servers they bundle."],
+          ["instructions", "Instructions", "CLAUDE.md files and .claude/rules, added to the agent's instructions."],
+          ["agents", "Subagents", "Agent definitions from .claude/agents."],
+          ["mcpServers", "MCP servers", "Servers from Claude's MCP configuration, in addition to the ones set in Patchbay."],
+          ["hooks", "Hooks", "Hooks from Claude's settings. These run commands on your machine during sessions."],
+        ] as const
+      ).map(([key, label, hint]) => (
+        <Row key={key} label={label} hint={hint}>
+          <Toggle
+            label={`Claude Code ${label}`}
+            checked={prefs.claudeConfig[key]}
+            onChange={(v) => update({ claudeConfig: { ...prefs.claudeConfig, [key]: v } })}
+          />
+        </Row>
+      ))}
+      <p className="pt-2 text-xs text-muted">Idle sessions restart to pick up changes; busy ones restart when their turn ends.</p>
+    </>
+  );
+}
 
-  const load = () =>
-    api.listAgents().then(
-      (a) => {
-        setAgents(a);
-        setError(null);
-      },
-      (e) => setError(errorText(e)),
-    );
-  useEffect(() => {
-    load();
-  }, []);
-
-  const setPath = async (id: AgentId, path: string) => {
-    const agentPaths = { ...prefs.agentPaths };
-    if (path) agentPaths[id] = path;
-    else delete agentPaths[id];
-    const err = await update({ agentPaths });
-    if (!err) load();
-    return err;
-  };
+/** Settings → Coding agents: what applies to every agent, and a summary linking to each agent's page. */
+export function AgentsPage({ list, onOpen }: { list: AgentList; onOpen: (id: AgentId) => void }) {
+  const prefs = useStore((s) => s.prefs);
+  const update = useStore((s) => s.updatePrefs);
+  const setToast = useStore((s) => s.setToast);
+  useEffect(list.want, []);
+  const ids = list.agents?.map((a) => a.id) ?? (Object.keys(AGENT_LABELS) as AgentId[]);
 
   return (
     <div className="flex max-w-xl flex-col">
       <p className="pb-2 text-xs text-muted">
         Code sessions run a coding agent over the Agent Client Protocol. Grok Build ships with Patchbay and uses your
-        providers and models. The others use their own sign-in and model list; install and sign in to them in a
-        terminal. Claude Code, OpenCode and Kilo Code can use your providers instead. A session keeps the agent it
-        started with.
+        providers and models. The others bring their own sign-in and models; install and sign in to them in a
+        terminal. A session keeps the agent it started with. The settings here apply to every agent; open an agent for
+        its own.
       </p>
-      {error && (
-        <p className="py-2 text-xs text-danger" role="alert">
-          {error}
-        </p>
-      )}
-      {!agents && !error && <p className="py-3 text-xs text-muted">Looking for agents…</p>}
-      {agents?.map((a) => (
-        <div key={a.id} className="border-b border-border py-3 last:border-b-0">
-          <div className="flex items-start justify-between gap-6">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 text-sm">
-                <span
-                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${a.available ? "bg-ok" : "bg-faint"}`}
-                  aria-hidden
-                />
-                {a.label}
-                {prefs.defaultAgent === a.id && (
-                  <span className="rounded bg-panel-2 px-1.5 py-px text-[11px] text-muted">default</span>
-                )}
-              </div>
-              <div className="mt-0.5 break-all text-xs text-muted">
-                {a.available ? (
-                  <>
-                    {a.version ? `${a.version} · ` : ""}
-                    <span className="font-mono">{a.program}</span>
-                    {a.source ? ` (${SOURCE[a.source]})` : ""}
-                  </>
-                ) : (
-                  <span className={prefs.agentPaths[a.id] ? "text-danger" : ""}>{a.error ?? a.installHint}</span>
-                )}
-              </div>
-              {!a.supportsInstructions && (
-                <div className="mt-0.5 text-xs text-faint">Doesn't receive Patchbay's custom instructions.</div>
-              )}
-            </div>
-            <button
-              className="shrink-0 rounded-md border border-border px-2.5 py-1 text-xs text-muted hover:text-fg disabled:opacity-50"
-              disabled={prefs.defaultAgent === a.id}
-              onClick={() => update({ defaultAgent: a.id })}
-            >
-              Make default
-            </button>
-          </div>
-          {a.takesProviders && (
-            <div className="mt-2">
-              <ProviderChoice agent={a.id} />
-            </div>
-          )}
-          {a.id === "claude-code" && !prefs.agentProviders[a.id] && (
-            <div className="mt-2">
-              <UsageLimit />
-            </div>
-          )}
-          {a.id !== "grok" || prefs.agentPaths[a.id] ? (
-            <div className="mt-2">
-              <Row label="Executable" hint="Absolute path. Blank looks it up on PATH.">
-                <Deferred
-                  value={prefs.agentPaths[a.id] ?? ""}
-                  placeholder={a.id === "claude-code" ? "claude-agent-acp" : (a.program ?? "")}
-                  mono
-                  onCommit={(v) => setPath(a.id, v.trim())}
-                />
-              </Row>
-            </div>
-          ) : null}
+      <Row label="Default agent" hint="New Code sessions start with it. You can pick another for each session.">
+        <select
+          className={`${input} w-56`}
+          value={prefs.defaultAgent}
+          onChange={async (e) => {
+            const err = await update({ defaultAgent: e.target.value as AgentId });
+            if (err) setToast(err);
+          }}
+        >
+          {ids.map((id) => (
+            <option key={id} value={id}>
+              {AGENT_LABELS[id]}
+            </option>
+          ))}
+        </select>
+      </Row>
+      <Row
+        label="Default approval mode"
+        hint={
+          prefs.permissionMode === "always-approve" ? (
+            <span className="text-danger">
+              New sessions run edits, commands and network access without asking. Plans and questions still reach you,
+              and deny rules in an agent's own config still apply.
+            </span>
+          ) : prefs.permissionMode === "auto" ? (
+            "New sessions read and edit inside the project without asking; deletes, shell, network and anything outside the project still ask."
+          ) : (
+            "New sessions ask before anything the agent asks permission for. Each session can change it in its header."
+          )
+        }
+      >
+        <Choice
+          value={prefs.permissionMode}
+          onChange={async (permissionMode) => {
+            const err = await update({ permissionMode });
+            if (err) setToast(err);
+          }}
+          options={[
+            { value: "default", label: "Ask first" },
+            { value: "auto", label: "Auto edits" },
+            { value: "always-approve", label: "Approve all" },
+          ]}
+        />
+      </Row>
+      <div className="pt-3">
+        <div className="text-sm">Custom instructions</div>
+        <div className="mt-0.5 text-xs text-muted">
+          Added to the agent's system prompt in every Code session, alongside the project's AGENTS.md. Each agent's page
+          says whether it receives them.
         </div>
+        <LongText
+          value={prefs.agentInstructions}
+          placeholder="e.g. Run the test suite after changing code. Never commit without asking."
+          onCommit={(v) => update({ agentInstructions: v })}
+        />
+      </div>
+
+      <div className="pt-3 text-sm">Agents</div>
+      <Loading list={list} />
+      {list.agents?.map((a) => (
+        <button
+          key={a.id}
+          className="flex items-center justify-between gap-6 border-b border-border py-2.5 text-left last:border-b-0 hover:bg-panel-2/40"
+          onClick={() => onOpen(a.id)}
+        >
+          <span className="flex min-w-0 items-center gap-2 text-sm">
+            <StatusDot on={a.available} />
+            {a.label}
+            {prefs.defaultAgent === a.id && (
+              <span className="rounded bg-panel-2 px-1.5 py-px text-[11px] text-muted">default</span>
+            )}
+          </span>
+          <span className="flex shrink-0 items-center gap-2 text-xs text-muted">
+            {a.available ? (a.version ?? "installed") : "not found"}
+            <span aria-hidden>›</span>
+          </span>
+        </button>
       ))}
       <div className="pt-3">
-        <button className="text-xs text-accent-ink underline underline-offset-2" onClick={load}>
+        <button className="text-xs text-accent-ink underline underline-offset-2" onClick={list.reload}>
           Check again
         </button>
       </div>
       <PermissionRulesList />
+    </div>
+  );
+}
+
+/** Settings → Coding agents → one agent: where it was found, its models, and its own settings. */
+export function AgentPage({ id, list }: { id: AgentId; list: AgentList }) {
+  const prefs = useStore((s) => s.prefs);
+  const update = useStore((s) => s.updatePrefs);
+  useEffect(list.want, []);
+  const a = list.agents?.find((x) => x.id === id);
+
+  const setPath = async (path: string) => {
+    const agentPaths = { ...prefs.agentPaths };
+    if (path) agentPaths[id] = path;
+    else delete agentPaths[id];
+    const err = await update({ agentPaths });
+    if (!err) list.reload();
+    return err;
+  };
+
+  if (!a) return <Loading list={list} />;
+
+  return (
+    <div className="flex max-w-xl flex-col">
+      <div className="flex items-start justify-between gap-6 border-b border-border pb-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-sm">
+            <StatusDot on={a.available} />
+            {a.available ? "Installed" : "Not found"}
+            {prefs.defaultAgent === a.id && (
+              <span className="rounded bg-panel-2 px-1.5 py-px text-[11px] text-muted">default</span>
+            )}
+          </div>
+          <div className="mt-0.5 break-all text-xs text-muted">
+            {a.available ? (
+              <>
+                {a.version ? `${a.version} · ` : ""}
+                <span className="font-mono">{a.program}</span>
+                {a.source ? ` (${SOURCE[a.source]})` : ""}
+              </>
+            ) : (
+              <span className={prefs.agentPaths[a.id] ? "text-danger" : ""}>{a.error ?? a.installHint}</span>
+            )}
+          </div>
+          <div className="mt-0.5 text-xs text-faint">
+            {a.usesPatchbayModels ? "Runs on your Patchbay providers and models. " : ""}
+            {a.supportsInstructions ? "Receives your custom instructions." : "Doesn't receive your custom instructions."}
+          </div>
+        </div>
+        <div className="flex shrink-0 flex-col items-end gap-1.5">
+          <button
+            className="rounded-md border border-border px-2.5 py-1 text-xs text-muted hover:text-fg disabled:opacity-50"
+            disabled={prefs.defaultAgent === a.id}
+            onClick={() => update({ defaultAgent: a.id })}
+          >
+            Make default
+          </button>
+          <button className="text-xs text-accent-ink underline underline-offset-2" onClick={list.reload}>
+            Check again
+          </button>
+        </div>
+      </div>
+      {a.takesProviders && <ProviderChoice agent={a.id} label={a.label} />}
+      {a.id === "claude-code" && !prefs.agentProviders[a.id] && <UsageLimit />}
+      {a.id !== "grok" || prefs.agentPaths[a.id] ? (
+        <Row label="Executable" hint="Absolute path. Blank looks it up on PATH.">
+          <Deferred
+            value={prefs.agentPaths[a.id] ?? ""}
+            placeholder={a.id === "claude-code" ? "claude-agent-acp" : (a.program ?? "")}
+            mono
+            onCommit={(v) => setPath(v.trim())}
+          />
+        </Row>
+      ) : null}
+      {a.id === "grok" && <GrokSettings />}
     </div>
   );
 }

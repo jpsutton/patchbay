@@ -44,6 +44,7 @@ import { HeaderButton } from "../components/HeaderButton";
 import { useDragRegion, WindowControls } from "../components/WindowControls";
 import { isRemoteApp } from "../lib/platform";
 import {
+  ActivityIcon,
   CheckIcon,
   ChevronRightIcon,
   CopyIcon,
@@ -53,6 +54,7 @@ import {
   PencilIcon,
   PlusIcon,
   RestartIcon,
+  SlidersIcon,
   TerminalIcon,
   XIcon,
 } from "../components/icons";
@@ -82,6 +84,118 @@ export async function newSessionIn(dir: string, agent?: AgentId, host?: string |
 /** Choices of a select config option, flattening groups. */
 function configChoices(o: AcpConfigOption) {
   return o.options.flatMap((c) => ("options" in c ? c.options : [c]));
+}
+
+/** An option's name. Claude Code calls its persona option "Agent", beside the agent picker. */
+const optionName = (o: AcpConfigOption) => (o.name === "Agent" ? "Persona" : o.name);
+
+/**
+ * An agent config option as a composer chip. Thinking effort keeps a chip of its own, marked like
+ * Chat's; the options sheet labels its rows, so there the value goes bare.
+ */
+function ConfigChip({
+  option: o,
+  disabled,
+  onSet,
+}: {
+  option: AcpConfigOption;
+  disabled: boolean;
+  onSet: (o: AcpConfigOption, value: string) => void;
+}) {
+  const thinking = o.category === "thought_level";
+  const prefix = thinking && !useContext(ChipRows) ? "Thinking: " : "";
+  return (
+    <ChipSelect
+      lead={thinking ? <ActivityIcon size={14} /> : undefined}
+      className="max-w-44"
+      value={o.currentValue}
+      disabled={disabled}
+      title={o.description ?? o.name}
+      aria-label={optionName(o)}
+      label={thinking ? "Thinking" : optionName(o)}
+      onChange={(e) => onSet(o, e.target.value)}
+    >
+      {configChoices(o).map((c) => (
+        <option key={c.value} value={c.value}>
+          {`${prefix}${c.name}`}
+        </option>
+      ))}
+    </ChipSelect>
+  );
+}
+
+/**
+ * The agent's other options (Claude Code's Fast mode and persona, say) behind one button, each
+ * named and explained: as bare chips they read "Off" and "Default" with no hint of what for.
+ */
+function MoreOptions({
+  options,
+  disabled,
+  onSet,
+}: {
+  options: AcpConfigOption[];
+  disabled: boolean;
+  onSet: (o: AcpConfigOption, value: string) => void;
+}) {
+  const rows = useContext(ChipRows);
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const esc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        setOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", close);
+    window.addEventListener("keydown", esc, true);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("keydown", esc, true);
+    };
+  }, [open]);
+  if (options.length === 0) return null;
+  // The phone's options sheet already lists every option on its own labeled row.
+  if (rows) return options.map((o) => <ConfigChip key={o.id} option={o} disabled={disabled} onSet={onSet} />);
+  const names = options.map(optionName).join(", ");
+  return (
+    <div ref={ref} className="relative shrink-0">
+      <button
+        className={`flex h-8 w-8 items-center justify-center rounded-[9px] border border-border hover:bg-panel-2/60 hover:text-fg ${
+          open ? "bg-panel-2 text-fg" : "text-muted"
+        }`}
+        onClick={() => setOpen(!open)}
+        title={`More options: ${names}`}
+        aria-label="More agent options"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+      >
+        <SlidersIcon size={15} />
+      </button>
+      {open && (
+        <div
+          role="dialog"
+          aria-label="More agent options"
+          className="absolute bottom-full left-0 z-30 mb-1.5 flex w-80 flex-col rounded-xl border border-border bg-raised p-1 shadow-float"
+        >
+          {options.map((o) => (
+            <div key={o.id} className="flex items-center justify-between gap-3 rounded-md px-2.5 py-2">
+              <div className="min-w-0">
+                <div className="text-[13px] text-fg">{optionName(o)}</div>
+                {o.description && <div className="text-[12px] leading-4 text-muted">{o.description}</div>}
+              </div>
+              <ConfigChip option={o} disabled={disabled} onSet={onSet} />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /** Agents installed here, or on computer `host`; asked once per window and computer. */
@@ -1310,23 +1424,16 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     </ChipText>
                   )
                 )}
-                {configOptions.map((o) => (
-                  <ChipSelect
-                    key={o.id}
-                    className="max-w-40"
-                    value={o.currentValue}
-                    disabled={!ready || working}
-                    title={o.description ?? o.name}
-                    aria-label={o.name}
-                    onChange={(e) => setConfigOption(o, e.target.value)}
-                  >
-                    {configChoices(o).map((c) => (
-                      <option key={c.value} value={c.value}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </ChipSelect>
-                ))}
+                {configOptions
+                  .filter((o) => o.category === "thought_level")
+                  .map((o) => (
+                    <ConfigChip key={o.id} option={o} disabled={!ready || working} onSet={setConfigOption} />
+                  ))}
+                <MoreOptions
+                  options={configOptions.filter((o) => o.category !== "thought_level")}
+                  disabled={!ready || working}
+                  onSet={setConfigOption}
+                />
                 {remote && (
                   <>
                     {modeControl}
