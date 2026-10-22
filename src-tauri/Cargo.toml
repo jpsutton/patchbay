@@ -78,7 +78,7 @@ pdf_oxide = { version = "0.3.43", features = ["rendering"] }
 portable-pty = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"

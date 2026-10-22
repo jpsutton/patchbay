@@ -381,10 +381,28 @@ const EntryView = memo(function EntryView({
       return <HarnessEntry text={e.text} />;
     case "cancelled":
       return <div className="text-center font-mono text-[11px] text-faint">Turn cancelled</div>;
+    case "unrecognized":
+      return <UnrecognizedEntry text={e.text} raw={e.raw} count={e.count} />;
     default:
       return null;
   }
 });
+
+/** A dim line for something the agent sent that Patchbay can't show; opens to the raw payload. */
+function UnrecognizedEntry({ text, raw, count }: { text: string; raw: string; count?: number }) {
+  return (
+    <details className="group text-[12px] text-faint">
+      <summary className="cursor-pointer list-none text-center hover:text-muted">
+        {text}
+        {count && count > 1 ? ` (×${count})` : ""}
+        <span className="ml-1 group-open:hidden">· show</span>
+      </summary>
+      <pre className="mt-1.5 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12px] leading-5 text-muted">
+        {raw}
+      </pre>
+    </details>
+  );
+}
 
 function PlanPanel({ plan }: { plan: NonNullable<CodeState["plan"]> }) {
   if (plan.length === 0) return null;

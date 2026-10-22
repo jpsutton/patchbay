@@ -55,7 +55,10 @@ export type Entry =
   /** A replayed user-role message the agent's harness wrote (a reminder, a slash command's output). */
   | { kind: "harness"; text: string }
   /** A replayed marker that the user stopped the turn. */
-  | { kind: "cancelled" };
+  | { kind: "cancelled" }
+  /** Something the agent sent that Patchbay can't show, with its raw payload as capped JSON
+   *  text (see `rawText`); `count` times this turn. */
+  | { kind: "unrecognized"; text: string; raw: string; count?: number };
 
 /** A prompt waiting for the running turn to end (agents that can't take one mid-turn). */
 export interface QueuedPrompt {
@@ -396,6 +399,15 @@ function textOf(content: { type: string; text?: string } | undefined): string {
   return content && content.type === "text" && typeof content.text === "string" ? content.text : "";
 }
 
+/** Most characters of an unrecognized payload kept (and shown). */
+const MAX_RAW = 20_000;
+
+/** An unrecognized payload as indented JSON, cut to `MAX_RAW` characters. */
+export function rawText(raw: unknown): string {
+  const json = JSON.stringify(raw, null, 2) ?? "null";
+  return json.length > MAX_RAW ? `${json.slice(0, MAX_RAW)}\n…[${json.length - MAX_RAW} more characters]` : json;
+}
+
 function appendText(entries: Entry[], kind: "agent" | "thought" | "user", text: string): Entry[] {
   if (!text) return entries;
   const last = entries[entries.length - 1];
@@ -577,6 +589,29 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
     case "notice":
       next = { ...s, entries: [...s.entries, { kind: "info", text: e.message }] };
       break;
+    case "unrecognized": {
+      // Repeats of the same kind in a turn (an unknown chunk type, say) show as one line, with
+      // the latest payload, even with other entries between them.
+      const raw = rawText(e.raw);
+      let at = -1;
+      for (let i = s.entries.length - 1; i >= 0; i--) {
+        const x = s.entries[i];
+        if (x.kind === "user") break;
+        if (x.kind === "unrecognized" && x.text === e.message) {
+          at = i;
+          break;
+        }
+      }
+      if (at >= 0) {
+        const prev = s.entries[at] as Extract<Entry, { kind: "unrecognized" }>;
+        const entries = [...s.entries];
+        entries[at] = { ...prev, raw, count: (prev.count ?? 1) + 1 };
+        next = { ...s, entries };
+      } else {
+        next = { ...s, entries: [...s.entries, { kind: "unrecognized", text: e.message, raw }] };
+      }
+      break;
+    }
     case "update":
       next = reduceUpdate(s, e.update, useStore.getState().codeSessions.find((x) => x.id === id)?.agent);
       break;
