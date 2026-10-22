@@ -1,4 +1,4 @@
-//! Render a private `$GROK_HOME/config.toml` for the Grok Build sidecar from Patchbay's providers.
+//! Render a private `$GROK_HOME/config.toml` for an external Grok Build from Patchbay's providers.
 //!
 //! API keys never touch this file: each provider key is passed to the child as an env var
 //! (`PATCHBAY_KEY_<n>`) referenced by `env_key` (Bearer) or `env_http_headers` (x-api-key).
@@ -82,7 +82,7 @@ pub fn render(db: &Db, default_model_ref: Option<&str>) -> Result<Rendered> {
         )])),
     );
     if !cc.plugins {
-        // No config cell for this; see patches/0004-claude-plugins-env-gate.patch.
+        // No config cell for this; only builds of Grok Build that read the env var honour it.
         env.push(("GROK_CLAUDE_PLUGINS_ENABLED".to_owned(), "false".to_owned()));
     }
     root.insert(

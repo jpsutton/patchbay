@@ -85,7 +85,9 @@ impl AgentKind {
     /// Executables to look for on PATH, in order, and the arguments that start ACP on stdio.
     fn program(self) -> (&'static [&'static str], &'static [&'static str]) {
         match self {
-            AgentKind::Patchbay | AgentKind::Grok => (&[], &[]),
+            AgentKind::Patchbay => (&[], &[]),
+            // `prepare_grok` adds the arguments that start its ACP server.
+            AgentKind::Grok => (&["grok"], &[]),
             AgentKind::ClaudeCode => (&["claude-agent-acp"], &[]),
             AgentKind::Opencode => (&["opencode"], &["acp"]),
             AgentKind::Cursor => (&["cursor-agent"], &["acp"]),
@@ -125,7 +127,9 @@ impl AgentKind {
     pub fn install_hint(self) -> &'static str {
         match self {
             AgentKind::Patchbay => "Built into Patchbay. Add a provider and model in Settings.",
-            AgentKind::Grok => "Bundled with Patchbay; in a dev checkout run scripts/build-sidecar.sh.",
+            AgentKind::Grok => {
+                "Install Grok Build (https://github.com/xai-org/grok-build) so that `grok` is on your PATH, or set its path in Settings."
+            }
             AgentKind::ClaudeCode => {
                 "Install Node.js (Patchbay then runs the adapter through npx), or `npm install -g @agentclientprotocol/claude-agent-acp`. Sign in with `claude`."
             }
@@ -263,8 +267,6 @@ pub enum Source {
     Builtin,
     /// The path set in Settings.
     Override,
-    /// Next to Patchbay's own executable, or the dev-staged sidecar.
-    Bundled,
     Path,
     /// `npx`, which downloads the package on first use.
     Npx,
@@ -361,8 +363,8 @@ fn is_executable(p: &Path) -> bool {
     }
 }
 
-/// Find the agent's executable: the Settings override, then the bundled copy (Grok), PATH, and
-/// for the agents published on npm a fallback to `npx`.
+/// Find the agent's executable: the Settings override, then PATH, and for the agents published
+/// on npm a fallback to `npx`.
 pub fn resolve(kind: AgentKind, overrides: &AgentPaths) -> Result<Resolved> {
     let (names, acp_args) = kind.program();
     let args: Vec<String> = acp_args.iter().map(|s| (*s).to_owned()).collect();
@@ -375,9 +377,6 @@ pub fn resolve(kind: AgentKind, overrides: &AgentPaths) -> Result<Resolved> {
             return Err(anyhow!("{} path {p} does not exist", kind.label()));
         }
         return Ok(Resolved { program, args, source: Source::Override });
-    }
-    if kind == AgentKind::Grok {
-        return super::sidecar_path().map(|program| Resolved { program, args, source: Source::Bundled });
     }
     if let Some(program) = names.iter().find_map(|n| which(n)) {
         return Ok(Resolved { program, args, source: Source::Path });

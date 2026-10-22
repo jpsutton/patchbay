@@ -1,5 +1,5 @@
-//! Code tab: coding agents (Grok Build, Claude Code, OpenCode, Cursor CLI, Kilo Code) speaking
-//! ACP over stdio.
+//! Code tab: coding agents speaking ACP: Patchbay's own (in-process) and external ones
+//! (Grok Build, Claude Code, OpenCode, Cursor CLI, Kilo Code, …) over stdio.
 
 pub mod acp;
 pub mod agent_providers;
@@ -42,32 +42,6 @@ pub struct CodeManager {
     next_generation: std::sync::atomic::AtomicU64,
     pub titles: titles::Titles,
     pub plan: plan_limits::PlanGuard,
-}
-
-/// Locate the Grok Build binary: bundled sidecar next to our exe, `PATCHBAY_GROK_BIN`, or the
-/// dev-staged `src-tauri/binaries/grok-<triple>`.
-pub fn sidecar_path() -> Result<PathBuf> {
-    let exe_suffix = std::env::consts::EXE_SUFFIX;
-    if let Ok(p) = std::env::var("PATCHBAY_GROK_BIN") {
-        return Ok(PathBuf::from(p));
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let p = dir.join(format!("grok{exe_suffix}"));
-        if p.exists() {
-            return Ok(p);
-        }
-    }
-    let dev = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("binaries")
-        .join(format!("grok-{}{exe_suffix}", env!("PATCHBAY_TARGET")));
-    if dev.exists() {
-        return Ok(dev);
-    }
-    Err(anyhow!(
-        "Grok Build agent binary not found; run scripts/build-sidecar.sh"
-    ))
 }
 
 impl CodeManager {

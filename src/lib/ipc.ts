@@ -346,7 +346,7 @@ export interface AgentInfo {
   label: string;
   available: boolean;
   program: string | null;
-  source: "builtin" | "override" | "bundled" | "path" | "npx" | null;
+  source: "builtin" | "override" | "path" | "npx" | null;
   version: string | null;
   error: string | null;
   installHint: string;

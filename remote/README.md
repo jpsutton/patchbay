@@ -48,7 +48,7 @@ The desktop build of the app (`cargo run` in `src-tauri/`, after `pnpm build:rem
 
 ## Trying it end to end in an emulator
 
-A gateway with something to drive: `scripts/mock-llm.py` as the model, and a test node that serves phones on port 41890 (passphrase `correct horse battery`), with a Grok Build session and a chat, approving every phone that asks to join:
+A gateway with something to drive: `scripts/mock-llm.py` as the model, and a test node that serves phones on port 41890 (passphrase `correct horse battery`), with a Code session on the Patchbay agent and a chat, approving every phone that asks to join:
 
 ```bash
 scripts/mock-llm.py

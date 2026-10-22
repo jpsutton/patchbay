@@ -8,7 +8,6 @@ import { input } from "./ProviderPage";
 const SOURCE: Record<NonNullable<AgentInfo["source"]>, string> = {
   builtin: "built in",
   override: "your path",
-  bundled: "bundled",
   path: "PATH",
   npx: "npx, downloaded on first use",
 };
@@ -141,24 +140,14 @@ function UsageLimit() {
   );
 }
 
-/** Settings Grok Build reads from the config Patchbay writes for it. */
-function GrokSettings() {
+/** Settings for the agents that run on Patchbay's providers and models (Patchbay's own, Grok Build). */
+function PatchbayModelSettings() {
   const prefs = useStore((s) => s.prefs);
   const update = useStore((s) => s.updatePrefs);
   return (
     <>
       <Row label="Web fetch tool" hint="Let the agent download web pages you or it reference.">
         <Toggle label="Web fetch tool" checked={prefs.webFetch} onChange={(webFetch) => update({ webFetch })} />
-      </Row>
-      <Row
-        label="Background titles and recaps"
-        hint="Extra model calls that name sessions and summarize turns. Turn off to save tokens."
-      >
-        <Toggle
-          label="Background titles and recaps"
-          checked={prefs.backgroundSummaries}
-          onChange={(backgroundSummaries) => update({ backgroundSummaries })}
-        />
       </Row>
       <Row label="Auto-compact at (%)" hint="Default for models without their own setting. Blank = 85.">
         <Deferred
@@ -173,6 +162,26 @@ function GrokSettings() {
           }}
         />
       </Row>
+    </>
+  );
+}
+
+/** Settings Grok Build reads from the config Patchbay writes for it. */
+function GrokSettings() {
+  const prefs = useStore((s) => s.prefs);
+  const update = useStore((s) => s.updatePrefs);
+  return (
+    <>
+      <Row
+        label="Background titles and recaps"
+        hint="Extra model calls that name sessions and summarize turns. Turn off to save tokens."
+      >
+        <Toggle
+          label="Background titles and recaps"
+          checked={prefs.backgroundSummaries}
+          onChange={(backgroundSummaries) => update({ backgroundSummaries })}
+        />
+      </Row>
       <div className="pt-4">
         <div className="text-sm">From your Claude Code setup</div>
         <div className="mt-0.5 text-xs text-muted">
@@ -183,7 +192,7 @@ function GrokSettings() {
       {(
         [
           ["skills", "Skills and slash commands", "Skills from .claude/skills and commands from .claude/commands."],
-          ["plugins", "Plugins", "Installed Claude Code plugins, including the skills, agents, hooks and MCP servers they bundle."],
+          ["plugins", "Plugins", "Installed Claude Code plugins, including the skills, agents, hooks and MCP servers they bundle. Only builds of Grok Build that honour GROK_CLAUDE_PLUGINS_ENABLED can turn this off."],
           ["instructions", "Instructions", "CLAUDE.md files and .claude/rules, added to the agent's instructions."],
           ["agents", "Subagents", "Agent definitions from .claude/agents."],
           ["mcpServers", "MCP servers", "Servers from Claude's MCP configuration, in addition to the ones set in Patchbay."],
@@ -377,6 +386,7 @@ export function AgentPage({ id, list }: { id: AgentId; list: AgentList }) {
           />
         </Row>
       ) : null}
+      {a.usesPatchbayModels && <PatchbayModelSettings />}
       {a.id === "grok" && <GrokSettings />}
     </div>
   );

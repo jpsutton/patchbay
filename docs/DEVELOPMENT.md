@@ -2,52 +2,37 @@
 
 Notes for working on Patchbay itself. For what the app does and how to install it, see the [README](../README.md).
 
-## How it reuses Grok Build
+## How the Code agent and the LLM client are built
 
-[Grok Build](https://github.com/xai-org/grok-build) (Apache-2.0) is vendored as a git submodule at `vendor/grok-build`, pinned to a fixed commit. Local fixes live in `patches/` and are applied idempotently by `scripts/apply-patches.sh`, which `build-sidecar.sh` runs. Keep this set small.
+Patchbay owns both. Two crates in `crates/` do the work, and the app wires them in:
 
-- `0001-chat-completions-omit-model_id.patch`: stops sending xAI's non-standard `model_id` on Chat Completions messages, which strict endpoints such as Fireworks reject with a 400.
-- `0002-chat-completions-accept-null-numbers.patch` treats explicit `null` token counts and indexes in Chat Completions responses and stream chunks as `0`. Fireworks sends these, and the unpatched parser fails with "invalid type: null, expected u32".
-- `0003-messages-pdf-document-blocks.patch`: the Anthropic Messages encoder turns a `data:application/pdf` part into a `document` block, so PDFs can be sent natively.
-- `0004-claude-plugins-env-gate.patch`: `GROK_CLAUDE_PLUGINS_ENABLED=false` stops the agent from loading Claude Code plugins. Grok's `[compat.claude]` config has no switch for plugins.
-- `0005-windows-find-msvc-tools.patch` bumps `find-msvc-tools` to 0.1.14 in Grok Build's `Cargo.lock`. With 0.1.13, `cc` does not compile on Windows.
-- `0006-windows-proto-build-deps.patch`: on Windows, Grok Build's proto build helper watches the proto files directly instead of asking `protoc` to write a dependency list to `/dev/stdout`, which Windows lacks.
-
-| Patchbay piece | Grok Build plumbing |
+| Piece | Where |
 | --- | --- |
-| Chat streaming for all three wire protocols | `xai-grok-sampler` + `xai-grok-sampling-types`, linked in-process |
-| Code agent: tools, permissions, sessions, compaction | the `grok` binary run as a sidecar: `grok agent --no-leader stdio` speaking [ACP](https://agentclientprotocol.com) |
-| ACP client | `agent-client-protocol` 0.10.4, the same version Grok Build uses |
+| LLM client: one conversation model over OpenAI Chat Completions, OpenAI Responses, Anthropic Messages and Gemini; streaming, retries, tool calls, reasoning, prompt caching | `crates/patchbay-llm` |
+| Coding agent: an ACP server with the prompt, tools, permissions, MCP client, plan mode, compaction, rewind and session store | `crates/patchbay-agent` |
+| The app's side of that agent: providers, keys and settings for it | `src-tauri/src/code/native.rs` |
+| ACP client for every agent, built in or external | `src-tauri/src/code/acp.rs`, on `agent-client-protocol` 0.10.4 |
 
-### How the Code agent is configured
+The built-in agent runs inside the app and talks ACP to `acp.rs` over an in-memory pipe, so permissions, MCP settings, mesh relay, usage and the whole Code UI treat it like any other agent. `docs/design/harness.md` describes its design. External agents (Claude Code, OpenCode, Cursor CLI, Kilo Code, Codex, Gemini CLI, Grok Build) are spawned as child processes; `docs/design/agents.md` covers them.
 
-Patchbay gives the sidecar a private `GROK_HOME` at `<app data>/grok`. It generates `config.toml` there from your Patchbay providers.
+### Grok Build
 
-API keys never touch that file. Each key goes to the child process as an environment variable, which the config references with `env_key` (Bearer auth) or `env_http_headers` (`x-api-key`).
-
-The generated config also does the following:
-
-- It turns off telemetry, remote catalog fetches, auto-update and the leader daemon.
-- It limits the model picker to Patchbay-defined models (`pb-*`).
-- It writes `[compat.claude]` from Settings → Code agent → "From your Claude Code setup". By default the agent also loads your Claude Code skills, plugins, CLAUDE.md, subagents, MCP servers and hooks from `~/.claude` and project `.claude/` folders; each can be turned off there.
+Grok Build is no longer part of the build. If `grok` is on `PATH` (or set in Settings → Coding agents), it runs as an external agent like the others. For that, Patchbay gives it a private `GROK_HOME` at `<app data>/grok` and generates `config.toml` there from your Patchbay providers (`code/grok_config.rs`). API keys never touch that file: each key goes to the child process as an environment variable, which the config references with `env_key` (Bearer auth) or `env_http_headers` (`x-api-key`). The generated config also turns off telemetry, remote catalog fetches, auto-update and the leader daemon, limits the model picker to Patchbay-defined models (`pb-*`), and writes `[compat.claude]` from Settings → "From your Claude Code setup".
 
 ## Requirements
 
-- Rust (stable; tested with 1.99) and `protoc` on `PATH`. DotSlash is not needed.
+- Rust (stable; tested with 1.99).
 - Node 20+ and pnpm.
 - The Tauri 2 system dependencies. On Linux this means webkit2gtk-4.1 (see the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)).
 
 ## Build and run
 
 ```bash
-git submodule update --init
-scripts/apply-patches.sh
 pnpm install
-scripts/build-sidecar.sh      # builds vendor/grok-build -> src-tauri/binaries/grok-<triple>
 pnpm tauri dev
 ```
 
-The first sidecar build compiles about 800 crates and takes a few minutes. For a release bundle, run `PROFILE=release scripts/build-sidecar.sh`, then `pnpm tauri build`.
+For a release bundle, run `pnpm tauri build`.
 
 Open **Settings** to add a provider. Presets are available for OpenAI, Anthropic, OpenRouter, Ollama and LM Studio. Then fetch or type model ids, and pick a default model.
 
@@ -59,9 +44,9 @@ To try it, `pnpm build`, then `target/debug/patchbayd --data-dir /tmp/pb --liste
 
 ## Testing without a real provider
 
-`scripts/mock-llm.py` is a mock server that speaks OpenAI Chat Completions and Anthropic Messages. It rejects non-standard per-message fields as strictly as Fireworks does, and echoes back what the model received: the text, the number of images and the names of attached files.
+`scripts/mock-llm.py` is a mock server that speaks OpenAI Chat Completions, OpenAI Responses, Anthropic Messages and Gemini. It rejects non-standard per-message fields as strictly as Fireworks does, and echoes back what the model received: the text, the number of images and the names of attached files.
 
-When the request includes tools, the mock also triggers tool calls. Put `!run` in the prompt for a shell call, or `!edit` for a file edit. `!tools` lists the tool names it was offered.
+When the request includes tools, the mock also triggers tool calls. Put `!run` in the prompt for a shell call, `!edit` for a file edit, `!ask` for a multiple-choice question or `!task` for a subagent. `!tools` lists the tool names it was offered.
 
 `scripts/mock-mcp.py` is a minimal stdio MCP server with one `pb_echo` tool. It is used by the MCP smoke test.
 
@@ -69,9 +54,13 @@ When the request includes tools, the mock also triggers tool calls. Put `!run` i
 scripts/mock-llm.py --port 8765 &
 cd src-tauri
 cargo test --lib                              # unit tests
-cargo test --lib smoke -- --ignored           # chat (both backends), title generation, sidecar config, full ACP agent flow + resume
+cargo test --lib smoke -- --ignored           # chat, title generation, the built-in agent through the Code tab: edit, permission, rewind, MCP, resume
 PATCHBAY_SMOKE_KIND=openai cargo test --lib smoke_code -- --ignored
+(cd ../crates/patchbay-llm && cargo test -- --ignored)     # all four wire formats, tool round trips
+(cd ../crates/patchbay-agent && cargo test -- --ignored)   # the agent over ACP: every wire format, plan mode, compaction, rewind, questions, subagents
 ```
+
+To drive the built-in agent by hand over stdio, build `crates/patchbay-agent` and run `patchbay-agent` with `PATCHBAY_AGENT_MODELS` pointing at a JSON list of models (see `src/main.rs`).
 
 The other coding agents (Claude Code, OpenCode, Cursor CLI, Kilo Code) have live tests that run against the copies installed on your machine, with your own sign-ins. Agents that aren't installed are skipped:
 
@@ -93,11 +82,12 @@ src-tauri/src/
   web.rs            patchbayd's HTTP/WebSocket server for the browser UI (feature `web`)
   bin/patchbayd.rs  the headless daemon (docs/headless.md)
   db.rs             SQLite schema (providers, models, conversations, messages, attachments, code sessions)
-  providers.rs      keyring secrets, /models discovery, SamplerConfig mapping
-  chat.rs           Chat streaming over xai-grok-sampler
+  providers.rs      keyring secrets, /models discovery, mapping to patchbay-llm's Config
+  chat.rs           Chat streaming over patchbay-llm
   attachments.rs    ingest/sniff/store; images downscaled, PDFs text-extracted (pdf_oxide) with page-render fallback
   code/agents.rs    coding agent backends: finding, launching and configuring each one
-  code/grok_config.rs  sidecar config.toml rendering (Grok-specific)
+  code/native.rs    the host of the built-in agent (providers, keys, settings)
+  code/grok_config.rs  config.toml rendering for an external Grok Build (Grok-specific)
   code/acp.rs       ACP client (one agent process per code session, LocalSet thread)
   code/mcp.rs       MCP server settings -> ACP `mcpServers` (secrets in the keyring)
   code/permissions.rs  "always allow" rules matched against ACP tool calls
@@ -105,13 +95,13 @@ src-tauri/src/
   files.rs          project file listing for @-mentions (honors .gitignore)
   terminal.rs       PTY shells (portable-pty)
 src/                React + TypeScript UI (Vite, Tailwind, zustand, react-markdown + shiki, xterm.js)
-scripts/            build-sidecar.sh, mock-llm.py, mock-mcp.py
+crates/            patchbay-llm (LLM client), patchbay-agent (coding agent), patchbay-mesh (mesh protocol)
+scripts/            mock-llm.py, mock-mcp.py, ci/, package-daemon.sh
 ```
 
 ## Known limitations (technical)
 
-- PDFs reach non-Anthropic models as extracted text. Pages without extractable text are sent as images, up to 20 pages.
-- The sampler adds `x-grok-*` request headers and a `grok-shell` User-Agent. Most endpoints ignore them.
+- PDFs reach models other than Anthropic's and Gemini's as extracted text. Pages without extractable text are sent as images, up to 20 pages.
 - Chat has no tools yet, so MCP servers apply to the Code tab only.
 - Global shortcuts may not reach apps on Wayland desktops. The tray icon needs a StatusNotifier host on Linux.
 - Office formats (docx/xlsx/pptx), packaging/signing and auto-update are out of scope for this POC.
@@ -120,7 +110,7 @@ scripts/            build-sidecar.sh, mock-llm.py, mock-mcp.py
 
 - `staging` is the default branch. Work goes on a feature branch (`feat/…`, `fix/…`, `chore/…`) and merges into `staging` by pull request.
 - `release` only takes pull requests from `staging`. Merge them with **Create a merge commit**.
-- Pull requests into either branch run `checks.yml`: static checks (`scripts/ci/check.sh`, actionlint), the frontend build, the third-party notices check, and the Rust unit tests.
+- Pull requests into either branch run `checks.yml`: static checks (`scripts/ci/check.sh`, actionlint), the frontend build, the third-party notices check, the Rust unit tests and the end-to-end tests of the LLM client and the agent against the mock model.
 - Pull requests into `release` also run `build.yml`, which builds every package: `.deb`, `.rpm` and AppImage, an Arch package, and best-effort Windows (NSIS, MSI) and macOS (DMG) builds. Run it by hand with workflow_dispatch to test the build on any branch.
 - Merging into `release` runs `release.yml`. It reuses the pull request's build artifacts, signs each one with the release key, builds a signed pacman repository, tags `v<version>` and creates the GitHub Release. Windows and macOS packages ship only if they built.
 - Every release needs a new version. `scripts/ci/version.sh` checks that `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json` and the PKGBUILD agree.
@@ -129,4 +119,4 @@ The signing key's public half is `packaging/patchbay-signing-key.asc`. Its priva
 
 ## License and third-party notices
 
-Patchbay is Apache-2.0 (`LICENSE`, `NOTICE`). After changing Rust or npm dependencies, run `pnpm notices` and commit the updated `THIRD_PARTY_NOTICES.md`; CI fails when it is stale. Each file in `patches/` starts with a header naming the Grok Build files it changes, as the Apache license requires for modified files.
+Patchbay is Apache-2.0 (`LICENSE`, `NOTICE`). After changing Rust or npm dependencies, run `pnpm notices` and commit the updated `THIRD_PARTY_NOTICES.md`; CI fails when it is stale.

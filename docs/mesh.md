@@ -158,7 +158,7 @@ Behind a Cloudflare Tunnel, every connection arrives from the tunnel's local add
 
 ## Limitations
 
-- Moving the agent's own session history works with Grok Build, the agent Patchbay ships with. With other agents, the moved session starts fresh and gets the conversation so far as context on its first prompt.
+- Moving the agent's own session history works with Patchbay's built-in agent and with Grok Build. With other agents, the moved session starts fresh and gets the conversation so far as context on its first prompt.
 - Window preferences (theme, text size, shortcuts and similar) stay per computer.
 - Two copies of the same Patchbay database can't both join a mesh, because they share one identity. Use a fresh install on each computer instead of copying the data folder.
 

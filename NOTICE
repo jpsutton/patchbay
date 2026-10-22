@@ -3,20 +3,6 @@ Copyright 2026 Jared Sutton
 
 Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-This product includes Grok Build (https://github.com/xai-org/grok-build),
-Copyright 2023-2026 SpaceXAI, licensed under the Apache License, Version 2.0.
-Grok Build is vendored at vendor/grok-build. Patchbay links its
-xai-grok-sampler and xai-grok-sampling-types crates and ships its agent as the
-"grok" sidecar binary. Both are built with the local modifications in
-patches/, which are described in README.md.
-
-Grok Build in turn includes these vendored projects (see
-vendor/grok-build/third_party/NOTICE):
-  - mermaid-to-svg, Copyright (c) 2025-2026 Denver Technologies, Inc. (MIT)
-  - dagre_rust, graphlib_rust, ordered_hashmap (Apache-2.0)
-  - nfsserve (BSD-3-Clause)
-  - fuser (MIT)
-
 src/terminal/typeAhead.ts is adapted from Visual Studio Code's terminal
 type-ahead addon (https://github.com/microsoft/vscode),
 Copyright (c) Microsoft Corporation, licensed under the MIT License:

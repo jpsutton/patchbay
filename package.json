@@ -12,7 +12,6 @@
     "build:remote": "tsc --noEmit && vite build --config vite.remote.config.ts",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri",
-    "sidecar": "scripts/build-sidecar.sh",
     "notices": "node scripts/third-party-notices.mjs"
   },
   "dependencies": {
