@@ -96,9 +96,14 @@ pub fn render(db: &Db, default_model_ref: Option<&str>) -> Result<Rendered> {
     let mut provider_tables = Table::new();
     for (i, (p, inline)) in db.list_providers()?.into_iter().enumerate() {
         let mut t = Table::new();
-        t.insert("base_url".into(), s(&providers::normalize_base_url(&p.base_url)));
+        let mut base_url = providers::normalize_base_url(&p.base_url);
+        if p.kind == ProviderKind::Gemini {
+            // Grok Build has no Gemini backend; Google serves the OpenAI dialect under /openai.
+            base_url.push_str("/openai");
+        }
+        t.insert("base_url".into(), s(&base_url));
         let backend = match p.kind {
-            ProviderKind::OpenaiChat => "chat_completions",
+            ProviderKind::OpenaiChat | ProviderKind::Gemini => "chat_completions",
             ProviderKind::OpenaiResponses => "responses",
             ProviderKind::Anthropic => "messages",
         };

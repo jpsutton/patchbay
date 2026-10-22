@@ -5,6 +5,7 @@ import { useStore } from "../lib/store";
 const PRESETS: { label: string; kind: ProviderKind; baseUrl: string }[] = [
   { label: "OpenAI", kind: "openai_chat", baseUrl: "https://api.openai.com/v1" },
   { label: "Anthropic", kind: "anthropic", baseUrl: "https://api.anthropic.com/v1" },
+  { label: "Google Gemini", kind: "gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta" },
   { label: "OpenRouter", kind: "openai_chat", baseUrl: "https://openrouter.ai/api/v1" },
   { label: "Ollama (local)", kind: "openai_chat", baseUrl: "http://localhost:11434/v1" },
   { label: "LM Studio (local)", kind: "openai_chat", baseUrl: "http://localhost:1234/v1" },
@@ -14,6 +15,7 @@ const KIND_LABEL: Record<ProviderKind, string> = {
   openai_chat: "OpenAI-compatible · Chat Completions",
   openai_responses: "OpenAI · Responses API",
   anthropic: "Anthropic-compatible · Messages",
+  gemini: "Google · Gemini API",
 };
 
 export const input =
@@ -80,7 +82,7 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
         </select>
       </label>
       <label className="flex flex-col gap-1 text-xs text-muted">
-        Base URL (including /v1)
+        Base URL (with its version path, e.g. /v1)
         <input
           className={`${input} font-mono`}
           value={baseUrl}

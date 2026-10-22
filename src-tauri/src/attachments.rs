@@ -1,16 +1,15 @@
 //! Attachments: ingest (sniff, store content-addressed), and conversion into model input —
-//! sampler `ContentPart`s for Chat, ACP `ContentBlock`s for Code.
+//! `patchbay_llm` parts for Chat, ACP `ContentBlock`s for Code.
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use xai_grok_sampling_types::ContentPart;
+use patchbay_llm::Part;
 
 use crate::db::{Attachment, Db, new_id};
 
@@ -270,28 +269,23 @@ fn prepare_pdf(bytes: Vec<u8>) -> Result<Vec<Prepared>> {
     Ok(out)
 }
 
-pub fn to_content_parts(prepared: Vec<Prepared>) -> Vec<ContentPart> {
+pub fn to_content_parts(prepared: Vec<Prepared>) -> Vec<Part> {
     prepared
         .into_iter()
         .map(|p| match p {
-            Prepared::Text { text } => ContentPart::Text {
-                text: Arc::from(text),
-            },
-            Prepared::Image { mime, b64 } => ContentPart::Image {
-                url: Arc::from(format!("data:{mime};base64,{b64}")),
-            },
+            Prepared::Text { text } => Part::Text(text),
+            Prepared::Image { mime, b64 } => Part::Image { mime, data: b64 },
         })
         .collect()
 }
 
-/// The PDF itself as a base64 data URI; the patched Messages encoder turns it into a
-/// `document` block. Only for providers that read PDFs natively.
-pub fn pdf_document_part(att: &Attachment) -> Result<ContentPart> {
-    use base64::Engine;
+/// The PDF itself, base64-encoded. Only for providers that read PDFs natively.
+pub fn pdf_document_part(att: &Attachment) -> Result<Part> {
     let bytes = std::fs::read(&att.path).with_context(|| format!("read {}", att.path))?;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-    Ok(ContentPart::Image {
-        url: Arc::from(format!("data:application/pdf;base64,{b64}")),
+    Ok(Part::Document {
+        mime: "application/pdf".into(),
+        name: att.name.clone(),
+        data: B64.encode(bytes),
     })
 }
 

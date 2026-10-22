@@ -2,7 +2,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import type { Activity } from "./activity";
 import type { UpdateInfo } from "./update";
 
-export type ProviderKind = "openai_chat" | "openai_responses" | "anthropic";
+export type ProviderKind = "openai_chat" | "openai_responses" | "anthropic" | "gemini";
 export type AuthMode = "api_key" | "claude_login";
 
 export interface Provider {

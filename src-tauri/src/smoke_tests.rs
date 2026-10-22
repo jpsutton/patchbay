@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use xai_grok_sampler::{RequestId, RetryPolicy, SamplerActor, SamplingEvent};
-use xai_grok_sampling_types::{ContentPart, ConversationItem, ConversationRequest};
+use patchbay_llm::{Client, Message, Part, Request, Role, SystemBlock};
+use tokio_util::sync::CancellationToken;
 
 use crate::db::{Db, Model, Provider, ProviderKind};
 use crate::providers::{self, Resolved};
@@ -37,43 +37,24 @@ fn mock_resolved(kind: ProviderKind) -> Resolved {
     }
 }
 
-async fn sample(kind: ProviderKind, parts: Vec<ContentPart>) -> String {
+async fn sample(kind: ProviderKind, parts: Vec<Part>) -> String {
     let r = mock_resolved(kind);
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let h = SamplerActor::spawn(providers::sampler_config(&r), RetryPolicy::default(), tx);
-    h.submit(
-        RequestId::random(),
-        ConversationRequest {
-            items: vec![
-                ConversationItem::system("be terse"),
-                ConversationItem::user_with_parts(parts),
-            ],
-            ..Default::default()
-        },
-    );
-    let mut out = String::new();
-    while let Some(ev) = rx.recv().await {
-        match ev {
-            SamplingEvent::ChannelToken { text, .. } => out.push_str(&text),
-            SamplingEvent::Completed { .. } => return out,
-            SamplingEvent::Failed { error, .. } => panic!("sampling failed: {error:?}"),
-            _ => {}
-        }
-    }
-    panic!("stream ended without terminal event")
+    let req = Request {
+        system: vec![SystemBlock::new("be terse")],
+        messages: vec![Message::with_parts(Role::User, parts)],
+        ..Default::default()
+    };
+    Client::new(providers::llm_config(&r))
+        .complete_text(&req, &CancellationToken::new())
+        .await
+        .unwrap_or_else(|e| panic!("sampling failed: {e}"))
 }
 
-fn parts() -> Vec<ContentPart> {
+fn parts() -> Vec<Part> {
     vec![
-        ContentPart::Text {
-            text: Arc::from("<file name=\"a.csv\" type=\"text/csv\">\na,b\n</file>"),
-        },
-        ContentPart::Image {
-            url: Arc::from("data:image/png;base64,iVBORw0KGgo="),
-        },
-        ContentPart::Text {
-            text: Arc::from("what is this?"),
-        },
+        Part::Text("<file name=\"a.csv\" type=\"text/csv\">\na,b\n</file>".into()),
+        Part::Image { mime: "image/png".into(), data: "iVBORw0KGgo=".into() },
+        Part::Text("what is this?".into()),
     ]
 }
 
@@ -109,8 +90,8 @@ async fn smoke_generate_title() {
 #[tokio::test]
 #[ignore]
 async fn smoke_anthropic_pdf_document() {
-    let pdf = ContentPart::Image { url: Arc::from("data:application/pdf;base64,JVBERi0xLjQK") };
-    let out = sample(ProviderKind::Anthropic, vec![pdf, ContentPart::Text { text: Arc::from("summarize") }]).await;
+    let pdf = Part::Document { mime: "application/pdf".into(), name: "a.pdf".into(), data: "JVBERi0xLjQK".into() };
+    let out = sample(ProviderKind::Anthropic, vec![pdf, Part::Text("summarize".into())]).await;
     println!("{out}");
     assert!(out.contains("[document application/pdf"), "{out}");
     assert!(out.contains("images seen: 0"), "{out}");

@@ -1,10 +1,8 @@
-//! Provider configuration: secrets, model discovery, mapping to Grok Build's `SamplerConfig`.
+//! Provider configuration: secrets, model discovery, mapping to `patchbay_llm`'s `Config`.
 
 use anyhow::{Context, Result, anyhow};
-use indexmap::IndexMap;
+use patchbay_llm::{AuthScheme, SystemBlock, WireFormat};
 use serde::{Deserialize, Serialize};
-use xai_grok_sampler::{ApiBackend, AuthScheme, SamplerConfig};
-use xai_grok_sampling_types::ConversationItem;
 
 use crate::db::{AuthMode, Db, Model, Provider, ProviderKind};
 
@@ -79,11 +77,12 @@ pub fn normalize_base_url(url: &str) -> String {
     url.trim().trim_end_matches('/').to_owned()
 }
 
-pub fn backend_for(kind: &ProviderKind) -> ApiBackend {
+pub fn wire_format(kind: &ProviderKind) -> WireFormat {
     match kind {
-        ProviderKind::OpenaiChat => ApiBackend::ChatCompletions,
-        ProviderKind::OpenaiResponses => ApiBackend::Responses,
-        ProviderKind::Anthropic => ApiBackend::Messages,
+        ProviderKind::OpenaiChat => WireFormat::ChatCompletions,
+        ProviderKind::OpenaiResponses => WireFormat::Responses,
+        ProviderKind::Anthropic => WireFormat::Anthropic,
+        ProviderKind::Gemini => WireFormat::Gemini,
     }
 }
 
@@ -139,53 +138,37 @@ pub async fn ensure_token(resolved: &mut Resolved) -> Result<()> {
 /// `429 rate_limit_error: Error`.
 pub const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
-/// Make `items` acceptable to the provider before submitting them.
-pub fn prepare_items(r: &Resolved, items: &mut Vec<ConversationItem>) {
+/// Make `req` acceptable to the provider before sending it.
+pub fn prepare_request(r: &Resolved, req: &mut patchbay_llm::Request) {
     if r.auth == Auth::ClaudeLogin {
-        // Each system item becomes its own block, so the user's prompt follows untouched.
-        items.insert(0, ConversationItem::system(CLAUDE_CODE_IDENTITY));
+        // Its own block, so the caller's system prompt follows untouched.
+        req.system.insert(0, SystemBlock::new(CLAUDE_CODE_IDENTITY));
     }
 }
 
-pub fn sampler_config(r: &Resolved) -> SamplerConfig {
-    let mut extra_headers = IndexMap::new();
-    let mut auth_scheme = AuthScheme::Bearer;
+pub fn llm_config(r: &Resolved) -> patchbay_llm::Config {
+    let mut cfg = patchbay_llm::Config::new(
+        wire_format(&r.provider.kind),
+        normalize_base_url(&r.provider.base_url),
+        r.model.model_id.clone(),
+    );
+    cfg.key = r.key.clone();
     if r.provider.kind == ProviderKind::Anthropic {
-        extra_headers.insert("anthropic-version".into(), ANTHROPIC_VERSION.into());
         match r.auth {
             Auth::ClaudeLogin => {
-                extra_headers.insert("anthropic-beta".into(), ANTHROPIC_OAUTH_BETA.into());
-                auth_scheme = AuthScheme::Bearer;
+                cfg.auth = AuthScheme::Bearer;
+                cfg.extra_headers.push(("anthropic-beta".into(), ANTHROPIC_OAUTH_BETA.into()));
             }
-            Auth::Key => {
-                auth_scheme = AuthScheme::XApiKey;
-            }
+            Auth::Key => cfg.auth = AuthScheme::XApiKey,
         }
     }
-    SamplerConfig {
-        api_key: r.key.clone(),
-        base_url: normalize_base_url(&r.provider.base_url),
-        model: r.model.model_id.clone(),
-        api_backend: backend_for(&r.provider.kind),
-        auth_scheme,
-        extra_headers,
-        context_window: r.model.context_window.unwrap_or(200_000) as u64,
-        // Anthropic requires max_tokens; default it when the user hasn't set one.
-        max_completion_tokens: r
-            .model
-            .params
-            .max_output_tokens
-            .or((r.provider.kind == ProviderKind::Anthropic).then_some(8192)),
-        temperature: r.model.params.temperature,
-        top_p: r.model.params.top_p,
-        reasoning_effort: r.model.params.reasoning_effort(),
-        reasoning_summary: r.model.params.reasoning_summary(),
-        idle_timeout_secs: Some(180),
-        max_retries: Some(2),
-        client_identifier: Some("patchbay".into()),
-        client_version: Some(env!("CARGO_PKG_VERSION").into()),
-        ..Default::default()
-    }
+    let p = &r.model.params;
+    cfg.max_output_tokens = p.max_output_tokens;
+    cfg.temperature = p.temperature;
+    cfg.top_p = p.top_p;
+    cfg.effort = p.reasoning_effort();
+    cfg.summary = p.reasoning_summary();
+    cfg
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,14 +211,46 @@ fn context_window_of(rest: &serde_json::Map<String, serde_json::Value>) -> Optio
         .filter(|n| *n > 0)
 }
 
-/// `GET {base}/models` — works for OpenAI-compatible servers and the Anthropic API.
+/// Gemini lists `{models: [{name: "models/x", displayName, inputTokenLimit, ...}]}`.
+fn gemini_models(body: &serde_json::Value) -> Vec<DiscoveredModel> {
+    body.get("models")
+        .and_then(|m| m.as_array())
+        .map(|ms| {
+            ms.iter()
+                .filter(|m| {
+                    m.get("supportedGenerationMethods")
+                        .and_then(|g| g.as_array())
+                        .is_none_or(|g| g.iter().any(|x| x == "generateContent"))
+                })
+                .filter_map(|m| {
+                    let name = m.get("name")?.as_str()?;
+                    let id = name.strip_prefix("models/").unwrap_or(name).to_owned();
+                    Some(DiscoveredModel {
+                        display_name: m
+                            .get("displayName")
+                            .and_then(|d| d.as_str())
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| id.clone()),
+                        context_window: m.get("inputTokenLimit").and_then(|n| n.as_u64()).filter(|n| *n > 0),
+                        id,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `GET {base}/models` — works for OpenAI-compatible servers, Anthropic and Gemini.
 pub async fn discover_models(
     kind: &ProviderKind,
     base_url: &str,
     key: Option<&str>,
     auth: Auth,
 ) -> Result<Vec<DiscoveredModel>> {
-    let url = format!("{}/models", normalize_base_url(base_url));
+    let mut url = format!("{}/models", normalize_base_url(base_url));
+    if *kind == ProviderKind::Gemini {
+        url.push_str("?pageSize=1000");
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()?;
@@ -258,6 +273,7 @@ pub async fn discover_models(
         (ProviderKind::Anthropic, Auth::Key, None) => {
             req = req.header("anthropic-version", ANTHROPIC_VERSION);
         }
+        (ProviderKind::Gemini, _, Some(k)) => req = req.header("x-goog-api-key", k),
         (_, _, Some(k)) => req = req.bearer_auth(k),
         (_, _, None) => {}
     }
@@ -266,6 +282,12 @@ pub async fn discover_models(
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(anyhow!("GET {url} returned {status}: {}", truncate(&body, 400)));
+    }
+    if *kind == ProviderKind::Gemini {
+        let body: serde_json::Value = resp.json().await.context("parse model list")?;
+        let mut out = gemini_models(&body);
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        return Ok(out);
     }
     let list: ModelList = resp.json().await.context("parse model list")?;
     let mut out: Vec<DiscoveredModel> = list
@@ -305,6 +327,18 @@ mod tests {
     }
 
     #[test]
+    fn lists_gemini_models() {
+        let body = serde_json::json!({"models": [
+            {"name": "models/gemini-2.5-pro", "displayName": "Gemini 2.5 Pro", "inputTokenLimit": 1048576,
+             "supportedGenerationMethods": ["generateContent", "countTokens"]},
+            {"name": "models/embedding-001", "supportedGenerationMethods": ["embedContent"]},
+        ]});
+        let m = super::gemini_models(&body);
+        assert_eq!(m.len(), 1);
+        assert_eq!((m[0].id.as_str(), m[0].context_window), ("gemini-2.5-pro", Some(1048576)));
+    }
+
+    #[test]
     fn claude_login_leads_with_claude_code_identity() {
         use super::*;
         let resolved = |auth| Resolved {
@@ -328,25 +362,22 @@ mod tests {
             key: None,
             auth,
         };
-        let history = || vec![ConversationItem::system("be terse"), ConversationItem::user("hi")];
-        let systems = |items: &[ConversationItem]| -> Vec<String> {
-            items
-                .iter()
-                .filter_map(|i| match i {
-                    ConversationItem::System(s) => Some(s.content.as_ref().to_owned()),
-                    _ => None,
-                })
-                .collect()
+        let request = || patchbay_llm::Request {
+            system: vec![SystemBlock::new("be terse")],
+            messages: vec![patchbay_llm::Message::user("hi")],
+            ..Default::default()
+        };
+        let systems = |req: &patchbay_llm::Request| -> Vec<String> {
+            req.system.iter().map(|b| b.text.clone()).collect()
         };
 
-        let mut items = history();
-        prepare_items(&resolved(Auth::ClaudeLogin), &mut items);
-        assert_eq!(items.len(), 3);
-        assert_eq!(systems(&items), [CLAUDE_CODE_IDENTITY, "be terse"]);
+        let mut req = request();
+        prepare_request(&resolved(Auth::ClaudeLogin), &mut req);
+        assert_eq!(req.messages.len(), 1);
+        assert_eq!(systems(&req), [CLAUDE_CODE_IDENTITY, "be terse"]);
 
-        let mut items = history();
-        prepare_items(&resolved(Auth::Key), &mut items);
-        assert_eq!(items.len(), 2);
-        assert_eq!(systems(&items), ["be terse"]);
+        let mut req = request();
+        prepare_request(&resolved(Auth::Key), &mut req);
+        assert_eq!(systems(&req), ["be terse"]);
     }
 }
