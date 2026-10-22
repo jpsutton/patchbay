@@ -275,8 +275,9 @@ function fakeHarnessReplay(csid: string) {
   const agent = (text: string) => codeEmit(csid, { type: "update", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } });
   user("<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>opus</command-args>");
   user("<local-command-stdout>Set model to Opus</local-command-stdout>");
-  user("Fix the flaky upload test.");
-  user("<system-reminder>\nThe user opened src/upload.test.ts in the IDE.\n</system-reminder>");
+  // A prompt and a reminder in one message, the reminder split across chunks.
+  user("Fix the flaky upload test.\n<system-reminder>\nThe user opened ");
+  user("src/upload.test.ts in the IDE.\n</system-reminder>");
   agent("Looking at the upload test now.");
   user("[Request interrupted by user]");
   user("Use <b>bold</b> in the summary instead.");

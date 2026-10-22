@@ -380,6 +380,8 @@ const EntryView = memo(function EntryView({
       return <HarnessEntry text={e.text} />;
     case "cancelled":
       return <div className="text-center font-mono text-[11px] text-faint">Turn cancelled</div>;
+    default:
+      return null;
   }
 });
 
