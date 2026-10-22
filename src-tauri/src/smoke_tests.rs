@@ -685,3 +685,135 @@ fn smoke_claude_config_toggle() {
     let leaked: Vec<&String> = off.iter().filter(|n| skill_dirs.iter().any(|s| n.ends_with(s.as_str()))).collect();
     assert!(leaked.is_empty(), "Claude skills still loaded with the setting off: {leaked:?}");
 }
+
+/// Live: the built-in agent on the user's own Claude Code login (`~/.claude/.credentials.json`).
+/// Makes a few tiny real requests. `cargo test --lib live_claude_login -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn live_claude_login() {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    use crate::code::CodeManager;
+    use crate::code::acp::{AgentCmd, CodeEvent, Envelope, Sink};
+    use crate::db::AuthMode;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let root = std::env::temp_dir().join("patchbay-live-claude");
+    let _ = std::fs::remove_dir_all(&root);
+    let (data_dir, proj) = (root.join("data"), root.join("proj"));
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(&proj).unwrap();
+    let db = Arc::new(Db::open(&data_dir.join("db.sqlite")).unwrap());
+    let provider = Provider {
+        id: "claude".into(),
+        name: "Claude login".into(),
+        kind: ProviderKind::Anthropic,
+        base_url: "https://api.anthropic.com/v1".into(),
+        has_key: false,
+        auth_mode: AuthMode::ClaudeLogin,
+    };
+    db.upsert_provider(&provider, None).unwrap();
+
+    // 1. The login works at all: a token, and the model list.
+    let token = rt.block_on(crate::claude_auth::access_token()).expect("a Claude Code login is needed");
+    println!("1. token ok ({} chars, not shown)", token.len());
+    let models = rt
+        .block_on(providers::discover_models(&ProviderKind::Anthropic, &provider.base_url, Some(&token), providers::Auth::ClaudeLogin))
+        .expect("model list");
+    println!("   models: {:?}", models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>());
+    let want = std::env::var("PATCHBAY_LIVE_MODEL").unwrap_or_else(|_| "haiku".into());
+    let pick = models
+        .iter()
+        .find(|m| m.id.contains(&want))
+        .or_else(|| models.first())
+        .expect("at least one model")
+        .clone();
+    println!("   using {}", pick.id);
+    // The same model twice, under two providers, with and without reasoning effort.
+    db.upsert_provider(&Provider { id: "claude2".into(), name: "Claude login 2".into(), ..provider.clone() }, None).unwrap();
+    for (id, provider_id, effort) in [("plain", "claude", None), ("effort", "claude2", Some("low"))] {
+        db.upsert_model(&Model {
+            id: id.into(),
+            provider_id: provider_id.into(),
+            model_id: pick.id.clone(),
+            display_name: format!("{} ({id})", pick.display_name),
+            vision: true,
+            context_window: pick.context_window.map(|c| c as i64),
+            params: crate::db::ModelParams { reasoning_effort: effort.map(str::to_owned), max_output_tokens: Some(2048), ..Default::default() },
+        })
+        .unwrap();
+    }
+
+    // 2. A plain request through the client, as Chat makes it.
+    let mut resolved = providers::resolve(&db, "plain").unwrap();
+    rt.block_on(providers::ensure_token(&mut resolved)).expect("token");
+    let reply = rt
+        .block_on(crate::chat::name_with(&resolved, "Reply with one short word.", "Say hello".into()))
+        .expect("plain request");
+    println!("2. plain request ok: {reply:?}");
+
+    // 3 and 4. The agent: a tool call, then again with reasoning effort set.
+    let run = |model: &str, prompt: &str| -> (String, String, Vec<String>, Vec<String>) {
+        let session = db.create_code_session(proj.to_str().unwrap(), Some(model), "patchbay", "default").unwrap();
+        let manager = Arc::new(CodeManager::default());
+        let events: Arc<Mutex<Vec<Envelope>>> = Arc::default();
+        let sink: Sink = {
+            let (events, manager) = (events.clone(), manager.clone());
+            Arc::new(move |env: Envelope| {
+                if let CodeEvent::Permission { request_id, request } = &env.event {
+                    let allow = request["options"]
+                        .as_array()
+                        .and_then(|o| o.iter().find(|x| x["kind"] == "allow_once"))
+                        .and_then(|x| x["optionId"].as_str())
+                        .map(str::to_owned);
+                    manager.respond_permission(request_id, allow);
+                }
+                events.lock().unwrap().push(env);
+            })
+        };
+        manager.start(sink, db.clone(), &data_dir, &session.id).unwrap();
+        let wait = |pred: &dyn Fn(&CodeEvent) -> bool, what: &str| {
+            let t0 = Instant::now();
+            while !events.lock().unwrap().iter().any(|e| pred(&e.event)) {
+                assert!(t0.elapsed() < Duration::from_secs(120), "timed out: {what}\n{:#?}", events.lock().unwrap());
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        };
+        wait(&|e| matches!(e, CodeEvent::Status { state, .. } if state == "ready"), "ready");
+        manager.send(&session.id, AgentCmd::prompt(prompt)).unwrap();
+        wait(&|e| matches!(e, CodeEvent::PromptDone { .. } | CodeEvent::Error { .. }), "prompt done");
+        manager.stop(&session.id);
+        let evs = events.lock().unwrap();
+        let text = |kind: &str| -> String {
+            evs.iter()
+                .filter_map(|e| match &e.event {
+                    CodeEvent::Update { update } if update["sessionUpdate"] == kind => update["content"]["text"].as_str().map(str::to_owned),
+                    _ => None,
+                })
+                .collect()
+        };
+        let errors = evs.iter().filter_map(|e| if let CodeEvent::Error { message } = &e.event { Some(message.clone()) } else { None }).collect();
+        let tools = evs
+            .iter()
+            .filter_map(|e| match &e.event {
+                CodeEvent::Update { update } if update["sessionUpdate"] == "tool_call_update" && update["status"] == "completed" => {
+                    Some(update["content"][0]["content"]["text"].as_str().unwrap_or("").to_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        (text("agent_message_chunk"), text("agent_thought_chunk"), errors, tools)
+    };
+
+    let (text, _, errors, tools) = run("plain", "Use the Bash tool to run `echo live-ok`, then reply with just the word done.");
+    println!("3. agent tool call: errors={errors:?} tool_output={tools:?} reply={text:?}");
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(tools.iter().any(|t| t.contains("live-ok")), "the Bash call did not run: {tools:?}");
+    assert!(!text.trim().is_empty());
+
+    let (text, thought, errors, _) = run("effort", "Reply with just the word ok.");
+    println!("4. agent with reasoning effort low: errors={errors:?} reply={text:?} thought_chars={}", thought.len());
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(!text.trim().is_empty());
+}

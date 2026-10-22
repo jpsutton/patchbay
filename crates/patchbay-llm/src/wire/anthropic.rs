@@ -68,6 +68,9 @@ pub fn body(cfg: &Config, req: &Request) -> Value {
     if thinking {
         b["thinking"] = json!({"type": "adaptive", "display": "summarized"});
         b["output_config"] = json!({"effort": cfg.effort.unwrap().as_str()});
+        if needs_budget_thinking(&cfg.model) {
+            downgrade_thinking(&mut b);
+        }
     } else {
         // Extended thinking only runs at the default temperature.
         if let Some(t) = cfg.temperature {
@@ -91,6 +94,44 @@ pub fn body(cfg: &Config, req: &Request) -> Value {
         };
     }
     b
+}
+
+/// Models that predate adaptive thinking take an explicit token budget instead. Names the API
+/// has refused are listed here; for the rest [`downgrade_thinking`] answers the refusal.
+pub fn needs_budget_thinking(model: &str) -> bool {
+    model.contains("haiku-4") || model.contains("claude-3")
+}
+
+/// Whether an API error says the model cannot do adaptive thinking.
+pub fn refuses_adaptive(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("adaptive thinking is not supported")
+}
+
+/// Switch a request from adaptive thinking to a token budget sized from its effort. Returns false
+/// when the request has no adaptive thinking to change.
+pub fn downgrade_thinking(body: &mut Value) -> bool {
+    if body["thinking"]["type"] != "adaptive" {
+        return false;
+    }
+    let budget: u64 = match body["output_config"]["effort"].as_str() {
+        Some("low") => 2048,
+        Some("medium") => 8192,
+        Some("high") => 16384,
+        Some("xhigh") => 24576,
+        _ => 32000,
+    };
+    let max = body["max_tokens"].as_u64().unwrap_or(8192);
+    // The budget has to leave room for the answer.
+    let budget = budget.min(max.saturating_sub(1024));
+    if let Some(o) = body.as_object_mut() {
+        o.remove("output_config");
+        if budget >= 1024 {
+            o.insert("thinking".into(), json!({"type": "enabled", "budget_tokens": budget}));
+        } else {
+            o.remove("thinking");
+        }
+    }
+    true
 }
 
 fn block(p: &Part) -> Option<Value> {
@@ -379,6 +420,28 @@ mod tests {
         assert_eq!(r.stop, StopReason::ToolUse);
         let u = r.usage.unwrap();
         assert_eq!((u.input, u.cached_read, u.cache_write, u.output), (17, 10, 2, 9));
+    }
+
+    #[test]
+    fn older_models_get_a_thinking_budget() {
+        let mut c = cfg();
+        c.model = "claude-haiku-4-5-20251001".into();
+        c.effort = Some(Effort::Low);
+        c.max_output_tokens = Some(4096);
+        let b = body(&c, &Request::simple("s", "hi"));
+        assert_eq!(b["thinking"], json!({"type": "enabled", "budget_tokens": 2048}));
+        assert!(b.get("output_config").is_none());
+
+        // A model not on the list is tried adaptively, and downgraded when the API says no.
+        let mut c = cfg();
+        c.effort = Some(Effort::High);
+        c.max_output_tokens = Some(8000);
+        let mut b = body(&c, &Request::simple("s", "hi"));
+        assert_eq!(b["thinking"]["type"], "adaptive");
+        assert!(refuses_adaptive("adaptive thinking is not supported on this model"));
+        assert!(downgrade_thinking(&mut b));
+        assert_eq!(b["thinking"], json!({"type": "enabled", "budget_tokens": 6976}));
+        assert!(!downgrade_thinking(&mut b), "already downgraded");
     }
 
     #[test]

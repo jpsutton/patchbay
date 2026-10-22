@@ -77,7 +77,7 @@ impl Client {
         mut on_event: impl FnMut(Event) + Send,
     ) -> Result<Response> {
         let cfg = &self.config;
-        let body = wire::body(cfg, req);
+        let mut body = wire::body(cfg, req);
         let url = wire::url(cfg);
         let mut attempt = 0u32;
         loop {
@@ -85,6 +85,14 @@ impl Client {
             match self.attempt(&url, &body, cancel, &mut emitted, &mut on_event).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) if e.cancelled => return Err(e),
+                // Some Anthropic models refuse adaptive thinking; ask again with a token budget.
+                Err(e)
+                    if cfg.format == WireFormat::Anthropic
+                        && wire::anthropic::refuses_adaptive(&e.message)
+                        && wire::anthropic::downgrade_thinking(&mut body) =>
+                {
+                    continue;
+                }
                 Err(e) if e.retryable && !emitted && attempt < cfg.max_retries => {
                     attempt += 1;
                     on_event(Event::Retrying {
