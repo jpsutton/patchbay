@@ -962,9 +962,35 @@ async fn code_unqueue(state: &AppState, id: String, prompt_id: String) -> CmdRes
     Ok(state.code.send(&id, AgentCmd::Unqueue { prompt_id })?)
 }
 
+/// Whether a `code.attach` answer shows a running agent on a host that can cancel a turn to send
+/// a prompt next. Hosts from before force send leave `extensions.forceSend` out.
+fn attach_has_force_send(attach: &serde_json::Value) -> bool {
+    attach["running"] == true
+        && attach["events"].as_array().is_some_and(|evs| {
+            evs.iter().any(|e| e["type"] == "sessionReady" && e["extensions"]["forceSend"] == true)
+        })
+}
+
+/// Refuse a forced send to a remote host that would queue it instead (`code.prompt`) or not know
+/// the method (`code.send_now`).
+async fn ensure_remote_force_send(state: &AppState, host: &str, id: &str) -> anyhow::Result<()> {
+    let attach = state.mesh.rpc(host, "code.attach", serde_json::json!({ "id": id })).await?;
+    if attach["running"] != true {
+        anyhow::bail!("the agent isn't running on {}", state.mesh.member_name(host));
+    }
+    if !attach_has_force_send(&attach) {
+        anyhow::bail!(
+            "{} runs an older Patchbay that can't stop the turn to send this now. Update it, or send the message normally to queue it.",
+            state.mesh.member_name(host)
+        );
+    }
+    Ok(())
+}
+
 /// Send a queued prompt now: the running turn is cancelled and the prompt goes next.
 async fn code_send_now(state: &AppState, id: String, prompt_id: String) -> CmdResult<()> {
     if let Some(host) = remote_host(state, &id)? {
+        ensure_remote_force_send(state, &host, &id).await?;
         state.mesh.rpc(&host, "code.send_now", serde_json::json!({ "id": id, "promptId": prompt_id })).await?;
         return Ok(());
     }
@@ -984,6 +1010,9 @@ async fn code_prompt(
     // Cancels the running turn and sends this next (Ctrl+Enter mid-turn).
     let force = force.unwrap_or(false);
     if let Some(host) = remote_host(state, &id)? {
+        if force {
+            ensure_remote_force_send(state, &host, &id).await?;
+        }
         let params = serde_json::json!({
             "id": id, "text": text, "attachmentIds": attachment_ids, "mentions": mentions, "promptId": prompt_id,
             "force": force,
@@ -1752,6 +1781,19 @@ fn coalesce_term_input_merges_writes_in_order() {
     let next = rx.try_recv().unwrap();
     assert_eq!(coalesce_term_input(next, &mut rx, &mut held).1["data"], "d");
     assert_eq!(coalesce_term_input(resize.clone(), &mut rx, &mut held), resize);
+}
+
+#[cfg(test)]
+#[test]
+fn force_send_needs_a_host_that_advertises_it() {
+    let attach = |running: bool, ext: serde_json::Value| {
+        serde_json::json!({ "running": running, "events": [{ "type": "sessionReady", "extensions": ext }] })
+    };
+    assert!(attach_has_force_send(&attach(true, serde_json::json!({ "steering": true, "forceSend": true }))));
+    // A host from before force send: it would queue a forced prompt and not know `code.send_now`.
+    assert!(!attach_has_force_send(&attach(true, serde_json::json!({ "steering": true }))));
+    assert!(!attach_has_force_send(&attach(false, serde_json::json!({ "forceSend": true }))));
+    assert!(!attach_has_force_send(&serde_json::json!({ "running": true, "events": [] })));
 }
 
 /// Queue input for a remote terminal; false when `id` is local.
