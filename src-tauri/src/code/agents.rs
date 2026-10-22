@@ -597,7 +597,7 @@ fn prepare_patchbay(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSess
         args: Vec::new(),
         env: Vec::new(),
         env_remove: Vec::new(),
-        ext: Extensions { patchbay_models: true, ..Extensions::default() },
+        ext: Extensions { patchbay_models: true, rewind: true, ..Extensions::default() },
         session_meta: json!({ "model": initial_model }),
         initial_model,
         login_hint: AgentKind::Patchbay.login_hint(),

@@ -30,7 +30,7 @@ fn diff_item(path: &Path, old: Option<&str>, new: &str) -> Value {
 }
 
 /// An edit needs the file's current state to be the one the model saw.
-fn check_fresh(session: &Session, path: &Path) -> Result<(), String> {
+pub(super) fn check_fresh(session: &Session, path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
     }
@@ -42,7 +42,7 @@ fn check_fresh(session: &Session, path: &Path) -> Result<(), String> {
     }
 }
 
-fn remember(session: &Session, path: &Path) {
+pub(super) fn remember(session: &Session, path: &Path) {
     if let Some(s) = stamp_of(path) {
         session.files.lock().unwrap().insert(path.to_path_buf(), s);
     }
@@ -277,6 +277,7 @@ fails. Prefer Edit for partial changes. Do not create documentation files unless
         {
             return ToolOutput::error(format!("Cannot create {}: {e}", dir.display()));
         }
+        session.snapshot_file(&path);
         if let Err(e) = std::fs::write(&path, content) {
             return ToolOutput::error(format!("Cannot write {}: {e}", path.display()));
         }
@@ -396,6 +397,7 @@ file first. To create a file, use an empty `old_string` with a path that does no
         {
             return ToolOutput::error(format!("Cannot create {}: {e}", dir.display()));
         }
+        session.snapshot_file(&plan.path);
         if let Err(e) = std::fs::write(&plan.path, &plan.new_file) {
             return ToolOutput::error(format!("Cannot write {}: {e}", plan.path.display()));
         }

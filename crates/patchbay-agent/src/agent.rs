@@ -71,7 +71,8 @@ impl Agent {
     }
 
     async fn handle(&self, method: &str, params: Value) -> Result<Value, RpcError> {
-        match method {
+        // Extension methods may arrive with ACP's leading underscore.
+        match method.trim_start_matches('_') {
             "initialize" => Ok(json!({
                 "protocolVersion": 1,
                 "agentCapabilities": {
@@ -112,8 +113,77 @@ impl Agent {
                 s.update(json!({"sessionUpdate": "current_mode_update", "currentModeId": mode.id()}));
                 Ok(json!({}))
             }
+            "patchbay/rewind/points" => {
+                let s = self.need_session(&params)?;
+                let points: Vec<Value> = s
+                    .prompts
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| json!({"prompt_index": i, "prompt_preview": p.preview}))
+                    .collect();
+                Ok(json!({"rewind_points": points}))
+            }
+            "patchbay/rewind/execute" => self.rewind(&params).await,
             _ => Err(RpcError::new(-32601, format!("method not found: {method}"))),
         }
+    }
+
+    /// Drop a prompt and everything after it; with `mode: "all"` also put back the files they changed.
+    async fn rewind(&self, params: &Value) -> Result<Value, RpcError> {
+        let s = self.need_session(params)?;
+        if s.busy.load(Ordering::SeqCst) {
+            return Err(RpcError::invalid_params("a turn is running; stop it first"));
+        }
+        let target = params["targetPromptIndex"].as_u64().ok_or_else(|| RpcError::invalid_params("targetPromptIndex is required"))? as usize;
+        let revert_files = params["mode"] == "all";
+        let (msg_index, failed) = {
+            let mut prompts = s.prompts.lock().unwrap();
+            if target >= prompts.len() {
+                return Err(RpcError::invalid_params("no rewind point for that prompt"));
+            }
+            let mut failed = Vec::new();
+            if revert_files {
+                for p in prompts[target..].iter().rev() {
+                    for (path, old) in &p.files {
+                        let r = match old {
+                            Some(bytes) => std::fs::write(path, bytes),
+                            None => match std::fs::remove_file(path) {
+                                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                                r => r,
+                            },
+                        };
+                        if let Err(e) = r {
+                            failed.push(format!("{}: {e}", path.display()));
+                        }
+                    }
+                }
+            }
+            let msg_index = prompts[target].msg_index;
+            prompts.truncate(target);
+            (msg_index, failed)
+        };
+        s.state.lock().await.messages.truncate(msg_index);
+        s.store.append(&crate::store::Entry::Truncate { len: msg_index });
+        s.files.lock().unwrap().clear();
+        s.notified.lock().unwrap().clear();
+        if failed.is_empty() {
+            Ok(json!({}))
+        } else {
+            Err(RpcError::internal(format!("could not restore some files: {}", failed.join("; "))))
+        }
+    }
+
+    fn announce_commands(&self, s: &Session) {
+        s.update(json!({
+            "sessionUpdate": "available_commands_update",
+            "availableCommands": [{
+                "name": "compact",
+                "description": "Summarize the conversation to free up context",
+                "input": {"hint": "what the summary should focus on"},
+            }],
+        }));
     }
 
     async fn session_info(&self, s: &Session) -> Value {
@@ -158,6 +228,7 @@ impl Agent {
         self.sessions.lock().unwrap().insert(id.clone(), s.clone());
         let mut info = self.session_info(&s).await;
         info["sessionId"] = json!(id);
+        self.announce_commands(&s);
         Ok(info)
     }
 
@@ -183,10 +254,12 @@ impl Agent {
             .ok_or_else(|| RpcError::internal("add a provider and model in Settings first"))?;
         let mode = restored.mode.unwrap_or(Mode::Default);
         let s = Session::new(id.clone(), cwd, self.host.clone(), self.peer.clone(), model.clone(), mode);
+        *s.prompts.lock().unwrap() = session::prompts_of(&restored.messages);
         s.state.lock().await.messages = restored.messages;
         s.replay(&entries);
         self.attach_mcp(&s, params).await;
         self.sessions.lock().unwrap().insert(id, s.clone());
+        self.announce_commands(&s);
         Ok(self.session_info(&s).await)
     }
 

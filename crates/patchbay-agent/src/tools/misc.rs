@@ -75,7 +75,11 @@ imperative `content` (\"Run the tests\") and a present-continuous `activeForm` (
             })
             .collect();
         ctx.session.update(json!({"sessionUpdate": "plan", "entries": entries}));
-        ctx.session.state.lock().await.todos = todos;
+        {
+            let mut st = ctx.session.state.lock().await;
+            st.todos = todos;
+            st.since_todo_write = 0;
+        }
         ToolOutput::text(
             "Todos have been modified successfully. Continue to use the list to track progress and carry on with the current task.",
         )

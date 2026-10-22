@@ -5,7 +5,7 @@ Speaks OpenAI Chat Completions, OpenAI Responses, Anthropic Messages and Gemini
 (streaming) at http://127.0.0.1:PORT/v1 (Gemini: /v1/models/<id>:streamGenerateContent). Replies echo what the model "saw" (text, image count,
 attached file names). When the request carries tools, a user message containing
 `!run` triggers a shell tool call, `!edit` a file-creating edit call and `!tools` lists
-the offered tool names, so the Code tab's permission prompts, diff view and MCP wiring can
+the offered tool names, `!ask` asks a multiple-choice question and `!task` starts a subagent, so the Code tab's permission prompts, diff view and MCP wiring can
 be exercised.
 
 Usage: scripts/mock-llm.py [--port 8765]
@@ -111,6 +111,14 @@ def _decide(user_text, images, after_tool, tools):
         name = find_tool(tools, {"command"})
         if name:
             return ("tool", name, {"command": "echo patchbay-ok && ls"})
+    if "!ask" in user_text:
+        name = find_tool(tools, {"questions"})
+        if name:
+            return ("tool", name, {"questions": [{"question": "Which one?", "options": [{"label": "Alpha"}, {"label": "Beta"}]}]})
+    if "!task" in user_text:
+        name = find_tool(tools, {"subagent_type", "prompt"})
+        if name:
+            return ("tool", name, {"description": "look around", "prompt": "Report the word SUBAGENT-OK", "subagent_type": "explore"})
     if "!edit" in user_text:
         name = find_tool(tools, {"file_path", "old_string", "new_string"})
         if name:

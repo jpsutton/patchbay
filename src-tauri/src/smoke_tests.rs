@@ -341,7 +341,7 @@ fn smoke_code_agent_edit_with_permission() {
     assert!(after.input >= before.input && after.output >= before.output, "{before:?} -> {after:?}");
 }
 
-/// Rewind via `x.ai/rewind/*`: dropping the first prompt reverts its file edit and its history.
+/// Rewind: dropping the first prompt reverts its file edit and its history.
 #[test]
 #[ignore]
 fn smoke_code_rewind() {
@@ -382,7 +382,7 @@ fn smoke_code_rewind() {
     })
     .unwrap();
     let session = db
-        .create_code_session(proj.to_str().unwrap(), Some("m"), "grok", "default")
+        .create_code_session(proj.to_str().unwrap(), Some("m"), &smoke_agent(), "default")
         .unwrap();
 
     let manager = Arc::new(CodeManager::default());
@@ -391,8 +391,13 @@ fn smoke_code_rewind() {
         let events = events.clone();
         let manager = manager.clone();
         Arc::new(move |env: Envelope| {
-            if let CodeEvent::Permission { request_id, .. } = &env.event {
-                manager.respond_permission(request_id, Some("allow-once".into()));
+            if let CodeEvent::Permission { request_id, request } = &env.event {
+                let allow = request["options"]
+                    .as_array()
+                    .and_then(|o| o.iter().find(|x| x["kind"] == "allow_once"))
+                    .and_then(|x| x["optionId"].as_str())
+                    .map(str::to_owned);
+                manager.respond_permission(request_id, allow);
             }
             events.lock().unwrap().push(env);
         })
@@ -488,7 +493,7 @@ fn smoke_code_rules_and_mcp() {
         params: Default::default(),
     })
     .unwrap();
-    let session = db.create_code_session(proj.to_str().unwrap(), Some("m"), "grok", "default").unwrap();
+    let session = db.create_code_session(proj.to_str().unwrap(), Some("m"), &smoke_agent(), "default").unwrap();
     db.add_permission_rule(proj.to_str().unwrap(), "edit", "").unwrap();
     let mock_mcp = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/mock-mcp.py");
     let mcp_log = root.join("mcp.log");

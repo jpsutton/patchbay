@@ -13,6 +13,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 struct TestHost {
     format: WireFormat,
     data: PathBuf,
+    window: Option<u64>,
+    percent: Option<u8>,
 }
 
 #[async_trait]
@@ -25,7 +27,7 @@ impl Host for TestHost {
         let base = std::env::var("PATCHBAY_MOCK_URL").unwrap_or_else(|_| "http://127.0.0.1:8765/v1".into());
         let mut cfg = Config::new(self.format, base, "mock-agent");
         cfg.key = Some("test-key".into());
-        Ok(ModelClient { client: Client::new(cfg), system_prefix: Vec::new(), context_window: Some(100_000), auto_compact_percent: None })
+        Ok(ModelClient { client: Client::new(cfg), system_prefix: Vec::new(), context_window: self.window, auto_compact_percent: self.percent })
     }
 
     fn data_dir(&self) -> PathBuf {
@@ -43,15 +45,21 @@ struct Acp {
     /// Permission requests seen, and what to answer them.
     asked: Vec<Value>,
     answer: &'static str,
+    /// An option id to pick instead of allow/reject.
+    pick: Option<&'static str>,
 }
 
 impl Acp {
     fn start(format: WireFormat, data: PathBuf) -> Acp {
+        Acp::start_with(format, data, Some(100_000), None)
+    }
+
+    fn start_with(format: WireFormat, data: PathBuf, window: Option<u64>, percent: Option<u8>) -> Acp {
         let (c_to_a, a_from_c) = tokio::io::duplex(1 << 20);
         let (a_to_c, c_from_a) = tokio::io::duplex(1 << 20);
-        let host = Arc::new(TestHost { format, data });
+        let host = Arc::new(TestHost { format, data, window, percent });
         tokio::spawn(patchbay_agent::serve(host, a_from_c, a_to_c));
-        Acp { to: c_to_a, from: BufReader::new(c_from_a).lines(), next: 1, updates: Vec::new(), asked: Vec::new(), answer: "allow" }
+        Acp { to: c_to_a, from: BufReader::new(c_from_a).lines(), next: 1, updates: Vec::new(), asked: Vec::new(), answer: "allow", pick: None }
     }
 
     async fn send(&mut self, v: Value) {
@@ -77,7 +85,7 @@ impl Acp {
                 Some("session/update") => self.updates.push(m["params"]["update"].clone()),
                 Some("session/request_permission") => {
                     self.asked.push(m["params"].clone());
-                    let option = if self.answer == "allow" { "allow" } else { "reject" };
+                    let option = self.pick.unwrap_or(if self.answer == "allow" { "allow" } else { "reject" });
                     self.send(json!({"jsonrpc": "2.0", "id": m["id"], "result": {"outcome": {"outcome": "selected", "optionId": option}}})).await;
                 }
                 _ => {}
@@ -199,5 +207,102 @@ async fn plan_mode_hides_writes_and_asks_to_exit() {
     let list: Vec<&str> = names.trim_start_matches("tool names: ").split(", ").collect();
     assert!(list.contains(&"ExitPlanMode") && list.contains(&"Grep"), "{names}");
     assert!(!list.contains(&"Bash") && !list.contains(&"Edit") && !list.contains(&"Write"), "{names}");
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
+async fn compaction_replaces_the_history_and_survives_a_reload() {
+    let cwd = workdir();
+    // A tiny window makes the first reply's usage cross the threshold.
+    let mut acp = Acp::start_with(WireFormat::ChatCompletions, cwd.join("data"), Some(1000), Some(1));
+    let sid = open(&mut acp, &cwd).await;
+    let r = prompt(&mut acp, &sid, "!run it").await;
+    assert_eq!(r["stopReason"], "end_turn");
+    assert!(acp.text_of("agent_thought_chunk").contains("Summarized the conversation"), "{}", acp.text_of("agent_thought_chunk"));
+
+    let store = std::fs::read_to_string(cwd.join("data/agent/sessions").join(format!("{sid}.jsonl"))).unwrap();
+    assert!(store.contains("\"t\":\"compacted\"") && store.contains("<conversation-summary>"), "{store}");
+
+    let mut again = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));
+    again.call("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await;
+    again.call("session/load", json!({"sessionId": sid, "cwd": cwd, "mcpServers": []})).await;
+    assert!(again.text_of("agent_message_chunk").contains("Earlier conversation summarized"), "{}", again.text_of("agent_message_chunk"));
+    // The agent also compacts on request.
+    let r = prompt(&mut again, &sid, "/compact keep the file names").await;
+    assert_eq!(r["stopReason"], "end_turn");
+    assert!(again.text_of("agent_thought_chunk").contains("Summarized the conversation"));
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
+async fn rewind_drops_prompts_and_restores_files() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::Anthropic, cwd.join("data"));
+    let sid = open(&mut acp, &cwd).await;
+    prompt(&mut acp, &sid, "first !edit").await;
+    assert!(cwd.join("patchbay-test.txt").exists());
+    prompt(&mut acp, &sid, "second question").await;
+    let points = acp.call("patchbay/rewind/points", json!({"sessionId": sid})).await;
+    let points = points["rewind_points"].as_array().unwrap().clone();
+    assert_eq!(points.len(), 2, "{points:?}");
+    assert!(points[0]["prompt_preview"].as_str().unwrap().starts_with("first"));
+
+    // Conversation only: the file stays.
+    acp.call("patchbay/rewind/execute", json!({"sessionId": sid, "targetPromptIndex": 1, "mode": "conversation_only"})).await;
+    assert!(cwd.join("patchbay-test.txt").exists());
+    // Everything: the file the first prompt created goes away.
+    acp.call("patchbay/rewind/execute", json!({"sessionId": sid, "targetPromptIndex": 0, "mode": "all"})).await;
+    assert!(!cwd.join("patchbay-test.txt").exists());
+
+    let mut again = Acp::start(WireFormat::Anthropic, cwd.join("data"));
+    again.call("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await;
+    again.call("session/load", json!({"sessionId": sid, "cwd": cwd, "mcpServers": []})).await;
+    assert_eq!(again.text_of("user_message_chunk"), "", "the rewound prompts must not replay");
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
+async fn tells_the_model_about_files_changed_behind_its_back() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));
+    let sid = open(&mut acp, &cwd).await;
+    prompt(&mut acp, &sid, "make it !edit").await;
+    std::fs::write(cwd.join("patchbay-test.txt"), "someone else wrote this\n").unwrap();
+    prompt(&mut acp, &sid, "carry on").await;
+    let store = std::fs::read_to_string(cwd.join("data/agent/sessions").join(format!("{sid}.jsonl"))).unwrap();
+    assert!(store.contains("changed since you read it"), "{store}");
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
+async fn asks_the_user_a_question() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::Responses, cwd.join("data"));
+    let sid = open(&mut acp, &cwd).await;
+    acp.pick = Some("opt-1");
+    let r = prompt(&mut acp, &sid, "please !ask").await;
+    assert_eq!(r["stopReason"], "end_turn");
+    let q = &acp.asked[0];
+    let ids: Vec<&str> = q["options"].as_array().unwrap().iter().filter_map(|o| o["optionId"].as_str()).collect();
+    assert_eq!(ids, ["opt-0", "opt-1", "__ask_question_skip__"]);
+    assert!(acp.text_of("agent_message_chunk").contains("= \"Beta\""), "{}", acp.text_of("agent_message_chunk"));
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_subagent_reports_back() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::Anthropic, cwd.join("data"));
+    let sid = open(&mut acp, &cwd).await;
+    let r = prompt(&mut acp, &sid, "please !task").await;
+    assert_eq!(r["stopReason"], "end_turn");
+    assert!(acp.text_of("agent_message_chunk").contains("SUBAGENT-OK"), "{}", acp.text_of("agent_message_chunk"));
+    // Its tokens count toward the turn: more than the two main requests alone (59 each).
+    assert!(r["usage"]["outputTokens"].as_u64().unwrap() >= 51, "{r}");
     let _ = std::fs::remove_dir_all(cwd);
 }

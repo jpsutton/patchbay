@@ -1085,6 +1085,8 @@ async fn run(
     } = launch;
     emit(&sink, &csid, CodeEvent::Status { state: "starting".into(), message: None });
 
+    // Patchbay's own agent and Grok Build each name their rewind methods in their own namespace.
+    let rewind_ns = if native.is_some() { "patchbay" } else { "x.ai" };
     // Keep the last stderr lines to explain crashes.
     let stderr_tail: Rc<RefCell<Vec<String>>> = Rc::default();
     let (stdin, stdout, mut child): (
@@ -1527,7 +1529,7 @@ async fn run(
                     }
                     AgentCmd::Rewind { ordinal, preview, revert_files, reply } => {
                         let r = if extensions.rewind {
-                            rewind(&conn, &session_id, ordinal, &preview, revert_files).await
+                            rewind(&conn, rewind_ns, &session_id, ordinal, &preview, revert_files).await
                         } else {
                             Err(anyhow!("this agent can't rewind a session"))
                         };
@@ -1924,12 +1926,13 @@ struct RewindPoint {
 /// synthetic turns the UI never shows don't shift it) and rewind there.
 async fn rewind(
     conn: &acp::ClientSideConnection,
+    ns: &str,
     session_id: &str,
     ordinal: usize,
     preview: &str,
     revert_files: bool,
 ) -> Result<()> {
-    let points = ext(conn, "x.ai/rewind/points", json!({ "sessionId": session_id })).await?;
+    let points = ext(conn, &format!("{ns}/rewind/points"), json!({ "sessionId": session_id })).await?;
     let mut points: Vec<RewindPoint> =
         serde_json::from_value(points["rewind_points"].clone()).unwrap_or_default();
     points.sort_by_key(|p| p.prompt_index);
@@ -1937,7 +1940,7 @@ async fn rewind(
         .ok_or_else(|| anyhow!("no rewind point for that message"))?;
     ext(
         conn,
-        "x.ai/rewind/execute",
+        &format!("{ns}/rewind/execute"),
         json!({
             "sessionId": session_id,
             "targetPromptIndex": target,

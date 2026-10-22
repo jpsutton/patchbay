@@ -6,8 +6,9 @@ use patchbay_llm::{Event, Message, Part, Request, Role, StopReason, ToolCall, To
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
+use crate::compact;
 use crate::prompt;
-use crate::session::{Mode, Session, Totals};
+use crate::session::{Mode, PromptRec, Session, Totals, stamp_of};
 use crate::store::Entry;
 use crate::tools::{Registry, Tool, ToolCtx, ToolOutput, clip_middle};
 
@@ -64,26 +65,147 @@ fn card_text(text: &str) -> String {
     clip_middle(text, MAX_CARD_CHARS)
 }
 
+/// What the harness wants the model to know that the user did not say: files that changed under
+/// it, a model switch, a stale task list. `None` when there is nothing to add.
+async fn reminders(session: &Session, model_name: &str) -> Option<Part> {
+    let mut notes: Vec<String> = Vec::new();
+    {
+        let files = session.files.lock().unwrap().clone();
+        let mut notified = session.notified.lock().unwrap();
+        let mut paths: Vec<_> = files.keys().cloned().collect();
+        paths.sort();
+        for path in paths {
+            let now = stamp_of(&path);
+            if now == files.get(&path).copied() {
+                continue;
+            }
+            if let Some(n) = now
+                && notified.get(&path) == Some(&n)
+            {
+                continue;
+            }
+            match now {
+                Some(n) => {
+                    notified.insert(path.clone(), n);
+                    notes.push(format!(
+                        "{} changed since you read it (the user or a tool edited it). Read it again before you edit it.",
+                        path.display()
+                    ));
+                }
+                None => {
+                    notified.remove(&path);
+                    session.files.lock().unwrap().remove(&path);
+                    notes.push(format!("{} was deleted since you read it.", path.display()));
+                }
+            }
+        }
+    }
+    let mut st = session.state.lock().await;
+    if let Some(prev) = &st.last_model
+        && prev != &st.model_id
+    {
+        notes.push(format!("The session's model was changed to {model_name}. Earlier replies came from a different model."));
+    }
+    st.last_model = Some(st.model_id.clone());
+    st.since_todo_write += 1;
+    if st.since_todo_write >= 8 && st.todos.iter().any(|t| t.status != "completed") {
+        st.since_todo_write = 0;
+        let list: Vec<String> = st.todos.iter().map(|t| format!("- [{}] {}", t.status, t.content)).collect();
+        notes.push(format!(
+            "You have not used TodoWrite for a while. If the list below is out of date, update it; if the work is done, clear it. Current list:\n{}",
+            list.join("\n")
+        ));
+    }
+    (!notes.is_empty()).then(|| Part::Text(prompt::reminder(&notes.join("\n\n"))))
+}
+
+/// `/compact [focus]`: the user asked for a summary instead of a reply.
+fn compact_command(parts: &[Part]) -> Option<String> {
+    let [Part::Text(t)] = parts else { return None };
+    let rest = t.trim().strip_prefix("/compact")?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim().to_owned())
+}
+
 pub async fn run_turn(session: Arc<Session>, prompt_blocks: &Value, cancel: CancellationToken) -> Result<TurnResult, String> {
-    let parts = blocks_to_parts(prompt_blocks);
+    let mut result = run_turn_inner(&session, prompt_blocks, cancel).await;
+    if let Ok(r) = &mut result {
+        let mut extra = session.extra_usage.lock().unwrap();
+        r.usage.input += extra.input;
+        r.usage.cached_read += extra.cached_read;
+        r.usage.cache_write += extra.cache_write;
+        r.usage.output += extra.output;
+        r.usage.reasoning += extra.reasoning;
+        *extra = Totals::default();
+    }
+    result
+}
+
+async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: CancellationToken) -> Result<TurnResult, String> {
+    let session = session.clone();
+    let mut parts = blocks_to_parts(prompt_blocks);
     if parts.is_empty() {
         return Err("the prompt is empty".into());
     }
+    if let Some(focus) = compact_command(&parts) {
+        let model_id = session.state.lock().await.model_id.clone();
+        let mc = session.host.model_client(&model_id).await?;
+        return match compact::compact(&session, &mc, Some(&focus), &cancel).await {
+            Ok(()) => Ok(TurnResult { stop_reason: "end_turn", usage: Totals::default() }),
+            Err(e) if e == "cancelled" => Ok(TurnResult { stop_reason: "cancelled", usage: Totals::default() }),
+            Err(e) => {
+                session.text_chunk("agent_message_chunk", &format!("Could not compact the conversation: {e}"));
+                Ok(TurnResult { stop_reason: "end_turn", usage: Totals::default() })
+            }
+        };
+    }
+    let model_name = {
+        let id = session.state.lock().await.model_id.clone();
+        session.host.models().into_iter().find(|m| m.id == id).map(|m| m.name).unwrap_or(id)
+    };
+    if let Some(r) = reminders(&session, &model_name).await {
+        parts.push(r);
+    }
+    let preview: String = parts
+        .iter()
+        .find_map(|p| if let Part::Text(t) = p { Some(t.trim().chars().take(80).collect()) } else { None })
+        .unwrap_or_default();
     let user = Message::with_parts(Role::User, parts);
     session.store.append(&Entry::Msg { m: user.clone() });
-    session.state.lock().await.messages.push(user);
+    {
+        let mut st = session.state.lock().await;
+        session.prompts.lock().unwrap().push(PromptRec {
+            msg_index: st.messages.len(),
+            preview,
+            files: Default::default(),
+        });
+        st.messages.push(user);
+    }
 
     let mut totals = Totals::default();
     for step in 0..MAX_STEPS {
         if cancel.is_cancelled() {
             return Ok(TurnResult { stop_reason: "cancelled", usage: totals });
         }
-        let (model_id, mode, messages) = {
+        let (model_id, mode) = {
             let st = session.state.lock().await;
-            (st.model_id.clone(), st.mode, st.messages.clone())
+            (st.model_id.clone(), st.mode)
         };
         let settings = session.host.settings();
         let mc = session.host.model_client(&model_id).await?;
+        let percent = mc
+            .auto_compact_percent
+            .or((settings.auto_compact_percent > 0).then_some(settings.auto_compact_percent))
+            .unwrap_or(compact::DEFAULT_PERCENT);
+        let context = session.state.lock().await.context_tokens;
+        if compact::needs(context, mc.context_window, percent)
+            && let Err(e) = compact::compact(&session, &mc, None, &cancel).await
+        {
+            if e == "cancelled" {
+                return Ok(TurnResult { stop_reason: "cancelled", usage: totals });
+            }
+            session.text_chunk("agent_thought_chunk", &format!("Could not compact the conversation: {e}\n"));
+        }
+        let messages = session.state.lock().await.messages.clone();
         let mcp = session.mcp.lock().await.clone();
         let mut registry = Registry::builtin(settings.web_fetch);
         for t in mcp.tools() {
@@ -157,8 +279,12 @@ pub async fn run_turn(session: Arc<Session>, prompt_blocks: &Value, cancel: Canc
             return Ok(TurnResult { stop_reason, usage: totals });
         }
 
-        let results = execute(&session, &registry, calls, &cancel).await;
-        let msg = Message::with_parts(Role::User, results.into_iter().map(Part::ToolResult).collect());
+        let results = execute(&session, &registry, calls, &cancel, "").await;
+        let mut parts: Vec<Part> = results.into_iter().map(Part::ToolResult).collect();
+        if let Some(r) = reminders(&session, &model_name).await {
+            parts.push(r);
+        }
+        let msg = Message::with_parts(Role::User, parts);
         session.store.append(&Entry::Msg { m: msg.clone() });
         session.state.lock().await.messages.push(msg);
         if cancel.is_cancelled() {
@@ -191,11 +317,28 @@ fn card(tool: Option<&Arc<dyn Tool>>, call: &ToolCall, session: &Session) -> Val
     })
 }
 
-async fn execute(session: &Arc<Session>, registry: &Registry, calls: Vec<ToolCall>, cancel: &CancellationToken) -> Vec<ToolResult> {
+/// Run a step's tool calls. `title_prefix` marks calls a subagent makes.
+pub(crate) async fn execute(
+    session: &Arc<Session>,
+    registry: &Registry,
+    calls: Vec<ToolCall>,
+    cancel: &CancellationToken,
+    title_prefix: &str,
+) -> Vec<ToolResult> {
     let mode = session.state.lock().await.mode;
     let tools: Vec<Option<Arc<dyn Tool>>> = calls.iter().map(|c| registry.get(&c.name)).collect();
     // Show every call right away; they may then wait their turn for permission.
-    let cards: Vec<Value> = calls.iter().zip(&tools).map(|(c, t)| card(t.as_ref(), c, session)).collect();
+    let cards: Vec<Value> = calls
+        .iter()
+        .zip(&tools)
+        .map(|(c, t)| {
+            let mut card = card(t.as_ref(), c, session);
+            if !title_prefix.is_empty() {
+                card["title"] = json!(format!("{title_prefix}{}", card["title"].as_str().unwrap_or("")));
+            }
+            card
+        })
+        .collect();
     for c in &cards {
         let mut u = c.clone();
         u["sessionUpdate"] = json!("tool_call");

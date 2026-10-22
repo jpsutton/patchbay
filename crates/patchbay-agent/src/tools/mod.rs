@@ -10,10 +10,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::session::Session;
 
+pub mod ask;
 pub mod fs;
 pub mod misc;
+pub mod notebook;
 pub mod search;
 pub mod shell;
+pub mod task;
 pub mod web;
 
 /// What a tool hands back: the model's view, the client's view, and raw data for the card.
@@ -105,13 +108,21 @@ impl Registry {
             Arc::new(shell::Bash),
             Arc::new(shell::BashOutput),
             Arc::new(shell::KillShell),
+            Arc::new(notebook::NotebookEdit),
             Arc::new(misc::TodoWrite),
             Arc::new(misc::ExitPlanMode),
+            Arc::new(ask::AskUserQuestion),
+            Arc::new(task::Task),
         ];
         if web_fetch {
             tools.push(Arc::new(web::WebFetch));
         }
         Registry { tools }
+    }
+
+    /// Keep only the tools whose name `keep` accepts.
+    pub fn retain(&mut self, keep: impl Fn(&str) -> bool) {
+        self.tools.retain(|t| keep(&t.spec().name));
     }
 
     pub fn push(&mut self, t: Arc<dyn Tool>) {

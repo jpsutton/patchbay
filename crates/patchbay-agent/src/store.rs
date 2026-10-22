@@ -18,6 +18,35 @@ pub enum Entry {
     Tool { call: Value },
     /// The conversation so far was replaced by a summary: everything before is history only.
     Compacted { summary: Message },
+    /// Rewind: keep only the first `len` messages since the last compaction.
+    Truncate { len: usize },
+}
+
+/// The entries that still count: a compaction and a rewind drop what they replace.
+pub fn effective(entries: &[Entry]) -> Vec<Entry> {
+    let mut out: Vec<Entry> = Vec::new();
+    // Where each message since the last compaction sits in `out`.
+    let mut positions: Vec<usize> = Vec::new();
+    for e in entries {
+        match e {
+            Entry::Msg { .. } => {
+                positions.push(out.len());
+                out.push(e.clone());
+            }
+            Entry::Compacted { .. } => {
+                positions.clear();
+                out.push(e.clone());
+            }
+            Entry::Truncate { len } => {
+                if positions.len() > *len {
+                    out.truncate(positions[*len]);
+                    positions.truncate(*len);
+                }
+            }
+            _ => out.push(e.clone()),
+        }
+    }
+    out
 }
 
 pub struct Store {
@@ -67,6 +96,28 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rewind_drops_later_messages_and_their_cards() {
+        let msg = |t: &str| Entry::Msg { m: Message::user(t) };
+        let tool = || Entry::Tool { call: serde_json::json!({"toolCallId": "t"}) };
+        let entries = vec![
+            Entry::Meta { cwd: "/p".into(), model: "m".into(), mode: "default".into() },
+            msg("one"),
+            tool(),
+            msg("two"),
+            tool(),
+            Entry::Truncate { len: 1 },
+            msg("three"),
+        ];
+        let kept = effective(&entries);
+        let texts: Vec<String> = kept
+            .iter()
+            .filter_map(|e| if let Entry::Msg { m } = e { Some(m.text()) } else { None })
+            .collect();
+        assert_eq!(texts, ["one", "three"]);
+        assert_eq!(kept.iter().filter(|e| matches!(e, Entry::Tool { .. })).count(), 1);
+    }
 
     #[test]
     fn appends_and_reloads() {
