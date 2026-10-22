@@ -1,4 +1,4 @@
-import { useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -106,6 +106,11 @@ function matchCommands(commands: AcpCommand[], text: string): AcpCommand[] {
   return [...prefix, ...rest];
 }
 
+type Draft = { text: string; atts: Attachment[]; mentions: string[] };
+
+/** Unsent composer contents per `draftKey`, so each conversation or session keeps its own. */
+const drafts = new Map<string, Draft>();
+
 export function Composer({
   onSend,
   onStop,
@@ -124,6 +129,7 @@ export function Composer({
   restore,
   onRestored,
   onForceSend,
+  draftKey,
 }: {
   /** `mentions`: project-relative paths picked with @ that are still in the text. */
   onSend: (text: string, attachments: Attachment[], mentions: string[]) => void | Promise<void>;
@@ -156,6 +162,8 @@ export function Composer({
    * Ctrl+Shift+Enter when Ctrl+Enter is the send key; idle, those keys keep their usual meaning.
    */
   onForceSend?: (text: string, attachments: Attachment[], mentions: string[]) => void | Promise<void>;
+  /** The conversation or session the composer is typing into; each key keeps its own draft. */
+  draftKey?: string;
 }) {
   const [text, setText] = useState("");
   const [atts, setAtts] = useState<Attachment[]>([]);
@@ -283,6 +291,25 @@ export function Composer({
       .then((u) => (unlisten = u));
     return () => unlisten?.();
   }, []);
+
+  // Switching conversations, or leaving the view, keeps the draft with the one it was typed into.
+  // `shownKey` is the key whose draft the state holds; until it catches up, nothing is saved.
+  const [shownKey, setShownKey] = useState<string>();
+  useLayoutEffect(() => {
+    if (draftKey === undefined) return;
+    const d = drafts.get(draftKey);
+    setText(d?.text ?? "");
+    setAtts(d?.atts ?? []);
+    setMentions(d?.mentions ?? []);
+    setCaret(d?.text.length ?? 0);
+    setFiles(null);
+    setShownKey(draftKey);
+  }, [draftKey]);
+  useEffect(() => {
+    if (shownKey === undefined || shownKey !== draftKey) return;
+    if (text || atts.length) drafts.set(shownKey, { text, atts, mentions });
+    else drafts.delete(shownKey);
+  }, [shownKey, draftKey, text, atts, mentions]);
 
   useEffect(() => {
     if (!restore) return;
