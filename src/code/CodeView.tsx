@@ -6,7 +6,6 @@ import {
   estimateCost,
   type AcpConfigOption,
   type AcpToolCall,
-  type AcpToolCallContent,
   type AgentId,
   type AgentInfo,
   type Attachment,
@@ -35,6 +34,8 @@ import { PermissionCard, PlanDocCard, planDocOf, ToolCallCard, ToolGroup } from 
 import { SignInCard } from "./SignInCard";
 import { TranscriptRows, type TranscriptRow } from "./TranscriptRows";
 import { DiffView, diffStats } from "./DiffView";
+import { changesKey, collectChanges, normalizePath, type FileChange } from "./changes";
+import { todoPlanOf } from "../lib/todoPlan";
 import { CopyButton, copyText } from "../components/CopyButton";
 import { ExportMenu } from "../components/ExportMenu";
 import { codeToJson, codeToMarkdown, saveExport } from "../lib/export";
@@ -388,24 +389,26 @@ const EntryView = memo(function EntryView({
 function PlanPanel({ plan }: { plan: NonNullable<CodeState["plan"]> }) {
   if (plan.length === 0) return null;
   const done = plan.filter((p) => p.status === "completed").length;
+  // Cancelled steps stay listed but don't count toward the total.
+  const total = plan.filter((p) => p.status !== "cancelled").length;
   return (
     <section aria-label="Plan" className="flex flex-col gap-2 rounded-xl border border-line bg-panel/60 px-3.5 py-3 text-[13px]">
       <div className="flex items-center font-mono text-[11px] text-faint">
         <span className="uppercase tracking-[0.06em]">Plan</span>
         <span className="flex-1" />
         <span>
-          {done} of {plan.length}
+          {done} of {total}
         </span>
       </div>
       <div
         className="h-[3px] overflow-hidden rounded-full bg-panel-2"
         role="progressbar"
         aria-valuemin={0}
-        aria-valuemax={plan.length}
+        aria-valuemax={total}
         aria-valuenow={done}
         aria-label="Plan progress"
       >
-        <div className="h-full bg-accent transition-[width]" style={{ width: `${(done / plan.length) * 100}%` }} />
+        <div className="h-full bg-accent transition-[width]" style={{ width: `${total ? (done / total) * 100 : 0}%` }} />
       </div>
       <ol className="flex flex-col gap-1">
         {plan.map((p, i) => (
@@ -417,6 +420,10 @@ function PlanPanel({ plan }: { plan: NonNullable<CodeState["plan"]> }) {
                 </span>
               ) : p.status === "in_progress" ? (
                 <span className="signal-pulse h-2 w-2 rounded-full bg-accent" />
+              ) : p.status === "cancelled" ? (
+                <span className="flex text-faint" title="Cancelled">
+                  <XIcon size={13} strokeWidth={2.2} />
+                </span>
               ) : (
                 <span className="h-2 w-2 rounded-full border-[1.5px] border-faint/60" />
               )}
@@ -425,6 +432,8 @@ function PlanPanel({ plan }: { plan: NonNullable<CodeState["plan"]> }) {
               className={
                 p.status === "completed"
                   ? "text-muted line-through decoration-faint/40"
+                  : p.status === "cancelled"
+                    ? "text-faint line-through decoration-faint/40"
                   : p.status === "in_progress"
                     ? "text-fg"
                     : "text-muted"
@@ -451,12 +460,14 @@ type Run = { i: number; e: Entry } | { tools: { i: number; e: Entry }[] };
 /**
  * Consecutive tool calls form one run, drawn as a single box with hairlines between rows. A call
  * waiting on a permission stays on its own, so its card can't hide inside a group, and so does a
- * plan document, which reads as part of the conversation.
+ * plan document, which reads as part of the conversation. A saved to-do write shows as the plan
+ * panel instead of a card (only for the agents whose plan it is: `agent`).
  */
-function runsOf(entries: Entry[], s: Pick<CodeState, "toolCalls" | "permissions">): Run[] {
+function runsOf(entries: Entry[], s: Pick<CodeState, "toolCalls" | "permissions">, agent?: AgentId): Run[] {
   const out: Run[] = [];
   entries.forEach((e, i) => {
     const tc = e.kind === "tool" ? s.toolCalls[e.id] : undefined;
+    if (tc && todoPlanOf(tc, agent)) return;
     const groupable =
       !!tc && !planDocOf(tc) && !s.permissions.some((p) => p.request.toolCall.toolCallId === tc.toolCallId);
     const last = out[out.length - 1];
@@ -474,29 +485,23 @@ function runRow(r: Run, key: string, dim: boolean, one: (e: Entry, i: number) =>
     : { key: `${key}${r.i}`, dim, render: () => one(r.e, r.i) };
 }
 
-type Diff = Extract<AcpToolCallContent, { type: "diff" }>;
+const STATUS = {
+  added: { letter: "A", label: "Added", tone: "text-ok" },
+  modified: { letter: "M", label: "Modified", tone: "text-accent-ink" },
+  deleted: { letter: "D", label: "Deleted", tone: "text-danger" },
+} as const;
 
-/** Collapse every diff in the session to one per path: first oldText → last newText. */
-function collectChanges(order: Entry[], toolCalls: Record<string, AcpToolCall>): Diff[] {
-  const byPath = new Map<string, Diff>();
-  for (const e of order) {
-    if (e.kind !== "tool") continue;
-    const tc = toolCalls[e.id];
-    if (!tc || tc.status === "failed") continue;
-    for (const c of tc.content ?? []) {
-      if (c.type !== "diff") continue;
-      const prev = byPath.get(c.path);
-      byPath.set(c.path, prev ? { ...c, oldText: prev.oldText } : c);
-    }
-  }
-  return [...byPath.values()];
-}
-
-function ChangesPanel({ changes, cwd, onClose }: { changes: Diff[]; cwd: string; onClose: () => void }) {
+function ChangesPanel({ changes, cwd, onClose }: { changes: FileChange[]; cwd: string; onClose: () => void }) {
   const [sel, setSel] = useState<string | null>(null);
   const cur = changes.find((c) => c.path === sel) ?? changes[0];
-  const rel = (p: string) => (p.startsWith(cwd + "/") ? p.slice(cwd.length + 1) : p);
-  const stats = changes.map((c) => diffStats(c.oldText, c.newText));
+  const root = normalizePath(cwd, "/");
+  const prefix = root.endsWith("/") ? root : root + "/";
+  const rel = (p: string) => (p.startsWith(prefix) && p.length > prefix.length ? p.slice(prefix.length) : p);
+  const stats = changes.map((c) =>
+    c.parts
+      .map((p) => diffStats(p.oldText, p.newText))
+      .reduce((a, b) => ({ add: a.add + b.add, del: a.del + b.del }), { add: 0, del: 0 }),
+  );
   const total = stats.reduce((a, b) => ({ add: a.add + b.add, del: a.del + b.del }), { add: 0, del: 0 });
   return (
     <div className="flex h-full flex-col">
@@ -521,7 +526,7 @@ function ChangesPanel({ changes, cwd, onClose }: { changes: Diff[]; cwd: string;
       <ul className="flex max-h-48 shrink-0 flex-col gap-px overflow-y-auto border-b border-line p-1.5">
         {changes.map((c, i) => {
           const st = stats[i];
-          const isNew = c.oldText === null || c.oldText === "";
+          const status = STATUS[c.status];
           return (
             <li key={c.path}>
             <button
@@ -530,8 +535,8 @@ function ChangesPanel({ changes, cwd, onClose }: { changes: Diff[]; cwd: string;
               }`}
               onClick={() => setSel(c.path)}
             >
-              <span className={`w-3 font-mono text-[11px] ${isNew ? "text-ok" : "text-accent-ink"}`} title={isNew ? "Added" : "Modified"}>
-                {isNew ? "A" : "M"}
+              <span className={`w-3 font-mono text-[11px] ${status.tone}`} title={status.label}>
+                {status.letter}
               </span>
               <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{rel(c.path)}</span>
               <span className="meta">
@@ -543,8 +548,18 @@ function ChangesPanel({ changes, cwd, onClose }: { changes: Diff[]; cwd: string;
         })}
       </ul>
       )}
-      <div className="min-h-0 flex-1 overflow-auto p-2">
-        {cur && <DiffView path={rel(cur.path)} oldText={cur.oldText} newText={cur.newText} maxHeight={10000} />}
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto p-2">
+        {cur?.parts.map((p, i) => (
+          <DiffView
+            key={`${cur.path}:${i}`}
+            path={rel(cur.path)}
+            oldText={p.oldText}
+            newText={p.newText}
+            oldStart={p.oldStart}
+            newStart={p.newStart}
+            maxHeight={10000}
+          />
+        ))}
       </div>
     </div>
   );
@@ -604,17 +619,21 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   }, [activeId, meshLoaded]);
 
   const earlierRuns = useMemo(
+    // Earlier turns ran under other agents: their cards all show.
     () => (state?.earlier ? runsOf(state.earlier.entries, { toolCalls: state.earlier.toolCalls, permissions: [] }) : []),
     [state?.earlier],
   );
   const historyRuns = useMemo(
-    () => (state?.history ? runsOf(state.history.entries, { toolCalls: state.history.toolCalls, permissions: [] }) : []),
-    [state?.history],
+    () =>
+      state?.history
+        ? runsOf(state.history.entries, { toolCalls: state.history.toolCalls, permissions: [] }, session?.agent)
+        : [],
+    [state?.history, session?.agent],
   );
   const entryRuns = useMemo(
-    () => (state ? runsOf(state.entries, state) : []),
+    () => (state ? runsOf(state.entries, state, session?.agent) : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [state?.entries, state?.toolCalls, state?.permissions],
+    [state?.entries, state?.toolCalls, state?.permissions, session?.agent],
   );
   // Stable for the memoized entries; it calls the latest `editAndResend`, set on each render.
   const editRef = useRef<(i: number, text: string, atts: Attachment[]) => Promise<boolean>>(null);
@@ -623,10 +642,18 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     [],
   );
 
-  const changes = useMemo(
-    () => (state ? collectChanges(state.entries, state.toolCalls) : []),
-    [state?.entries, state?.toolCalls],
-  );
+  // The header's badge needs the count even with the panel shut, so this always runs; the key
+  // keeps it from redoing the work when only text or non-diff tool output changed.
+  const changesCache = useRef<{ key: unknown[]; value: FileChange[] } | null>(null);
+  const changes = useMemo(() => {
+    if (!state || !session) return [];
+    const key = [session.cwd, ...changesKey(state.entries, state.toolCalls)];
+    const hit = changesCache.current;
+    if (hit && hit.key.length === key.length && hit.key.every((k, i) => k === key[i])) return hit.value;
+    const value = collectChanges(state.entries, state.toolCalls, session.cwd);
+    changesCache.current = { key, value };
+    return value;
+  }, [state?.entries, state?.toolCalls, session?.cwd]);
 
   useViewAction((a) => {
     if (!activeId) return;
