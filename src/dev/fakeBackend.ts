@@ -403,6 +403,69 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
     codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
     return;
   }
+  // Claude Code's diffs: an Edit's hunks (start lines in `locations`), a Write that first sends
+  // the whole file with `oldText: null`, and a Codex-style deletion (`newText: ""`).
+  if (text.startsWith("/hunks")) {
+    const app = `${s.cwd}/src/app.ts`;
+    const editId = id();
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: editId, title: "Edit src/app.ts", kind: "edit", status: "pending", rawInput: { file_path: app }, content: [{ type: "diff", path: app, oldText: "return 1;", newText: "return one;" }], locations: [{ path: app }] } });
+    await sleep(200);
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: editId, status: "completed",
+      content: [
+        { type: "diff", path: app, oldText: "import { b } from \"./b\";\n\nfunction one() {\n  return 1;\n}", newText: "import { b } from \"./b\";\n\n/** The first. */\nfunction one() {\n  return one;\n}" },
+        { type: "diff", path: app, oldText: "function two() {\n  return 2;\n}\n\nexport { one, two };", newText: "function two() {\n  return b(2);\n}\n\nexport { one, two };" },
+      ],
+      locations: [{ path: app, line: 2 }, { path: app, line: 9 }] } });
+    // A second edit to the same file, by a relative path, over the first hunk.
+    const edit2 = id();
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: edit2, title: "Edit src/app.ts", kind: "edit", status: "completed",
+      content: [{ type: "diff", path: "./src/app.ts", oldText: "/** The first. */\nfunction one() {\n  return one;", newText: "/** The first one. */\nfunction one() {\n  return one;" }],
+      locations: [{ path: "./src/app.ts", line: 4 }] } });
+    const notes = `${s.cwd}/NOTES.md`;
+    const writeId = id();
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: writeId, title: "Write NOTES.md", kind: "edit", status: "pending", rawInput: { file_path: notes }, content: [{ type: "diff", path: notes, oldText: null, newText: "# Notes\n\n- one\n- two, revised\n- three\n" }], locations: [{ path: notes }] } });
+    await sleep(200);
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: writeId, status: "completed", content: [{ type: "diff", path: notes, oldText: "# Notes\n\n- one\n- two\n- three", newText: "# Notes\n\n- one\n- two, revised\n- three" }], locations: [{ path: notes, line: 1 }] } });
+    const newId = id();
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: newId, title: "Write src/b.ts", kind: "edit", status: "completed", content: [{ type: "diff", path: `${s.cwd}/src/b.ts`, oldText: null, newText: "export const b = (n: number) => n;\n" }], locations: [{ path: `${s.cwd}/src/b.ts` }] } });
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: id(), title: "Delete old.txt", kind: "delete", status: "completed", content: [{ type: "diff", path: `${s.cwd}/old.txt`, oldText: "stale\n", newText: "" }] } });
+    await say("Edited `src/app.ts` in two places, rewrote `NOTES.md`, added `src/b.ts` and removed `old.txt`.");
+    codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
+  // OpenCode's (and Kilo's) to-do list: `todowrite` tool calls, not ACP plans. The first write
+  // completes, the second is rejected, the third saves a list with a cancelled step.
+  if (text.startsWith("/todos")) {
+    const write = async (todos: { content: string; status: string; priority: string }[], ok: boolean) => {
+      const tid = id();
+      codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: tid, title: "todowrite", kind: "other", status: "pending", rawInput: {} } });
+      await sleep(150);
+      codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: tid, status: "in_progress", rawInput: { todos } } });
+      await sleep(150);
+      if (!ok) {
+        codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: tid, status: "failed", rawOutput: { error: "The user rejected permission to use this specific tool call." } } });
+        return;
+      }
+      const open = todos.filter((t) => t.status !== "completed").length;
+      codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: tid, status: "completed", title: `${open} todos`, rawOutput: { output: JSON.stringify(todos, null, 2), metadata: { todos } } } });
+    };
+    await write([
+      { content: "Read the parser", status: "in_progress", priority: "high" },
+      { content: "Fix the off-by-one", status: "pending", priority: "high" },
+      { content: "Rewrite the lexer", status: "pending", priority: "low" },
+    ], true);
+    await say("Reading the parser first.\n");
+    await write([{ content: "Delete every test", status: "pending", priority: "high" }], false);
+    await say("That write was rejected, so the plan stays.\n");
+    await write([
+      { content: "Read the parser", status: "completed", priority: "high" },
+      { content: "Fix the off-by-one", status: "in_progress", priority: "high" },
+      { content: "Rewrite the lexer", status: "cancelled", priority: "low" },
+    ], true);
+    await say("Dropped the lexer rewrite; fixing the off-by-one now.");
+    codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
   codeEmit(csid, {
     type: "update",
     update: {

@@ -508,7 +508,8 @@ export interface AcpCommand {
 export interface AcpPlanEntry {
   content: string;
   priority: string;
-  status: "pending" | "in_progress" | "completed";
+  /** `cancelled` is from ACP's v2 draft; OpenCode's to-do list uses it. */
+  status: "pending" | "in_progress" | "completed" | "cancelled";
 }
 
 export type AcpUpdate =

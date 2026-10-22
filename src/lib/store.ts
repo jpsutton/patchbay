@@ -33,6 +33,7 @@ import { notifyInBackground } from "./notify";
 import { activityOf, strongest, type Activity } from "./activity";
 import { isRemoteApp } from "./platform";
 import { isForegroundUpdate } from "./codeWorking";
+import { todoPlanOf } from "./todoPlan";
 
 export { codeWorking, FOREGROUND_IDLE_MS, hasActiveForegroundTools } from "./codeWorking";
 
@@ -467,10 +468,15 @@ function reduceUpdate(s: CodeState, u: AcpUpdate): CodeState {
     case "tool_call_update": {
       const tc = u as unknown as AcpToolCall;
       const exists = !!s.toolCalls[tc.toolCallId];
+      const merged = mergeToolCall(s.toolCalls[tc.toolCallId], tc);
+      // OpenCode's and Kilo's to-do writes are their plan; the transcript hides their cards. Only
+      // the frame that completes a write sets it, so a late repeat can't bring back an older list.
+      const todos = tc.status === "completed" || tc.rawOutput != null ? todoPlanOf(merged) : null;
       return stamp({
         ...s,
-        toolCalls: { ...s.toolCalls, [tc.toolCallId]: mergeToolCall(s.toolCalls[tc.toolCallId], tc) },
+        toolCalls: { ...s.toolCalls, [tc.toolCallId]: merged },
         entries: exists ? s.entries : [...s.entries, { kind: "tool", id: tc.toolCallId }],
+        plan: todos ?? s.plan,
       });
     }
     case "plan":
