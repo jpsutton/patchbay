@@ -8,6 +8,7 @@ import { McpPage } from "./McpPage";
 import { MeshPage } from "./MeshPage";
 import { PromptsPage } from "./PromptsPage";
 import { UsagePage } from "./UsagePage";
+import { ReadAloudSettings } from "./ReadAloudSettings";
 
 export type PrefSection = "general" | "chat" | "prompts" | "agents" | "code" | "mcp" | "terminal" | "mesh" | "usage";
 
@@ -286,6 +287,7 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
         >
           <Toggle label="Generate conversation titles" checked={prefs.generateTitles} onChange={(v) => set("generateTitles", v)} />
         </Row>
+        <ReadAloudSettings />
         <div className="pt-3">
           <div className="text-sm">Default system prompt</div>
           <div className="mt-0.5 text-xs text-muted">

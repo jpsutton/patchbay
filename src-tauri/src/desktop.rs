@@ -205,11 +205,40 @@ fn write_text_file(path: String, contents: String) -> crate::CmdResult<()> {
     Ok(std::fs::write(&path, contents)?)
 }
 
+/// Voices of the operating system on this computer. Empty when it has none.
+#[tauri::command]
+fn list_native_voices() -> Vec<crate::speech::NativeVoice> {
+    crate::speech::list_native_voices()
+}
+
+/// Speak on this computer's speakers. The browser UI never calls this.
+/// Blocking on a worker so Stop can kill the process while a sentence is still playing.
+#[tauri::command]
+async fn speak_native(text: String, voice: String, rate: String) -> crate::CmdResult<()> {
+    let joined = tauri::async_runtime::spawn_blocking(move || crate::speech::speak_native(&text, &voice, &rate)).await;
+    match joined {
+        Ok(r) => Ok(r?),
+        Err(e) => Err(crate::CmdError(e.to_string())),
+    }
+}
+
+#[tauri::command]
+fn stop_native() {
+    crate::speech::stop_native();
+}
+
 /// Serve an invoke from the window. Shared commands go through `api::call`, the same dispatcher
 /// the daemon's web clients use; the rest are the desktop-only commands above.
 fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     let desktop_only: Box<dyn Fn(tauri::ipc::Invoke) -> bool + Send + Sync> =
-        Box::new(tauri::generate_handler![quick_submit, quick_dismiss, write_text_file]);
+        Box::new(tauri::generate_handler![
+            quick_submit,
+            quick_dismiss,
+            write_text_file,
+            list_native_voices,
+            speak_native,
+            stop_native
+        ]);
     move |invoke| {
         if crate::api::COMMANDS.contains(&invoke.message.command()) {
             dispatch(invoke);

@@ -53,19 +53,42 @@ async function shrinkPhoto(f: File): Promise<{ blob: Blob; name: string }> {
   return blob ? { blob, name: keep.name.replace(/\.[^.]*$/, "") + ".jpg" } : keep;
 }
 
-export function AttachmentChip({ att, onRemove }: { att: Attachment; onRemove?: () => void }) {
-  const [thumb, setThumb] = useState<string | null>(null);
+function useThumb(att: Attachment, localUrl?: string): string | null {
+  const [thumb, setThumb] = useState<string | null>(localUrl ?? null);
   useEffect(() => {
+    if (localUrl) {
+      setThumb(localUrl);
+      return;
+    }
     if (att.kind !== "image") return;
     let live = true;
     api
       .attachmentThumbnail(att.id)
-      .then((t) => live && setThumb(t))
+      .then((t) => {
+        if (live && typeof t === "string" && t.startsWith("data:")) setThumb(t);
+      })
       .catch(() => {});
     return () => {
       live = false;
     };
-  }, [att.id, att.kind]);
+  }, [att.id, att.kind, localUrl]);
+  return thumb;
+}
+
+function RemoveAttachment({ name, onRemove }: { name: string; onRemove: () => void }) {
+  return (
+    <button
+      className="chip-remove absolute -right-1.5 -top-1.5 hidden h-5 w-5 items-center justify-center rounded-full bg-fg text-[13px] leading-none text-bg group-hover:flex"
+      onClick={onRemove}
+      aria-label={`Remove ${name}`}
+    >
+      ×
+    </button>
+  );
+}
+
+export function AttachmentChip({ att, onRemove, localUrl }: { att: Attachment; onRemove?: () => void; localUrl?: string }) {
+  const thumb = useThumb(att, localUrl);
   const badge = att.kind === "pdf" ? "PDF" : att.kind === "text" ? "TXT" : "IMG";
   return (
     <div
@@ -83,15 +106,25 @@ export function AttachmentChip({ att, onRemove }: { att: Attachment; onRemove?: 
         <div className="truncate text-fg">{att.name}</div>
         <div className="font-mono text-[11px] text-faint">{fmtSize(att.size)}</div>
       </div>
-      {onRemove && (
-        <button
-          className="absolute -right-1.5 -top-1.5 hidden h-4 w-4 items-center justify-center rounded-full bg-fg text-[11px] leading-none text-bg group-hover:flex"
-          onClick={onRemove}
-          aria-label={`Remove ${att.name}`}
-        >
-          ×
-        </button>
+      {onRemove && <RemoveAttachment name={att.name} onRemove={onRemove} />}
+    </div>
+  );
+}
+
+/** The photo itself, for a sent message. A phone has no hover row to stand in for it. */
+export function AttachmentPreview({ att, onRemove, localUrl }: { att: Attachment; onRemove?: () => void; localUrl?: string }) {
+  const thumb = useThumb(att, localUrl);
+  if (att.kind !== "image") return <AttachmentChip att={att} onRemove={onRemove} localUrl={localUrl} />;
+  return (
+    <div className="group relative max-w-full">
+      {thumb ? (
+        <img src={thumb} alt={att.name} className="max-h-52 max-w-full rounded-xl border border-line object-contain" />
+      ) : (
+        <div className="flex h-24 w-24 items-center justify-center rounded-xl border border-line bg-panel font-mono text-[10px] text-muted">
+          IMG
+        </div>
       )}
+      {onRemove && <RemoveAttachment name={att.name} onRemove={onRemove} />}
     </div>
   );
 }
@@ -119,6 +152,7 @@ export function Composer({
   commands,
   mentionFiles,
   onEditLast,
+  seed,
 }: {
   /** `mentions`: project-relative paths picked with @ that are still in the text. */
   onSend: (text: string, attachments: Attachment[], mentions: string[]) => void | Promise<void>;
@@ -138,6 +172,8 @@ export function Composer({
   mentionFiles?: () => Promise<string[]>;
   /** Up arrow in an empty composer. */
   onEditLast?: () => void;
+  /** Puts this text in the composer. A new `id` applies again. `replace` overwrites a draft. */
+  seed?: { id: number; text: string; replace?: boolean } | null;
 }) {
   const [text, setText] = useState("");
   const [atts, setAtts] = useState<Attachment[]>([]);
@@ -163,6 +199,19 @@ export function Composer({
     const m = /(^|\s)@([^\s@]*)$/.exec(text.slice(0, caret));
     return m ? { query: m[2], start: caret - m[2].length - 1 } : null;
   }, [mentionFiles, text, caret]);
+
+  useEffect(() => {
+    if (!seed?.text) return;
+    setText((cur) => (!seed.replace && cur.trim() ? cur : seed.text));
+    const pos = seed.text.length;
+    const id = window.setTimeout(() => {
+      const el = ref.current;
+      if (!el || el.value !== seed.text) return;
+      el.focus();
+      el.setSelectionRange(pos, pos);
+    }, 30);
+    return () => clearTimeout(id);
+  }, [seed]);
 
   useEffect(() => {
     if (!mention || !mentionFiles) return;
@@ -303,6 +352,28 @@ export function Composer({
   };
 
   const filesRef = useRef<HTMLInputElement>(null);
+  /** Photos picked on this phone, shown before the gateway's thumbnail comes back. */
+  const localThumbs = useRef<Record<string, string>>({});
+  const [thumbRev, setThumbRev] = useState(0);
+  const keepLocal = (id: string, blob: Blob) => {
+    if (!blob.type.startsWith("image/")) return;
+    const prev = localThumbs.current[id];
+    if (prev) URL.revokeObjectURL(prev);
+    localThumbs.current[id] = URL.createObjectURL(blob);
+    setThumbRev((n) => n + 1);
+  };
+  const dropLocal = (id: string) => {
+    const url = localThumbs.current[id];
+    if (!url) return;
+    URL.revokeObjectURL(url);
+    delete localThumbs.current[id];
+  };
+  useEffect(
+    () => () => {
+      Object.values(localThumbs.current).forEach((url) => URL.revokeObjectURL(url));
+    },
+    [],
+  );
   const pick = async () => {
     // The phone app and a browser have no native file dialog; the web view's picker reaches the
     // photo library on a phone.
@@ -326,6 +397,7 @@ export function Composer({
     setText("");
     setAtts([]);
     setMentions([]);
+    a.forEach((att) => dropLocal(att.id));
     await onSend(t, a, m);
     ref.current?.focus();
   };
@@ -345,9 +417,18 @@ export function Composer({
       )}
       {(atts.length > 0 || adding > 0) && (
         <div className="flex flex-wrap gap-2 px-3 pt-3">
-          {atts.map((a) => (
-            <AttachmentChip key={a.id} att={a} onRemove={() => setAtts((p) => p.filter((x) => x.id !== a.id))} />
-          ))}
+          {atts.map((a) => {
+            const localUrl = localThumbs.current[a.id];
+            const remove = () => {
+              dropLocal(a.id);
+              setAtts((p) => p.filter((x) => x.id !== a.id));
+            };
+            return isRemoteApp() && a.kind === "image" ? (
+              <AttachmentPreview key={a.id} att={a} localUrl={localUrl} onRemove={remove} />
+            ) : (
+              <AttachmentChip key={`${a.id}-${thumbRev}`} att={a} localUrl={localUrl} onRemove={remove} />
+            );
+          })}
           {adding > 0 && <div className="self-center text-xs text-muted">Adding {adding}…</div>}
         </div>
       )}
@@ -449,7 +530,9 @@ export function Composer({
           addMany(
             files.map((f, i) => async () => {
               const name = f.name || `pasted-${Date.now()}-${i}.${(f.type.split("/")[1] ?? "bin").replace("jpeg", "jpg")}`;
-              return api.addAttachmentBytes(name, await fileToBase64(f));
+              const att = await api.addAttachmentBytes(name, await fileToBase64(f));
+              keepLocal(att.id, f);
+              return att;
             }),
           );
         }}
@@ -477,7 +560,9 @@ export function Composer({
                 files.map((f) => async () => {
                   // Phones shrink camera photos before the upload; a browser sends files as they are.
                   const { blob, name } = isWeb() ? { blob: f, name: f.name } : await shrinkPhoto(f);
-                  return api.addAttachmentBytes(name, await fileToBase64(blob));
+                  const att = await api.addAttachmentBytes(name, await fileToBase64(blob));
+                  keepLocal(att.id, blob);
+                  return att;
                 }),
               );
             }}

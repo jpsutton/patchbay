@@ -110,6 +110,7 @@ commands! {
     delete_model(id);
     get_preferences();
     set_preferences(prefs);
+    synthesize_speech(provider_id, base_url, model, voice, text);
     get_setting(key);
     set_setting(key, value);
     list_conversations();
@@ -145,6 +146,7 @@ commands! {
     code_rewind(id, ordinal, preview, revert_files);
     code_usage(id);
     code_permission_respond(request_id, option_id, id);
+    code_session_image(id, path);
     code_move(id, target, cwd);
     code_take_over(id, cwd);
     code_checkpoints();

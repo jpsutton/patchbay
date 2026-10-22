@@ -474,12 +474,26 @@ export function install() {
         case "delete_model": db.models = db.models.filter((m) => m.id !== a.id); return null;
         case "get_preferences": return JSON.parse(db.settings.preferences ?? "{}");
         case "set_preferences": {
-          const p = a.prefs as { terminalShell?: string; autoCompactPercent?: number | null };
+          const p = a.prefs as {
+            terminalShell?: string;
+            autoCompactPercent?: number | null;
+            readAloudEngine?: string;
+            readAloudRate?: string;
+            readAloudServerUrl?: string;
+          };
           if (p.terminalShell && !p.terminalShell.startsWith("/")) throw `terminal shell ${p.terminalShell} does not exist`;
           if (p.autoCompactPercent != null && (p.autoCompactPercent < 10 || p.autoCompactPercent > 99)) throw "auto-compact threshold must be between 10 and 99%";
+          if (p.readAloudEngine && !["auto", "system", "builtin", "server"].includes(p.readAloudEngine)) throw "read aloud engine must be one of auto, system, builtin, server";
+          if (p.readAloudRate && !["slower", "normal", "faster"].includes(p.readAloudRate)) throw "read aloud speed must be one of slower, normal, faster";
+          const speechUrl = p.readAloudServerUrl?.trim() ?? "";
+          if (speechUrl && !speechUrl.startsWith("http://") && !speechUrl.startsWith("https://")) throw "speech server URL must be an http or https URL";
           db.settings.preferences = JSON.stringify(a.prefs);
           return null;
         }
+        case "list_native_voices": return [];
+        case "speak_native": return null;
+        case "stop_native": return null;
+        case "synthesize_speech": throw "pnpm dev has no speech server. Use System or Built-in, or run the app.";
         case "get_setting": return db.settings[a.key as string] ?? null;
         case "set_setting": db.settings[a.key as string] = a.value as string; return null;
 
@@ -661,6 +675,7 @@ export function install() {
         case "get_code_transcript": return db.transcripts[a.id as string] ?? null;
         case "save_code_transcript": db.transcripts[a.id as string] = a.json as string; return null;
         case "list_project_files": await sleep(80); return DEMO_FILES;
+        case "code_session_image": return "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
         case "list_mcp_servers": return db.mcp.map((m) => ({ ...m, config: { ...m.config, env: m.config.env.map((kv) => (kv.secret ? { ...kv, value: "", stored: !!kv.value } : kv)) } }));
         case "save_mcp_server": {
           const i = a.input as Omit<McpServer, "id"> & { id?: string };

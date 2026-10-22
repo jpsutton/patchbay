@@ -508,6 +508,19 @@ export interface Preferences {
   claudeConfig: ClaudeConfig;
   terminalShell: string;
   terminalFontSize: number;
+  /** auto | system | builtin | server. This device only; preferences are not synced. */
+  readAloudEngine: "auto" | "system" | "builtin" | "server";
+  /** Voice id for the engine in use. Empty means that engine's default. */
+  readAloudVoice: string;
+  readAloudRate: "slower" | "normal" | "faster";
+  /** Speak each new finished reply while its chat or session is on screen. */
+  readAloudListen: boolean;
+  /** OpenAI-compatible speech base URL, used when no provider is chosen. */
+  readAloudServerUrl: string;
+  readAloudServerModel: string;
+  readAloudServerVoice: string;
+  /** An OpenAI-compatible provider whose key and URL to use. */
+  readAloudServerProviderId: string;
 }
 
 export const defaultPreferences: Preferences = {
@@ -532,7 +545,25 @@ export const defaultPreferences: Preferences = {
   claudeConfig: { skills: true, instructions: true, agents: true, mcpServers: true, hooks: true, plugins: true },
   terminalShell: "",
   terminalFontSize: 13,
+  readAloudEngine: "auto",
+  readAloudVoice: "",
+  readAloudRate: "normal",
+  readAloudListen: false,
+  readAloudServerUrl: "",
+  readAloudServerModel: "",
+  readAloudServerVoice: "",
+  readAloudServerProviderId: "",
 };
+
+export interface SpeechAudio {
+  mime: string;
+  audioBase64: string;
+}
+
+export interface NativeVoice {
+  id: string;
+  name: string;
+}
 
 export type TermEvent = { type: "data"; data: string } | { type: "exit"; code: number | null };
 
@@ -572,6 +603,16 @@ export const api = {
   deleteModel: (id: string) => invoke<void>("delete_model", { id }),
   getPreferences: () => invoke<Preferences>("get_preferences"),
   setPreferences: (prefs: Preferences) => invoke<void>("set_preferences", { prefs }),
+  listNativeVoices: () => invoke<NativeVoice[]>("list_native_voices"),
+  speakNative: (text: string, voice: string, rate: string) => invoke<void>("speak_native", { text, voice, rate }),
+  stopNative: () => invoke<void>("stop_native"),
+  synthesizeSpeech: (input: {
+    providerId: string;
+    baseUrl: string;
+    model: string;
+    voice: string;
+    text: string;
+  }) => invoke<SpeechAudio>("synthesize_speech", input),
   getSetting: (key: string) => invoke<string | null>("get_setting", { key }),
   setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),
 
@@ -655,6 +696,8 @@ export const api = {
   saveCodeTranscript: (id: string, json: string) => invoke<void>("save_code_transcript", { id, json }),
   /** With `sessionId`, lists files on the node hosting that session. */
   listProjectFiles: (cwd: string, sessionId?: string) => invoke<string[]>("list_project_files", { cwd, sessionId }),
+  /** A picture the reply linked, read on the computer that holds the session. A data URL. */
+  codeSessionImage: (id: string, path: string) => invoke<string>("code_session_image", { id, path }),
 
   listMcpServers: () => invoke<McpServer[]>("list_mcp_servers"),
   saveMcpServer: (input: { id?: string; name: string; enabled: boolean; config: McpConfig }) =>

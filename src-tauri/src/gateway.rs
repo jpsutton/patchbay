@@ -30,6 +30,7 @@ const CODE_METHODS: &[&str] = &[
     "code.rewind",
     "code.permission",
     "code.files",
+    "code.image",
     "code.auto_title",
 ];
 /// Largest attachment a phone may upload.

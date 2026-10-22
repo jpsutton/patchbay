@@ -37,8 +37,8 @@ export { codeWorking, FOREGROUND_IDLE_MS, hasActiveForegroundTools } from "./cod
 export type Mode = "chat" | "code";
 
 export type Entry =
-  | { kind: "user"; text: string; attachments?: Attachment[] }
-  | { kind: "agent"; text: string }
+  | { kind: "user"; text: string; attachments?: Attachment[]; at?: number }
+  | { kind: "agent"; text: string; at?: number }
   /** An image the agent sent in its reply (an ACP image block). */
   | { kind: "image"; data: string; mimeType: string }
   | { kind: "thought"; text: string }
@@ -324,12 +324,13 @@ function textOf(content: { type: string; text?: string } | undefined): string {
   return content && content.type === "text" && typeof content.text === "string" ? content.text : "";
 }
 
-function appendText(entries: Entry[], kind: "agent" | "thought" | "user", text: string): Entry[] {
+function appendText(entries: Entry[], kind: "agent" | "thought" | "user", text: string, at?: number): Entry[] {
   if (!text) return entries;
   const last = entries[entries.length - 1];
   if (last && last.kind === kind) {
     return [...entries.slice(0, -1), { ...last, text: last.text + text }];
   }
+  if ((kind === "agent" || kind === "user") && at) return [...entries, { kind, text, at }];
   return [...entries, { kind, text } as Entry];
 }
 
@@ -385,14 +386,19 @@ function reduceUpdate(s: CodeState, u: AcpUpdate): CodeState {
       if (s.busy) return s;
       return {
         ...s,
-        entries: appendText(s.entries, "user", withoutNote(textOf((u as unknown as { content: { type: string; text?: string } }).content))),
+        entries: appendText(
+          s.entries,
+          "user",
+          withoutNote(textOf((u as unknown as { content: { type: string; text?: string } }).content)),
+          s.status === "ready" ? Date.now() : undefined,
+        ),
       };
     case "agent_message_chunk": {
       const c = (u as unknown as { content: { type: string; text?: string; data?: string; mimeType?: string } }).content;
       if (c?.type === "image" && c.data && c.mimeType) {
         return stamp({ ...s, entries: [...s.entries, { kind: "image", data: c.data, mimeType: c.mimeType }] });
       }
-      return stamp({ ...s, entries: appendText(s.entries, "agent", textOf(c)) });
+      return stamp({ ...s, entries: appendText(s.entries, "agent", textOf(c), s.status === "ready" ? Date.now() : undefined) });
     }
     case "agent_thought_chunk":
       return stamp({
@@ -608,7 +614,8 @@ export const useStore = create<Store>((set, get) => ({
   pushCodeEntry: (id, e) =>
     set((st) => {
       const s = st.code[id] ?? emptyCode();
-      return { code: { ...st.code, [id]: { ...s, entries: [...s.entries, e] } } };
+      const entry = (e.kind === "user" || e.kind === "agent") && e.at == null ? { ...e, at: Date.now() } : e;
+      return { code: { ...st.code, [id]: { ...s, entries: [...s.entries, entry] } } };
     }),
   setCodeBusy: (id, busy) =>
     set((st) => {
@@ -725,7 +732,15 @@ export const useStore = create<Store>((set, get) => ({
         next = {
           ...s,
           busy: true,
-          entries: [...s.entries, { kind: "user", text: e.text, attachments: e.attachments?.length ? e.attachments : undefined }],
+          entries: [
+            ...s.entries,
+            {
+              kind: "user",
+              text: e.text,
+              attachments: e.attachments?.length ? e.attachments : undefined,
+              ...(e.replay || s.status !== "ready" ? {} : { at: Date.now() }),
+            },
+          ],
         };
         break;
     }

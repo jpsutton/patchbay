@@ -432,6 +432,16 @@ export const MonitorIcon = icon(
   </>,
 );
 
+export const SpeakerIcon = icon(
+  <>
+    <path d="M11 5 6 9H2v6h4l5 4V5z" />
+    <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+    <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+  </>,
+);
+
+export const StopIcon = icon(<rect x="6" y="6" width="12" height="12" rx="1" fill="currentColor" stroke="none" />);
+
 export const MonitorUpIcon = icon(
   <>
     <path d="m9 10 3-3 3 3" />

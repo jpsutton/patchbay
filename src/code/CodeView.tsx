@@ -1,4 +1,4 @@
-import { useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   AGENT_LABELS,
@@ -25,7 +25,8 @@ import {
   type Entry,
 } from "../lib/store";
 import { HostBadge, MoveDialog, OfflineHostBanner } from "./HostControls";
-import { Composer } from "../components/Composer";
+import { AttachmentChip, AttachmentPreview, Composer } from "../components/Composer";
+import { MessageTime } from "../components/MessageTime";
 import { Markdown } from "../components/Markdown";
 import { EditMessage } from "../components/EditMessage";
 import { UsageBar } from "../components/UsageBar";
@@ -33,9 +34,12 @@ import { TerminalPane } from "../terminal/TerminalPane";
 import { PermissionCard, PlanDocCard, planDocOf, ToolCallCard, ToolGroup } from "./ToolCallCard";
 import { DiffView, diffStats } from "./DiffView";
 import { CopyButton, copyText } from "../components/CopyButton";
+import { ListenButton, ReadAloudButton, useSpeakingId, useStopSpeechWhenHidden } from "../components/ReadAloudButton";
 import { ExportMenu } from "../components/ExportMenu";
 import { codeToJson, codeToMarkdown, saveExport } from "../lib/export";
-import { useViewAction } from "../lib/shortcuts";
+import { useViewAction, ViewActive } from "../lib/shortcuts";
+import { speakingNow, speakText, stopSpeech } from "../lib/speech";
+import { proseSinceLastUser } from "../lib/spokenText";
 import { HeaderButton } from "../components/HeaderButton";
 import { useDragRegion, WindowControls } from "../components/WindowControls";
 import { isRemoteApp, isWeb } from "../lib/platform";
@@ -230,11 +234,14 @@ function UserEntry({
   editing,
   setEditing,
   onEdit,
+  onReuse,
 }: {
   e: Extract<Entry, { kind: "user" }>;
   editing: boolean;
   setEditing: (on: boolean) => void;
   onEdit?: (text: string, atts: Attachment[]) => Promise<boolean>;
+  /** Phone, when this agent cannot rewind: put the prompt back in the composer. */
+  onReuse?: () => void;
 }) {
   if (editing && onEdit) {
     return (
@@ -253,41 +260,71 @@ function UserEntry({
   }
   return (
     <div className="group flex flex-col items-end gap-1.5">
-      {e.attachments && e.attachments.length > 0 && (
-        <div className="flex items-center gap-1.5 text-xs text-muted">
-          <PaperclipIcon size={13} />
-          {e.attachments.map((a) => a.name).join(", ")}
-        </div>
-      )}
+      {e.attachments && e.attachments.length > 0 &&
+        (isRemoteApp() ? (
+          <div className="flex max-w-[82%] flex-wrap justify-end gap-2">
+            {e.attachments.map((a) =>
+              a.kind === "image" ? <AttachmentPreview key={a.id} att={a} /> : <AttachmentChip key={a.id} att={a} />,
+            )}
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5 text-xs text-muted">
+            <PaperclipIcon size={13} />
+            {e.attachments.map((a) => a.name).join(", ")}
+          </div>
+        ))}
       {e.text && (
         <div className="max-w-[82%] whitespace-pre-wrap rounded-[16px_16px_4px_16px] border border-line bg-panel-2 px-3.5 py-2.5 leading-6">
           {e.text}
         </div>
       )}
-      <div className="flex gap-0.5 text-muted opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-        {onEdit && (
+      <div className="action-row flex gap-0.5 text-muted opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+        {(onEdit || onReuse) && (
           <button
-            className="flex h-7 w-7 items-center justify-center rounded-md hover:bg-panel-2 hover:text-fg"
-            onClick={() => setEditing(true)}
-            title="Edit"
+            className={`flex h-7 items-center justify-center rounded-md hover:bg-panel-2 hover:text-fg ${isRemoteApp() ? "gap-1 px-1.5 text-xs" : "w-7"}`}
+            onClick={() => (onEdit ? setEditing(true) : onReuse?.())}
+            title={onEdit ? "Edit and resend" : "Edit and send again"}
             aria-label="Edit message"
           >
             <PencilIcon size={14} />
+            {isRemoteApp() && "Edit"}
           </button>
         )}
         {e.text && <CopyButton text={e.text} icon={<CopyIcon size={14} />} />}
+        {isRemoteApp() && e.at != null && <MessageTime at={e.at} />}
       </div>
     </div>
   );
 }
 
-function AgentEntry({ text }: { text: string }) {
+function AgentEntry({
+  text,
+  speechId,
+  settled,
+  at,
+  sessionId,
+}: {
+  text: string;
+  speechId: string;
+  settled: boolean;
+  at?: number;
+  sessionId: string;
+}) {
+  const reading = useSpeakingId() === speechId;
   return (
     <div className="group">
-      <Markdown text={text} />
-      <div className="mt-1 flex gap-0.5 text-muted opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-        <CopyButton text={text} label="Copy Markdown" icon={<CopyIcon size={14} />} />
-      </div>
+      <Markdown text={text} sessionId={sessionId} />
+      {settled && text.trim() && (
+        <div
+          className={`action-row mt-1 flex gap-0.5 text-muted transition-opacity group-hover:opacity-100 focus-within:opacity-100 ${
+            reading ? "" : "opacity-0"
+          }`}
+        >
+          <ReadAloudButton id={speechId} text={text} />
+          <CopyButton text={text} label="Copy Markdown" icon={<CopyIcon size={14} />} />
+          {isRemoteApp() && at != null && <MessageTime at={at} />}
+        </div>
+      )}
     </div>
   );
 }
@@ -299,6 +336,10 @@ function EntryView({
   editing,
   setEditing,
   onEdit,
+  onReuse,
+  speechId,
+  settled,
+  sessionId,
 }: {
   e: Entry;
   s: Pick<CodeState, "toolCalls" | "permissions" | "autoApproved">;
@@ -306,12 +347,19 @@ function EntryView({
   editing: boolean;
   setEditing: (on: boolean) => void;
   onEdit?: (text: string, atts: Attachment[]) => Promise<boolean>;
+  /** Phone, when this agent cannot rewind: put the prompt back in the composer. */
+  onReuse?: () => void;
+  /** Stable id for Read aloud. Agent prose only. */
+  speechId: string;
+  /** False while this bubble is the one still growing. */
+  settled: boolean;
+  sessionId: string;
 }) {
   switch (e.kind) {
     case "user":
-      return <UserEntry e={e} editing={editing} setEditing={setEditing} onEdit={onEdit} />;
+      return <UserEntry e={e} editing={editing} setEditing={setEditing} onEdit={onEdit} onReuse={onReuse} />;
     case "agent":
-      return <AgentEntry text={e.text} />;
+      return <AgentEntry text={e.text} speechId={speechId} settled={settled} at={e.at} sessionId={sessionId} />;
     case "image":
       return <AgentImage data={e.data} mimeType={e.mimeType} alt="Image from the agent" />;
     case "thought":
@@ -523,6 +571,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const [showChanges, setShowChanges] = useState(false);
   const [termMounted, setTermMounted] = useState<Record<string, boolean>>({});
   const [editingIdx, setEditingIdx] = useState<number | null>(null);
+  /** Fills the composer after Stop when this agent cannot rewind. */
+  const [composerSeed, setComposerSeed] = useState<{ id: number; text: string; replace?: boolean } | null>(null);
   const [moving, setMoving] = useState<"move" | "takeOver" | null>(null);
   /** Forces a re-render when the post-foreground idle window expires. */
   const [, setIdleTick] = useState(0);
@@ -558,11 +608,87 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     () => (state ? collectChanges(state.entries, state.toolCalls) : []),
     [state?.entries, state?.toolCalls],
   );
+  const changeStats = useMemo(
+    () =>
+      changes.reduce(
+        (a, c) => {
+          const st = diffStats(c.oldText, c.newText);
+          return { add: a.add + st.add, del: a.del + st.del };
+        },
+        { add: 0, del: 0 },
+      ),
+    [changes],
+  );
+
+  const viewActive = useContext(ViewActive);
+  const listenOn = useStore((s) => s.prefs.readAloudListen);
+  const skipListen = useRef(false);
+  /** Session whose last prompt should open for editing once Stop finishes. Phone only. */
+  const amendAfterStop = useRef<string | null>(null);
+  const busy = !!state?.busy;
+  // Broader than prompt-RPC `busy`: Claude (and similar) keep streaming after PromptDone.
+  const working = state ? codeWorking(state) : false;
+  useStopSpeechWhenHidden();
+  const turnRef = useRef({ id: activeId, busy });
+
+  useEffect(() => {
+    const prev = turnRef.current;
+    turnRef.current = { id: activeId, busy };
+    if (prev.id !== activeId || !prev.busy || busy) return;
+    if (!viewActive || !listenOn) return;
+    if (skipListen.current) {
+      skipListen.current = false;
+      return;
+    }
+    const entries = activeId ? useStore.getState().code[activeId]?.entries : undefined;
+    if (!entries) return;
+    const text = proseSinceLastUser(entries);
+    if (!text.trim()) return;
+    speakText(text, `listen:${activeId}`).catch((e) => setToast(e instanceof Error ? e.message : "Could not read this aloud"));
+  }, [activeId, busy, viewActive, listenOn, setToast]);
+
+  useEffect(() => {
+    const pending = amendAfterStop.current;
+    if (!pending) return;
+    if (pending !== activeId || !viewActive) {
+      amendAfterStop.current = null;
+      return;
+    }
+    if (!remote || working || !activeId) return;
+    const cur = useStore.getState().code[activeId];
+    if (!cur) return;
+    let last = -1;
+    for (let i = cur.entries.length - 1; i >= 0; i--) {
+      if (cur.entries[i].kind === "user") {
+        last = i;
+        break;
+      }
+    }
+    if (last < 0) return;
+    amendAfterStop.current = null;
+    if (cur.extensions.rewind) {
+      setEditingIdx(last);
+      setTimeout(() => document.querySelector("[data-amend]")?.scrollIntoView({ block: "center" }), 30);
+      return;
+    }
+    const entry = cur.entries[last];
+    if (entry.kind === "user" && entry.text) setComposerSeed({ id: Date.now(), text: entry.text });
+  }, [remote, working, activeId, viewActive]);
 
   useViewAction((a) => {
     if (!activeId) return;
     const cur = useStore.getState().code[activeId];
-    if (a === "stop" && cur?.busy) api.codeCancel(activeId);
+    if (a === "stop") {
+      if (speakingNow()) {
+        stopSpeech();
+        return;
+      }
+      if (cur?.busy) {
+        skipListen.current = true;
+        if (isRemoteApp()) amendAfterStop.current = activeId;
+        api.codeCancel(activeId);
+      }
+    }
     if (a === "copy-last") {
       const last = [...(cur?.entries ?? [])].reverse().find((x) => x.kind === "agent");
       if (last && last.kind === "agent") {
@@ -611,8 +737,6 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   // The offline banner offers the way forward instead of a restart that can't work.
   const hostOffline = !!host && !memberOnline(mesh, host);
   const ready = status === "ready";
-  // Broader than prompt-RPC `s.busy`: Claude (and similar) keep streaming after PromptDone.
-  const working = s ? codeWorking(s) : false;
   // Commands the agent backgrounded: its turn is over, but they still run (and it resumes when
   // they end).
   const background = Object.values(s?.toolCalls ?? {}).filter((tc) => tc.background);
@@ -947,6 +1071,9 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                         cwd={session.cwd}
                         editing={false}
                         setEditing={() => {}}
+                        speechId={`${session.id}:earlier:${i}`}
+                        settled
+                        sessionId={session.id}
                       />
                     ))}
                     <div className="border-t border-line" />
@@ -967,6 +1094,9 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                         cwd={session.cwd}
                         editing={false}
                         setEditing={() => {}}
+                        speechId={`${session.id}:history:${i}`}
+                        settled
+                        sessionId={session.id}
                       />
                     ))}
                     {ready && <div className="border-t border-line" />}
@@ -987,9 +1117,23 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     cwd={session.cwd}
                     editing={editingIdx === i}
                     setEditing={(on) => setEditingIdx(on ? i : null)}
+                    speechId={`${session.id}:live:${i}`}
+                    settled={!(s.busy && i === s.entries.length - 1)}
+                    sessionId={session.id}
                     onEdit={
                       ready && !working && e.kind === "user" && s.extensions.rewind
                         ? (t, a) => editAndResend(i, t, a)
+                        : undefined
+                    }
+                    onReuse={
+                      remote &&
+                      ready &&
+                      !working &&
+                      e.kind === "user" &&
+                      !s.extensions.rewind &&
+                      e.text &&
+                      !s.entries.slice(i + 1).some((x) => x.kind === "user")
+                        ? () => setComposerSeed({ id: Date.now(), text: e.text, replace: true })
                         : undefined
                     }
                   />
@@ -1033,6 +1177,19 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             <JumpToBottom show={!sticky.atBottom} onClick={sticky.toBottom} />
           </div>
           <div className="mx-auto w-full max-w-3xl px-6 pb-3 pt-2">
+            {remote && changes.length > 0 && (
+              <button
+                type="button"
+                className="mb-2 inline-flex h-9 items-center gap-2 rounded-full border border-line px-3 text-[13px] active:bg-panel-2"
+                onClick={() => setShowChanges(true)}
+                aria-label={`Diff, ${changeStats.add} lines added, ${changeStats.del} lines removed`}
+              >
+                <span className="font-medium">Diff</span>
+                <span className="font-mono text-[12px]">
+                  <span className="text-ok">+{changeStats.add}</span> <span className="text-danger">−{changeStats.del}</span>
+                </span>
+              </button>
+            )}
             <Composer
               busy={working}
               disabled={!ready}
@@ -1044,7 +1201,14 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                   if (s.entries[i].kind === "user") return setEditingIdx(i);
                 }
               }}
-              onStop={() => api.codeCancel(session.id)}
+              seed={composerSeed}
+              onStop={() => {
+                if (s?.busy) {
+                  skipListen.current = true;
+                  if (remote) amendAfterStop.current = session.id;
+                }
+                api.codeCancel(session.id);
+              }}
               onSend={send}
               placeholder={
                 reconnecting
@@ -1133,6 +1297,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     </div>
                   </>
                 )}
+                <ListenButton />
                 </>
               }
             />
@@ -1146,10 +1311,15 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             />
           </div>
         </div>
-        {showChanges && (
+        {showChanges && !remote && (
           <aside className="w-[42%] min-w-80 shrink-0 border-l border-line bg-panel/50">
             <ChangesPanel changes={changes} cwd={session.cwd} onClose={() => setShowChanges(false)} />
           </aside>
+        )}
+        {showChanges && remote && (
+          <div className="fixed inset-0 z-40 flex flex-col bg-bg pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
+            <ChangesPanel changes={changes} cwd={session.cwd} onClose={() => setShowChanges(false)} />
+          </div>
         )}
       </div>
 
