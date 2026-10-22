@@ -2,18 +2,19 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
-import { api, errorText, type CodeEnvelope, type CodeSession, type MeshChatEvent, type MeshMember, type MeshStatus } from "../lib/ipc";
-import { codeEventArrived, memberName, memberOnline, useStore } from "../lib/store";
+import { api, errorText, type CodeEnvelope, type MeshChatEvent, type MeshMember, type MeshStatus } from "../lib/ipc";
+import { codeEventArrived, useStore } from "../lib/store";
 import { ChatView } from "../chat/ChatView";
 import { CodeView } from "../code/CodeView";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ActionSheet, useHold, type ItemAction } from "../components/ItemMenu";
-import { chatActions, promptRename, sessionActions } from "../lib/itemActions";
+import { chatActions, promptRename } from "../lib/itemActions";
 import { NewSessionSheet } from "./NewSession";
 import { ChatNodePicker } from "./ChatNodePicker";
+import { ArchivedRow, CodeSessionList, type Live } from "./CodeSessionList";
 import { fmtShort } from "../lib/format";
-import { ChatIcon, ChevronLeftIcon, CodeIcon, MonitorIcon, PlusIcon, SettingsIcon, StarIcon, XIcon } from "../components/icons";
 import { Dot } from "../components/Dot";
+import { ChatIcon, ChevronLeftIcon, CodeIcon, ListIcon, PlusIcon, SettingsIcon, StarIcon, XIcon } from "../components/icons";
 
 /** The phone backend's own state (see crates/patchbay-mesh/src/client.rs, `status`). */
 export interface RemoteStatus {
@@ -40,14 +41,6 @@ interface JoinAction {
   nodeId: string;
 }
 
-/** What a gateway knows a Code session is doing. */
-interface Live {
-  status: string;
-  busy: boolean;
-  permissions: string[];
-  last: number;
-}
-
 const remote = {
   status: () => invoke<RemoteStatus>("remote_status"),
   join: (url: string, passphrase: string, name: string) => invoke<void>("remote_join", { url, passphrase, name }),
@@ -67,6 +60,7 @@ const remote = {
 const LOCK_KEY = "patchbay.remote.lock";
 const STAY_KEY = "patchbay.remote.stayConnected";
 const TAB_KEY = "patchbay.remote.tab";
+const GROUP_KEY = "patchbay.remote.groupCodeByProject";
 /** Lock again after the app has been out of sight this long. */
 const RELOCK_MS = 5 * 60_000;
 
@@ -263,7 +257,11 @@ function Main({
   });
   const [live, setLive] = useState<Record<string, Live>>({});
   const [settings, setSettings] = useState(false);
-  const [newSession, setNewSession] = useState(false);
+  const [sessionsOpen, setSessionsOpen] = useState(false);
+  const activeCodeId = useStore((s) => s.activeCodeSessionId);
+  const [groupProjects, setGroupProjects] = useState(() => flag(GROUP_KEY, false));
+  /** Set while the new-session sheet is open. `cwd` prefills the folder. */
+  const [newSession, setNewSession] = useState<{ host?: string; cwd?: string } | null>(null);
   const toast = useStore((s) => s.toast);
   const setToast = useStore((s) => s.setToast);
   const hiddenAt = useRef<number | null>(null);
@@ -382,6 +380,7 @@ function Main({
           return { code };
         });
       }
+      setSessionsOpen(false);
       setView({ kind: "home" });
     };
     window.addEventListener("popstate", onPop);
@@ -404,6 +403,18 @@ function Main({
       <ChevronLeftIcon size={20} />
     </button>
   );
+  const openSessions = (id: string) => {
+    const prev = useStore.getState().activeCodeSessionId;
+    if (prev && prev !== id) {
+      remote.unwatch(`session:${prev}`).catch(() => {});
+      useStore.setState((st) => {
+        const { [prev]: _, ...code } = st.code;
+        return { code };
+      });
+    }
+    useStore.getState().selectCodeSession(id);
+    setSessionsOpen(false);
+  };
 
   return (
     <div className="flex h-full flex-col bg-bg">
@@ -415,7 +426,21 @@ function Main({
               controls={<ChatNodePicker members={status.members} gateway={status.gateway} />}
             />
           ) : (
-            <CodeView leading={backButton} />
+            <CodeView
+              leading={
+                <>
+                  {backButton}
+                  <button
+                    className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg active:bg-panel-2 ${sessionsOpen ? "bg-panel-2 text-fg" : "text-muted"}`}
+                    aria-label="Sessions"
+                    aria-pressed={sessionsOpen}
+                    onClick={() => setSessionsOpen((v) => !v)}
+                  >
+                    <ListIcon size={18} />
+                  </button>
+                </>
+              }
+            />
           )}
         </div>
       )}
@@ -440,21 +465,60 @@ function Main({
             useStore.getState().selectCodeSession(id);
             open({ kind: "code" });
           }}
-          onNewSession={() => setNewSession(true)}
+          onNewSession={() => setNewSession({})}
+          onNewIn={(host, cwd) => setNewSession({ host, cwd })}
           onSettings={() => setSettings(true)}
+          groupProjects={groupProjects}
         />
       )}
       {view.kind !== "home" && status.phase !== "online" && <ConnectionBar status={status} />}
-      {settings && <SettingsSheet status={status} onClose={() => setSettings(false)} />}
+      {settings && (
+        <SettingsSheet
+          status={status}
+          groupProjects={groupProjects}
+          onGroupProjects={(on) => {
+            setGroupProjects(on);
+            setFlag(GROUP_KEY, on);
+          }}
+          onClose={() => setSettings(false)}
+        />
+      )}
+      {sessionsOpen && view.kind === "code" && (
+        <div className="fixed inset-x-0 bottom-0 top-[calc(env(safe-area-inset-top)+48px)] z-40 flex flex-col justify-end">
+          <button className="min-h-16 flex-1 bg-fg/25" aria-label="Close sessions" onClick={() => setSessionsOpen(false)} />
+          <div className="flex max-h-[78%] min-h-0 flex-col rounded-t-2xl bg-bg shadow-float">
+            <div className="mx-auto mt-2 h-1 w-9 shrink-0 rounded-full bg-border" />
+            <div className="flex h-11 shrink-0 items-center px-4">
+              <div className="flex-1 text-[17px] font-semibold">Sessions</div>
+              <button className="flex h-10 w-10 items-center justify-center rounded-lg text-muted active:bg-panel-2" aria-label="Close" onClick={() => setSessionsOpen(false)}>
+                <XIcon size={18} />
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto pb-[env(safe-area-inset-bottom)]">
+              <CodeSessionList
+                live={live}
+                groupByProject={groupProjects}
+                activeId={activeCodeId}
+                onOpen={openSessions}
+                onNewIn={(host, cwd) => {
+                  setSessionsOpen(false);
+                  setNewSession({ host, cwd });
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
       {newSession && (
         <NewSessionSheet
           members={status.members}
           gateway={status.gateway}
-          onClose={() => setNewSession(false)}
+          initial={newSession.host && newSession.cwd ? { host: newSession.host, cwd: newSession.cwd } : null}
+          onClose={() => setNewSession(null)}
           onCreated={(id) => {
-            setNewSession(false);
+            setNewSession(null);
             useStore.getState().selectCodeSession(id);
-            open({ kind: "code" });
+            if (view.kind !== "code") open({ kind: "code" });
           }}
         />
       )}
@@ -501,24 +565,27 @@ function Home({
   tab,
   setTab,
   live,
+  groupProjects,
   onOpenChat,
   onOpenCode,
   onNewSession,
+  onNewIn,
   onSettings,
 }: {
   status: RemoteStatus;
   tab: "chats" | "code";
   setTab: (t: "chats" | "code") => void;
   live: Record<string, Live>;
+  groupProjects: boolean;
   onOpenChat: (id: string | null) => void;
   onOpenCode: (id: string) => void;
   onNewSession: () => void;
+  onNewIn: (host: string, cwd: string) => void;
   onSettings: () => void;
 }) {
   const conversations = useStore((s) => s.conversations);
   const sessions = useStore((s) => s.codeSessions);
   const streams = useStore((s) => s.chatStreams);
-  const mesh = useStore((s) => s.mesh);
   const needsYou = sessions.filter((s) => (live[s.id]?.permissions.length ?? 0) > 0).length;
 
   const [sheet, setSheet] = useState<{ title: string; actions: ItemAction[] } | null>(null);
@@ -528,16 +595,6 @@ function Home({
 
   const chats = useMemo(() => conversations.filter((c) => c.archivedAt == null).sort(pinnedFirst), [conversations]);
   const archivedChats = useMemo(() => conversations.filter((c) => c.archivedAt != null), [conversations]);
-  const archivedSessions = useMemo(() => sessions.filter((s) => s.archivedAt != null), [sessions]);
-  const byHost = useMemo(() => {
-    const groups = new Map<string, CodeSession[]>();
-    for (const s of sessions.filter((x) => x.archivedAt == null).sort(pinnedFirst)) {
-      const h = s.hostNode ?? "";
-      groups.set(h, [...(groups.get(h) ?? []), s]);
-    }
-    // Hosts that are online first.
-    return [...groups.entries()].sort(([a], [b]) => Number(memberOnline(mesh, b)) - Number(memberOnline(mesh, a)));
-  }, [sessions, mesh]);
 
   // Opening an archived chat or session brings it back.
   const restoreThen = async (archived: boolean, restore: () => Promise<unknown>, open: () => void) => {
@@ -582,45 +639,6 @@ function Home({
       }
     />
   );
-
-  const sessionRow = (s: CodeSession) => {
-    const l = live[s.id];
-    return (
-      <Row
-        key={s.id}
-        title={s.title}
-        sub={`${s.cwd.split(/[\\/]/).filter(Boolean).pop() ?? s.cwd} · ${fmtShort(s.updatedAt)}`}
-        leading={s.pinned ? <StarIcon size={13} /> : null}
-        trailing={<SessionState live={l} online={memberOnline(mesh, s.hostNode ?? "")} />}
-        onClick={() =>
-          restoreThen(
-            s.archivedAt != null,
-            async () => {
-              await api.updateCodeSession(s.id, { archived: false });
-              await useStore.getState().refreshCodeSessions();
-            },
-            () => onOpenCode(s.id),
-          )
-        }
-        onHold={() =>
-          setSheet({
-            title: s.title,
-            actions: sessionActions(s, {
-              desktop: false,
-              local: false,
-              running: !!l && (l.busy || l.status === "ready" || l.status === "starting"),
-              rename: async () => {
-                const t = await promptRename(s.title);
-                if (!t) return;
-                await api.updateCodeSession(s.id, { title: t });
-                await useStore.getState().refreshCodeSessions();
-              },
-            }),
-          })
-        }
-      />
-    );
-  };
 
   return (
     <div className="flex min-h-0 flex-1 flex-col pt-[env(safe-area-inset-top)]">
@@ -674,25 +692,15 @@ function Home({
               {showArchived && archivedChats.map((c) => chatRow(c))}
             </>
           )
-        ) : byHost.length === 0 && archivedSessions.length === 0 ? (
+        ) : sessions.length === 0 ? (
           <Empty line="No Code sessions" sub="Start one here or on a computer; it runs on that computer, and you follow and drive it here." />
         ) : (
-          byHost.map(([host, list]) => (
-            <section key={host}>
-              <div className="flex items-center gap-2 px-4 pb-1.5 pt-4 font-mono text-[11px] uppercase tracking-[0.06em] text-faint">
-                <MonitorIcon size={12} />
-                {memberName(mesh, host) || "unknown computer"}
-                {!memberOnline(mesh, host) && <span className="normal-case tracking-normal">· offline</span>}
-              </div>
-              {list.map((s) => sessionRow(s))}
-            </section>
-          ))
-        )}
-        {tab === "code" && (
-          <>
-            <ArchivedRow count={archivedSessions.length} open={showArchived} onToggle={() => setShowArchived(!showArchived)} />
-            {showArchived && archivedSessions.map((s) => sessionRow(s))}
-          </>
+          <CodeSessionList
+            live={live}
+            groupByProject={groupProjects}
+            onOpen={onOpenCode}
+            onNewIn={onNewIn}
+          />
         )}
       </div>
       <button
@@ -703,36 +711,6 @@ function Home({
         {tab === "chats" ? "New chat" : "New session"}
       </button>
     </div>
-  );
-}
-
-function SessionState({ live, online }: { live?: Live; online: boolean }) {
-  if (!online) return <span className="text-[12px] text-faint">Offline</span>;
-  if (live && live.permissions.length > 0)
-    return <span className="rounded-full bg-accent px-2 py-0.5 text-[12px] font-semibold text-accent-fg">Needs you</span>;
-  if (live?.busy)
-    return (
-      <span className="flex items-center gap-1.5 text-[12px] text-live">
-        <Dot size={6} className="signal-pulse text-live" />
-        Working
-      </span>
-    );
-  if (live?.status === "ready") return <span className="text-[12px] text-ok">Ready</span>;
-  return null;
-}
-
-/** The collapsed "Archived" row at the end of a list. */
-function ArchivedRow({ count, open, onToggle }: { count: number; open: boolean; onToggle: () => void }) {
-  if (count === 0) return null;
-  return (
-    <button
-      className="flex w-full items-center gap-2 px-4 pb-1.5 pt-5 text-left font-mono text-[11px] uppercase tracking-[0.06em] text-faint"
-      aria-expanded={open}
-      onClick={onToggle}
-    >
-      <span className={`inline-block transition-transform ${open ? "rotate-90" : ""}`}>›</span>
-      Archived · {count}
-    </button>
   );
 }
 
@@ -836,7 +814,17 @@ function JoinRequests({ pending }: { pending: RemoteStatus["pending"] }) {
   );
 }
 
-function SettingsSheet({ status, onClose }: { status: RemoteStatus; onClose: () => void }) {
+function SettingsSheet({
+  status,
+  groupProjects,
+  onGroupProjects,
+  onClose,
+}: {
+  status: RemoteStatus;
+  groupProjects: boolean;
+  onGroupProjects: (on: boolean) => void;
+  onClose: () => void;
+}) {
   const [lock, setLock] = useState(() => flag(LOCK_KEY, false));
   const [stay, setStay] = useState(() => flag(STAY_KEY, true));
   const askConfirm = useStore((s) => s.askConfirm);
@@ -878,6 +866,12 @@ function SettingsSheet({ status, onClose }: { status: RemoteStatus; onClose: () 
               setStay(on);
               setFlag(STAY_KEY, on);
             }}
+          />
+          <Toggle
+            label="Group code sessions by project"
+            sub="Under each computer. Drag a project to put it where you want it."
+            on={groupProjects}
+            onChange={onGroupProjects}
           />
         </div>
         <div className="mt-6 font-mono text-[11px] uppercase tracking-[0.06em] text-faint">Computers</div>

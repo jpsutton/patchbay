@@ -17,6 +17,7 @@ export default defineConfig({
     strictPort: true,
     host: host || false,
     hmr: host ? { protocol: "ws", host, port: 1425 } : undefined,
-    watch: { ignored: ["**/src-tauri/**", "**/vendor/**", "**/target/**", "**/remote/**"] },
+    // `remote/**` is the phone's Rust crate. `**/remote/**` also matches src/remote, so the phone UI never reloaded.
+    watch: { ignored: ["**/src-tauri/**", "**/vendor/**", "**/target/**", "remote/**"] },
   },
 });
