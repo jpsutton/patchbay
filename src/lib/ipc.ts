@@ -358,6 +358,8 @@ export interface AgentExtensions {
   patchbayModels?: boolean;
   /** A message sent mid-turn joins the running turn; otherwise it waits for the turn to end. */
   steering?: boolean;
+  /** The host can cancel the running turn to send a message next (older hosts leave it out). */
+  forceSend?: boolean;
 }
 
 /** An ACP session config option (only `select` ones are shown). */
@@ -727,12 +729,14 @@ export const api = {
   codeStop: (id: string) => invoke<void>("code_stop", { id }),
   /**
    * `mentions`: absolute paths of @-mentioned project files. `promptId` names the prompt in the
-   * `userPrompt` events it causes.
+   * `userPrompt` events it causes. `force` cancels the running turn and sends this next.
    */
-  codePrompt: (id: string, text: string, attachmentIds: string[], mentions: string[] = [], promptId?: string) =>
-    invoke<void>("code_prompt", { id, text, attachmentIds, mentions, promptId }),
+  codePrompt: (id: string, text: string, attachmentIds: string[], mentions: string[] = [], promptId?: string, force?: boolean) =>
+    invoke<void>("code_prompt", { id, text, attachmentIds, mentions, promptId, force }),
   /** Drop a prompt queued behind the running turn. */
   codeUnqueue: (id: string, promptId: string) => invoke<void>("code_unqueue", { id, promptId }),
+  /** Cancel the running turn and send this queued prompt next. */
+  codeSendNow: (id: string, promptId: string) => invoke<void>("code_send_now", { id, promptId }),
   getCodeTranscript: (id: string) => invoke<string | null>("get_code_transcript", { id }),
   saveCodeTranscript: (id: string, json: string) => invoke<void>("save_code_transcript", { id, json }),
   /** With `sessionId`, lists files on the node hosting that session. */

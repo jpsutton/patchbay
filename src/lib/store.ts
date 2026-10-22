@@ -1067,6 +1067,24 @@ export function isSendKey(e: { key: string; shiftKey: boolean; ctrlKey: boolean;
 }
 
 /**
+ * True when this keydown should send now, cancelling the agent's running turn. Mod+Enter, or
+ * Mod+Shift+Enter where Mod+Enter is already the send key. Check it before {@link isSendKey}.
+ */
+export function isForceSendKey(e: { key: string; shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }, sendKey: Preferences["sendKey"]) {
+  if (e.key !== "Enter" || !(e.ctrlKey || e.metaKey)) return false;
+  return modEnterSends(sendKey) ? e.shiftKey : true;
+}
+
+/** How to say the force-send key in a tooltip. */
+export function forceSendKeyLabel(sendKey: Preferences["sendKey"]) {
+  return modEnterSends(sendKey) ? "Ctrl+Shift+Enter" : "Ctrl+Enter";
+}
+
+function modEnterSends(sendKey: Preferences["sendKey"]) {
+  return isRemoteApp() || sendKey === "mod-enter";
+}
+
+/**
  * True when Enter should insert a newline but the browser won't (Mod+Enter). Shift+Enter is
  * left to the textarea's default. Callers must preventDefault and insert `\n` themselves.
  */

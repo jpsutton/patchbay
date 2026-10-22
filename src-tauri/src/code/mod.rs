@@ -261,9 +261,10 @@ impl CodeManager {
     }
 
     /// Send a prompt: a new turn, or mid-turn steered into the running one or queued behind it.
-    pub async fn prompt(&self, code_session_id: &str, msg: acp::UserMessage) -> Result<acp::Delivery> {
+    /// `force` cancels the running turn instead and sends the prompt next.
+    pub async fn prompt(&self, code_session_id: &str, msg: acp::UserMessage, force: bool) -> Result<acp::Delivery> {
         let (reply, rx) = oneshot::channel();
-        self.send(code_session_id, AgentCmd::Prompt { msg, reply: Some(reply) })?;
+        self.send(code_session_id, AgentCmd::Prompt { msg, force, reply: Some(reply) })?;
         rx.await.map_err(|_| anyhow!("agent stopped"))?
     }
 

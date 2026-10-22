@@ -888,6 +888,7 @@ async fn code_prompt_local(
     mentions: Vec<String>,
     origin: String,
     prompt_id: Option<String>,
+    force: bool,
 ) -> anyhow::Result<()> {
     ensure_local_host(state, &id)?;
     let prefs = prefs::load(&state.db);
@@ -946,7 +947,7 @@ async fn code_prompt_local(
         origin,
         attachments: serde_json::to_value(&atts)?,
     };
-    state.code.prompt(&id, msg).await?;
+    state.code.prompt(&id, msg, force).await?;
     if note.is_some() {
         state.db.with_conn(|c| c.execute("DELETE FROM settings WHERE key = ?1", [&note_key]))?;
     }
@@ -961,6 +962,15 @@ async fn code_unqueue(state: &AppState, id: String, prompt_id: String) -> CmdRes
     Ok(state.code.send(&id, AgentCmd::Unqueue { prompt_id })?)
 }
 
+/// Send a queued prompt now: the running turn is cancelled and the prompt goes next.
+async fn code_send_now(state: &AppState, id: String, prompt_id: String) -> CmdResult<()> {
+    if let Some(host) = remote_host(state, &id)? {
+        state.mesh.rpc(&host, "code.send_now", serde_json::json!({ "id": id, "promptId": prompt_id })).await?;
+        return Ok(());
+    }
+    Ok(state.code.send(&id, AgentCmd::SendNow { prompt_id })?)
+}
+
 async fn code_prompt(
     state: &AppState,
     id: String,
@@ -968,17 +978,21 @@ async fn code_prompt(
     attachment_ids: Vec<String>,
     mentions: Option<Vec<String>>,
     prompt_id: Option<String>,
+    force: Option<bool>,
 ) -> CmdResult<()> {
     let mentions = mentions.unwrap_or_default();
+    // Cancels the running turn and sends this next (Ctrl+Enter mid-turn).
+    let force = force.unwrap_or(false);
     if let Some(host) = remote_host(state, &id)? {
         let params = serde_json::json!({
             "id": id, "text": text, "attachmentIds": attachment_ids, "mentions": mentions, "promptId": prompt_id,
+            "force": force,
         });
         state.mesh.rpc(&host, "code.prompt", params).await?;
         return Ok(());
     }
     let me = state.mesh.node_id().to_owned();
-    Ok(code_prompt_local(state, id, text, attachment_ids, mentions, me, prompt_id).await?)
+    Ok(code_prompt_local(state, id, text, attachment_ids, mentions, me, prompt_id, force).await?)
 }
 
 async fn code_cancel(state: &AppState, id: String) -> CmdResult<()> {
@@ -1377,7 +1391,8 @@ impl mesh::RpcHandler for MeshRpc {
                 // A gateway passing on a phone's prompt names the phone.
                 let origin = p["origin"].as_str().map(str::to_owned).unwrap_or(from);
                 let prompt_id = p["promptId"].as_str().map(str::to_owned);
-                code_prompt_local(state, id()?, text, atts, mentions, origin, prompt_id).await.map(|_| Value::Null)
+                let force = p["force"].as_bool().unwrap_or(false);
+                code_prompt_local(state, id()?, text, atts, mentions, origin, prompt_id, force).await.map(|_| Value::Null)
             }
             "code.cancel" => {
                 ensure_local_host(state, &id()?)?;
@@ -1387,6 +1402,11 @@ impl mesh::RpcHandler for MeshRpc {
                 ensure_local_host(state, &id()?)?;
                 let prompt_id = param(&p, "promptId")?.to_owned();
                 state.code.send(&id()?, AgentCmd::Unqueue { prompt_id }).map(|_| Value::Null)
+            }
+            "code.send_now" => {
+                ensure_local_host(state, &id()?)?;
+                let prompt_id = param(&p, "promptId")?.to_owned();
+                state.code.send(&id()?, AgentCmd::SendNow { prompt_id }).map(|_| Value::Null)
             }
             "code.set_model" => code_set_model_local(state, &id()?, param(&p, "modelId")?.to_owned()).await.map(|_| Value::Null),
             "code.set_config_option" => {

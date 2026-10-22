@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, errorText, type AcpCommand, type Attachment } from "../lib/ipc";
-import { insertNewlineAtCaret, isSendKey, needsExplicitNewline, useStore } from "../lib/store";
+import { forceSendKeyLabel, insertNewlineAtCaret, isForceSendKey, isSendKey, needsExplicitNewline, useStore } from "../lib/store";
 import { ViewActive } from "../lib/shortcuts";
 import { fuzzyPaths } from "../lib/fuzzy";
 import { ArrowUpIcon, PaperclipIcon, SlidersIcon } from "./icons";
@@ -123,6 +123,7 @@ export function Composer({
   busySendHint,
   restore,
   onRestored,
+  onForceSend,
 }: {
   /** `mentions`: project-relative paths picked with @ that are still in the text. */
   onSend: (text: string, attachments: Attachment[], mentions: string[]) => void | Promise<void>;
@@ -150,6 +151,11 @@ export function Composer({
   restore?: { text: string; attachments: Attachment[] } | null;
   /** Called once `restore` is in the composer. */
   onRestored?: () => void;
+  /**
+   * Send while `busy` by cancelling the running turn (Code tab). Bound to Ctrl+Enter, or
+   * Ctrl+Shift+Enter when Ctrl+Enter is the send key; idle, those keys keep their usual meaning.
+   */
+  onForceSend?: (text: string, attachments: Attachment[], mentions: string[]) => void | Promise<void>;
 }) {
   const [text, setText] = useState("");
   const [atts, setAtts] = useState<Attachment[]>([]);
@@ -336,8 +342,11 @@ export function Composer({
     addMany(paths.map((p) => () => api.addAttachmentPath(p)));
   };
 
-  const submit = async () => {
-    if ((busy && !sendWhileBusy) || disabled || adding > 0) return;
+  const forcing = busy && !!onForceSend;
+  const forceHint = forcing ? `${forceSendKeyLabel(sendKey)} sends now: stops the current turn` : null;
+
+  const submit = async (force = false) => {
+    if ((busy && !sendWhileBusy && !force) || disabled || adding > 0) return;
     if (!text.trim() && atts.length === 0) return;
     const t = text;
     const a = atts;
@@ -346,7 +355,7 @@ export function Composer({
     setText("");
     setAtts([]);
     setMentions([]);
-    await onSend(t, a, m);
+    await (force && onForceSend ? onForceSend : onSend)(t, a, m);
     ref.current?.focus();
   };
 
@@ -410,11 +419,11 @@ export function Composer({
         data-composer
         placeholder={placeholder ?? "Message"}
         title={
-          isRemoteApp()
+          (isRemoteApp()
             ? "Enter for a new line; send with the button"
             : sendKey === "mod-enter"
               ? "Ctrl+Enter to send, Enter for a new line"
-              : "Enter to send, Ctrl+Enter or Shift+Enter for a new line"
+              : "Enter to send, Ctrl+Enter or Shift+Enter for a new line") + (forceHint ? `\n${forceHint}` : "")
         }
         className="block w-full resize-none bg-transparent px-4 pb-2 pt-3.5 text-[15px] leading-6 text-fg outline-none placeholder:text-faint"
         onChange={(e) => {
@@ -447,6 +456,12 @@ export function Composer({
             return;
           }
           if (e.nativeEvent.isComposing) return;
+          // Mid-turn only: idle, the same keys send or break the line as the preference says.
+          if (forcing && isForceSendKey(e, sendKey)) {
+            e.preventDefault();
+            submit(true);
+            return;
+          }
           if (isSendKey(e, sendKey)) {
             e.preventDefault();
             submit();
@@ -534,9 +549,9 @@ export function Composer({
         {(!busy || (sendWhileBusy && hasContent)) && (
           <button
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-accent text-accent-fg transition-colors hover:brightness-105 disabled:bg-panel-2 disabled:text-faint"
-            onClick={submit}
+            onClick={() => submit()}
             disabled={disabled || adding > 0 || !hasContent}
-            title={busy ? (busySendHint ?? "Send") : "Send"}
+            title={busy ? [busySendHint ?? "Send", forceHint].filter(Boolean).join("\n") : "Send"}
             aria-label="Send"
           >
             <ArrowUpIcon size={18} strokeWidth={2.4} />

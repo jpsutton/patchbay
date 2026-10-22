@@ -207,13 +207,17 @@ impl UserMessage {
 
 pub enum AgentCmd {
     /// A new turn when the agent is idle. Mid-turn, steered into the running turn when the agent
-    /// can take that, else queued until the turn ends.
+    /// can take that, else queued until the turn ends. `force` cancels the running turn instead
+    /// and sends the prompt next, ahead of anything queued.
     Prompt {
         msg: UserMessage,
+        force: bool,
         reply: Option<oneshot::Sender<Result<Delivery>>>,
     },
     /// Drop a queued prompt.
     Unqueue { prompt_id: String },
+    /// Send a queued prompt now: cancel the running turn and send it next.
+    SendNow { prompt_id: String },
     Cancel,
     SetModel { model_id: String, reply: oneshot::Sender<Result<()>> },
     SetMode { mode_id: String, reply: oneshot::Sender<Result<()>> },
@@ -253,6 +257,7 @@ impl AgentCmd {
                 origin: String::new(),
                 attachments: json!([]),
             },
+            force: false,
             reply: None,
         }
     }
@@ -393,6 +398,18 @@ fn enqueue(ctx: &TurnCtx, queue: &mut std::collections::VecDeque<UserMessage>, m
     emit(&ctx.sink, &ctx.csid, msg.event(Delivery::Queued));
     queue.push_back(msg);
     Delivery::Queued
+}
+
+/// Ask the agent to end the running turn; its `session/prompt` then returns `cancelled`.
+fn cancel_turn(conn: &Rc<acp::ClientSideConnection>, session_id: &str) {
+    if let Ok(n) = from_json::<acp::CancelNotification>(json!({ "sessionId": session_id })) {
+        // A turn's `session/prompt` goes out from its own task. Spawning the cancel behind it
+        // keeps it from overtaking a prompt that was just sent.
+        let conn = conn.clone();
+        tokio::task::spawn_local(async move {
+            let _ = conn.cancel(n).await;
+        });
+    }
 }
 
 fn drop_queue(ctx: &TurnCtx, queue: &mut std::collections::VecDeque<UserMessage>) {
@@ -872,6 +889,7 @@ async fn run(
     let can_load = capabilities["loadSession"].as_bool().unwrap_or(false);
     let steer = Steer::of(&init_v, extensions.interject);
     extensions.steering = steer.is_some();
+    extensions.force_send = true;
     let (mcp_servers, mcp_skipped) = mcp(&init_v);
     if !mcp_skipped.is_empty() {
         emit(
@@ -1041,6 +1059,8 @@ async fn run(
     };
     let mut running = false;
     let mut queue = std::collections::VecDeque::<UserMessage>::new();
+    // A forced send cancelled the running turn: the front of the queue goes when it returns.
+    let mut forcing = false;
 
     loop {
         tokio::select! {
@@ -1049,7 +1069,8 @@ async fn run(
             }
             Some(go_on) = done_rx.recv() => {
                 running = false;
-                if !go_on {
+                let forced = std::mem::take(&mut forcing) && !auth_lost.get();
+                if !go_on && !forced {
                     drop_queue(&turns, &mut queue);
                 } else if let Some(next) = queue.pop_front() {
                     match start_turn(&turns, next) {
@@ -1074,7 +1095,21 @@ async fn run(
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else { break };
                 match cmd {
-                    AgentCmd::Prompt { msg, reply } => {
+                    AgentCmd::Prompt { msg, force: true, reply } => {
+                        if !running {
+                            answer(reply, start_turn(&turns, msg).inspect(|_| running = true));
+                        } else {
+                            // Never steered: the user wants this turn over. The cancelled turn's
+                            // output stays in the transcript.
+                            emit(&sink, &csid, msg.event(Delivery::Queued));
+                            queue.push_front(msg);
+                            cancel_pending(&pending);
+                            cancel_turn(&conn, &session_id);
+                            forcing = true;
+                            answer(reply, Ok(Delivery::Queued));
+                        }
+                    }
+                    AgentCmd::Prompt { msg, force: false, reply } => {
                         if !running {
                             answer(reply, start_turn(&turns, msg).inspect(|_| running = true));
                         } else if let Some((method, params)) = steer.and_then(|s| s.request(&session_id, &msg.blocks)) {
@@ -1096,17 +1131,26 @@ async fn run(
                             emit(&sink, &csid, CodeEvent::Unqueued { prompt_ids: vec![prompt_id], restore: false });
                         }
                     }
+                    AgentCmd::SendNow { prompt_id } => {
+                        let Some(i) = queue.iter().position(|m| m.id == prompt_id) else { continue };
+                        let msg = queue.remove(i).expect("found above");
+                        if running {
+                            queue.push_front(msg);
+                            cancel_pending(&pending);
+                            cancel_turn(&conn, &session_id);
+                            forcing = true;
+                        } else {
+                            match start_turn(&turns, msg) {
+                                Ok(_) => running = true,
+                                Err(e) => emit(&sink, &csid, CodeEvent::Error { message: format!("{e:#}") }),
+                            }
+                        }
+                    }
                     AgentCmd::Cancel => {
                         cancel_pending(&pending);
                         drop_queue(&turns, &mut queue);
-                        if let Ok(n) = from_json::<acp::CancelNotification>(json!({ "sessionId": session_id })) {
-                            // A turn's `session/prompt` goes out from its own task. Spawning the
-                            // cancel behind it keeps it from overtaking a prompt that was just sent.
-                            let conn = conn.clone();
-                            tokio::task::spawn_local(async move {
-                                let _ = conn.cancel(n).await;
-                            });
-                        }
+                        forcing = false;
+                        cancel_turn(&conn, &session_id);
                     }
                     AgentCmd::SetModel { model_id, reply } => {
                         let ids = config_ids.borrow().clone();
@@ -1260,7 +1304,7 @@ fn refuse_until_signed_in(cmd: AgentCmd) {
             let _ = reply.send(Err(anyhow!("a sign-in is already in progress")));
         }
         AgentCmd::Prompt { reply, .. } => answer(reply, Err(anyhow!("the agent isn't signed in yet"))),
-        AgentCmd::Unqueue { .. } | AgentCmd::Cancel | AgentCmd::Shutdown => {}
+        AgentCmd::Unqueue { .. } | AgentCmd::SendNow { .. } | AgentCmd::Cancel | AgentCmd::Shutdown => {}
     }
 }
 
@@ -2190,6 +2234,20 @@ for line in sys.stdin:
         text: &str,
         blocks: Option<Vec<serde_json::Value>>,
     ) -> Delivery {
+        deliver(tx, text, blocks, false)
+    }
+
+    /// A prompt sent with Ctrl+Enter: it cancels the running turn to go next.
+    fn force(tx: &tokio::sync::mpsc::UnboundedSender<AgentCmd>, text: &str) -> Delivery {
+        deliver(tx, text, None, true)
+    }
+
+    fn deliver(
+        tx: &tokio::sync::mpsc::UnboundedSender<AgentCmd>,
+        text: &str,
+        blocks: Option<Vec<serde_json::Value>>,
+        force: bool,
+    ) -> Delivery {
         let (reply, rx) = tokio::sync::oneshot::channel();
         let msg = UserMessage {
             id: text.into(),
@@ -2198,7 +2256,7 @@ for line in sys.stdin:
             origin: "me".into(),
             attachments: json!([]),
         };
-        tx.send(AgentCmd::Prompt { msg, reply: Some(reply) }).unwrap();
+        tx.send(AgentCmd::Prompt { msg, force, reply: Some(reply) }).unwrap();
         rx.blocking_recv().unwrap().unwrap()
     }
 
@@ -2365,6 +2423,72 @@ for line in sys.stdin:
         let handed_back =
             |e: &CodeEvent| matches!(e, CodeEvent::Unqueued { prompt_ids, restore: true } if prompt_ids == &["next", "and next"]);
         assert_eq!(count(&events, handed_back), 1);
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn stop_reasons(events: &Events) -> Vec<serde_json::Value> {
+        let evs = events.lock().unwrap();
+        evs.iter()
+            .filter_map(|e| match e {
+                CodeEvent::PromptDone { stop_reason } => Some(stop_reason.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn force_send_cancels_the_turn_instead_of_steering() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods", "--steering"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        // Idle, a forced send is just a send.
+        assert_eq!(force(&tx, "hold"), Delivery::Sent);
+        assert_eq!(prompt(&tx, "also this"), Delivery::Steered);
+        assert_eq!(force(&tx, "urgent"), Delivery::Queued);
+        wait_for(&events, "two turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 2);
+
+        // The cancelled turn's output stays; the forced prompt is the next turn.
+        assert_eq!(agent_heard(&events, 3), ["prompt:hold", "steer:also this", "prompt:urgent"]);
+        assert_eq!(stop_reasons(&events), [json!("cancelled"), json!("end_turn")]);
+        assert_eq!(
+            deliveries(&events),
+            [
+                ("hold".into(), Delivery::Sent),
+                ("also this".into(), Delivery::Steered),
+                ("urgent".into(), Delivery::Queued),
+                ("urgent".into(), Delivery::Sent),
+            ]
+        );
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn send_now_jumps_the_queue() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        assert_eq!(prompt(&tx, "first"), Delivery::Queued);
+        assert_eq!(prompt(&tx, "second"), Delivery::Queued);
+        tx.send(AgentCmd::SendNow { prompt_id: "second".into() }).unwrap();
+        // The rest of the queue still follows, after the one sent now.
+        wait_for(&events, "three turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 3);
+
+        assert_eq!(agent_heard(&events, 3), ["prompt:hold", "prompt:second", "prompt:first"]);
+        assert_eq!(stop_reasons(&events), [json!("cancelled"), json!("end_turn"), json!("end_turn")]);
+        assert_eq!(count(&events, |e| matches!(e, CodeEvent::Unqueued { .. })), 0);
         no_errors(&events);
         tx.send(AgentCmd::Shutdown).unwrap();
         thread.join().unwrap();
