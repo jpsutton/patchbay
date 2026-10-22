@@ -729,7 +729,8 @@ impl Inner {
         let st = self.st.lock().unwrap();
         let members: Vec<Value> = mems
             .iter()
-            .filter(|m| Some(&m.mesh_id) == mesh_id.as_ref())
+            // Members that left drop off the list; ones a member removed stay listed as removed.
+            .filter(|m| Some(&m.mesh_id) == mesh_id.as_ref() && !m.has_left())
             .map(|m| {
                 let sess = st.sessions.get(&m.node_id);
                 let (state, via) = if m.node_id == self.me {
@@ -2143,6 +2144,31 @@ impl Inner {
         res
     }
 
+    /// A phone says it's leaving: store its signed removal, which syncs to the other members, and
+    /// void its resume tickets. The phone closes the connection itself.
+    fn remote_left(&self, from: &str, params: &Value) -> Result<()> {
+        let rec: Member = serde_json::from_value(params["record"].clone()).context("bad removal record")?;
+        let known = members::get(&self.db, from)?.ok_or_else(|| anyhow!("not a member"))?;
+        let same = rec.node_id == from
+            && rec.mesh_id == known.mesh_id
+            && rec.sign_pub == known.sign_pub
+            && rec.noise_pub == known.noise_pub
+            && rec.is_remote()
+            && rec.has_left();
+        if !same || !members::verify_record(&self.db, &rec)? {
+            bail!("the removal record doesn't match this device");
+        }
+        if known.is_removed() {
+            return Ok(());
+        }
+        members::upsert(&self.db, &rec)?;
+        self.st.lock().unwrap().tickets.retain(|_, t| t.node != from);
+        tracing::info!("mesh: {} left the mesh", rec.name);
+        self.changed.send_modify(|v| *v += 1);
+        self.emit_status();
+        Ok(())
+    }
+
     fn remote_rpc(self: Arc<Self>, from: &str, id: u64, method: String, params: Value, reply: mpsc::UnboundedSender<Msg>) {
         let from = from.to_owned();
         // Register the topics now, so events after this point follow the reply in order.
@@ -2160,6 +2186,7 @@ impl Inner {
                     Ok(Value::Null)
                 }
                 "remote.members" => Ok(Mesh(self.clone()).remote_members()),
+                "remote.leave" => self.remote_left(&from, &params).map(|_| Value::Null),
                 "mesh.file" => self.clone().serve_rpc(from.clone(), method.clone(), params).await,
                 m if m.starts_with("remote.") => {
                     let h = self.handler.read().unwrap().clone();

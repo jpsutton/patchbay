@@ -228,3 +228,28 @@ async fn passphrase_mismatch_with_a_member_is_reported_and_fixed() {
     assert!(b.mesh.status()["problem"].is_null());
     assert_eq!(errors(&b), announced, "fixing it announces nothing new");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_that_leaves_drops_off_every_list() {
+    let (a, b, c) = (node("alpha5"), node("bravo5"), node("charlie5"));
+    a.mesh.create(PASS, "alpha5").unwrap();
+    admit(&a, &b).await;
+    admit(&a, &c).await;
+    let cid = c.mesh.node_id().to_owned();
+    until("bravo reaches charlie", 20, || b.mesh.connected(&cid)).await;
+
+    c.mesh.leave().await.unwrap();
+    assert!(!c.mesh.is_member());
+    for (n, who) in [(&a, "alpha"), (&b, "bravo")] {
+        until(&format!("{who} learns charlie left"), 10, || {
+            super::members::get(&n.db, &cid).unwrap().is_some_and(|m| m.is_removed())
+        })
+        .await;
+        until(&format!("charlie gone from {who}'s list"), 10, || member_state(n, &cid).is_empty()).await;
+        until(&format!("{who} disconnects from charlie"), 10, || !n.mesh.connected(&cid)).await;
+    }
+
+    // It can ask to join again, like any new computer.
+    admit(&b, &c).await;
+    until("charlie back on alpha", 20, || a.mesh.connected(&cid)).await;
+}
