@@ -385,6 +385,29 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
     codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
     return;
   }
+  // An edit sent the way Claude Code sends one: a diff per hunk, each hunk's new start line in `locations`.
+  if (text.startsWith("/hunks")) {
+    const path = `${s.cwd}/src/main.ts`;
+    codeEmit(csid, {
+      type: "update",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: id(),
+        title: "Edit `src/main.ts`",
+        kind: "edit",
+        status: "completed",
+        rawInput: { file_path: path },
+        content: [
+          { type: "diff", path, oldText: "import { a } from \"./a\";\nimport { b } from \"./b\";\n\nconst x = 1;", newText: "import { a } from \"./a\";\nimport { b } from \"./b\";\nimport { c } from \"./c\";\n\nconst x = 1;" },
+          { type: "diff", path, oldText: "function run() {\n  a();\n  b();\n  return x;\n}", newText: "function run() {\n  a();\n  b();\n  c();\n  return x;\n}" },
+        ],
+        locations: [{ path, line: 10 }, { path, line: 40 }],
+      },
+    });
+    await say("Done.");
+    codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
   // A plan document written as a tool call, the way Cursor's plan mode does it.
   if (text.startsWith("/plan")) {
     const plan = `# Tidy the README\n\n## Problem\n\nThe intro is out of date.\n\n## Steps\n\n1. Read \`README.md\`.\n2. Rewrite the intro.\n3. Check the links still work.\n`;

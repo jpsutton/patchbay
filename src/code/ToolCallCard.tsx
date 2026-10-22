@@ -133,11 +133,37 @@ function CommandBlock({ cmd }: { cmd: string }) {
   );
 }
 
+const lineCount = (t: string | null) => (t ? t.split("\n").length : 0);
+
+/**
+ * Where each diff starts in its file. Claude Code sends one diff per hunk, holding just that hunk,
+ * and puts each hunk's new start line in `locations`: the i-th diff for a path pairs with the i-th
+ * location for that path. The old start follows from the earlier hunks' net line change. A diff
+ * with no located line (a whole-file diff) starts at line 1, as before.
+ */
+function hunkStarts(
+  diffs: Extract<AcpToolCallContent, { type: "diff" }>[],
+  locations: AcpToolCall["locations"],
+): ({ oldStart: number; newStart: number } | undefined)[] {
+  const seen = new Map<string, number>();
+  const shift = new Map<string, number>();
+  return diffs.map((d) => {
+    const n = seen.get(d.path) ?? 0;
+    seen.set(d.path, n + 1);
+    const delta = shift.get(d.path) ?? 0;
+    shift.set(d.path, delta + lineCount(d.newText) - lineCount(d.oldText));
+    const line = (locations ?? []).filter((l) => l.path === d.path)[n]?.line;
+    if (typeof line !== "number" || line < 1) return undefined;
+    return { newStart: line, oldStart: Math.max(1, line - delta) };
+  });
+}
+
 export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withImages?: boolean }) {
   const content = tc.content ?? [];
   const cmd = tc.kind === "execute" ? commandOf(tc) : null;
   const images = imagesOf(tc);
   const diffs = content.filter((c): c is Extract<AcpToolCallContent, { type: "diff" }> => c.type === "diff");
+  const starts = hunkStarts(diffs, tc.locations);
   const terminals = content.filter((c): c is Extract<AcpToolCallContent, { type: "terminal" }> => c.type === "terminal");
   const texts = content.map(textOfContent).filter((t): t is string => !!t);
   // Patchbay doesn't host ACP terminals, so their output only reaches us as raw tool output.
@@ -148,7 +174,7 @@ export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withI
       {cmd && <CommandBlock cmd={cmd} />}
       {withImages && images.length > 0 && <ToolImages images={images} label={tc.title || "Tool output"} />}
       {diffs.map((d, i) => (
-        <DiffView key={i} path={d.path} oldText={d.oldText} newText={d.newText} />
+        <DiffView key={i} path={d.path} oldText={d.oldText} newText={d.newText} {...starts[i]} />
       ))}
       {terminals.length > 0 && !tc.terminalOutput && (
         <div className="flex items-center gap-2 text-[12px] text-muted">
