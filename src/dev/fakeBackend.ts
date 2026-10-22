@@ -25,6 +25,8 @@ import type {
   AgentId,
   AgentInfo,
   AuthChoice,
+  WireFrame,
+  WireLogStatus,
 } from "../lib/ipc";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -149,6 +151,14 @@ const FAKE_STEERING = new Set(["grok", "claude-code", "codex"]);
 /** Sessions mid-turn, and the prompts queued behind each turn. */
 const fakeTurns = new Set<string>();
 const fakeQueues: Record<string, { promptId: string; text: string; mentions: string[] }[]> = {};
+/** Sessions whose running turn a forced send cancelled. */
+const fakeCut = new Set<string>();
+
+/** Cancel the running turn for a forced send; the front of the queue goes next. */
+function fakeInterrupt(csid: string) {
+  fakeCut.add(csid);
+  for (const [k, r] of pending) { r(null); pending.delete(k); }
+}
 
 function fakeEcho(csid: string, promptId: string, text: string, delivery: PromptDelivery) {
   codeEmit(csid, { type: "userPrompt", promptId, text, origin: ME, attachments: [], delivery });
@@ -159,6 +169,7 @@ async function runFakeTurns(csid: string, promptId: string, text: string, mentio
   fakeEcho(csid, promptId, text, "sent");
   fakeTurns.add(csid);
   await fakeAgentTurn(csid, text, mentions);
+  if (fakeCut.delete(csid)) codeEmit(csid, { type: "promptDone", stopReason: "cancelled" });
   fakeTurns.delete(csid);
   const next = fakeQueues[csid]?.shift();
   if (next) void runFakeTurns(csid, next.promptId, next.text, next.mentions);
@@ -182,7 +193,7 @@ function fakeReady(csid: string, loaded = false) {
       ? null
       : { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] },
     configOptions: grok ? [] : [fakeEffort(fakeConfig[csid] ?? "medium")],
-    extensions: { statusLine: grok, rewind: grok, patchbayModels: grok, steering: FAKE_STEERING.has(db.code.find((c) => c.id === csid)?.agent ?? "grok") },
+    extensions: { statusLine: grok, rewind: grok, patchbayModels: grok, steering: FAKE_STEERING.has(db.code.find((c) => c.id === csid)?.agent ?? "grok"), forceSend: true },
   });
   codeEmit(csid, {
     type: "update",
@@ -207,6 +218,21 @@ function send<T>(ch: unknown, msg: T) {
 
 function codeEmit(codeSessionId: string, event: CodeEnvelope["event"]) {
   emit("code://event", { codeSessionId, event } satisfies CodeEnvelope);
+}
+
+/** The ACP wire log (`code/wire.rs`): a few sample frames once turned on. */
+const fakeWire: { until: number | null; frames: WireFrame[] } = { until: null, frames: [] };
+
+function fakeWireStatus(): WireLogStatus {
+  if (fakeWire.until !== null && Date.now() >= fakeWire.until) fakeWire.until = null;
+  const remainingSecs = fakeWire.until === null ? 0 : Math.floor((fakeWire.until - Date.now()) / 1000);
+  return { on: fakeWire.until !== null, remainingSecs, frames: fakeWire.frames.length, dropped: 0 };
+}
+
+function fakeWireRecord(agent: string, dir: "in" | "out", frame: unknown) {
+  if (!fakeWireStatus().on) return;
+  const seq = (fakeWire.frames[fakeWire.frames.length - 1]?.seq ?? 0) + 1;
+  fakeWire.frames.push({ seq, at: Date.now(), session: "fake", agent, dir, text: JSON.stringify(frame) });
 }
 
 /** `?long=<turns>`: a seeded session whose load replays a long transcript with images in it. */
@@ -264,6 +290,27 @@ async function fakeLongReplay(csid: string) {
   }
   console.info(`[fake] long replay: ${Math.round(performance.now() - t0)} ms`);
   (window as unknown as { __longReplayMs: number }).__longReplayMs = performance.now() - t0;
+}
+
+/** `?harness=1`: a seeded session whose load replays Claude Code's harness messages and a cancel. */
+const harnessDemo = new URLSearchParams(location.search).has("harness");
+let harnessSessionId: string | null = null;
+
+function fakeHarnessReplay(csid: string) {
+  const user = (text: string) => codeEmit(csid, { type: "update", update: { sessionUpdate: "user_message_chunk", content: { type: "text", text } } });
+  const agent = (text: string) => codeEmit(csid, { type: "update", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } });
+  user("<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>opus</command-args>");
+  user("<local-command-stdout>Set model to Opus</local-command-stdout>");
+  // A prompt and a reminder in one message, the reminder split across chunks.
+  user("Fix the flaky upload test.\n<system-reminder>\nThe user opened ");
+  user("src/upload.test.ts in the IDE.\n</system-reminder>");
+  agent("Looking at the upload test now.");
+  user("[Request interrupted by user]");
+  user("Use <b>bold</b> in the summary instead.");
+  agent("Sure, here is the **summary**.");
+  user('<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>Background build finished</summary>\n</task-notification>');
+  agent("The background build passed.");
+  user("[Request interrupted by user for tool use]");
 }
 
 async function fakeChat(a: Record<string, unknown>, regenerate?: string) {
@@ -348,25 +395,65 @@ async function fakeChat(a: Record<string, unknown>, regenerate?: string) {
 
 async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []) {
   const s = db.code.find((c) => c.id === csid)!;
+  // A forced send cut this turn short: it runs out silently, as if the agent stopped.
+  const turnEmit = (e: CodeEnvelope["event"]) => {
+    if (!fakeCut.has(csid)) codeEmit(csid, e);
+  };
   const say = async (t: string) => {
     for (const w of t.split(/(?<=\s)/)) {
       await sleep(15);
-      codeEmit(csid, { type: "update", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: w } } });
+      turnEmit({ type: "update", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: w } } });
     }
   };
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Planning the change." } } });
+  fakeWireRecord(s.agent, "out", { jsonrpc: "2.0", id: 3, method: "session/prompt", params: { sessionId: "acp", prompt: [{ type: "text", text }] } });
+  turnEmit({ type: "update", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Planning the change." } } });
+  // Frames ACP can't decode (see `code/wire.rs`): an unknown update type, a tool status outside
+  // the four known ones, and a permission option of an unknown kind.
+  if (text.startsWith("/odd")) {
+    const raw = { sessionUpdate: "turn_summary", summary: { files: 2, note: "Edited README.md" } };
+    fakeWireRecord(s.agent, "in", { jsonrpc: "2.0", method: "session/update", params: { sessionId: "acp", update: raw } });
+    for (let n = 0; n < 2; n++) {
+      codeEmit(csid, { type: "unrecognized", message: `The agent sent an update Patchbay doesn't know ("turn_summary")`, raw });
+    }
+    const toolId = id();
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: toolId, title: "Run `npm test`", kind: "execute", status: "cancelled", rawInput: { command: "npm test" } } });
+    const reqId = id();
+    const toolId2 = id();
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: toolId2, title: "Edit `README.md`", kind: "edit", status: "pending", content: [{ type: "diff", path: `${s.cwd}/README.md`, oldText: "Old intro." }] } });
+    const choice = await new Promise<string | null>((resolve) => {
+      pending.set(reqId, resolve);
+      codeEmit(csid, {
+        type: "permission",
+        requestId: reqId,
+        request: {
+          sessionId: "acp",
+          toolCall: { toolCallId: toolId2, title: "Edit `README.md`", kind: "edit" },
+          options: [
+            { optionId: "once", name: "Allow", kind: "allow_once" },
+            { optionId: "session", name: "Allow for this session", kind: "allow_for_session" as "allow_once" },
+            { optionId: "no", name: "Reject", kind: "reject_once" },
+          ],
+        },
+      });
+    });
+    codeEmit(csid, { type: "permissionResolved", requestId: reqId });
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: toolId2, status: choice === "no" ? "failed" : "completed" } });
+    await say(`Picked: ${choice}`);
+    codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
   // A plan that waits for approval, the way Claude Code's `ExitPlanMode` asks.
   if (text.startsWith("/plan-approve")) {
     const plan = `# Tidy the README\n\n## Steps\n\n1. Read \`README.md\`.\n2. Rewrite the intro.\n`;
     const planId = id();
     const reqId = id();
-    codeEmit(csid, {
+    turnEmit({
       type: "update",
-      update: { sessionUpdate: "tool_call", toolCallId: planId, title: "Ready to code?", kind: "switch_mode", status: "pending", rawInput: { plan }, content: [{ type: "content", content: { type: "text", text: plan } }] },
+      update: { sessionUpdate: "tool_call", toolCallId: planId, title: "Ready to code?", kind: "switch_mode", rawInput: { plan }, content: [{ type: "content", content: { type: "text", text: plan } }] },
     });
     const choice = await new Promise<string | null>((resolve) => {
       pending.set(reqId, resolve);
-      codeEmit(csid, {
+      turnEmit({
         type: "permission",
         requestId: reqId,
         request: {
@@ -380,15 +467,38 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
       });
     });
     codeEmit(csid, { type: "permissionResolved", requestId: reqId });
-    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: planId, status: choice === "default" ? "completed" : "failed" } });
+    turnEmit({ type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: planId, status: choice === "default" ? "completed" : "failed" } });
     await say(choice === "default" ? "Starting on it." : "Okay, still planning.");
+    turnEmit({ type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
+  // An edit sent the way Claude Code sends one: a diff per hunk, each hunk's new start line in `locations`.
+  if (text.startsWith("/hunks")) {
+    const path = `${s.cwd}/src/main.ts`;
+    codeEmit(csid, {
+      type: "update",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: id(),
+        title: "Edit `src/main.ts`",
+        kind: "edit",
+        status: "completed",
+        rawInput: { file_path: path },
+        content: [
+          { type: "diff", path, oldText: "import { a } from \"./a\";\nimport { b } from \"./b\";\n\nconst x = 1;", newText: "import { a } from \"./a\";\nimport { b } from \"./b\";\nimport { c } from \"./c\";\n\nconst x = 1;" },
+          { type: "diff", path, oldText: "function run() {\n  a();\n  b();\n  return x;\n}", newText: "function run() {\n  a();\n  b();\n  c();\n  return x;\n}" },
+        ],
+        locations: [{ path, line: 10 }, { path, line: 40 }],
+      },
+    });
+    await say("Done.");
     codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
     return;
   }
   // A plan document written as a tool call, the way Cursor's plan mode does it.
   if (text.startsWith("/plan")) {
     const plan = `# Tidy the README\n\n## Problem\n\nThe intro is out of date.\n\n## Steps\n\n1. Read \`README.md\`.\n2. Rewrite the intro.\n3. Check the links still work.\n`;
-    codeEmit(csid, {
+    turnEmit({
       type: "update",
       update: {
         sessionUpdate: "tool_call",
@@ -400,10 +510,73 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
       },
     });
     await say("The plan is ready. Say the word and I'll start.");
+    turnEmit({ type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
+  // Claude Code's diffs: an Edit's hunks (start lines in `locations`), a Write that first sends
+  // the whole file with `oldText: null`, and a Codex-style deletion (`newText: ""`).
+  if (text.startsWith("/hunks")) {
+    const app = `${s.cwd}/src/app.ts`;
+    const editId = id();
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: editId, title: "Edit src/app.ts", kind: "edit", status: "pending", rawInput: { file_path: app }, content: [{ type: "diff", path: app, oldText: "return 1;", newText: "return one;" }], locations: [{ path: app }] } });
+    await sleep(200);
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: editId, status: "completed",
+      content: [
+        { type: "diff", path: app, oldText: "import { b } from \"./b\";\n\nfunction one() {\n  return 1;\n}", newText: "import { b } from \"./b\";\n\n/** The first. */\nfunction one() {\n  return one;\n}" },
+        { type: "diff", path: app, oldText: "function two() {\n  return 2;\n}\n\nexport { one, two };", newText: "function two() {\n  return b(2);\n}\n\nexport { one, two };" },
+      ],
+      locations: [{ path: app, line: 2 }, { path: app, line: 9 }] } });
+    // A second edit to the same file, by a relative path, over the first hunk.
+    const edit2 = id();
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: edit2, title: "Edit src/app.ts", kind: "edit", status: "completed",
+      content: [{ type: "diff", path: "./src/app.ts", oldText: "/** The first. */\nfunction one() {\n  return one;", newText: "/** The first one. */\nfunction one() {\n  return one;" }],
+      locations: [{ path: "./src/app.ts", line: 4 }] } });
+    const notes = `${s.cwd}/NOTES.md`;
+    const writeId = id();
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: writeId, title: "Write NOTES.md", kind: "edit", status: "pending", rawInput: { file_path: notes }, content: [{ type: "diff", path: notes, oldText: null, newText: "# Notes\n\n- one\n- two, revised\n- three\n" }], locations: [{ path: notes }] } });
+    await sleep(200);
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: writeId, status: "completed", content: [{ type: "diff", path: notes, oldText: "# Notes\n\n- one\n- two\n- three", newText: "# Notes\n\n- one\n- two, revised\n- three" }], locations: [{ path: notes, line: 1 }] } });
+    const newId = id();
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: newId, title: "Write src/b.ts", kind: "edit", status: "completed", content: [{ type: "diff", path: `${s.cwd}/src/b.ts`, oldText: null, newText: "export const b = (n: number) => n;\n" }], locations: [{ path: `${s.cwd}/src/b.ts` }] } });
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: id(), title: "Delete old.txt", kind: "delete", status: "completed", content: [{ type: "diff", path: `${s.cwd}/old.txt`, oldText: "stale\n", newText: "" }] } });
+    await say("Edited `src/app.ts` in two places, rewrote `NOTES.md`, added `src/b.ts` and removed `old.txt`.");
     codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
     return;
   }
-  codeEmit(csid, {
+  // OpenCode's (and Kilo's) to-do list: `todowrite` tool calls, not ACP plans. The first write
+  // completes, the second is rejected, the third saves a list with a cancelled step.
+  if (text.startsWith("/todos")) {
+    const write = async (todos: { content: string; status: string; priority: string }[], ok: boolean) => {
+      const tid = id();
+      codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: tid, title: "todowrite", kind: "other", status: "pending", rawInput: {} } });
+      await sleep(150);
+      codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: tid, status: "in_progress", rawInput: { todos } } });
+      await sleep(150);
+      if (!ok) {
+        codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: tid, status: "failed", rawOutput: { error: "The user rejected permission to use this specific tool call." } } });
+        return;
+      }
+      const open = todos.filter((t) => t.status !== "completed").length;
+      codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: tid, status: "completed", title: `${open} todos`, rawOutput: { output: JSON.stringify(todos, null, 2), metadata: { todos } } } });
+    };
+    await write([
+      { content: "Read the parser", status: "in_progress", priority: "high" },
+      { content: "Fix the off-by-one", status: "pending", priority: "high" },
+      { content: "Rewrite the lexer", status: "pending", priority: "low" },
+    ], true);
+    await say("Reading the parser first.\n");
+    await write([{ content: "Delete every test", status: "pending", priority: "high" }], false);
+    await say("That write was rejected, so the plan stays.\n");
+    await write([
+      { content: "Read the parser", status: "completed", priority: "high" },
+      { content: "Fix the off-by-one", status: "in_progress", priority: "high" },
+      { content: "Rewrite the lexer", status: "cancelled", priority: "low" },
+    ], true);
+    await say("Dropped the lexer rewrite; fixing the off-by-one now.");
+    codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
+  turnEmit({
     type: "update",
     update: {
       sessionUpdate: "plan",
@@ -417,23 +590,27 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
   await say(`Working on: ${text}\n`);
   if (mentions.length) await say(`\nMentioned files: ${mentions.map((m) => `\`${m}\``).join(", ")}\n`);
   const readId = id();
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: readId, title: "Read `README.md`", kind: "read", status: "completed", rawInput: { path: `${s.cwd}/README.md` }, content: [{ type: "content", content: { type: "text", text: "# demo\n\nOld intro." } }] } });
+  turnEmit({ type: "update", update: { sessionUpdate: "tool_call", toolCallId: readId, title: "Read `README.md`", kind: "read", status: "completed", rawInput: { path: `${s.cwd}/README.md` }, content: [{ type: "content", content: { type: "text", text: "# demo\n\nOld intro." } }] } });
   const editId = id();
   const diff = { type: "diff" as const, path: `${s.cwd}/README.md`, oldText: "# demo\n\nOld intro.\n", newText: "# demo\n\nNew intro written by the agent.\n\n## Usage\n\nRun it.\n" };
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: editId, title: "Edit `README.md`", kind: "edit", status: "pending", rawInput: { file_path: "README.md" } } });
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: editId, content: [diff] } });
+  // Like the real backend: the announcement leaves out the defaults (`pending`, `other`), and the
+  // diff and full rawInput arrive only with the permission request.
+  turnEmit({ type: "update", update: { sessionUpdate: "tool_call", toolCallId: editId, title: "Edit" } });
+  const editCall = { toolCallId: editId, title: "Edit `README.md`", kind: "edit", rawInput: { file_path: "README.md" }, content: [diff] };
+  // The backend passes a known call's permission-request fields on as an update.
+  turnEmit({ type: "update", update: { sessionUpdate: "tool_call_update", ...editCall } });
   const reqId = id();
   const rule = db.rules.find((r) => r.toolKind === "edit" && (r.cwd === "*" || r.cwd === s.cwd));
   const choice = rule
-    ? (codeEmit(csid, { type: "autoApproved", toolCallId: editId, description: "Auto-approved: all edit calls in this folder" }), "allow-once")
+    ? (turnEmit({ type: "autoApproved", toolCallId: editId, description: "Auto-approved: all edit calls in this folder" }), "allow-once")
     : await new Promise<string | null>((resolve) => {
     pending.set(reqId, resolve);
-    codeEmit(csid, {
+    turnEmit({
       type: "permission",
       requestId: reqId,
       request: {
         sessionId: "acp",
-        toolCall: { toolCallId: editId, title: "Edit `README.md`", kind: "edit" },
+        toolCall: { ...editCall, status: "pending" },
         options: [
           { optionId: "allow-edits-session", name: "Yes, allow all edits during this session", kind: "allow_always" },
           { optionId: "allow-once", name: "Yes", kind: "allow_once" },
@@ -444,27 +621,27 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
   });
   if (!rule) codeEmit(csid, { type: "permissionResolved", requestId: reqId });
   if (!choice || choice.startsWith("reject")) {
-    codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: editId, status: "failed" } });
+    turnEmit({ type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: editId, status: "failed" } });
     await say("Okay, I won't make that edit.");
-    codeEmit(csid, { type: "promptDone", stopReason: choice ? "end_turn" : "cancelled" });
+    turnEmit({ type: "promptDone", stopReason: choice ? "end_turn" : "cancelled" });
     return;
   }
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: editId, status: "completed" } });
+  turnEmit({ type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: editId, status: "completed" } });
   const runId = id();
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: runId, title: "Execute `ls`", kind: "execute", status: "in_progress", rawInput: { command: "ls" } } });
+  turnEmit({ type: "update", update: { sessionUpdate: "tool_call", toolCallId: runId, title: "Execute `ls`", kind: "execute", status: "in_progress", rawInput: { command: "ls" } } });
   await sleep(300);
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: runId, status: "completed", content: [{ type: "content", content: { type: "text", text: "README.md\nsrc\nCargo.toml" } }] } });
+  turnEmit({ type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: runId, status: "completed", content: [{ type: "content", content: { type: "text", text: "README.md\nsrc\nCargo.toml" } }] } });
   const termId = id();
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: termId, title: "Execute `cargo check`", kind: "execute", status: "completed", rawInput: { command: "cargo check" }, content: [{ type: "terminal", terminalId: "term-1" }], rawOutput: { stdout: "Finished `dev` profile in 0.6s", exit_code: 0 } } });
-  codeEmit(csid, { type: "update", update: { sessionUpdate: "plan", entries: [
+  turnEmit({ type: "update", update: { sessionUpdate: "tool_call", toolCallId: termId, title: "Execute `cargo check`", kind: "execute", status: "completed", rawInput: { command: "cargo check" }, content: [{ type: "terminal", terminalId: "term-1" }], rawOutput: { stdout: "Finished `dev` profile in 0.6s", exit_code: 0 } } });
+  turnEmit({ type: "update", update: { sessionUpdate: "plan", entries: [
     { content: "Read README.md", priority: "high", status: "completed" },
     { content: "Edit README.md", priority: "high", status: "completed" },
     { content: "Run ls", priority: "medium", status: "completed" },
   ] } });
   await say("Done. I updated the README intro and added a **Usage** section.");
   fakeUsage.input += 9000; fakeUsage.cachedRead += 6000; fakeUsage.output += 700;
-  codeEmit(csid, { type: "usage", usage: { totals: { ...fakeUsage }, contextTokens: Math.min(118000, fakeUsage.input / 2), contextWindow: 128000, autoCompactPercent: 85 } });
-  codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
+  turnEmit({ type: "usage", usage: { totals: { ...fakeUsage }, contextTokens: Math.min(118000, fakeUsage.input / 2), contextWindow: 128000, autoCompactPercent: 85 } });
+  turnEmit({ type: "promptDone", stopReason: "end_turn" });
 }
 const fakeUsage = { input: 0, cachedRead: 0, cacheWrite: 0, output: 0, reasoning: 0, costUsd: null as number | null, apiMs: 0 };
 
@@ -593,6 +770,10 @@ export function install() {
   if (longTurns > 0) {
     seed("/home/demo/Projects/ips-amp-admin", "Long transcript", 10, "edit");
     longSessionId = db.code[db.code.length - 1].id;
+  }
+  if (harnessDemo) {
+    seed("/home/demo/Projects/uploads", "Claude Code replay", 5, "edit");
+    harnessSessionId = db.code[db.code.length - 1].id;
   }
   if (meshDemo) {
     meshMember();
@@ -816,7 +997,10 @@ export function install() {
                 return;
               }
               if (csid === longSessionId) void fakeLongReplay(csid).then(() => fakeReady(csid, true));
-              else fakeReady(csid);
+              else if (csid === harnessSessionId) {
+                fakeHarnessReplay(csid);
+                fakeReady(csid, true);
+              } else fakeReady(csid);
             }, 400);
           }, 10);
           return null;
@@ -860,6 +1044,12 @@ export function install() {
           }
           const promptId = (a.promptId as string) || id();
           const mentions = (a.mentions as string[]) ?? [];
+          if (fakeTurns.has(s.id) && a.force) {
+            (fakeQueues[s.id] ??= []).unshift({ promptId, text: a.text as string, mentions });
+            fakeEcho(s.id, promptId, a.text as string, "queued");
+            fakeInterrupt(s.id);
+            return null;
+          }
           if (fakeTurns.has(s.id)) {
             if (FAKE_STEERING.has(s.agent)) {
               fakeEcho(s.id, promptId, a.text as string, "steered");
@@ -879,6 +1069,15 @@ export function install() {
           if (i >= 0) {
             q.splice(i, 1);
             codeEmit(a.id as string, { type: "unqueued", promptIds: [a.promptId as string], restore: false });
+          }
+          return null;
+        }
+        case "code_send_now": {
+          const q = fakeQueues[a.id as string] ?? [];
+          const i = q.findIndex((x) => x.promptId === a.promptId);
+          if (i >= 0 && fakeTurns.has(a.id as string)) {
+            q.unshift(...q.splice(i, 1));
+            fakeInterrupt(a.id as string);
           }
           return null;
         }
@@ -953,6 +1152,7 @@ export function install() {
         case "plugin:clipboard-manager|write_text": return navigator.clipboard.writeText(a.text as string).then(() => null);
         case "plugin:clipboard-manager|read_text": return navigator.clipboard.readText();
         case "code_cancel": {
+          fakeCut.delete(a.id as string);
           for (const [k, r] of pending) { r(null); pending.delete(k); }
           const dropped = (fakeQueues[a.id as string] ?? []).splice(0);
           if (dropped.length) codeEmit(a.id as string, { type: "unqueued", promptIds: dropped.map((d) => d.promptId), restore: true });
@@ -1003,6 +1203,22 @@ export function install() {
             observedAt: now - 240,
           };
         }
+        case "wire_log_status":
+          return fakeWireStatus();
+        case "wire_log_set":
+          fakeWire.until = a.on ? Date.now() + 30 * 60_000 : null;
+          if (a.on && fakeWire.frames.length === 0) {
+            fakeWireRecord("claude-code", "out", { jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: 1, _meta: { apiKey: "[redacted]" } } });
+            fakeWireRecord("claude-code", "in", { jsonrpc: "2.0", id: 0, result: { protocolVersion: 1, agentInfo: { name: "claude-code-acp", version: "1.0" } } });
+          }
+          return fakeWireStatus();
+        case "wire_log_frames":
+          return fakeWire.frames.slice(-((a.last as number | null) ?? fakeWire.frames.length));
+        case "wire_log_clear":
+          fakeWire.frames = [];
+          return fakeWireStatus();
+        case "wire_log_save":
+          return "/home/you/.local/share/patchbay/diagnostics/acp-wire-20261021-120000.jsonl";
         case "code_permission_respond": {
           const r = pending.get(a.requestId as string);
           pending.delete(a.requestId as string);

@@ -109,6 +109,26 @@ export interface PlanLimits {
   observedAt: number;
 }
 
+/** The ACP wire log's state (see `code/wire.rs`). */
+export interface WireLogStatus {
+  on: boolean;
+  /** Until it turns itself off. */
+  remainingSecs: number;
+  frames: number;
+  /** Frames dropped to stay under the size cap. */
+  dropped: number;
+}
+
+/** One raw ACP frame, redacted and cut to size. `dir`: from the agent (`in`) or to it (`out`). */
+export interface WireFrame {
+  seq: number;
+  at: number;
+  session: string;
+  agent: string;
+  dir: "in" | "out";
+  text: string;
+}
+
 export interface Conversation {
   id: string;
   title: string;
@@ -358,6 +378,8 @@ export interface AgentExtensions {
   patchbayModels?: boolean;
   /** A message sent mid-turn joins the running turn; otherwise it waits for the turn to end. */
   steering?: boolean;
+  /** The host can cancel the running turn to send a message next (older hosts leave it out). */
+  forceSend?: boolean;
 }
 
 /** An ACP session config option (only `select` ones are shown). */
@@ -440,7 +462,9 @@ export type CodeEvent =
   /** The agent wants a sign-in with one of `methods`: before its session starts, or mid-session. */
   | { type: "authRequired"; message: string; methods: AuthChoice[] }
   /** A mid-session sign-in worked; the session goes on. */
-  | { type: "authResolved" };
+  | { type: "authResolved" }
+  /** Something the agent sent that Patchbay can't show; `raw` is its payload. */
+  | { type: "unrecognized"; message: string; raw: unknown };
 
 /** Where a live event sits in its topic's stream (see docs/design/mobile.md, section 3). */
 export interface EventPoint {
@@ -508,7 +532,8 @@ export interface AcpCommand {
 export interface AcpPlanEntry {
   content: string;
   priority: string;
-  status: "pending" | "in_progress" | "completed";
+  /** `cancelled` is from ACP's v2 draft; OpenCode's to-do list uses it. */
+  status: "pending" | "in_progress" | "completed" | "cancelled";
 }
 
 export type AcpUpdate =
@@ -727,12 +752,14 @@ export const api = {
   codeStop: (id: string) => invoke<void>("code_stop", { id }),
   /**
    * `mentions`: absolute paths of @-mentioned project files. `promptId` names the prompt in the
-   * `userPrompt` events it causes.
+   * `userPrompt` events it causes. `force` cancels the running turn and sends this next.
    */
-  codePrompt: (id: string, text: string, attachmentIds: string[], mentions: string[] = [], promptId?: string) =>
-    invoke<void>("code_prompt", { id, text, attachmentIds, mentions, promptId }),
+  codePrompt: (id: string, text: string, attachmentIds: string[], mentions: string[] = [], promptId?: string, force?: boolean) =>
+    invoke<void>("code_prompt", { id, text, attachmentIds, mentions, promptId, force }),
   /** Drop a prompt queued behind the running turn. */
   codeUnqueue: (id: string, promptId: string) => invoke<void>("code_unqueue", { id, promptId }),
+  /** Cancel the running turn and send this queued prompt next. */
+  codeSendNow: (id: string, promptId: string) => invoke<void>("code_send_now", { id, promptId }),
   getCodeTranscript: (id: string) => invoke<string | null>("get_code_transcript", { id }),
   saveCodeTranscript: (id: string, json: string) => invoke<void>("save_code_transcript", { id, json }),
   /** With `sessionId`, lists files on the node hosting that session. */
@@ -770,6 +797,15 @@ export const api = {
     invoke<void>("code_rewind", { id, ordinal, preview, revertFiles }),
   codeUsage: (id: string) => invoke<UsageView>("code_usage", { id }),
   planLimits: () => invoke<PlanLimits | null>("plan_limits"),
+  wireLogStatus: () => invoke<WireLogStatus>("wire_log_status"),
+  /** Turn the wire log on (for 30 minutes) or off. */
+  wireLogSet: (on: boolean) => invoke<WireLogStatus>("wire_log_set", { on }),
+  /** Recorded frames, oldest first; `last`: only the newest that many. */
+  wireLogFrames: (session?: string, last?: number) =>
+    invoke<WireFrame[]>("wire_log_frames", { session: session ?? null, last: last ?? null }),
+  wireLogClear: () => invoke<WireLogStatus>("wire_log_clear"),
+  /** Write the log to a file; resolves to its path. */
+  wireLogSave: () => invoke<string>("wire_log_save"),
   codePermissionRespond: (requestId: string, optionId: string | null, sessionId?: string) =>
     invoke<void>("code_permission_respond", { requestId, optionId, id: sessionId }),
   codeAttach: (id: string) => invoke<CodeAttach>("code_attach", { id }),

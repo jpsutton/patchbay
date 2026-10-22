@@ -4,6 +4,7 @@ import {
   errorText,
   type AgentCapabilities,
   type AgentExtensions,
+  type AgentId,
   type AcpCommand,
   type AcpConfigOption,
   type AcpModels,
@@ -33,8 +34,11 @@ import { notifyInBackground } from "./notify";
 import { activityOf, strongest, type Activity } from "./activity";
 import { isRemoteApp } from "./platform";
 import { isForegroundUpdate } from "./codeWorking";
+import { appendUserChunk } from "./harness";
+import { planUpdateOf } from "./todoPlan";
 
 export { codeWorking, FOREGROUND_IDLE_MS, hasActiveForegroundTools } from "./codeWorking";
+export { harnessTags } from "./harness";
 
 export type Mode = "chat" | "code";
 
@@ -47,7 +51,14 @@ export type Entry =
   | { kind: "thought"; text: string }
   | { kind: "tool"; id: string }
   | { kind: "error"; text: string }
-  | { kind: "info"; text: string };
+  | { kind: "info"; text: string }
+  /** A replayed user-role message the agent's harness wrote (a reminder, a slash command's output). */
+  | { kind: "harness"; text: string }
+  /** A replayed marker that the user stopped the turn. */
+  | { kind: "cancelled" }
+  /** Something the agent sent that Patchbay can't show, with its raw payload as capped JSON
+   *  text (see `rawText`); `count` times this turn. */
+  | { kind: "unrecognized"; text: string; raw: string; count?: number };
 
 /** A prompt waiting for the running turn to end (agents that can't take one mid-turn). */
 export interface QueuedPrompt {
@@ -388,6 +399,15 @@ function textOf(content: { type: string; text?: string } | undefined): string {
   return content && content.type === "text" && typeof content.text === "string" ? content.text : "";
 }
 
+/** Most characters of an unrecognized payload kept (and shown). */
+const MAX_RAW = 20_000;
+
+/** An unrecognized payload as indented JSON, cut to `MAX_RAW` characters. */
+export function rawText(raw: unknown): string {
+  const json = JSON.stringify(raw, null, 2) ?? "null";
+  return json.length > MAX_RAW ? `${json.slice(0, MAX_RAW)}\n…[${json.length - MAX_RAW} more characters]` : json;
+}
+
 function appendText(entries: Entry[], kind: "agent" | "thought" | "user", text: string): Entry[] {
   if (!text) return entries;
   const last = entries[entries.length - 1];
@@ -404,7 +424,7 @@ type TerminalMeta = {
   terminal_exit?: { exit_code?: number | null };
 };
 
-function mergeToolCall(prev: AcpToolCall | undefined, upd: AcpToolCall): AcpToolCall {
+export function mergeToolCall(prev: AcpToolCall | undefined, upd: AcpToolCall): AcpToolCall {
   const out: AcpToolCall = { ...(prev ?? { toolCallId: upd.toolCallId }) };
   for (const [k, v] of Object.entries(upd)) {
     if (k === "sessionUpdate" || k === "_meta" || v === undefined || v === null) continue;
@@ -435,7 +455,7 @@ function endBackground(calls: Record<string, AcpToolCall>): Record<string, AcpTo
   );
 }
 
-function reduceUpdate(s: CodeState, u: AcpUpdate): CodeState {
+function reduceUpdate(s: CodeState, u: AcpUpdate, agent: AgentId | undefined): CodeState {
   const stamp = (next: CodeState): CodeState => {
     const prev =
       u.sessionUpdate === "tool_call_update"
@@ -449,7 +469,7 @@ function reduceUpdate(s: CodeState, u: AcpUpdate): CodeState {
       if (s.busy) return s;
       return {
         ...s,
-        entries: appendText(s.entries, "user", withoutNote(textOf((u as unknown as { content: { type: string; text?: string } }).content))),
+        entries: appendUserChunk(s.entries, withoutNote(textOf((u as unknown as { content: { type: string; text?: string } }).content))),
       };
     case "agent_message_chunk": {
       const c = (u as unknown as { content: { type: string; text?: string; data?: string; mimeType?: string } }).content;
@@ -465,12 +485,20 @@ function reduceUpdate(s: CodeState, u: AcpUpdate): CodeState {
       });
     case "tool_call":
     case "tool_call_update": {
-      const tc = u as unknown as AcpToolCall;
-      const exists = !!s.toolCalls[tc.toolCallId];
+      let tc = u as unknown as AcpToolCall;
+      const prev = s.toolCalls[tc.toolCallId];
+      const exists = !!prev;
+      // ACP defaults for a new call's announcement (the backend fills them too). In an update, or
+      // a re-announcement of a known call, an absent field means unchanged.
+      if (u.sessionUpdate === "tool_call" && !exists) tc = { ...tc, status: tc.status ?? "pending", kind: tc.kind ?? "other" };
+      const merged = mergeToolCall(prev, tc);
+      // OpenCode's and Kilo's to-do writes are their plan; the transcript hides their cards.
+      const todos = planUpdateOf(prev, merged, agent);
       return stamp({
         ...s,
-        toolCalls: { ...s.toolCalls, [tc.toolCallId]: mergeToolCall(s.toolCalls[tc.toolCallId], tc) },
+        toolCalls: { ...s.toolCalls, [tc.toolCallId]: merged },
         entries: exists ? s.entries : [...s.entries, { kind: "tool", id: tc.toolCallId }],
+        plan: todos ?? s.plan,
       });
     }
     case "plan":
@@ -561,13 +589,47 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
     case "notice":
       next = { ...s, entries: [...s.entries, { kind: "info", text: e.message }] };
       break;
-    case "update":
-      next = reduceUpdate(s, e.update);
+    case "unrecognized": {
+      // Repeats of the same kind in a turn (an unknown chunk type, say) show as one line, with
+      // the latest payload, even with other entries between them.
+      const raw = rawText(e.raw);
+      let at = -1;
+      for (let i = s.entries.length - 1; i >= 0; i--) {
+        const x = s.entries[i];
+        if (x.kind === "user") break;
+        if (x.kind === "unrecognized" && x.text === e.message) {
+          at = i;
+          break;
+        }
+      }
+      if (at >= 0) {
+        const prev = s.entries[at] as Extract<Entry, { kind: "unrecognized" }>;
+        const entries = [...s.entries];
+        entries[at] = { ...prev, raw, count: (prev.count ?? 1) + 1 };
+        next = { ...s, entries };
+      } else {
+        next = { ...s, entries: [...s.entries, { kind: "unrecognized", text: e.message, raw }] };
+      }
       break;
-    case "permission":
-      next = { ...s, permissions: [...s.permissions, { requestId: e.requestId, request: e.request }] };
+    }
+    case "update":
+      next = reduceUpdate(s, e.update, useStore.getState().codeSessions.find((x) => x.id === id)?.agent);
+      break;
+    case "permission": {
+      // The request may carry fields no update did (a diff, rawInput): keep them with the call
+      // so they outlast the request and reach the Changes panel. A call no update announced yet
+      // gets its transcript entry here, since the later announcement finds it known.
+      const tc = e.request.toolCall;
+      const known = !!s.toolCalls[tc.toolCallId];
+      next = {
+        ...s,
+        toolCalls: { ...s.toolCalls, [tc.toolCallId]: mergeToolCall(s.toolCalls[tc.toolCallId], tc) },
+        entries: known ? s.entries : [...s.entries, { kind: "tool", id: tc.toolCallId }],
+        permissions: [...s.permissions, { requestId: e.requestId, request: e.request }],
+      };
       notifyCode(id, "needs your approval");
       break;
+    }
     case "permissionResolved":
       next = { ...s, permissions: s.permissions.filter((p) => p.requestId !== e.requestId) };
       break;
@@ -1063,7 +1125,26 @@ export function isSendKey(e: { key: string; shiftKey: boolean; ctrlKey: boolean;
   // Phone soft keyboards: Enter inserts a line; send with the button (and Mod+Enter if a
   // hardware keyboard is attached). Desktop still follows the preference.
   if (isRemoteApp()) return e.ctrlKey || e.metaKey;
-  return sendKey === "mod-enter" ? e.ctrlKey || e.metaKey : !e.shiftKey && !e.ctrlKey && !e.metaKey;
+  // With Enter to send, Mod+Enter sends too (and force-sends mid-turn); Shift+Enter breaks the line.
+  return sendKey === "mod-enter" ? e.ctrlKey || e.metaKey : !e.shiftKey;
+}
+
+/**
+ * True when this keydown should send now, cancelling the agent's running turn. Mod+Enter, or
+ * Mod+Shift+Enter where Mod+Enter is already the send key. Check it before {@link isSendKey}.
+ */
+export function isForceSendKey(e: { key: string; shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }, sendKey: Preferences["sendKey"]) {
+  if (e.key !== "Enter" || !(e.ctrlKey || e.metaKey)) return false;
+  return modEnterSends(sendKey) ? e.shiftKey : true;
+}
+
+/** How to say the force-send key in a tooltip. */
+export function forceSendKeyLabel(sendKey: Preferences["sendKey"]) {
+  return modEnterSends(sendKey) ? "Ctrl+Shift+Enter" : "Ctrl+Enter";
+}
+
+function modEnterSends(sendKey: Preferences["sendKey"]) {
+  return isRemoteApp() || sendKey === "mod-enter";
 }
 
 /**

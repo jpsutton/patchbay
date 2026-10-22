@@ -133,6 +133,12 @@ pub enum CodeEvent {
     },
     /// A sign-in asked for mid-session worked; the session goes on, and the user resends.
     AuthResolved,
+    /// Something the agent sent that Patchbay can't show (an update type or content it doesn't
+    /// know): a dim line in the transcript, with the raw payload.
+    Unrecognized {
+        message: String,
+        raw: Value,
+    },
 }
 
 /// A sign-in method the agent advertised in `initialize`, as the UI offers it.
@@ -207,13 +213,17 @@ impl UserMessage {
 
 pub enum AgentCmd {
     /// A new turn when the agent is idle. Mid-turn, steered into the running turn when the agent
-    /// can take that, else queued until the turn ends.
+    /// can take that, else queued until the turn ends. `force` cancels the running turn instead
+    /// and sends the prompt next, ahead of anything queued.
     Prompt {
         msg: UserMessage,
+        force: bool,
         reply: Option<oneshot::Sender<Result<Delivery>>>,
     },
     /// Drop a queued prompt.
     Unqueue { prompt_id: String },
+    /// Send a queued prompt now: cancel the running turn and send it next.
+    SendNow { prompt_id: String },
     Cancel,
     SetModel { model_id: String, reply: oneshot::Sender<Result<()>> },
     SetMode { mode_id: String, reply: oneshot::Sender<Result<()>> },
@@ -253,6 +263,7 @@ impl AgentCmd {
                 origin: String::new(),
                 attachments: json!([]),
             },
+            force: false,
             reply: None,
         }
     }
@@ -389,17 +400,51 @@ fn start_turn(ctx: &TurnCtx, msg: UserMessage) -> Result<Delivery> {
     Ok(Delivery::Sent)
 }
 
-fn enqueue(ctx: &TurnCtx, queue: &mut std::collections::VecDeque<UserMessage>, msg: UserMessage) -> Delivery {
+/// Where a held prompt waits: forced sends first, in the order they were sent, then steers that
+/// a forced send cut off, then everything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Rank {
+    Forced,
+    Rescued,
+    Normal,
+}
+
+type Queue = std::collections::VecDeque<(Rank, UserMessage)>;
+
+/// Put `msg` behind every prompt of its rank or better.
+fn hold(queue: &mut Queue, rank: Rank, msg: UserMessage) {
+    let i = queue.iter().position(|(r, _)| *r > rank).unwrap_or(queue.len());
+    queue.insert(i, (rank, msg));
+}
+
+fn enqueue(ctx: &TurnCtx, queue: &mut Queue, rank: Rank, msg: UserMessage) -> Delivery {
     emit(&ctx.sink, &ctx.csid, msg.event(Delivery::Queued));
-    queue.push_back(msg);
+    hold(queue, rank, msg);
     Delivery::Queued
 }
 
-fn drop_queue(ctx: &TurnCtx, queue: &mut std::collections::VecDeque<UserMessage>) {
+/// How long a forced send waits for the cancelled turn to end before saying the agent is slow
+/// to stop. Agents usually stop within a few seconds, once a running tool is killed.
+const FORCE_PATIENCE: std::time::Duration =
+    if cfg!(test) { std::time::Duration::from_millis(300) } else { std::time::Duration::from_secs(30) };
+
+/// Ask the agent to end the running turn; its `session/prompt` then returns `cancelled`.
+fn cancel_turn(conn: &Rc<acp::ClientSideConnection>, session_id: &str) {
+    if let Ok(n) = from_json::<acp::CancelNotification>(json!({ "sessionId": session_id })) {
+        // A turn's `session/prompt` goes out from its own task. Spawning the cancel behind it
+        // keeps it from overtaking a prompt that was just sent.
+        let conn = conn.clone();
+        tokio::task::spawn_local(async move {
+            let _ = conn.cancel(n).await;
+        });
+    }
+}
+
+fn drop_queue(ctx: &TurnCtx, queue: &mut Queue) {
     if queue.is_empty() {
         return;
     }
-    let prompt_ids = queue.drain(..).map(|m| m.id).collect();
+    let prompt_ids = queue.drain(..).map(|(_, m)| m.id).collect();
     emit(&ctx.sink, &ctx.csid, CodeEvent::Unqueued { prompt_ids, restore: true });
 }
 
@@ -414,6 +459,8 @@ pub type McpProvider = Box<dyn FnOnce(&Value) -> (Vec<Value>, Vec<String>) + Sen
 pub struct SpawnSpec {
     pub sink: Sink,
     pub code_session_id: String,
+    /// The agent's id (`AgentKind`), for the wire log and diagnostics.
+    pub agent: String,
     pub launch: Launch,
     pub cwd: PathBuf,
     /// Existing ACP session to `session/load`; `None` creates a new one.
@@ -565,11 +612,17 @@ fn hide_modes(modes: &mut Value, hide: &[&str]) {
 }
 
 impl UiClient {
-    fn merged_tool_call(&self, tc: &Value) -> Value {
-        let id = tc["toolCallId"].as_str().unwrap_or_default();
-        let mut out = self.tool_calls.borrow().get(id).cloned().unwrap_or_else(|| json!({}));
-        merge_fields(&mut out, tc);
-        out
+    /// Merge a tool call's fields into what's known about it, the newer fields winning, and
+    /// return the result.
+    fn merge_tool_call(&self, tc: &Value) -> Value {
+        let Some(id) = tc["toolCallId"].as_str() else { return tc.clone() };
+        let mut map = self.tool_calls.borrow_mut();
+        let entry = map.entry(id.to_owned()).or_insert_with(|| json!({}));
+        merge_fields(entry, tc);
+        if let Some(o) = entry.as_object_mut() {
+            o.remove("sessionUpdate");
+        }
+        entry.clone()
     }
 
     /// The agent switched itself into one of its own approval policies (Claude does when a plan
@@ -594,6 +647,19 @@ impl UiClient {
     }
 }
 
+/// Fill in the ACP defaults a `tool_call` announcement may leave out. The schema crate skips
+/// default values when it serializes, so a call announced as `pending` / `other` arrives with
+/// neither field. Only for announcements: in a `tool_call_update` an absent field means unchanged.
+fn fill_tool_call_defaults(update: &mut Value) {
+    if let Some(o) = update.as_object_mut() {
+        for (k, v) in [("status", "pending"), ("kind", "other")] {
+            if o.get(k).is_none_or(Value::is_null) {
+                o.insert(k.into(), json!(v));
+            }
+        }
+    }
+}
+
 fn merge_fields(into: &mut Value, from: &Value) {
     if let (Some(dst), Some(src)) = (into.as_object_mut(), from.as_object()) {
         for (k, v) in src {
@@ -604,14 +670,142 @@ fn merge_fields(into: &mut Value, from: &Value) {
     }
 }
 
-#[async_trait::async_trait(?Send)]
-impl acp::Client for UiClient {
-    async fn request_permission(
-        &self,
-        args: acp::RequestPermissionRequest,
-    ) -> acp::Result<acp::RequestPermissionResponse> {
-        let raw = serde_json::to_value(&args).unwrap_or(Value::Null);
-        let tool_call = self.merged_tool_call(&raw["toolCall"]);
+#[cfg(test)]
+mod tool_call_tests {
+    use super::*;
+    use acp::Client as _;
+
+    /// A client whose sink records events and answers each permission request with "allow".
+    fn client() -> (UiClient, Arc<Mutex<Vec<CodeEvent>>>, mpsc::UnboundedSender<AgentCmd>) {
+        let events: Arc<Mutex<Vec<CodeEvent>>> = Arc::default();
+        let pending: PendingPermissions = Arc::default();
+        let (seen, answers) = (events.clone(), pending.clone());
+        let sink: Sink = Arc::new(move |env: Envelope| {
+            if let CodeEvent::Permission { request_id, .. } = &env.event
+                && let Some((_, tx)) = answers.lock().unwrap().remove(request_id)
+            {
+                let _ = tx.send(Some("allow".into()));
+            }
+            seen.lock().unwrap().push(env.event);
+        });
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let client = UiClient {
+            sink,
+            code_session_id: "c".into(),
+            pending,
+            auto_approve: Arc::new(|_, _| None),
+            tool_calls: RefCell::default(),
+            config_ids: Rc::default(),
+            approvals: ApprovalSetup::default(),
+            cmds: tx.downgrade(),
+            acp_session: Rc::default(),
+        };
+        (client, events, tx)
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(f)
+    }
+
+    fn notify(c: &UiClient, update: Value) {
+        let n = serde_json::from_value(json!({ "sessionId": "s", "update": update })).unwrap();
+        block_on(c.session_notification(n)).unwrap();
+    }
+
+    fn last_update(events: &Mutex<Vec<CodeEvent>>) -> Value {
+        match events.lock().unwrap().last() {
+            Some(CodeEvent::Update { update }) => update.clone(),
+            other => panic!("expected an update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn announced_tool_call_gets_spec_defaults() {
+        let (c, events, _tx) = client();
+        notify(&c, json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Run", "status": "pending", "kind": "other" }));
+        let u = last_update(&events);
+        assert_eq!((u["status"].clone(), u["kind"].clone()), (json!("pending"), json!("other")));
+
+        notify(&c, json!({ "sessionUpdate": "tool_call", "toolCallId": "t2", "title": "Edit", "kind": "edit", "status": "in_progress" }));
+        let u = last_update(&events);
+        assert_eq!((u["status"].clone(), u["kind"].clone()), (json!("in_progress"), json!("edit")));
+
+        // An update leaves out what didn't change.
+        notify(&c, json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t2", "title": "Edit a.rs" }));
+        let u = last_update(&events);
+        assert!(u.get("status").is_none() && u.get("kind").is_none(), "{u}");
+        assert_eq!(c.tool_calls.borrow()["t2"]["status"], "in_progress");
+    }
+
+    #[test]
+    fn reannounced_tool_call_keeps_its_status_and_kind() {
+        let (c, events, _tx) = client();
+        notify(&c, json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Edit", "kind": "edit", "status": "completed" }));
+        notify(&c, json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Edit a.rs" }));
+        let u = last_update(&events);
+        assert!(u.get("status").is_none() && u.get("kind").is_none(), "{u}");
+        let stored = &c.tool_calls.borrow()["t1"];
+        assert_eq!((stored["status"].clone(), stored["kind"].clone()), (json!("completed"), json!("edit")));
+        assert_eq!(stored["title"], "Edit a.rs");
+    }
+
+    #[test]
+    fn permission_request_fields_win_and_are_kept() {
+        let (c, events, _tx) = client();
+        notify(&c, json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Edit", "kind": "edit", "rawInput": { "old": 1 } }));
+        let req = serde_json::from_value(json!({
+            "sessionId": "s",
+            "toolCall": {
+                "toolCallId": "t1",
+                "title": "Edit `a.rs`",
+                "rawInput": { "file_path": "a.rs" },
+                "content": [{ "type": "diff", "path": "/w/a.rs", "oldText": "a", "newText": "b" }]
+            },
+            "options": [{ "optionId": "allow", "name": "Yes", "kind": "allow_once" }]
+        }))
+        .unwrap();
+        block_on(c.request_permission(req)).unwrap();
+
+        let sent = events.lock().unwrap().iter().find_map(|e| match e {
+            CodeEvent::Permission { request, .. } => Some(request["toolCall"].clone()),
+            _ => None,
+        });
+        let tc = sent.expect("a permission event");
+        assert_eq!(tc["title"], "Edit `a.rs`");
+        assert_eq!(tc["rawInput"], json!({ "file_path": "a.rs" }));
+        assert_eq!(tc["kind"], "edit");
+        assert_eq!(tc["status"], "pending");
+        assert_eq!(tc["content"][0]["type"], "diff");
+        assert!(tc.get("sessionUpdate").is_none());
+        // The stored call keeps the request's fields once the request is answered, and the UI
+        // gets them as an update too.
+        assert_eq!(c.tool_calls.borrow()["t1"], tc);
+        let evs = events.lock().unwrap();
+        let upd = evs.iter().find_map(|e| match e {
+            CodeEvent::Update { update } if update["sessionUpdate"] == "tool_call_update" => Some(update.clone()),
+            _ => None,
+        });
+        assert_eq!(upd.expect("a tool_call_update")["content"][0]["newText"], "b");
+    }
+}
+
+impl UiClient {
+    /// Ask the UI (or a saved rule) about a permission request; returns the ACP response.
+    async fn permission(&self, mut raw: Value) -> Value {
+        // The request may carry fields no notification did (a diff, rawInput): keep them with the
+        // call, and show the UI the merged call, the request's fields winning. A call the
+        // transcript already shows also gets them as an update, so they outlast the request (or
+        // reach the UI at all when a rule answers it).
+        let known = raw["toolCall"]["toolCallId"]
+            .as_str()
+            .is_some_and(|id| self.tool_calls.borrow().contains_key(id));
+        let tool_call = self.merge_tool_call(&raw["toolCall"]);
+        if known {
+            let mut update = raw["toolCall"].clone();
+            update["sessionUpdate"] = json!("tool_call_update");
+            emit(&self.sink, &self.code_session_id, CodeEvent::Update { update });
+        }
+        raw["toolCall"] = tool_call.clone();
         if let Some((option_id, description)) = (self.auto_approve)(&tool_call, &raw["options"]) {
             emit(
                 &self.sink,
@@ -621,8 +815,7 @@ impl acp::Client for UiClient {
                     description,
                 },
             );
-            return serde_json::from_value(json!({ "outcome": { "outcome": "selected", "optionId": option_id } }))
-                .map_err(|_| acp::Error::internal_error());
+            return json!({ "outcome": { "outcome": "selected", "optionId": option_id } });
         }
         let request_id = crate::db::new_id();
         let (tx, rx) = oneshot::channel();
@@ -635,7 +828,7 @@ impl acp::Client for UiClient {
             &self.code_session_id,
             CodeEvent::Permission {
                 request_id: request_id.clone(),
-                request: serde_json::to_value(&args).unwrap_or(Value::Null),
+                request: raw,
             },
         );
         let choice = rx.await.ok().flatten();
@@ -649,23 +842,21 @@ impl acp::Client for UiClient {
             Some(option_id) => json!({ "outcome": "selected", "optionId": option_id }),
             None => json!({ "outcome": "cancelled" }),
         };
-        let resp: acp::RequestPermissionResponse =
-            serde_json::from_value(json!({ "outcome": outcome }))
-                .map_err(|_| acp::Error::internal_error())?;
-        Ok(resp)
+        json!({ "outcome": outcome })
     }
 
-    async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<()> {
-        if self.acp_session.borrow().as_deref().is_some_and(|sid| *args.session_id.0 != *sid) {
-            return Ok(());
+    fn update(&self, session_id: &str, mut update: Value) {
+        if self.acp_session.borrow().as_deref().is_some_and(|sid| session_id != sid) {
+            return;
         }
-        let update = serde_json::to_value(&args.update).unwrap_or(Value::Null);
-        if matches!(update["sessionUpdate"].as_str(), Some("tool_call" | "tool_call_update"))
-            && let Some(id) = update["toolCallId"].as_str()
+        // Defaults only for a new call: re-announcing a known one leaves out what didn't change.
+        if update["sessionUpdate"] == "tool_call"
+            && update["toolCallId"].as_str().is_some_and(|id| !self.tool_calls.borrow().contains_key(id))
         {
-            let mut map = self.tool_calls.borrow_mut();
-            let entry = map.entry(id.to_owned()).or_insert_with(|| json!({}));
-            merge_fields(entry, &update);
+            fill_tool_call_defaults(&mut update);
+        }
+        if matches!(update["sessionUpdate"].as_str(), Some("tool_call" | "tool_call_update")) {
+            self.merge_tool_call(&update);
         }
         match update["sessionUpdate"].as_str() {
             Some("config_option_update") => {
@@ -686,12 +877,100 @@ impl acp::Client for UiClient {
             }
             _ => emit(&self.sink, &self.code_session_id, CodeEvent::Update { update }),
         }
+    }
+
+    /// A `session/update` the ACP types can't decode (see `wire::reroute`). The UI takes the
+    /// kinds it knows as they are, unknown values included; the rest show as a dim line.
+    fn raw_update(&self, params: Value) {
+        let Some(session_id) = params["sessionId"].as_str() else {
+            // No session to check it against: show it in this one rather than drop it unseen.
+            tracing::warn!("the agent sent a session/update without a session id");
+            let message = "The agent sent an update without a session id".to_owned();
+            emit(&self.sink, &self.code_session_id, CodeEvent::Unrecognized { message, raw: params });
+            return;
+        };
+        if self.acp_session.borrow().as_deref().is_some_and(|sid| session_id != sid) {
+            return;
+        }
+        let update = params["update"].clone();
+        match unknown_update(&update) {
+            None => self.update(session_id, update),
+            Some(message) => emit(&self.sink, &self.code_session_id, CodeEvent::Unrecognized { message, raw: update }),
+        }
+    }
+}
+
+/// Why the UI can't show `update` (one ACP couldn't decode), or `None` when it can as is.
+fn unknown_update(update: &Value) -> Option<String> {
+    let kind = update["sessionUpdate"].as_str().unwrap_or("?");
+    match kind {
+        "agent_message_chunk" | "agent_thought_chunk" | "user_message_chunk" => {
+            let ty = update["content"]["type"].as_str().unwrap_or("?");
+            let shown = ty == "text" || (ty == "image" && kind == "agent_message_chunk");
+            (!shown).then(|| format!("The agent sent content Patchbay can't show ({kind}, type \"{ty}\")"))
+        }
+        "tool_call" | "tool_call_update" if !update["toolCallId"].is_string() => {
+            Some(format!("The agent sent a tool call Patchbay can't show ({kind} without an id)"))
+        }
+        "plan" if !update["entries"].is_array() => Some("The agent sent a plan Patchbay can't show".into()),
+        "tool_call" | "tool_call_update" | "plan" | "current_mode_update" | "available_commands_update"
+        | "config_option_update" | "usage_update" | "session_info_update" => None,
+        _ => Some(format!("The agent sent an update Patchbay doesn't know (\"{kind}\")")),
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl acp::Client for UiClient {
+    async fn request_permission(
+        &self,
+        args: acp::RequestPermissionRequest,
+    ) -> acp::Result<acp::RequestPermissionResponse> {
+        let raw = serde_json::to_value(&args).unwrap_or(Value::Null);
+        serde_json::from_value(self.permission(raw).await).map_err(|_| acp::Error::internal_error())
+    }
+
+    async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<()> {
+        self.update(&args.session_id.0, serde_json::to_value(&args.update).unwrap_or(Value::Null));
         Ok(())
     }
 
+    async fn ext_method(&self, args: acp::ExtRequest) -> acp::Result<acp::ExtResponse> {
+        if &*args.method != super::wire::RAW_PERMISSION {
+            return Err(acp::Error::method_not_found());
+        }
+        // A permission request the ACP types can't decode (an unknown option kind, say). The UI
+        // shows unknown values as they are (an unknown kind as a plain button); without a tool
+        // call or usable options there is nothing to show or choose.
+        let raw: Value = serde_json::from_str(args.params.get()).unwrap_or_default();
+        let usable = raw["toolCall"]["toolCallId"].is_string()
+            && raw["options"].as_array().is_some_and(|o| {
+                !o.is_empty() && o.iter().all(|o| o["optionId"].is_string() && o["name"].is_string())
+            });
+        let resp = if usable {
+            self.permission(raw).await
+        } else {
+            emit(
+                &self.sink,
+                &self.code_session_id,
+                CodeEvent::Unrecognized {
+                    message: "The agent asked for a permission Patchbay can't show; it was declined".into(),
+                    raw,
+                },
+            );
+            json!({ "outcome": { "outcome": "cancelled" } })
+        };
+        let resp = serde_json::value::to_raw_value(&resp).map_err(|_| acp::Error::internal_error())?;
+        Ok(acp::ExtResponse::new(resp.into()))
+    }
+
     async fn ext_notification(&self, args: acp::ExtNotification) -> acp::Result<()> {
+        let method = args.method.trim_start_matches('_');
+        if method == super::wire::RAW_UPDATE {
+            if let Ok(v) = serde_json::from_str::<Value>(args.params.get()) {
+                self.raw_update(v);
+            }
         // `x.ai/session_notification` carries Grok Build's own session updates.
-        if args.method.trim_start_matches('_') == "x.ai/session_notification"
+        } else if method == "x.ai/session_notification"
             && let Ok(v) = serde_json::from_str::<Value>(args.params.get())
             && v["update"]["sessionUpdate"] == "session_status"
         {
@@ -750,6 +1029,7 @@ async fn run(
     let SpawnSpec {
         sink,
         code_session_id: csid,
+        agent,
         launch,
         cwd,
         resume,
@@ -821,10 +1101,12 @@ async fn run(
         cmds,
         acp_session: acp_session.clone(),
     };
+    // Through the wire tap: it logs frames when asked, and passes on raw the ones ACP can't decode.
+    let (to_agent, from_agent) = super::wire::tap(super::wire::Tap { session: csid.clone(), agent }, stdin, stdout);
     let (conn, io) = acp::ClientSideConnection::new(
         client,
-        stdin.compat_write(),
-        stdout.compat(),
+        to_agent.compat_write(),
+        from_agent.compat(),
         |fut| {
             tokio::task::spawn_local(fut);
         },
@@ -872,6 +1154,7 @@ async fn run(
     let can_load = capabilities["loadSession"].as_bool().unwrap_or(false);
     let steer = Steer::of(&init_v, extensions.interject);
     extensions.steering = steer.is_some();
+    extensions.force_send = true;
     let (mcp_servers, mcp_skipped) = mcp(&init_v);
     if !mcp_skipped.is_empty() {
         emit(
@@ -1026,7 +1309,8 @@ async fn run(
     // One turn at a time: a prompt sent mid-turn is steered in or queued here, never sent as a
     // second `session/prompt` (agents cancel, refuse or garble those).
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<bool>();
-    type SteerReply = (UserMessage, Option<oneshot::Sender<Result<Delivery>>>, Result<Value>);
+    // The steered message, its reply, the agent's answer, and `forces` when it was sent.
+    type SteerReply = (UserMessage, Option<oneshot::Sender<Result<Delivery>>>, Result<Value>, u64);
     let (steered_tx, mut steered_rx) = mpsc::unbounded_channel::<SteerReply>();
     let turns = TurnCtx {
         conn: conn.clone(),
@@ -1040,73 +1324,139 @@ async fn run(
         done: done_tx,
     };
     let mut running = false;
-    let mut queue = std::collections::VecDeque::<UserMessage>::new();
+    let mut queue = Queue::new();
+    // A forced send cancelled the running turn: the front of the queue goes when it returns.
+    let mut forcing = false;
+    // How many turns a forced send has cancelled. A steer sent before the latest one went into
+    // a cancelled turn, whatever the agent answers.
+    let mut forces: u64 = 0;
+    // Armed while a forced send waits on its cancel: an agent that ignores the cancel gets a
+    // notice instead of a silent wait. The message still goes when the turn ends.
+    let force_wait = tokio::time::sleep(FORCE_PATIENCE);
+    tokio::pin!(force_wait);
+    let mut force_armed = false;
 
     loop {
         tokio::select! {
+            // A turn that has ended is seen before any command: a forced send then starts a turn
+            // instead of cancelling one that is already over.
+            biased;
             status = child.wait() => {
                 return Err(exited(status, &stderr_tail));
             }
             Some(go_on) = done_rx.recv() => {
                 running = false;
-                if !go_on {
+                force_armed = false;
+                let forced = std::mem::take(&mut forcing) && !auth_lost.get();
+                if !go_on && !forced {
                     drop_queue(&turns, &mut queue);
-                } else if let Some(next) = queue.pop_front() {
+                } else if let Some((_, next)) = queue.pop_front() {
                     match start_turn(&turns, next) {
                         Ok(_) => running = true,
                         Err(e) => emit(&sink, &csid, CodeEvent::Error { message: format!("{e:#}") }),
                     }
                 }
             }
-            Some((msg, reply, resp)) = steered_rx.recv() => {
+            Some((msg, reply, resp, sent_at)) = steered_rx.recv() => {
                 let outcome = resp.map(|v| steer_outcome(&v)).unwrap_or_else(|e| {
                     tracing::warn!("steering failed, queueing the message instead: {e:#}");
                     Steered::No
                 });
+                // A forced send cancelled the turn it went into: it goes again, right after the
+                // forced prompts.
+                let cut_off = forcing || sent_at != forces;
                 // Shown as steered already; a queued or sent event moves it where it went.
                 let r = match outcome {
-                    Steered::Yes => Ok(Delivery::Steered),
-                    _ if running => Ok(enqueue(&turns, &mut queue, msg)),
+                    Steered::Yes if !cut_off => Ok(Delivery::Steered),
+                    _ if running && cut_off => Ok(enqueue(&turns, &mut queue, Rank::Rescued, msg)),
+                    _ if running => Ok(enqueue(&turns, &mut queue, Rank::Normal, msg)),
                     _ => start_turn(&turns, msg).inspect(|_| running = true),
                 };
                 answer(reply, r);
             }
+            () = &mut force_wait, if force_armed => {
+                force_armed = false;
+                let secs = FORCE_PATIENCE.as_secs();
+                let message = format!(
+                    "The agent hasn't stopped its turn after {secs} seconds. Your message goes when it does; Stop drops it."
+                );
+                emit(&sink, &csid, CodeEvent::Notice { message });
+            }
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else { break };
                 match cmd {
-                    AgentCmd::Prompt { msg, reply } => {
+                    AgentCmd::Prompt { msg, force: true, reply } => {
                         if !running {
                             answer(reply, start_turn(&turns, msg).inspect(|_| running = true));
-                        } else if let Some((method, params)) = steer.and_then(|s| s.request(&session_id, &msg.blocks)) {
+                        } else {
+                            // Never steered: the user wants this turn over. The cancelled turn's
+                            // output stays in the transcript. Forced sends go in the order sent.
+                            answer(reply, Ok(enqueue(&turns, &mut queue, Rank::Forced, msg)));
+                            if !forcing {
+                                cancel_pending(&pending);
+                                cancel_turn(&conn, &session_id);
+                                forcing = true;
+                                forces += 1;
+                                force_wait.as_mut().reset(tokio::time::Instant::now() + FORCE_PATIENCE);
+                                force_armed = true;
+                            }
+                        }
+                    }
+                    AgentCmd::Prompt { msg, force: false, reply } => {
+                        if !running {
+                            answer(reply, start_turn(&turns, msg).inspect(|_| running = true));
+                        } else if let Some((method, params)) =
+                            steer.filter(|_| !forcing).and_then(|s| s.request(&session_id, &msg.blocks))
+                        {
                             // Shown at once, ahead of the agent's answer to it. The agent's reply
-                            // comes on `steered_rx`, so the loop goes on meanwhile.
+                            // comes on `steered_rx`, so the loop goes on meanwhile. Not while a
+                            // forced send is cancelling the turn: it would go down with it.
                             emit(&sink, &csid, msg.event(Delivery::Steered));
-                            let (conn, steered) = (conn.clone(), steered_tx.clone());
+                            let (conn, steered, sent_at) = (conn.clone(), steered_tx.clone(), forces);
                             tokio::task::spawn_local(async move {
                                 let resp = ext(&conn, method, params).await;
-                                let _ = steered.send((msg, reply, resp));
+                                let _ = steered.send((msg, reply, resp, sent_at));
                             });
                         } else {
-                            answer(reply, Ok(enqueue(&turns, &mut queue, msg)));
+                            answer(reply, Ok(enqueue(&turns, &mut queue, Rank::Normal, msg)));
                         }
                     }
                     AgentCmd::Unqueue { prompt_id } => {
-                        if let Some(i) = queue.iter().position(|m| m.id == prompt_id) {
+                        if let Some(i) = queue.iter().position(|(_, m)| m.id == prompt_id) {
                             queue.remove(i);
                             emit(&sink, &csid, CodeEvent::Unqueued { prompt_ids: vec![prompt_id], restore: false });
+                        }
+                    }
+                    AgentCmd::SendNow { prompt_id } => {
+                        let Some(i) = queue.iter().position(|(_, m)| m.id == prompt_id) else { continue };
+                        let (rank, msg) = queue.remove(i).expect("found above");
+                        if running {
+                            // Already forced: it keeps its place among the others.
+                            match rank {
+                                Rank::Forced => queue.insert(i, (rank, msg)),
+                                _ => hold(&mut queue, Rank::Forced, msg),
+                            }
+                            if !forcing {
+                                cancel_pending(&pending);
+                                cancel_turn(&conn, &session_id);
+                                forcing = true;
+                                forces += 1;
+                                force_wait.as_mut().reset(tokio::time::Instant::now() + FORCE_PATIENCE);
+                                force_armed = true;
+                            }
+                        } else {
+                            match start_turn(&turns, msg) {
+                                Ok(_) => running = true,
+                                Err(e) => emit(&sink, &csid, CodeEvent::Error { message: format!("{e:#}") }),
+                            }
                         }
                     }
                     AgentCmd::Cancel => {
                         cancel_pending(&pending);
                         drop_queue(&turns, &mut queue);
-                        if let Ok(n) = from_json::<acp::CancelNotification>(json!({ "sessionId": session_id })) {
-                            // A turn's `session/prompt` goes out from its own task. Spawning the
-                            // cancel behind it keeps it from overtaking a prompt that was just sent.
-                            let conn = conn.clone();
-                            tokio::task::spawn_local(async move {
-                                let _ = conn.cancel(n).await;
-                            });
-                        }
+                        forcing = false;
+                        force_armed = false;
+                        cancel_turn(&conn, &session_id);
                     }
                     AgentCmd::SetModel { model_id, reply } => {
                         let ids = config_ids.borrow().clone();
@@ -1260,7 +1610,7 @@ fn refuse_until_signed_in(cmd: AgentCmd) {
             let _ = reply.send(Err(anyhow!("a sign-in is already in progress")));
         }
         AgentCmd::Prompt { reply, .. } => answer(reply, Err(anyhow!("the agent isn't signed in yet"))),
-        AgentCmd::Unqueue { .. } | AgentCmd::Cancel | AgentCmd::Shutdown => {}
+        AgentCmd::Unqueue { .. } | AgentCmd::SendNow { .. } | AgentCmd::Cancel | AgentCmd::Shutdown => {}
     }
 }
 
@@ -1386,8 +1736,34 @@ fn exited(
     anyhow!("agent process exited ({code})\n{tail}")
 }
 
+/// `data.errorKind` values with which claude-agent-acp reports a sign-in that failed mid-session.
+/// It sends them as a plain internal error (`-32603`) and keeps `-32000` for "Please run /login".
+const AUTH_ERROR_KINDS: [&str; 2] = ["authentication_failed", "oauth_org_not_allowed"];
+
 fn is_auth_required(e: &acp::Error) -> bool {
-    i32::from(e.code) == -32000
+    match i32::from(e.code) {
+        -32000 => true,
+        -32603 => e
+            .data
+            .as_ref()
+            .and_then(|d| d["errorKind"].as_str())
+            .is_some_and(|k| AUTH_ERROR_KINDS.contains(&k)),
+        _ => false,
+    }
+}
+
+/// An internal error's message without JSON-RPC's generic "Internal error:" prefix, or `None`
+/// for other errors.
+fn internal_error_reason(e: &acp::Error) -> Option<&str> {
+    if i32::from(e.code) != -32603 {
+        return None;
+    }
+    let m = e
+        .message
+        .strip_prefix("Internal error:")
+        .unwrap_or(&e.message)
+        .trim();
+    (!m.is_empty()).then_some(m)
 }
 
 /// For ACP's `auth_required` error: how to sign in. Patchbay's own hint for the agent comes
@@ -1410,10 +1786,13 @@ fn auth_message(e: &acp::Error, init: &Value, login_hint: &str, again: bool) -> 
         .or(init["agentInfo"]["name"].as_str())
         .unwrap_or("The agent");
     let when = if again { "again" } else { "first" };
-    if how.is_empty() {
-        format!("{name} needs you to sign in {when} ({e}).")
-    } else {
-        format!("{name} needs you to sign in {when}. {how}")
+    // An internal error carries the agent's reason (an expired login, say) and nothing else
+    // does, so show it even next to the hint.
+    match (internal_error_reason(e), how.is_empty()) {
+        (Some(why), true) => format!("{name} needs you to sign in {when} ({why})."),
+        (Some(why), false) => format!("{name} needs you to sign in {when} ({why}). {how}"),
+        (None, true) => format!("{name} needs you to sign in {when} ({e})."),
+        (None, false) => format!("{name} needs you to sign in {when}. {how}"),
     }
 }
 
@@ -1819,16 +2198,19 @@ mod tests {
     /// An ACP agent that refuses `session/new` until `authenticate` gets method `api-key` with
     /// key `sk-test` in codex-acp's shape, so the string shape Patchbay tries first is refused.
     /// The prompt `expire` signs it out again, and prompts fail with `auth_required` until the
-    /// next sign-in. To clients that run terminal sign-ins it also offers `tui`, whose command
+    /// next sign-in. `expire-oauth` does the same with claude-agent-acp's `-32603` and
+    /// `errorKind`, and `crash` fails with a `-32603` that isn't about signing in. To clients
+    /// that run terminal sign-ins it also offers `tui`, whose command
     /// (this script with `--login`) leaves a `signed-in` file that a new process starts with.
     /// `--no-methods` starts it signed in, with no auth methods.
     ///
     /// Turns: a prompt `hold` runs until a `release` steer or a cancel, and `brief` for half a
     /// second. `subagent` streams `child:work` under another session id, as a subagent would,
     /// then says whether `initialize` advertised `_meta.subagents`. A second prompt mid-turn is
-    /// refused. `--steering` advertises `_session/steering` (a `refuse` steer fails), and every
-    /// prompt or steer is echoed as agent text
-    /// (`prompt:<text>`, `steer:<text>`).
+    /// refused. `--steering` advertises `_session/steering` (a `refuse` steer fails, a `slow` one
+    /// is answered 0.3s late), and every prompt or steer is echoed as agent text
+    /// (`prompt:<text>`, `steer:<text>`). `--slow-cancel` says `cancel` for each cancel and ends
+    /// the turn 0.3s later; `--late-cancel` ends it 1s later, past a forced send's patience.
     const FAKE_AGENT: &str = r#"
 import json, os, sys, threading
 if "--login" in sys.argv:
@@ -1860,7 +2242,11 @@ def text_of(p):
 for line in sys.stdin:
     m = json.loads(line)
     if m.get("method") == "session/cancel":
-        finish("cancelled")
+        if "--slow-cancel" in sys.argv or "--late-cancel" in sys.argv:
+            say("cancel")
+            threading.Timer(1.0 if "--late-cancel" in sys.argv else 0.3, finish, ["cancelled"]).start()
+        else:
+            finish("cancelled")
         continue
     if "id" not in m or "method" not in m:
         continue
@@ -1893,8 +2279,17 @@ for line in sys.stdin:
         if held is not None:
             err(i, "a turn is already running")
             continue
-        if t == "expire":
+        if t in ("expire", "expire-oauth"):
             authed = False
+        if t == "crash":
+            send({"jsonrpc": "2.0", "id": i, "error": {"code": -32603, "message": "Internal error: boom",
+                  "data": {"errorKind": "unknown"}}})
+            continue
+        if not authed and t == "expire-oauth":
+            send({"jsonrpc": "2.0", "id": i, "error": {"code": -32603,
+                  "message": "Internal error: Failed to authenticate: OAuth session expired",
+                  "data": {"errorKind": "authentication_failed"}}})
+            continue
         if not authed:
             err(i, "Authentication required")
             continue
@@ -1903,6 +2298,15 @@ for line in sys.stdin:
             send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1-child",
                   "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "child:work"}}}})
             say("subagents:" + str(subagents))
+        if t == "odd":
+            def upd(u):
+                send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": u}})
+            upd({"sessionUpdate": "brand_new", "x": 1})
+            upd({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Run", "status": "cancelled"})
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {"update": {"sessionUpdate": "plan", "entries": []}}})
+            send({"jsonrpc": "2.0", "id": "p1", "method": "session/request_permission", "params": {"sessionId": "s1",
+                  "toolCall": {"toolCallId": "t1"}, "options": [{"optionId": "a", "name": "Allow", "kind": "allow_for_session"}]}})
+            send({"jsonrpc": "2.0", "id": "p2", "method": "session/request_permission", "params": {"sessionId": "s1", "options": []}})
         if t in ("hold", "brief"):
             held = i
             if t == "brief":
@@ -1919,6 +2323,9 @@ for line in sys.stdin:
             send({"jsonrpc": "2.0", "id": i, "result": {"outcome": idle or "startedNewTurn"}})
         elif t == "refuse":
             send({"jsonrpc": "2.0", "id": i, "result": {"outcome": "failed"}})
+        elif t == "slow":
+            say("steer:" + t)
+            threading.Timer(0.3, send, [{"jsonrpc": "2.0", "id": i, "result": {"outcome": "injected"}}]).start()
         else:
             say("steer:" + t)
             send({"jsonrpc": "2.0", "id": i, "result": {"outcome": "injected"}})
@@ -1958,6 +2365,7 @@ for line in sys.stdin:
         let (tx, thread) = super::spawn(SpawnSpec {
             sink: Arc::new(move |e: Envelope| ev.lock().unwrap().push(e.event)),
             code_session_id: "cs".into(),
+            agent: "fake".into(),
             launch: crate::code::agents::Launch {
                 program: python.into(),
                 args: std::iter::once(script.to_string_lossy().into_owned())
@@ -2133,6 +2541,43 @@ for line in sys.stdin:
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// claude-agent-acp reports an expired login as an internal error tagged `errorKind`. That
+    /// asks for a sign-in, with the reason minus "Internal error:"; other internal errors don't.
+    #[test]
+    fn internal_error_with_an_auth_error_kind_asks_for_a_sign_in() {
+        let dir = std::env::temp_dir().join(format!("pb-auth-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent(&dir) else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        wait_for(&events, "authRequired", |evs| auth_events(evs) == 1);
+        authenticate(&tx, "api-key", Some("sk-test")).unwrap();
+        wait_for(&events, "sessionReady", |evs| {
+            evs.iter()
+                .any(|e| matches!(e, CodeEvent::SessionReady { .. }))
+        });
+
+        send_prompt(&tx, "crash");
+        wait_for(&events, "promptDone", |evs| {
+            evs.iter().filter(|e| prompt_done(e)).count() == 1
+        });
+        assert_eq!(auth_events(&events.lock().unwrap()), 1);
+        assert_eq!(count(&events, |e| matches!(e, CodeEvent::Error { .. })), 1);
+
+        send_prompt(&tx, "expire-oauth");
+        wait_for(&events, "promptDone", |evs| {
+            evs.iter().filter(|e| prompt_done(e)).count() == 2
+        });
+        assert_eq!(auth_events(&events.lock().unwrap()), 2);
+        assert_eq!(count(&events, |e| matches!(e, CodeEvent::Error { .. })), 1);
+        let (message, _) = last_auth(&events);
+        let want = "Fake Agent needs you to sign in again (Failed to authenticate: OAuth session expired). Opens";
+        assert!(message.starts_with(want), "{message}");
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// The terminal method's command, run as Patchbay's terminal would, signs the agent in; the
     /// restarted agent starts its session without asking.
     #[test]
@@ -2190,6 +2635,20 @@ for line in sys.stdin:
         text: &str,
         blocks: Option<Vec<serde_json::Value>>,
     ) -> Delivery {
+        deliver(tx, text, blocks, false)
+    }
+
+    /// A prompt sent with Ctrl+Enter: it cancels the running turn to go next.
+    fn force(tx: &tokio::sync::mpsc::UnboundedSender<AgentCmd>, text: &str) -> Delivery {
+        deliver(tx, text, None, true)
+    }
+
+    fn deliver(
+        tx: &tokio::sync::mpsc::UnboundedSender<AgentCmd>,
+        text: &str,
+        blocks: Option<Vec<serde_json::Value>>,
+        force: bool,
+    ) -> Delivery {
         let (reply, rx) = tokio::sync::oneshot::channel();
         let msg = UserMessage {
             id: text.into(),
@@ -2198,7 +2657,7 @@ for line in sys.stdin:
             origin: "me".into(),
             attachments: json!([]),
         };
-        tx.send(AgentCmd::Prompt { msg, reply: Some(reply) }).unwrap();
+        tx.send(AgentCmd::Prompt { msg, force, reply: Some(reply) }).unwrap();
         rx.blocking_recv().unwrap().unwrap()
     }
 
@@ -2371,6 +2830,202 @@ for line in sys.stdin:
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    fn stop_reasons(events: &Events) -> Vec<serde_json::Value> {
+        let evs = events.lock().unwrap();
+        evs.iter()
+            .filter_map(|e| match e {
+                CodeEvent::PromptDone { stop_reason } => Some(stop_reason.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn force_send_cancels_the_turn_instead_of_steering() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods", "--steering"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        // Idle, a forced send is just a send.
+        assert_eq!(force(&tx, "hold"), Delivery::Sent);
+        assert_eq!(prompt(&tx, "also this"), Delivery::Steered);
+        assert_eq!(force(&tx, "urgent"), Delivery::Queued);
+        wait_for(&events, "two turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 2);
+
+        // The cancelled turn's output stays; the forced prompt is the next turn.
+        assert_eq!(agent_heard(&events, 3), ["prompt:hold", "steer:also this", "prompt:urgent"]);
+        assert_eq!(stop_reasons(&events), [json!("cancelled"), json!("end_turn")]);
+        assert_eq!(
+            deliveries(&events),
+            [
+                ("hold".into(), Delivery::Sent),
+                ("also this".into(), Delivery::Steered),
+                ("urgent".into(), Delivery::Queued),
+                ("urgent".into(), Delivery::Sent),
+            ]
+        );
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn send_now_jumps_the_queue() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        assert_eq!(prompt(&tx, "first"), Delivery::Queued);
+        assert_eq!(prompt(&tx, "second"), Delivery::Queued);
+        tx.send(AgentCmd::SendNow { prompt_id: "second".into() }).unwrap();
+        // The rest of the queue still follows, after the one sent now.
+        wait_for(&events, "three turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 3);
+
+        assert_eq!(agent_heard(&events, 3), ["prompt:hold", "prompt:second", "prompt:first"]);
+        assert_eq!(stop_reasons(&events), [json!("cancelled"), json!("end_turn"), json!("end_turn")]);
+        assert_eq!(count(&events, |e| matches!(e, CodeEvent::Unqueued { .. })), 0);
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The agent takes a steer, then a forced send cancels that turn before the agent's answer
+    /// comes back: the steered message went down with the turn, so it goes again.
+    #[test]
+    fn a_steer_cut_off_by_a_forced_send_goes_again() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods", "--steering"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        // Answered 0.3s late, by when `brief` (0.5s) is running.
+        let (reply, slow) = tokio::sync::oneshot::channel();
+        let msg = UserMessage {
+            id: "slow".into(),
+            blocks: vec![json!({ "type": "text", "text": "slow" })],
+            text: "slow".into(),
+            origin: "me".into(),
+            attachments: json!([]),
+        };
+        tx.send(AgentCmd::Prompt { msg, force: false, reply: Some(reply) }).unwrap();
+        assert_eq!(force(&tx, "brief"), Delivery::Queued);
+        assert_eq!(slow.blocking_recv().unwrap().unwrap(), Delivery::Queued);
+        wait_for(&events, "three turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 3);
+
+        assert_eq!(agent_heard(&events, 4), ["prompt:hold", "steer:slow", "prompt:brief", "prompt:slow"]);
+        assert_eq!(stop_reasons(&events), [json!("cancelled"), json!("end_turn"), json!("end_turn")]);
+        assert_eq!(
+            deliveries(&events),
+            [
+                ("hold".into(), Delivery::Sent),
+                ("slow".into(), Delivery::Steered),
+                ("brief".into(), Delivery::Queued),
+                ("brief".into(), Delivery::Sent),
+                ("slow".into(), Delivery::Queued),
+                ("slow".into(), Delivery::Sent),
+            ]
+        );
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// While a forced send's cancel is in flight, the turn is still running but on its way out:
+    /// a plain prompt waits behind the forced one instead of steering into it.
+    #[test]
+    fn a_prompt_during_a_forced_cancel_waits() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let flags = ["--no-methods", "--steering", "--slow-cancel"];
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &flags, "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        assert_eq!(force(&tx, "urgent"), Delivery::Queued);
+        assert_eq!(prompt(&tx, "later"), Delivery::Queued);
+        wait_for(&events, "three turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 3);
+
+        assert_eq!(agent_heard(&events, 4), ["prompt:hold", "cancel", "prompt:urgent", "prompt:later"]);
+        assert_eq!(stop_reasons(&events), [json!("cancelled"), json!("end_turn"), json!("end_turn")]);
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Forced sends and "Send now" go in the order they were made, ahead of the plain queue, and
+    /// the turn gets one cancel however many pile up behind it.
+    #[test]
+    fn forced_sends_keep_their_order() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods", "--slow-cancel"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        assert_eq!(prompt(&tx, "normal"), Delivery::Queued);
+        assert_eq!(force(&tx, "first"), Delivery::Queued);
+        assert_eq!(prompt(&tx, "third"), Delivery::Queued);
+        tx.send(AgentCmd::SendNow { prompt_id: "third".into() }).unwrap();
+        assert_eq!(force(&tx, "second"), Delivery::Queued);
+        wait_for(&events, "five turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 5);
+
+        assert_eq!(
+            agent_heard(&events, 6),
+            ["prompt:hold", "cancel", "prompt:first", "prompt:third", "prompt:second", "prompt:normal"]
+        );
+        assert_eq!(stop_reasons(&events)[0], json!("cancelled"));
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An agent slow to stop a cancelled turn gets a notice, and the forced message still goes
+    /// once the turn ends.
+    #[test]
+    fn a_slow_cancel_gets_a_notice_and_the_forced_send_still_goes() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods", "--late-cancel"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        assert_eq!(force(&tx, "urgent"), Delivery::Queued);
+        wait_for(&events, "two turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 2);
+
+        let notices: Vec<_> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                CodeEvent::Notice { message } => Some(message.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("hasn't stopped its turn"));
+        assert_eq!(agent_heard(&events, 3), ["prompt:hold", "cancel", "prompt:urgent"]);
+        assert_eq!(stop_reasons(&events), [json!("cancelled"), json!("end_turn")]);
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn grok_interjects_text_and_queues_files() {
         let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
@@ -2409,6 +3064,42 @@ for line in sys.stdin:
         wait_for(&events, "promptDone", |evs| evs.iter().any(prompt_done));
         assert_eq!(agent_heard(&events, 2), ["prompt:subagent", "subagents:True"]);
         no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn undecodable_frames_reach_the_ui() {
+        let dir = std::env::temp_dir().join(format!("pb-odd-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        send_prompt(&tx, "odd");
+        wait_for(&events, "promptDone", |evs| evs.iter().any(prompt_done));
+        wait_for(&events, "both permissions", |evs| {
+            let n = |f: fn(&CodeEvent) -> bool| evs.iter().filter(|e| f(e)).count();
+            n(|e| matches!(e, CodeEvent::Permission { .. })) == 1 && n(|e| matches!(e, CodeEvent::Unrecognized { .. })) == 3
+        });
+        let evs = events.lock().unwrap();
+        let unknown: Vec<&str> = evs
+            .iter()
+            .filter_map(|e| match e {
+                CodeEvent::Unrecognized { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(unknown[0].contains("\"brand_new\""), "{unknown:?}");
+        assert!(unknown[1].contains("without a session id"), "{unknown:?}");
+        assert!(unknown[2].contains("permission"), "{unknown:?}");
+        // Unknown values the UI can show go through as they are.
+        assert!(evs.iter().any(|e| matches!(e, CodeEvent::Update { update } if update["status"] == "cancelled")));
+        assert!(evs.iter().any(
+            |e| matches!(e, CodeEvent::Permission { request, .. } if request["options"][0]["kind"] == "allow_for_session")
+        ));
+        drop(evs);
         tx.send(AgentCmd::Shutdown).unwrap();
         thread.join().unwrap();
         let _ = std::fs::remove_dir_all(dir);

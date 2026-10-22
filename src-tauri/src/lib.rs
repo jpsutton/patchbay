@@ -700,6 +700,36 @@ async fn plan_limits(state: &AppState) -> CmdResult<Option<code::plan_limits::Pl
     Ok(state.code.plan.latest())
 }
 
+// The ACP wire log (Settings > Diagnostics): this computer's agents only, kept in memory.
+
+async fn wire_log_status(_state: &AppState) -> CmdResult<code::wire::Status> {
+    Ok(code::wire::status())
+}
+
+async fn wire_log_set(_state: &AppState, on: bool) -> CmdResult<code::wire::Status> {
+    Ok(code::wire::set(on))
+}
+
+/// The recorded frames, oldest first; with `last`, only the newest that many.
+async fn wire_log_frames(
+    _state: &AppState,
+    session: Option<String>,
+    last: Option<usize>,
+) -> CmdResult<Vec<std::sync::Arc<code::wire::Frame>>> {
+    Ok(code::wire::frames(session.as_deref(), last))
+}
+
+async fn wire_log_clear(_state: &AppState) -> CmdResult<code::wire::Status> {
+    code::wire::clear();
+    Ok(code::wire::status())
+}
+
+/// Write the log to a file under the data folder; returns its path.
+async fn wire_log_save(state: &AppState) -> CmdResult<String> {
+    let path = code::wire::save(&state.data_dir.join("diagnostics"))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// Whether the session runs Claude Code on its own sign-in, which may be a Claude plan with
 /// usage limits (not on a Patchbay provider, which bills by the token).
 fn on_claude_plan(state: &AppState, prefs: &prefs::Preferences, id: &str) -> bool {
@@ -888,6 +918,7 @@ async fn code_prompt_local(
     mentions: Vec<String>,
     origin: String,
     prompt_id: Option<String>,
+    force: bool,
 ) -> anyhow::Result<()> {
     ensure_local_host(state, &id)?;
     let prefs = prefs::load(&state.db);
@@ -946,7 +977,7 @@ async fn code_prompt_local(
         origin,
         attachments: serde_json::to_value(&atts)?,
     };
-    state.code.prompt(&id, msg).await?;
+    state.code.prompt(&id, msg, force).await?;
     if note.is_some() {
         state.db.with_conn(|c| c.execute("DELETE FROM settings WHERE key = ?1", [&note_key]))?;
     }
@@ -961,6 +992,41 @@ async fn code_unqueue(state: &AppState, id: String, prompt_id: String) -> CmdRes
     Ok(state.code.send(&id, AgentCmd::Unqueue { prompt_id })?)
 }
 
+/// Whether a `code.attach` answer shows a running agent on a host that can cancel a turn to send
+/// a prompt next. Hosts from before force send leave `extensions.forceSend` out.
+fn attach_has_force_send(attach: &serde_json::Value) -> bool {
+    attach["running"] == true
+        && attach["events"].as_array().is_some_and(|evs| {
+            evs.iter().any(|e| e["type"] == "sessionReady" && e["extensions"]["forceSend"] == true)
+        })
+}
+
+/// Refuse a forced send to a remote host that would queue it instead (`code.prompt`) or not know
+/// the method (`code.send_now`).
+async fn ensure_remote_force_send(state: &AppState, host: &str, id: &str) -> anyhow::Result<()> {
+    let attach = state.mesh.rpc(host, "code.attach", serde_json::json!({ "id": id })).await?;
+    if attach["running"] != true {
+        anyhow::bail!("the agent isn't running on {}", state.mesh.member_name(host));
+    }
+    if !attach_has_force_send(&attach) {
+        anyhow::bail!(
+            "{} runs an older Patchbay that can't stop the turn to send this now. Update it, or send the message normally to queue it.",
+            state.mesh.member_name(host)
+        );
+    }
+    Ok(())
+}
+
+/// Send a queued prompt now: the running turn is cancelled and the prompt goes next.
+async fn code_send_now(state: &AppState, id: String, prompt_id: String) -> CmdResult<()> {
+    if let Some(host) = remote_host(state, &id)? {
+        ensure_remote_force_send(state, &host, &id).await?;
+        state.mesh.rpc(&host, "code.send_now", serde_json::json!({ "id": id, "promptId": prompt_id })).await?;
+        return Ok(());
+    }
+    Ok(state.code.send(&id, AgentCmd::SendNow { prompt_id })?)
+}
+
 async fn code_prompt(
     state: &AppState,
     id: String,
@@ -968,17 +1034,24 @@ async fn code_prompt(
     attachment_ids: Vec<String>,
     mentions: Option<Vec<String>>,
     prompt_id: Option<String>,
+    force: Option<bool>,
 ) -> CmdResult<()> {
     let mentions = mentions.unwrap_or_default();
+    // Cancels the running turn and sends this next (Ctrl+Enter mid-turn).
+    let force = force.unwrap_or(false);
     if let Some(host) = remote_host(state, &id)? {
+        if force {
+            ensure_remote_force_send(state, &host, &id).await?;
+        }
         let params = serde_json::json!({
             "id": id, "text": text, "attachmentIds": attachment_ids, "mentions": mentions, "promptId": prompt_id,
+            "force": force,
         });
         state.mesh.rpc(&host, "code.prompt", params).await?;
         return Ok(());
     }
     let me = state.mesh.node_id().to_owned();
-    Ok(code_prompt_local(state, id, text, attachment_ids, mentions, me, prompt_id).await?)
+    Ok(code_prompt_local(state, id, text, attachment_ids, mentions, me, prompt_id, force).await?)
 }
 
 async fn code_cancel(state: &AppState, id: String) -> CmdResult<()> {
@@ -1377,7 +1450,8 @@ impl mesh::RpcHandler for MeshRpc {
                 // A gateway passing on a phone's prompt names the phone.
                 let origin = p["origin"].as_str().map(str::to_owned).unwrap_or(from);
                 let prompt_id = p["promptId"].as_str().map(str::to_owned);
-                code_prompt_local(state, id()?, text, atts, mentions, origin, prompt_id).await.map(|_| Value::Null)
+                let force = p["force"].as_bool().unwrap_or(false);
+                code_prompt_local(state, id()?, text, atts, mentions, origin, prompt_id, force).await.map(|_| Value::Null)
             }
             "code.cancel" => {
                 ensure_local_host(state, &id()?)?;
@@ -1387,6 +1461,11 @@ impl mesh::RpcHandler for MeshRpc {
                 ensure_local_host(state, &id()?)?;
                 let prompt_id = param(&p, "promptId")?.to_owned();
                 state.code.send(&id()?, AgentCmd::Unqueue { prompt_id }).map(|_| Value::Null)
+            }
+            "code.send_now" => {
+                ensure_local_host(state, &id()?)?;
+                let prompt_id = param(&p, "promptId")?.to_owned();
+                state.code.send(&id()?, AgentCmd::SendNow { prompt_id }).map(|_| Value::Null)
             }
             "code.set_model" => code_set_model_local(state, &id()?, param(&p, "modelId")?.to_owned()).await.map(|_| Value::Null),
             "code.set_config_option" => {
@@ -1732,6 +1811,19 @@ fn coalesce_term_input_merges_writes_in_order() {
     let next = rx.try_recv().unwrap();
     assert_eq!(coalesce_term_input(next, &mut rx, &mut held).1["data"], "d");
     assert_eq!(coalesce_term_input(resize.clone(), &mut rx, &mut held), resize);
+}
+
+#[cfg(test)]
+#[test]
+fn force_send_needs_a_host_that_advertises_it() {
+    let attach = |running: bool, ext: serde_json::Value| {
+        serde_json::json!({ "running": running, "events": [{ "type": "sessionReady", "extensions": ext }] })
+    };
+    assert!(attach_has_force_send(&attach(true, serde_json::json!({ "steering": true, "forceSend": true }))));
+    // A host from before force send: it would queue a forced prompt and not know `code.send_now`.
+    assert!(!attach_has_force_send(&attach(true, serde_json::json!({ "steering": true }))));
+    assert!(!attach_has_force_send(&attach(false, serde_json::json!({ "forceSend": true }))));
+    assert!(!attach_has_force_send(&serde_json::json!({ "running": true, "events": [] })));
 }
 
 /// Queue input for a remote terminal; false when `id` is local.

@@ -4,12 +4,13 @@ import { useStore } from "../lib/store";
 import { isWeb } from "../lib/platform";
 import { input } from "./ProviderPage";
 import { AgentsPage } from "./AgentsPage";
+import { DiagnosticsPage } from "./DiagnosticsPage";
 import { McpPage } from "./McpPage";
 import { MeshPage } from "./MeshPage";
 import { PromptsPage } from "./PromptsPage";
 import { UsagePage } from "./UsagePage";
 
-export type PrefSection = "general" | "chat" | "prompts" | "agents" | "code" | "mcp" | "terminal" | "mesh" | "usage";
+export type PrefSection = "general" | "chat" | "prompts" | "agents" | "code" | "mcp" | "terminal" | "mesh" | "usage" | "diagnostics";
 
 export const PREF_SECTIONS: { id: PrefSection; label: string }[] = [
   { id: "general", label: "General" },
@@ -21,6 +22,7 @@ export const PREF_SECTIONS: { id: PrefSection; label: string }[] = [
   { id: "terminal", label: "Terminal" },
   { id: "mesh", label: "Mesh" },
   { id: "usage", label: "Usage" },
+  { id: "diagnostics", label: "Diagnostics" },
 ];
 
 export function Row({ label, hint, children }: { label: string; hint?: ReactNode; children: ReactNode }) {
@@ -198,7 +200,7 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
         </Row>
         <Row
           label="Send messages with"
-          hint="The other combination (and Shift+Enter) inserts a new line. On the phone app, Enter always inserts a line — send with the button."
+          hint={`Shift+Enter inserts a new line, and so does Enter when ${MOD}+Enter sends. While a Code agent works, ${MOD}+Enter (${MOD}+Shift+Enter when ${MOD}+Enter sends) stops its turn and sends now. On the phone app, Enter always inserts a line — send with the button.`}
         >
           <Choice
             value={prefs.sendKey}
@@ -273,6 +275,7 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
   if (section === "agents") return <AgentsPage />;
   if (section === "mesh") return <MeshPage />;
   if (section === "usage") return <UsagePage />;
+  if (section === "diagnostics") return <DiagnosticsPage />;
 
   if (section === "chat") {
     return (

@@ -135,8 +135,9 @@ commands! {
     code_attach(id);
     code_is_running(id);
     code_stop(id);
-    code_prompt(id, text, attachment_ids, mentions, prompt_id);
+    code_prompt(id, text, attachment_ids, mentions, prompt_id, force);
     code_unqueue(id, prompt_id);
+    code_send_now(id, prompt_id);
     code_cancel(id);
     code_set_model(id, model_id);
     code_set_config_option(id, config_id, value);
@@ -147,6 +148,11 @@ commands! {
     code_rewind(id, ordinal, preview, revert_files);
     code_usage(id);
     plan_limits();
+    wire_log_status();
+    wire_log_set(on);
+    wire_log_frames(session, last);
+    wire_log_clear();
+    wire_log_save();
     code_permission_respond(request_id, option_id, id);
     code_move(id, target, cwd);
     code_take_over(id, cwd);
