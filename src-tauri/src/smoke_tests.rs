@@ -700,10 +700,15 @@ fn smoke_claude_config_toggle() {
 }
 
 /// Live: the built-in agent on the user's own Claude Code login (`~/.claude/.credentials.json`).
-/// Makes a few tiny real requests. `cargo test --lib live_claude_login -- --ignored --nocapture`
+/// Makes a few tiny real requests. Needs `PATCHBAY_LIVE_CLAUDE=1` so the `smoke` CI run skips it.
+/// `PATCHBAY_LIVE_CLAUDE=1 cargo test --lib live_claude_login -- --ignored --nocapture`
 #[test]
 #[ignore]
 fn live_claude_login() {
+    if std::env::var("PATCHBAY_LIVE_CLAUDE").is_err() {
+        eprintln!("skipped: set PATCHBAY_LIVE_CLAUDE=1 to run against the Claude Code login");
+        return;
+    }
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
