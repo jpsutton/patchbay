@@ -22,12 +22,12 @@ pub struct AgentMessagingBridge {
 }
 
 impl AgentMessagingBridge {
-    pub fn bind() -> Result<(Self, TcpListener)> {
+    /// Returns the std listener: converting to tokio needs a running runtime, which `serve` has.
+    pub fn bind() -> Result<(Self, StdTcpListener)> {
         let listener = StdTcpListener::bind(("127.0.0.1", 0))
             .context("binding local agent-messaging bridge")?;
         listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
-        let listener = TcpListener::from_std(listener)?;
         Ok((
             Self {
                 addr,
@@ -56,9 +56,16 @@ impl AgentMessagingBridge {
         }))
     }
 
-    pub fn serve(&self, listener: TcpListener, state: AppState) {
+    pub fn serve(&self, listener: StdTcpListener, state: AppState) {
         let tokens = self.tokens.clone();
         api::spawn(async move {
+            let listener = match TcpListener::from_std(listener) {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!("agent-messaging bridge cannot listen: {e}");
+                    return;
+                }
+            };
             let limit = Arc::new(Semaphore::new(16));
             loop {
                 let (stream, _) = match listener.accept().await {
