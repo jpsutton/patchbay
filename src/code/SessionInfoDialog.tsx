@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { AGENT_LABELS, type AgentInfo } from "../lib/ipc";
+import { AGENT_LABELS, api, type AgentInfo, type HostInfo } from "../lib/ipc";
 import { memberName, remoteHost, useStore } from "../lib/store";
 import { sessionInfoSections, sessionInfoText } from "../lib/sessionInfo";
 import { CopyButton } from "../components/CopyButton";
@@ -18,6 +18,7 @@ export function SessionInfoDialog() {
   const state = useStore((s) => (s.sessionInfoId ? s.code[s.sessionInfoId] : undefined));
   const mesh = useStore((s) => s.mesh);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [hostInfo, setHostInfo] = useState<HostInfo | null>(null);
   const host = remoteHost(session, mesh);
 
   useEffect(() => {
@@ -33,6 +34,9 @@ export function SessionInfoDialog() {
     if (!id) return;
     let live = true;
     installedAgents(host).then((list) => live && setAgents(list));
+    // An older host doesn't know the request, an offline one can't answer: leave the row out.
+    setHostInfo(null);
+    api.hostInfo(host).then((info) => live && setHostInfo(info), () => {});
     return () => {
       live = false;
     };
@@ -46,11 +50,12 @@ export function SessionInfoDialog() {
             state,
             agentLabel: AGENT_LABELS[session.agent] ?? session.agent,
             build: agents.find((a) => a.id === session.agent) ?? null,
+            hostInfo,
             hostName: host ? memberName(mesh, host) : null,
             isLocalHost: !host,
           })
         : [],
-    [session, state, agents, host, mesh],
+    [session, state, agents, hostInfo, host, mesh],
   );
 
   if (!id || !session) return null;

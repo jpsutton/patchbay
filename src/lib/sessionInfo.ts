@@ -1,7 +1,7 @@
 // What a Code session is, as plain rows: the raw ids, the agent and its build, the model, where it
 // runs. One list feeds the details dialog and the "copy all" text (modelled on Claude Code's
 // `/status`), so the two can't drift. Pure: the caller gathers the inputs.
-import type { AcpConfigChoice, AcpConfigOption, AgentInfo, CodeSession } from "./ipc";
+import type { AcpConfigChoice, AcpConfigOption, AgentInfo, CodeSession, HostInfo } from "./ipc";
 import type { CodeState } from "./store";
 
 export interface InfoRow {
@@ -29,6 +29,8 @@ export interface SessionInfoInput {
   agentLabel: string;
   /** This session's agent as installed on the computer that runs it, when known. */
   build?: Pick<AgentInfo, "program" | "version" | "source"> | null;
+  /** The Patchbay build on that computer; absent when unknown (an older host doesn't say). */
+  hostInfo?: HostInfo | null;
   /** Name of the computer running the agent; null for this one. */
   hostName: string | null;
   /** True when that computer is the one showing this. */
@@ -54,6 +56,13 @@ const STATUSES: Record<NonNullable<SessionInfoInput["state"]>["status"], string>
   ready: "Running",
   exited: "Stopped",
 };
+
+const OS_NAMES: Record<string, string> = { macos: "macOS", linux: "Linux", windows: "Windows" };
+
+/** "0.11.0 · macOS (aarch64)". An OS name Patchbay doesn't know is shown as given. */
+function patchbayBuild(h: HostInfo): string {
+  return `${h.version} · ${OS_NAMES[h.os] ?? h.os} (${h.arch})`;
+}
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -146,6 +155,7 @@ export function sessionInfoSections(i: SessionInfoInput): InfoSection[] {
   const environmentRows: (InfoRow | null)[] = [
     { label: "Folder", value: session.cwd, mono: true, copy: true },
     { label: "Runs on", value: where },
+    i.hostInfo ? { label: "Patchbay", value: patchbayBuild(i.hostInfo) } : null,
     session.hostNode ? { label: "Host node ID", value: session.hostNode, mono: true, copy: true } : null,
     session.epoch > 0 ? { label: "Moves between computers", value: String(session.epoch) } : null,
     i.build?.program

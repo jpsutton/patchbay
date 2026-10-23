@@ -43,6 +43,15 @@ const base: SessionInfoInput = { session, agentLabel: "Claude Code", hostName: n
   assert(!("Archived" in s) && !("Mode" in s), "absent fields leave no row");
   assert(rowsOf(base, "Environment")["Runs on"].value === "This computer", "local host");
   assert(!("Host node ID" in rowsOf(base, "Environment")), "no host node row without a host");
+  assert(!("Patchbay" in rowsOf(base, "Environment")), "no build row while the host's build is unknown");
+}
+
+// The host's build: named OS, an unknown OS shown as given.
+{
+  const row = (os: string) =>
+    rowsOf({ ...base, hostInfo: { version: "0.11.0", os, arch: "aarch64" } }, "Environment")["Patchbay"].value;
+  assert(row("macos") === "0.11.0 · macOS (aarch64)", "build row names the OS");
+  assert(row("freebsd") === "0.11.0 · freebsd (aarch64)", "unknown OS passes through");
 }
 
 // A session the agent never started: no id to copy.

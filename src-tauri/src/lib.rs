@@ -1628,6 +1628,7 @@ impl mesh::RpcHandler for MeshRpc {
             }
             // Starting a session here for a phone, through its gateway.
             "code.new_options" => gateway::new_session_options_local(state).await,
+            "host.info" => Ok(gateway::host_info_local()),
             "code.create" => gateway::create_local(state, &p).map(|s| json!(s)),
             "fs.dirs" => gateway::list_dirs_local(p["path"].as_str()),
             m if m.starts_with("remote.") => gateway::call(state, &from, m, &p).await,

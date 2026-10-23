@@ -117,6 +117,7 @@ pub(crate) async fn call(state: &AppState, from: &str, method: &str, p: &Value) 
         }
         // Starting a Code session on a chosen computer.
         "remote.new_session_options" => on_host(state, p, "code.new_options").await?,
+        "remote.host_info" => on_host(state, p, "host.info").await?,
         "remote.list_dirs" => on_host(state, p, "fs.dirs").await?,
         "remote.create_code_session" => on_host(state, p, "code.create").await?,
         "remote.attach_put" => upload(state, p).await?,
@@ -137,6 +138,7 @@ pub(crate) async fn on_host(state: &AppState, p: &Value, method: &str) -> Result
     if host == state.mesh.node_id() {
         return match method {
             "code.new_options" => new_session_options_local(state).await,
+            "host.info" => Ok(host_info_local()),
             "code.create" => create_local(state, p).map(|s| json!(s)),
             "fs.dirs" => list_dirs_local(p["path"].as_str()),
             other => bail!("unknown request {other}"),
@@ -176,6 +178,16 @@ pub(crate) async fn new_session_options_local(state: &AppState) -> Result<Value>
         "home": crate::code::agents::home_dir().map(|h| h.to_string_lossy().into_owned()),
         "recent": recent,
     }))
+}
+
+/// Which build runs on this computer, for a session's info dialog: the Patchbay version, the
+/// operating system (`std::env::consts::OS`: "macos", "linux", "windows") and the CPU architecture.
+pub(crate) fn host_info_local() -> Value {
+    json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+    })
 }
 
 /// The folders in `path` (default: home), for picking where a session runs. Only folders, only

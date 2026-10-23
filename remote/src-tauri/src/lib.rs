@@ -710,6 +710,14 @@ async fn list_agents(r: Shared<'_>, host: Option<String>) -> CmdResult<Value> {
     Ok(options["agents"].clone())
 }
 
+/// The Patchbay version and OS of `host`, the computer running a session. An older host doesn't
+/// answer, and the caller leaves the row out.
+#[tauri::command]
+async fn host_info(r: Shared<'_>, host: Option<String>) -> CmdResult<Value> {
+    let Some(host) = host else { return Ok(Value::Null) };
+    Ok(r.client.rpc("remote.host_info", json!({ "host": host })).await?)
+}
+
 #[tauri::command]
 async fn get_code_transcript(r: Shared<'_>, id: String) -> CmdResult<Value> {
     Ok(r.client.rpc("remote.transcript", json!({ "id": id })).await?)
@@ -990,6 +998,7 @@ pub fn run() {
             update_code_session,
             code_auto_title,
             list_agents,
+            host_info,
             get_code_transcript,
             save_code_transcript,
             code_checkpoints,

@@ -1294,6 +1294,7 @@ export function install() {
           return null;
         }
         case "list_agents": return FAKE_AGENTS;
+        case "host_info": return { version: "0.11.0", os: "macos", arch: "aarch64" };
         case "code_set_agent": {
           const s = db.code.find((x) => x.id === a.id)!;
           const saved = db.transcripts[s.id];
