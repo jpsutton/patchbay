@@ -411,7 +411,11 @@ node_start() {
     mkdir -p "$E2E_DIR/node"
     chmod 700 "$E2E_DIR/node"
     say "starting the node (built from $(stamp_get node id)) on web port $WEB_PORT, mesh port $MESH_PORT"
-    detach "$E2E_DIR/logs/node.log" env PATCHBAY_LOG="${PATCHBAY_LOG:-info}" \
+    # A HOME with no login keychain: on macOS the node then cannot reach the user's keychain, so it
+    # keeps its mesh secrets in its data folder instead of asking for a keychain login on every
+    # run (a fresh debug build is a new app to the keychain, so "Always Allow" never sticks).
+    mkdir -p "$E2E_DIR/home"
+    detach "$E2E_DIR/logs/node.log" env HOME="$E2E_DIR/home" PATCHBAY_LOG="${PATCHBAY_LOG:-info}" \
         "$bin" --data-dir "$E2E_DIR/node" --listen "127.0.0.1:$WEB_PORT" --ui-dir "$top/dist"
     echo $! >"$E2E_DIR/node.pid"
     wait_port "$WEB_PORT" 60 || { tail -n 20 "$E2E_DIR/logs/node.log" >&2; die "the node did not start"; }
