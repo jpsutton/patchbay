@@ -1,4 +1,4 @@
-import { memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AGENT_LABELS,
   api,
@@ -142,6 +142,13 @@ function MoreOptions({
   const rows = useContext(ChipRows);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  // The popup is 20rem wide and opens rightward from the button; in a narrow window (a tiled
+  // one, say) that runs off the edge, so it opens leftward from the button's right edge instead.
+  const [alignRight, setAlignRight] = useState(false);
+  useLayoutEffect(() => {
+    if (!open || !ref.current) return;
+    setAlignRight(ref.current.getBoundingClientRect().left + 320 > window.innerWidth - 8);
+  }, [open]);
   useEffect(() => {
     if (!open) return;
     const close = (e: MouseEvent) => {
@@ -183,7 +190,9 @@ function MoreOptions({
         <div
           role="dialog"
           aria-label="More agent options"
-          className="absolute bottom-full left-0 z-30 mb-1.5 flex w-80 flex-col rounded-xl border border-border bg-raised p-1 shadow-float"
+          className={`absolute bottom-full z-30 mb-1.5 flex w-80 max-w-[calc(100vw-16px)] flex-col rounded-xl border border-border bg-raised p-1 shadow-float ${
+            alignRight ? "right-0" : "left-0"
+          }`}
         >
           {options.map((o) => (
             <div key={o.id} className="flex items-center justify-between gap-3 rounded-md px-2.5 py-2">
