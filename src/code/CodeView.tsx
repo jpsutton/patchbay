@@ -27,6 +27,7 @@ import {
 import { HostBadge, MoveDialog, OfflineHostBanner } from "./HostControls";
 import { Composer } from "../components/Composer";
 import { Markdown } from "../components/Markdown";
+import { FileLinkContext } from "../components/FileLink";
 import { EditMessage } from "../components/EditMessage";
 import { UsageBar } from "../components/UsageBar";
 import { TerminalPane } from "../terminal/TerminalPane";
@@ -853,6 +854,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const s = state;
   const status = s?.status ?? "idle";
   const host = remoteHost(session, mesh);
+  // Paths in the transcript open here only when the session's files are on this computer.
+  const fileLinks = { cwd: session.cwd, local: !host };
   // The offline banner offers the way forward instead of a restart that can't work.
   const hostOffline = !!host && !memberOnline(mesh, host);
   const ready = status === "ready";
@@ -1178,6 +1181,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   );
 
   return (
+    <FileLinkContext.Provider value={fileLinks}>
     <div className="flex h-full min-w-0 flex-1 flex-col">
       <header {...drag} className={`flex h-12 shrink-0 items-center gap-1 border-b border-line pr-3 ${leading ? "pl-1" : "pl-6"}`}>
         {leading}
@@ -1492,5 +1496,6 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
       )}
       {moving && <MoveDialog session={session} takeOver={moving === "takeOver"} onClose={() => setMoving(null)} />}
     </div>
+    </FileLinkContext.Provider>
   );
 }

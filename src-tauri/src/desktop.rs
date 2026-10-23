@@ -234,6 +234,63 @@ fn write_text_file(path: String, contents: String) -> crate::CmdResult<()> {
     Ok(std::fs::write(&path, contents)?)
 }
 
+// ---------------- file links ----------------
+
+/// A path as an agent wrote it, made absolute: `~/…` against home, relative ones against the
+/// session's folder. Relative paths without a folder to resolve them against give `None`.
+fn resolve_mentioned(path: &str, cwd: Option<&str>) -> Option<std::path::PathBuf> {
+    let p = std::path::Path::new(path);
+    if let Some(rest) = path.strip_prefix("~/") {
+        return crate::code::agents::home_dir().map(|h| h.join(rest));
+    }
+    if p.is_absolute() {
+        return Some(p.to_path_buf());
+    }
+    cwd.filter(|c| !c.is_empty()).map(|c| std::path::Path::new(c).join(p))
+}
+
+/// Something the OS would run rather than show: an executable file, a Windows script or
+/// installer, or a macOS app bundle. Agents write these too, so a click reveals them instead.
+fn runs_when_opened(p: &std::path::Path, meta: &std::fs::Metadata) -> bool {
+    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if meta.is_dir() {
+        return ext == "app";
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 != 0 {
+            return true;
+        }
+    }
+    matches!(
+        ext.as_str(),
+        "exe" | "bat" | "cmd" | "com" | "ps1" | "vbs" | "vbe" | "js" | "jse" | "wsf" | "wsh" | "msi" | "msc"
+            | "scr" | "lnk" | "url" | "hta" | "cpl" | "reg" | "desktop" | "command" | "jar"
+    )
+}
+
+/// Whether a path mentioned in a session's transcript exists on this computer, so the view only
+/// links what a click can open.
+#[tauri::command]
+fn local_path_exists(path: String, cwd: Option<String>) -> bool {
+    resolve_mentioned(&path, cwd.as_deref()).is_some_and(|p| p.exists())
+}
+
+/// Open a mentioned file or folder in the OS's default app. Anything that would run is shown in
+/// the file manager instead.
+#[tauri::command]
+fn open_local_path(path: String, cwd: Option<String>) -> crate::CmdResult<()> {
+    let p = resolve_mentioned(&path, cwd.as_deref()).ok_or_else(|| anyhow!("{path} is relative and has no folder"))?;
+    let meta = std::fs::metadata(&p).map_err(|e| anyhow!("{}: {e}", p.display()))?;
+    if runs_when_opened(&p, &meta) {
+        tauri_plugin_opener::reveal_item_in_dir(&p)?;
+    } else {
+        tauri_plugin_opener::open_path(&p, None::<&str>)?;
+    }
+    Ok(())
+}
+
 // ---------------- updates ----------------
 
 /// A newer release, found by `update_check` and kept until `update_install` applies it.
@@ -282,6 +339,8 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'stat
             quick_submit,
             quick_dismiss,
             write_text_file,
+            local_path_exists,
+            open_local_path,
             update_check,
             update_install
         ]);
@@ -450,5 +509,46 @@ mod ipc_tests {
         let err = invoke(&w, "save_prompt", json!({ "name": " ", "content": "" })).unwrap_err();
         assert_eq!(err, "name is required");
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod file_link_tests {
+    use super::*;
+
+    #[test]
+    fn resolves_mentioned_paths() {
+        assert_eq!(resolve_mentioned("/etc/hosts", None), Some("/etc/hosts".into()));
+        assert_eq!(resolve_mentioned("re/SPEC.md", Some("/w/proj")), Some("/w/proj/re/SPEC.md".into()));
+        assert_eq!(resolve_mentioned("/abs/x.md", Some("/w/proj")), Some("/abs/x.md".into()));
+        assert_eq!(resolve_mentioned("re/SPEC.md", None), None);
+        assert_eq!(resolve_mentioned("re/SPEC.md", Some("")), None);
+        if let Some(home) = crate::code::agents::home_dir() {
+            assert_eq!(resolve_mentioned("~/notes.md", None), Some(home.join("notes.md")));
+        }
+    }
+
+    #[test]
+    fn executables_are_revealed_not_opened() {
+        let dir = std::env::temp_dir().join(format!("patchbay-file-link-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Thing.app")).unwrap();
+        let doc = dir.join("notes.md");
+        let bat = dir.join("run.bat");
+        std::fs::write(&doc, "hi").unwrap();
+        std::fs::write(&bat, "echo").unwrap();
+        let runs = |p: &std::path::Path| runs_when_opened(p, &std::fs::metadata(p).unwrap());
+        assert!(!runs(&doc));
+        assert!(!runs(&dir));
+        assert!(runs(&bat));
+        assert!(runs(&dir.join("Thing.app")));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let sh = dir.join("go.sh");
+            std::fs::write(&sh, "#!/bin/sh").unwrap();
+            std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(runs(&sh));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -849,6 +849,10 @@ export const api = {
   termClose: (id: string) => invoke<void>("term_close", { id }),
 
   writeTextFile: (path: string, contents: string) => invoke<void>("write_text_file", { path, contents }),
+  /** Native app only: whether a path from a transcript exists here (relative ones under `cwd`). */
+  localPathExists: (path: string, cwd: string | null) => invoke<boolean>("local_path_exists", { path, cwd }),
+  /** Native app only: open that path in the OS's default app, or reveal it if it would run. */
+  openLocalPath: (path: string, cwd: string | null) => invoke<void>("open_local_path", { path, cwd }),
   /** Native app only: a newer release it can install itself, or null. */
   updateCheck: () => invoke<UpdateInfo | null>("update_check"),
   /** Native app only: install what `updateCheck` found and restart. */
