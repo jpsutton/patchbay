@@ -250,8 +250,8 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
           hint={
             <>
               Global shortcut that opens a small prompt window from anywhere, e.g. <span className="font-mono">Alt+Space</span>{" "}
-              or <span className="font-mono">CommandOrControl+Shift+Space</span>. Blank turns it off. Wayland desktops may not
-              deliver global shortcuts to apps.
+              or <span className="font-mono">CommandOrControl+Shift+Space</span>. Blank turns it off. On Wayland the
+              desktop may ask you to confirm it, and its own shortcut settings have the final say.
             </>
           }
         >

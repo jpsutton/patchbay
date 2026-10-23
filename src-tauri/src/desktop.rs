@@ -133,15 +133,37 @@ pub fn hide_quick(app: &AppHandle) {
     }
 }
 
-/// Replace the global quick-entry shortcut. Empty disables it.
+/// Register the saved quick-entry shortcut at startup: through the GlobalShortcuts portal on a
+/// Wayland session, else (or when the portal is unavailable) through the plugin.
+fn init_quick_shortcut(app: &AppHandle, accel: &str) {
+    #[cfg(target_os = "linux")]
+    if crate::portal_shortcuts::wayland_session() {
+        crate::portal_shortcuts::start(app.clone(), accel, register_quick_shortcut);
+        return;
+    }
+    register_quick_shortcut(app, accel);
+}
+
+fn register_quick_shortcut(app: &AppHandle, accel: &str) {
+    if let Err(e) = set_quick_shortcut(app, accel) {
+        tracing::warn!("quick entry shortcut: {e:#}");
+    }
+}
+
+/// Replace the global quick-entry shortcut. Empty disables it. On a Wayland session the
+/// GlobalShortcuts portal handles it when available (see `portal_shortcuts`).
 pub fn set_quick_shortcut(app: &AppHandle, accel: &str) -> Result<()> {
-    let gs = app.global_shortcut();
     let accel = accel.trim();
     let next = if accel.is_empty() {
         None
     } else {
         Some(Shortcut::from_str(accel).map_err(|e| anyhow!("invalid shortcut {accel}: {e}"))?)
     };
+    #[cfg(target_os = "linux")]
+    if crate::portal_shortcuts::update(accel) {
+        return Ok(());
+    }
+    let gs = app.global_shortcut();
     gs.unregister_all().map_err(|e| anyhow!("{e}"))?;
     if let Some(s) = next {
         gs.on_shortcut(s, |app, _s, ev| {
@@ -435,9 +457,7 @@ pub fn run() {
             if p.title_bar != "system" {
                 apply_title_bar(&handle, &p.title_bar);
             }
-            if let Err(e) = set_quick_shortcut(&handle, &p.quick_entry_shortcut) {
-                tracing::warn!("quick entry shortcut: {e:#}");
-            }
+            init_quick_shortcut(&handle, &p.quick_entry_shortcut);
             Ok(())
         })
         .on_window_event(|w, ev| {

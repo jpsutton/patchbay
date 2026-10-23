@@ -10,6 +10,8 @@ mod files;
 mod gateway;
 mod handoff;
 mod mesh;
+#[cfg(all(feature = "desktop", target_os = "linux"))]
+mod portal_shortcuts;
 mod prefs;
 mod providers;
 mod terminal;
