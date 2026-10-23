@@ -18,6 +18,9 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      # scripts/mock-llm.py uses only the standard library, so the runner needs no pipenv.
+      PATCHBAY_E2E_PYTHON: python3
     steps:
       - uses: actions/checkout@v4
       - name: KVM for the emulator
