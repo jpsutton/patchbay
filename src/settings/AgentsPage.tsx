@@ -14,6 +14,7 @@ import { PermissionRulesList } from "./PermissionRules";
 import { Choice, Deferred, LongText, Row } from "./PreferencesPage";
 import { Toggle } from "../components/Toggle";
 import { input } from "./ProviderPage";
+import { Dot } from "../components/Dot";
 
 const SOURCE: Record<NonNullable<AgentInfo["source"]>, string> = {
   builtin: "built in",
@@ -44,7 +45,7 @@ export function useAgentList() {
 export type AgentList = ReturnType<typeof useAgentList>;
 
 function StatusDot({ on }: { on: boolean }) {
-  return <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${on ? "bg-ok" : "bg-faint"}`} aria-hidden />;
+  return <Dot size={6} className={on ? "text-ok" : "text-faint"} />;
 }
 
 function Loading({ list }: { list: AgentList }) {

@@ -3,6 +3,7 @@ import { api, errorText, type KeyValue, type McpConfig, type McpServer } from ".
 import { useStore } from "../lib/store";
 import { input } from "./ProviderPage";
 import { Toggle } from "../components/Toggle";
+import { Dot } from "../components/Dot";
 
 const blank = (): McpConfig => ({ transport: "stdio", command: "", args: [], env: [], url: "", headers: [] });
 
@@ -105,7 +106,7 @@ export function McpPage() {
             className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs ${sel === s.id ? "bg-panel-2" : "hover:bg-panel-2/60"}`}
             onClick={() => setSel(s.id)}
           >
-            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${s.enabled ? "bg-ok" : "border border-muted"}`} />
+            <Dot size={6} hollow={s.enabled ? undefined : 1} className={s.enabled ? "text-ok" : "text-muted"} />
             <span className="min-w-0 flex-1 truncate">{s.name}</span>
             <span className="text-[11px] text-muted">{s.config.transport}</span>
           </button>

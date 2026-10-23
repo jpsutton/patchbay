@@ -3,6 +3,7 @@ import { api, errorText, type MeshMember } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { input } from "./ProviderPage";
 import { Deferred, Row } from "./PreferencesPage";
+import { Dot } from "../components/Dot";
 
 const primary = "rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg disabled:opacity-40";
 const secondary = "rounded-md border border-border px-3 py-1.5 text-xs hover:bg-panel-2 disabled:opacity-40";
@@ -20,11 +21,11 @@ const STATE_LABEL: Record<MeshMember["state"], string> = {
 };
 
 const STATE_DOT: Record<MeshMember["state"], string> = {
-  self: "bg-accent",
-  direct: "bg-ok",
-  relay: "bg-live",
-  offline: "bg-faint",
-  removed: "bg-danger",
+  self: "text-accent",
+  direct: "text-ok",
+  relay: "text-live",
+  offline: "text-faint",
+  removed: "text-danger",
 };
 
 function MemberRow({ m, onRemove }: { m: MeshMember; onRemove?: () => void }) {
@@ -38,7 +39,7 @@ function MemberRow({ m, onRemove }: { m: MeshMember; onRemove?: () => void }) {
         : null;
   return (
     <div className="flex items-center gap-3 border-b border-border py-2.5 last:border-b-0">
-      <span className={`h-2 w-2 shrink-0 rounded-full ${m.authFailed ? "bg-danger" : STATE_DOT[m.state]}`} aria-hidden="true" />
+      <Dot className={m.authFailed ? "text-danger" : STATE_DOT[m.state]} />
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm">{m.name}</div>
         <div className="text-[12px] text-muted">
@@ -178,7 +179,7 @@ function Joining() {
         </div>
       ) : (
         <div className="flex items-center gap-2 text-xs text-muted">
-          <span className="signal-pulse h-1.5 w-1.5 rounded-full bg-accent" />
+          <Dot size={6} className="signal-pulse text-accent" />
           Connecting to <span className="font-mono">{j.url}</span>…
           {j.error && <span className="text-danger">({j.error}; retrying)</span>}
         </div>

@@ -8,6 +8,7 @@ import { ChevronRightIcon, PlusIcon } from "../components/icons";
 import { activityOf, strongest } from "../lib/activity";
 import { installedAgents, newSessionIn } from "./CodeView";
 import { ContextMenu } from "../components/ItemMenu";
+import { Dot } from "../components/Dot";
 
 const COLLAPSED_KEY = "patchbay.codeSidebar.collapsed";
 const ORDER_KEY = "patchbay.codeSidebar.order";
@@ -348,7 +349,7 @@ export function CodeSidebar() {
                 >
                   <ChevronRightIcon size={12} />
                 </span>
-                {isCollapsed && hasActive && <span className="h-1.5 w-1.5 shrink-0 self-center rounded-full bg-accent" />}
+                {isCollapsed && hasActive && <Dot size={6} className="self-center text-accent" />}
               </button>
               <button
                 className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-faint opacity-0 hover:bg-panel-2 hover:text-fg focus-visible:opacity-100 group-hover/header:opacity-100"

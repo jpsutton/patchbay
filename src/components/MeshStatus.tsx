@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import type { MeshMember, MeshStatus } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { MeshIcon, TriangleAlertIcon, XIcon } from "./icons";
+import { Dot } from "./Dot";
 
 /** The other computers in the mesh, and how many of them are connected. */
 function summary(mesh: MeshStatus) {
@@ -13,9 +14,9 @@ function summary(mesh: MeshStatus) {
 /** Red for a problem, amber while someone asks to join, green with a computer connected, grey alone. */
 function dotClass(mesh: MeshStatus) {
   const { online } = summary(mesh);
-  if (mesh.problem) return "bg-danger";
-  if (mesh.pending.length > 0) return "signal-pulse bg-accent";
-  return online > 0 ? "bg-ok" : "bg-faint";
+  if (mesh.problem) return "text-danger";
+  if (mesh.pending.length > 0) return "signal-pulse text-accent";
+  return online > 0 ? "text-ok" : "text-faint";
 }
 
 function title(mesh: MeshStatus) {
@@ -26,10 +27,10 @@ function title(mesh: MeshStatus) {
 }
 
 function memberDot(m: MeshMember) {
-  if (m.authFailed) return "bg-danger";
-  if (m.state === "direct") return "bg-ok";
-  if (m.state === "relay") return "bg-live";
-  return "bg-faint opacity-60";
+  if (m.authFailed) return "text-danger";
+  if (m.state === "direct") return "text-ok";
+  if (m.state === "relay") return "text-live";
+  return "text-faint opacity-60";
 }
 
 function memberStatus(m: MeshMember) {
@@ -66,7 +67,7 @@ export function MeshChip() {
       aria-expanded={open}
       onClick={() => setOpen(!open)}
     >
-      <span className={`h-2 w-2 shrink-0 rounded-full ${dotClass(mesh)}`} aria-hidden="true" />
+      <Dot className={dotClass(mesh)} />
       {err ? (
         // The word drops out in a narrow sidebar footer; the dot (red on error) and count stay.
         <span className="@max-[320px]/footer:hidden">Mesh error</span>
@@ -100,10 +101,7 @@ export function MeshRailButton() {
       onClick={() => setOpen(!open)}
     >
       <MeshIcon />
-      <span
-        className={`absolute bottom-1 right-1 h-[7px] w-[7px] rounded-full ring-2 ring-panel ${dotClass(mesh)}`}
-        aria-hidden="true"
-      />
+      <Dot size={7} ring="panel" className={`absolute bottom-1 right-1 ${dotClass(mesh)}`} />
     </button>
   );
 }
@@ -160,7 +158,7 @@ export function MeshPopover({ className }: { className: string }) {
       )}
       {others.map((m) => (
         <div key={m.nodeId} className="flex items-center gap-[9px] px-3 py-1.5">
-          <span className={`h-2 w-2 shrink-0 rounded-full ${memberDot(m)}`} aria-hidden="true" />
+          <Dot className={memberDot(m)} />
           <span className={`min-w-0 flex-1 truncate ${m.state === "offline" && !m.authFailed ? "text-muted" : ""}`}>
             {m.name}
             {m.role === "remote" && <span className="meta text-faint"> phone</span>}

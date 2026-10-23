@@ -66,6 +66,7 @@ import { Toggle } from "../components/Toggle";
 import { AgentImage, AttachedImage } from "../components/AgentImage";
 import { ModelRing } from "../lib/cable";
 import { JumpToBottom, ScrollFade, useStickyScroll } from "../lib/useStickyScroll";
+import { Dot } from "../components/Dot";
 
 
 /**
@@ -640,13 +641,13 @@ function PlanSteps({ plan }: { plan: NonNullable<CodeState["plan"]> }) {
                   <CheckIcon size={14} strokeWidth={2.4} />
                 </span>
               ) : p.status === "in_progress" ? (
-                <span className="signal-pulse h-2 w-2 rounded-full bg-accent" />
+                <Dot className="signal-pulse text-accent" />
               ) : p.status === "cancelled" ? (
                 <span className="flex text-faint" title="Cancelled">
                   <XIcon size={13} strokeWidth={2.2} />
                 </span>
               ) : (
-                <span className="h-2 w-2 rounded-full border-[1.5px] border-faint/60" />
+                <Dot hollow={1.5} className="text-faint/60" />
               )}
             </span>
             <span
@@ -1098,16 +1099,16 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const needsYou = (s?.permissions.length ?? 0) > 0 || !!s?.auth;
   // The status light: amber = needs you, blue = working, green = ready, red = stopped.
   const dot = needsYou
-    ? "bg-accent signal-pulse shadow-[0_0_0_3px_rgb(242_165_65/0.18)]"
+    ? { className: "text-accent signal-pulse", halo: 3 }
     : working
-      ? "bg-live shadow-[0_0_0_3px_rgb(110_168_254/0.15)]"
+      ? { className: "text-live", halo: 3 }
       : status === "ready"
-        ? "bg-ok shadow-[0_0_0_3px_rgb(91_208_138/0.15)]"
+        ? { className: "text-ok", halo: 3 }
         : status === "starting"
-          ? "bg-accent signal-pulse"
+          ? { className: "text-accent signal-pulse" }
           : status === "exited"
-            ? "bg-danger"
-            : "bg-faint";
+            ? { className: "text-danger" }
+            : { className: "text-faint" };
   const dotLabel = needsYou ? "needs you" : working ? "working" : status;
 
   const setAcpMode = async (id: string) => {
@@ -1251,7 +1252,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     <div className="flex h-full min-w-0 flex-1 flex-col">
       <header {...drag} className={`flex h-12 shrink-0 items-center gap-1 border-b border-line pr-3 ${leading ? "pl-1" : "pl-6"}`}>
         {leading}
-        <span className={`h-2 w-2 shrink-0 rounded-full ${dot}`} title={dotLabel} role="img" aria-label={`Agent ${dotLabel}`} />
+        <Dot {...dot} title={dotLabel} role="img" aria-label={`Agent ${dotLabel}`} />
         <div {...drag} className="mx-2.5 flex min-w-0 flex-1 items-baseline gap-2.5">
           <h1 {...drag} className="shrink truncate text-[15px] font-medium" style={{ minWidth: "4rem" }}>
             {session.title}
@@ -1332,7 +1333,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                 <OfflineHostBanner session={session} onTakeOver={() => setMoving("takeOver")} />
                 {waiting && (s?.entries.length ?? 0) === 0 && (
                   <div className="flex items-center justify-center gap-2 text-xs text-muted">
-                    <span className="signal-pulse h-1.5 w-1.5 rounded-full bg-accent" />
+                    <Dot size={6} className="signal-pulse text-accent" />
                     {waiting}
                   </div>
                 )}
@@ -1366,12 +1367,12 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                 )}
                 {working && s?.permissions.length === 0 && (
                   <div className="flex items-center gap-2 text-xs text-muted">
-                    <span className="signal-pulse h-1.5 w-1.5 rounded-full bg-live" /> Working…
+                    <Dot size={6} className="signal-pulse text-live" /> Working…
                   </div>
                 )}
                 {background.length > 0 && (
                   <div className="flex items-center gap-2 text-xs text-muted" title={background.map(backgroundLabel).join("\n")}>
-                    <span className="signal-pulse h-1.5 w-1.5 shrink-0 rounded-full bg-live" />
+                    <Dot size={6} className="signal-pulse text-live" />
                     <span className="min-w-0 truncate">
                       {background.length === 1
                         ? `Running in the background: ${backgroundLabel(background[0])}`
