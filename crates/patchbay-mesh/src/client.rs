@@ -21,7 +21,7 @@ use crate::handshake::{self, HandshakeError, Link, Secure, TICKET_ID_LEN};
 use crate::keys::{Identity, KeyStore, hex32, write_private};
 use crate::member::{self, Member, ROLE_REMOTE};
 use crate::remote::{self, Point};
-use crate::wire::{FEATURE_GATEWAY, Hello, Msg, PROTOCOL_VERSION};
+use crate::wire::{EV_JOIN_REQUEST, EV_JOIN_RESOLVED, FEATURE_GATEWAY, Hello, JoinRequest, Msg, PROTOCOL_VERSION};
 use crate::ws::{self, normalize_url, recv, send};
 
 /// Delivers an event to the app: (event name, payload).
@@ -114,6 +114,8 @@ struct State {
     hidden_since: Option<Instant>,
     /// How long the next probe waits for an answer, when not the usual `PROBE_TIMEOUT`.
     probe_timeout: Option<Duration>,
+    /// Nodes waiting to join, as the gateway reports them; this device may decide them.
+    join_requests: HashMap<String, JoinRequest>,
 }
 
 /// How long to wait for the connection to answer when the app comes back after `hidden_for`.
@@ -286,6 +288,27 @@ impl RemoteClient {
         self.0.status()
     }
 
+    /// Admit a node waiting to join, with this device's own signature. The gateway passes the
+    /// admission to the computer the node is connected to.
+    pub async fn approve(&self, node_id: &str) -> Result<()> {
+        let req = self.0.st.lock().unwrap().join_requests.get(node_id).cloned().ok_or_else(|| anyhow!("that request is gone"))?;
+        let rec = {
+            let s = self.0.saved.lock().unwrap();
+            let mesh_id = s.mesh_id.clone().ok_or_else(|| anyhow!("this device isn't in a mesh"))?;
+            Member::admit(&s.node_id, self.0.ident(), &mesh_id, node_id, &req.name, &req.sign_pub, &req.noise_pub, req.role.as_deref())
+        };
+        self.rpc("remote.admit", json!({ "record": rec })).await?;
+        self.0.drop_request(node_id);
+        Ok(())
+    }
+
+    /// Turn a node waiting to join away.
+    pub async fn reject(&self, node_id: &str) -> Result<()> {
+        self.rpc("remote.reject", json!({ "nodeId": node_id })).await?;
+        self.0.drop_request(node_id);
+        Ok(())
+    }
+
     /// Call `method` on the gateway, waiting for one when none is connected.
     pub async fn rpc(&self, method: &str, params: Value) -> Result<Value> {
         self.0.clone().rpc(method, params).await
@@ -416,6 +439,13 @@ impl Inner {
             })
             .collect();
         let joining = st.joining.as_ref().map(|j| json!({ "url": j.url, "code": j.code, "status": j.status, "error": j.error }));
+        let host_name = |id: &str| s.members.iter().find(|m| m.node_id == id).map(|m| m.name.clone());
+        let mut pending: Vec<Value> = st
+            .join_requests
+            .values()
+            .map(|r| json!({ "nodeId": r.node_id, "name": r.name, "code": r.code, "role": r.role, "host": r.host, "hostName": host_name(&r.host) }))
+            .collect();
+        pending.sort_by_key(|p| p["nodeId"].as_str().map(str::to_owned));
         json!({
             "nodeId": s.node_id,
             "name": s.name,
@@ -430,7 +460,7 @@ impl Inner {
             "resumed": st.conn.as_ref().map(|c| c.resumed),
             "joining": joining,
             "members": members,
-            "pending": [],
+            "pending": pending,
             "running": true,
         })
     }
@@ -960,6 +990,8 @@ impl Inner {
             }
             st.phase = "connecting".into();
             st.error = res.as_ref().err().map(|e| format!("{e:#}"));
+            // The next gateway lists what waits when we connect to it.
+            st.join_requests.clear();
             st.waiters.drain().map(|(_, w)| w).collect()
         };
         for w in waiters {
@@ -973,7 +1005,49 @@ impl Inner {
         self.emit_status();
     }
 
+    /// A node waits to join. Believed when its host is a member we know and its code is the one
+    /// that host's key and the node's key give, so the code shown is the one we'd sign for.
+    fn join_requested(&self, payload: Value) {
+        let Ok(req) = serde_json::from_value::<JoinRequest>(payload.clone()) else { return };
+        let me = self.saved.lock().unwrap().node_id.clone();
+        let host_ok = self
+            .saved
+            .lock()
+            .unwrap()
+            .members
+            .iter()
+            .find(|m| m.node_id == req.host)
+            .is_some_and(|h| !h.is_removed() && !h.is_remote() && req.code_matches(&h.noise_pub));
+        if !host_ok || req.node_id == me || !self.is_member() {
+            tracing::debug!("remote: ignoring a join request that doesn't add up");
+            return;
+        }
+        let fresh = self.st.lock().unwrap().join_requests.insert(req.node_id.clone(), req).is_none();
+        if fresh {
+            self.emit_status();
+            self.emit(EV_JOIN_REQUEST, payload);
+        }
+    }
+
+    /// A join request is decided or gone.
+    fn drop_request(&self, node_id: &str) {
+        if self.st.lock().unwrap().join_requests.remove(node_id).is_some() {
+            self.emit_status();
+            self.emit(EV_JOIN_RESOLVED, json!({ "nodeId": node_id }));
+        }
+    }
+
     fn on_event(&self, name: &str, payload: Value) {
+        if name == EV_JOIN_REQUEST {
+            self.join_requested(payload);
+            return;
+        }
+        if name == EV_JOIN_RESOLVED {
+            if let Some(id) = payload["nodeId"].as_str() {
+                self.drop_request(id);
+            }
+            return;
+        }
         if let Some(topic) = remote::topic_of(name, &payload) {
             let mut st = self.st.lock().unwrap();
             if let Some(buf) = st.pending.get_mut(&topic) {

@@ -68,7 +68,7 @@ async fn admit(via: &Node, joiner: &Node) {
     let req = pending(via)[0].clone();
     until("joiner code", 5, || joiner.mesh.status()["joining"]["code"].is_string()).await;
     assert_eq!(req["code"], joiner.mesh.status()["joining"]["code"], "both sides show the same code");
-    via.mesh.approve(req["nodeId"].as_str().unwrap()).unwrap();
+    via.mesh.approve(req["nodeId"].as_str().unwrap()).await.unwrap();
     until("membership", 10, || joiner.mesh.is_member()).await;
 }
 
@@ -252,4 +252,36 @@ async fn a_member_that_leaves_drops_off_every_list() {
     // It can ask to join again, like any new computer.
     admit(&b, &c).await;
     until("charlie back on alpha", 20, || a.mesh.connected(&cid)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn any_member_can_decide_a_join_request() {
+    let (a, b, c, d) = (node("alpha5"), node("bravo5"), node("charlie5"), node("delta5"));
+    a.mesh.create(PASS, "alpha5").unwrap();
+    admit(&a, &b).await;
+
+    // C asks A; B, which C never contacted, sees the request with the same code and approves it.
+    c.mesh.join(&url(&a).await, PASS, "charlie5").unwrap();
+    let cid = c.mesh.node_id().to_owned();
+    until("request on bravo", 10, || pending(&b).iter().any(|r| r["nodeId"] == cid.as_str())).await;
+    until("joiner code", 5, || c.mesh.status()["joining"]["code"].is_string()).await;
+    let seen = pending(&b).into_iter().find(|r| r["nodeId"] == cid.as_str()).unwrap();
+    assert_eq!(seen["code"], c.mesh.status()["joining"]["code"], "the approver compares the joiner's code");
+    assert_eq!(seen["host"], a.mesh.node_id());
+    b.mesh.approve(&cid).await.unwrap();
+    until("charlie joins", 10, || c.mesh.is_member()).await;
+    let rec = crate::mesh::members::get(&c.db, &cid).unwrap().unwrap();
+    assert_eq!(rec.approver, b.mesh.node_id(), "the admission is bravo's, not the host's");
+    until("request clears everywhere", 10, || pending(&a).is_empty() && pending(&b).is_empty()).await;
+    until("alpha lists charlie", 10, || member_state(&a, &cid) != "").await;
+
+    // Any member can turn a request away as well.
+    d.mesh.join(&url(&a).await, PASS, "delta5").unwrap();
+    let did = d.mesh.node_id().to_owned();
+    until("request on charlie", 10, || pending(&c).iter().any(|r| r["nodeId"] == did.as_str())).await;
+    c.mesh.reject(&did).await.unwrap();
+    until("delta is turned away", 10, || d.mesh.status()["joining"]["status"] == "rejected").await;
+    assert!(!d.mesh.is_member());
+    until("request clears", 10, || pending(&a).is_empty() && pending(&c).is_empty()).await;
+    assert!(c.mesh.approve(&did).await.is_err(), "a decided request can't be approved");
 }
