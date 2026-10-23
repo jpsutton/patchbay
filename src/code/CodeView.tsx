@@ -39,9 +39,12 @@ import { DiffView, diffStats } from "./DiffView";
 import { changesKey, collectChanges, normalizePath, type FileChange } from "./changes";
 import { todoPlanOf } from "../lib/todoPlan";
 import { CopyButton, copyText } from "../components/CopyButton";
+import { ListenButton, ReadAloudButton, useSpeakingId, useStopSpeechWhenHidden } from "../components/ReadAloudButton";
 import { ExportMenu } from "../components/ExportMenu";
 import { codeToJson, codeToMarkdown, saveExport } from "../lib/export";
-import { useViewAction } from "../lib/shortcuts";
+import { useViewAction, ViewActive } from "../lib/shortcuts";
+import { speakingNow, speakText, stopSpeech } from "../lib/speech";
+import { proseSinceLastUser } from "../lib/spokenText";
 import { HeaderButton } from "../components/HeaderButton";
 import { useDragRegion, WindowControls } from "../components/WindowControls";
 import { isRemoteApp } from "../lib/platform";
@@ -466,13 +469,21 @@ function UserEntry({
   );
 }
 
-function AgentEntry({ text }: { text: string }) {
+function AgentEntry({ text, speechId, settled }: { text: string; speechId: string; settled: boolean }) {
+  const reading = useSpeakingId() === speechId;
   return (
     <div className="group">
       <Markdown text={text} />
-      <div className="mt-1 flex gap-0.5 text-muted opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-        <CopyButton text={text} label="Copy Markdown" icon={<CopyIcon size={14} />} />
-      </div>
+      {settled && text.trim() && (
+        <div
+          className={`action-row mt-1 flex gap-0.5 text-muted transition-opacity group-hover:opacity-100 focus-within:opacity-100 ${
+            reading ? "" : "opacity-0"
+          }`}
+        >
+          <ReadAloudButton id={speechId} text={text} />
+          <CopyButton text={text} label="Copy Markdown" icon={<CopyIcon size={14} />} />
+        </div>
+      )}
     </div>
   );
 }
@@ -494,6 +505,8 @@ const EntryView = memo(function EntryView({
   canEdit,
   onEditing,
   onEdit,
+  speechId,
+  settled,
 }: {
   e: Entry;
   /** The entry's index, passed back to `onEditing` and `onEdit`. */
@@ -506,6 +519,10 @@ const EntryView = memo(function EntryView({
   canEdit: boolean;
   onEditing?: (i: number | null) => void;
   onEdit?: (i: number, text: string, atts: Attachment[]) => Promise<boolean>;
+  /** Stable id for Read aloud. Agent prose only. */
+  speechId: string;
+  /** False while this bubble is the one still growing. */
+  settled: boolean;
 }) {
   switch (e.kind) {
     case "user":
@@ -518,7 +535,7 @@ const EntryView = memo(function EntryView({
         />
       );
     case "agent":
-      return <AgentEntry text={e.text} />;
+      return <AgentEntry text={e.text} speechId={speechId} settled={settled} />;
     case "image":
       return e.from === "user" ? (
         <div className="flex justify-end">
@@ -866,6 +883,29 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   // The header's badge needs the count even with the panel shut, so this always runs; the key
   // keeps it from redoing the work when only text or non-diff tool output changed.
   const changesCache = useRef<{ key: unknown[]; value: FileChange[] } | null>(null);
+  const viewActive = useContext(ViewActive);
+  const listenOn = useStore((s) => s.prefs.readAloudListen);
+  const skipListen = useRef(false);
+  const busy = !!state?.busy;
+  useStopSpeechWhenHidden();
+  const turnRef = useRef({ id: activeId, busy });
+
+  useEffect(() => {
+    const prev = turnRef.current;
+    turnRef.current = { id: activeId, busy };
+    if (prev.id !== activeId || !prev.busy || busy) return;
+    if (!viewActive || !listenOn) return;
+    if (skipListen.current) {
+      skipListen.current = false;
+      return;
+    }
+    const entries = activeId ? useStore.getState().code[activeId]?.entries : undefined;
+    if (!entries) return;
+    const text = proseSinceLastUser(entries);
+    if (!text.trim()) return;
+    speakText(text, `listen:${activeId}`).catch((e) => setToast(e instanceof Error ? e.message : "Could not read this aloud"));
+  }, [activeId, busy, viewActive, listenOn, setToast]);
+
   const changes = useMemo(() => {
     if (!state || !session) return [];
     const key = [session.cwd, ...changesKey(state.entries, state.toolCalls)];
@@ -879,7 +919,16 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   useViewAction((a) => {
     if (!activeId) return;
     const cur = useStore.getState().code[activeId];
-    if (a === "stop" && cur?.busy) api.codeCancel(activeId);
+    if (a === "stop") {
+      if (speakingNow()) {
+        stopSpeech();
+        return;
+      }
+      if (cur?.busy) {
+        skipListen.current = true;
+        api.codeCancel(activeId);
+      }
+    }
     if (a === "copy-last") {
       const last = [...(cur?.entries ?? [])].reverse().find((x) => x.kind === "agent");
       if (last && last.kind === "agent") {
@@ -1045,7 +1094,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     for (const r of earlierRuns) {
       rows.push(
         runRow(r, "e", true, (e, i) => (
-          <EntryView key={i} e={e} i={i} tc={e.kind === "tool" ? calls[e.id] : undefined} cwd={session.cwd} editing={false} canEdit={false} />
+          <EntryView key={i} e={e} i={i} tc={e.kind === "tool" ? calls[e.id] : undefined} cwd={session.cwd} editing={false} canEdit={false} speechId={`${session.id}:earlier:${i}`} settled />
         )),
       );
     }
@@ -1067,7 +1116,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     for (const r of historyRuns) {
       rows.push(
         runRow(r, "h", ready, (e, i) => (
-          <EntryView key={i} e={e} i={i} tc={e.kind === "tool" ? calls[e.id] : undefined} cwd={session.cwd} editing={false} canEdit={false} />
+          <EntryView key={i} e={e} i={i} tc={e.kind === "tool" ? calls[e.id] : undefined} cwd={session.cwd} editing={false} canEdit={false} speechId={`${session.id}:history:${i}`} settled />
         )),
       );
     }
@@ -1090,6 +1139,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             canEdit={canEdit && e.kind === "user"}
             onEditing={setEditingIdx}
             onEdit={onEdit}
+            speechId={`${session.id}:live:${i}`}
+            settled={!(s.busy && i === s.entries.length - 1)}
           />
         )),
       );
@@ -1448,7 +1499,10 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                   if (s.entries[i].kind === "user") return setEditingIdx(i);
                 }
               }}
-              onStop={() => api.codeCancel(session.id)}
+              onStop={() => {
+                if (s?.busy) skipListen.current = true;
+                api.codeCancel(session.id);
+              }}
               onSend={send}
               onForceSend={forceSend ? (t, a, m) => send(t, a, m, true) : undefined}
               placeholder={
@@ -1536,6 +1590,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     </div>
                   </>
                 )}
+                <ListenButton />
                 </>
               }
             />

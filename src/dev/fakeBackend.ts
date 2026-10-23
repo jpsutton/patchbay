@@ -929,13 +929,28 @@ export function install() {
         case "delete_model": db.models = db.models.filter((m) => m.id !== a.id); return null;
         case "get_preferences": return JSON.parse(db.settings.preferences ?? "{}");
         case "set_preferences": {
-          const p = a.prefs as { terminalShell?: string; autoCompactPercent?: number | null; usageLimit?: { percent: number } };
+          const p = a.prefs as {
+            terminalShell?: string;
+            autoCompactPercent?: number | null;
+            usageLimit?: { percent: number };
+            readAloudEngine?: string;
+            readAloudRate?: string;
+            readAloudServerUrl?: string;
+          };
           if (p.terminalShell && !p.terminalShell.startsWith("/")) throw `terminal shell ${p.terminalShell} does not exist`;
           if (p.autoCompactPercent != null && (p.autoCompactPercent < 10 || p.autoCompactPercent > 99)) throw "auto-compact threshold must be between 10 and 99%";
           if (p.usageLimit && (p.usageLimit.percent < 1 || p.usageLimit.percent > 100)) throw "usage limit must be between 1 and 100%";
+          if (p.readAloudEngine && !["auto", "system", "builtin", "server"].includes(p.readAloudEngine)) throw "read aloud engine must be one of auto, system, builtin, server";
+          if (p.readAloudRate && !["slower", "normal", "faster"].includes(p.readAloudRate)) throw "read aloud speed must be one of slower, normal, faster";
+          const speechUrl = p.readAloudServerUrl?.trim() ?? "";
+          if (speechUrl && !speechUrl.startsWith("http://") && !speechUrl.startsWith("https://")) throw "speech server URL must be an http or https URL";
           db.settings.preferences = JSON.stringify(a.prefs);
           return null;
         }
+        case "list_native_voices": return [];
+        case "speak_native": return null;
+        case "stop_native": return null;
+        case "synthesize_speech": throw "pnpm dev has no speech server. Use System or Built-in, or run the app.";
         case "claude_overview": {
           const cfg = JSON.parse(db.settings.preferences ?? "{}").claudeConfig ?? {};
           const off = (list: string[] | undefined, x: string) => (list ?? []).includes(x);

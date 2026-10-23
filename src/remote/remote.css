@@ -13,3 +13,8 @@ body {
     min-width: 36px;
   }
 }
+
+/* Copy and Read aloud sit in a row that the desktop reveals on hover. A phone has no hover. */
+.action-row {
+  opacity: 1;
+}

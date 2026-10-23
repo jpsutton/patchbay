@@ -14,6 +14,7 @@ import { ChatNodePicker } from "./ChatNodePicker";
 import { fmtShort } from "../lib/format";
 import { ChatIcon, ChevronLeftIcon, CodeIcon, MonitorIcon, PlusIcon, SettingsIcon, StarIcon, XIcon } from "../components/icons";
 import { Dot } from "../components/Dot";
+import { ReadAloudSettings } from "../settings/ReadAloudSettings";
 
 /** The phone backend's own state (see crates/patchbay-mesh/src/client.rs, `status`). */
 export interface RemoteStatus {
@@ -879,6 +880,10 @@ function SettingsSheet({ status, onClose }: { status: RemoteStatus; onClose: () 
               setFlag(STAY_KEY, on);
             }}
           />
+        </div>
+        <div className="mt-6 font-mono text-[11px] uppercase tracking-[0.06em] text-faint">Reading</div>
+        <div className="mt-2 rounded-xl border border-line bg-panel px-4">
+          <ReadAloudSettings />
         </div>
         <div className="mt-6 font-mono text-[11px] uppercase tracking-[0.06em] text-faint">Computers</div>
         <div className="mt-2 flex flex-col">

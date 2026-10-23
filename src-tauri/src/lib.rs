@@ -14,6 +14,7 @@ mod mesh;
 mod portal_shortcuts;
 mod prefs;
 mod providers;
+mod speech;
 mod terminal;
 mod usage;
 #[cfg(feature = "web")]
@@ -277,6 +278,18 @@ async fn delete_model(state: &AppState, id: String) -> CmdResult<()> {
 
 async fn get_preferences(state: &AppState) -> CmdResult<prefs::Preferences> {
     Ok(prefs::load(&state.db))
+}
+
+/// One clip from a speech server. The window or browser plays the bytes; this process holds the key.
+async fn synthesize_speech(
+    state: &AppState,
+    provider_id: String,
+    base_url: String,
+    model: String,
+    voice: String,
+    text: String,
+) -> CmdResult<speech::SpeechAudio> {
+    Ok(speech::synthesize(&state.db, &provider_id, &base_url, &model, &voice, &text).await?)
 }
 
 async fn set_preferences(state: &AppState, prefs: prefs::Preferences) -> CmdResult<()> {

@@ -642,6 +642,19 @@ export interface Preferences {
   terminalFontSize: number;
   /** Draw typed characters before a slow shell echoes them: auto = when echo lags. */
   terminalLocalEcho: "auto" | "on" | "off";
+  /** auto | system | builtin | server. This device only; preferences are not synced. */
+  readAloudEngine: "auto" | "system" | "builtin" | "server";
+  /** Voice id for the engine in use. Empty means that engine's default. */
+  readAloudVoice: string;
+  readAloudRate: "slower" | "normal" | "faster";
+  /** Speak each new finished reply while its chat or session is on screen. */
+  readAloudListen: boolean;
+  /** OpenAI-compatible speech base URL, used when no provider is chosen. */
+  readAloudServerUrl: string;
+  readAloudServerModel: string;
+  readAloudServerVoice: string;
+  /** An OpenAI-compatible provider whose key and URL to use. */
+  readAloudServerProviderId: string;
 }
 
 export const defaultPreferences: Preferences = {
@@ -679,7 +692,25 @@ export const defaultPreferences: Preferences = {
   terminalShell: "",
   terminalFontSize: 13,
   terminalLocalEcho: "auto",
+  readAloudEngine: "auto",
+  readAloudVoice: "",
+  readAloudRate: "normal",
+  readAloudListen: false,
+  readAloudServerUrl: "",
+  readAloudServerModel: "",
+  readAloudServerVoice: "",
+  readAloudServerProviderId: "",
 };
+
+export interface SpeechAudio {
+  mime: string;
+  audioBase64: string;
+}
+
+export interface NativeVoice {
+  id: string;
+  name: string;
+}
 
 export type TermEvent = { type: "data"; data: string } | { type: "exit"; code: number | null };
 
@@ -733,6 +764,16 @@ export const api = {
   claudeOverview: (cwd: string | null) => invoke<ClaudeOverview>("claude_overview", { cwd }),
   setWebSearchKey: (key: string) => invoke<void>("set_web_search_key", { key }),
   clearWebSearchKey: () => invoke<void>("clear_web_search_key"),
+  listNativeVoices: () => invoke<NativeVoice[]>("list_native_voices"),
+  speakNative: (text: string, voice: string, rate: string) => invoke<void>("speak_native", { text, voice, rate }),
+  stopNative: () => invoke<void>("stop_native"),
+  synthesizeSpeech: (input: {
+    providerId: string;
+    baseUrl: string;
+    model: string;
+    voice: string;
+    text: string;
+  }) => invoke<SpeechAudio>("synthesize_speech", input),
   getSetting: (key: string) => invoke<string | null>("get_setting", { key }),
   setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),
 

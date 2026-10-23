@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { api, errorText, estimateCost, type Attachment, type ChatEvent, type Message } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { AttachmentChip, Composer } from "../components/Composer";
@@ -10,7 +10,7 @@ import { ModelPicker } from "../components/ModelPicker";
 import { ExportMenu } from "../components/ExportMenu";
 import { chatToJson, chatToMarkdown, saveExport } from "../lib/export";
 import { fmtDateTime, fmtTime } from "../lib/format";
-import { useViewAction } from "../lib/shortcuts";
+import { useViewAction, ViewActive } from "../lib/shortcuts";
 import { HeaderButton } from "../components/HeaderButton";
 import { useDragRegion, WindowControls } from "../components/WindowControls";
 import {
@@ -25,6 +25,8 @@ import {
 import { ModelRing } from "../lib/cable";
 import { JumpToBottom, ScrollFade, useStickyScroll } from "../lib/useStickyScroll";
 import { CopyButton, copyText } from "../components/CopyButton";
+import { ListenButton, ReadAloudButton, useSpeakingId, useStopSpeechWhenHidden } from "../components/ReadAloudButton";
+import { speakingNow, stopSpeech, speakText } from "../lib/speech";
 import { EffortPicker } from "../components/EffortPicker";
 import { SystemPromptPanel } from "./SystemPromptPanel";
 import { notifyInBackground } from "../lib/notify";
@@ -109,6 +111,7 @@ function MessageRow({
   const models = useStore((s) => s.models);
   const providers = useStore((s) => s.providers);
   const body = useRef<HTMLDivElement>(null);
+  const reading = useSpeakingId() === m.id;
   const time = (
     <span className="meta text-faint" title={fmtDateTime(m.createdAt)}>
       {fmtTime(m.createdAt)}
@@ -210,10 +213,11 @@ function MessageRow({
       )}
       {!live && (
         <div
-          className={`mt-2 flex items-center gap-0.5 text-muted transition-opacity group-hover:opacity-100 focus-within:opacity-100 ${
-            m.siblingIds.length > 1 ? "" : "opacity-0"
+          className={`action-row mt-2 flex items-center gap-0.5 text-muted transition-opacity group-hover:opacity-100 focus-within:opacity-100 ${
+            m.siblingIds.length > 1 || reading ? "" : "opacity-0"
           }`}
         >
+          {m.content && <ReadAloudButton id={m.id} text={m.content} />}
           {m.content && <CopyButton text={m.content} label="Copy Markdown" icon={<CopyIcon size={14} />} />}
           {m.content && (
             <CopyButton
@@ -438,9 +442,39 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
   const running = !!stream?.running;
   // An empty chat centers the composer under the greeting instead of pinning it to the bottom.
   const empty = messages.length === 0 && !running;
+  const viewActive = useContext(ViewActive);
+  const listenOn = useStore((s) => s.prefs.readAloudListen);
+  const skipListen = useRef(false);
+  useStopSpeechWhenHidden();
+  const turnRef = useRef({ id: activeId, running });
+
+  useEffect(() => {
+    const prev = turnRef.current;
+    turnRef.current = { id: activeId, running };
+    if (prev.id !== activeId || !prev.running || running) return;
+    if (!viewActive || !listenOn) return;
+    if (skipListen.current) {
+      skipListen.current = false;
+      return;
+    }
+    const cur = activeId ? useStore.getState().chatStreams[activeId] : undefined;
+    if (!cur || cur.error || !cur.text.trim()) return;
+    speakText(cur.text, cur.assistantId ?? `listen:${activeId}`).catch((e) =>
+      setToast(e instanceof Error ? e.message : "Could not read this aloud"),
+    );
+  }, [activeId, running, viewActive, listenOn, setToast]);
 
   useViewAction((a) => {
-    if (a === "stop" && running && activeId) api.cancelChat(activeId);
+    if (a === "stop") {
+      if (speakingNow()) {
+        stopSpeech();
+        return;
+      }
+      if (running && activeId) {
+        skipListen.current = true;
+        api.cancelChat(activeId);
+      }
+    }
     if (a === "copy-last") {
       const last = [...messages].reverse().find((m) => m.role === "assistant" && m.content);
       if (last) {
@@ -555,7 +589,10 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
           draftKey={`chat:${activeId ?? "new"}`}
           busy={running}
           onEditLast={editLast}
-          onStop={() => activeId && api.cancelChat(activeId)}
+          onStop={() => {
+            if (running && activeId) skipListen.current = true;
+            if (activeId) api.cancelChat(activeId);
+          }}
           onSend={(t, a) => send(t, a)}
           placeholder={model ? `Message ${model.displayName}` : "Add a model in Settings to start"}
           warnNoVision={model ? !model.vision : false}
@@ -576,6 +613,7 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
                 modelDefault={model?.params.reasoningEffort ?? null}
                 onChange={(v) => setChatEffort(activeId ?? "new", v)}
               />
+              <ListenButton />
               {controls}
             </>
           }
