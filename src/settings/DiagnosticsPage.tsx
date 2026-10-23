@@ -9,7 +9,8 @@ import {
 } from "../lib/ipc";
 import { isWeb } from "../lib/platform";
 import { useStore } from "../lib/store";
-import { Row, Toggle } from "./PreferencesPage";
+import { Row } from "./PreferencesPage";
+import { Toggle } from "../components/Toggle";
 
 /** The newest frames the viewer lists; saving to a file keeps them all. */
 const SHOWN = 500;

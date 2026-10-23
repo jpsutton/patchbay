@@ -61,6 +61,7 @@ import {
   XIcon,
 } from "../components/icons";
 import { ChipRows, ChipSelect, ChipText } from "../components/ChipSelect";
+import { Toggle } from "../components/Toggle";
 import { AgentImage, AttachedImage } from "../components/AgentImage";
 import { ModelRing } from "../lib/cable";
 import { JumpToBottom, ScrollFade, useStickyScroll } from "../lib/useStickyScroll";
@@ -86,6 +87,15 @@ export async function newSessionIn(dir: string, agent?: AgentId, host?: string |
 /** Choices of a select config option, flattening groups. */
 function configChoices(o: AcpConfigOption) {
   return o.options.flatMap((c) => ("options" in c ? c.options : [c]));
+}
+
+/**
+ * A select option whose only values are "on" and "off" (Claude Code's Fast mode, Patchbay's
+ * Compact prompts): agents send these as selects, but they read better as a switch.
+ */
+function isOnOff(o: AcpConfigOption) {
+  const values = configChoices(o).map((c) => c.value);
+  return values.length === 2 && values.includes("on") && values.includes("off");
 }
 
 /** An option's name. Claude Code calls its persona option "Agent", beside the agent picker. */
@@ -200,7 +210,19 @@ function MoreOptions({
                 <div className="text-[13px] text-fg">{optionName(o)}</div>
                 {o.description && <div className="text-[12px] leading-4 text-muted">{o.description}</div>}
               </div>
-              <ConfigChip option={o} disabled={disabled} onSet={onSet} />
+              {/* Keep the control whole: beside a long description a shrinking select hides its value. */}
+              <div className="shrink-0">
+                {isOnOff(o) ? (
+                  <Toggle
+                    label={optionName(o)}
+                    checked={o.currentValue === "on"}
+                    disabled={disabled}
+                    onChange={(on) => onSet(o, on ? "on" : "off")}
+                  />
+                ) : (
+                  <ConfigChip option={o} disabled={disabled} onSet={onSet} />
+                )}
+              </div>
             </div>
           ))}
         </div>

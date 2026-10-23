@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api, errorText, type KeyValue, type McpConfig, type McpServer } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { input } from "./ProviderPage";
-import { Toggle } from "./PreferencesPage";
+import { Toggle } from "../components/Toggle";
 
 const blank = (): McpConfig => ({ transport: "stdio", command: "", args: [], env: [], url: "", headers: [] });
 
