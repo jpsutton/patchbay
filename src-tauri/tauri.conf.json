@@ -28,15 +28,12 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": ["binaries/grok"],
     "license": "Apache-2.0",
     "licenseFile": "../LICENSE",
     "resources": {
       "../LICENSE": "LICENSE",
       "../NOTICE": "NOTICE",
-      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
-      "../vendor/grok-build/THIRD-PARTY-NOTICES": "GROK_BUILD_THIRD_PARTY_NOTICES",
-      "../vendor/grok-build/third_party/NOTICE": "GROK_BUILD_VENDORED_NOTICE"
+      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
     },
     "macOS": {
       "signingIdentity": "-"

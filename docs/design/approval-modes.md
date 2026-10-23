@@ -86,6 +86,12 @@ pub struct ApprovalSetup {
 
 Environment and config changes go in the existing `env` and config-writing steps.
 
+### Patchbay (the built-in agent)
+
+- It never decides on its own: every call that changes something (Write, Edit, NotebookEdit, Bash, KillShell, WebFetch, MCP tools) goes to the client as a `session/request_permission` with ACP tool kinds (`edit`, `execute`, `fetch`, `other`), so `classify` and `decide` judge it like any other agent's. Plan approval (`switch_mode`, option ids `exit-plan-*`) and questions (`__ask_question_skip__`) are decisions and always ask.
+- Gaps: reads and searches inside the project (Read, Glob, Grep, BashOutput) run without asking. A read or search outside the project asks.
+- Bash edits are not tracked as edits: the call is `execute`, so it asks like any shell command, but a rewind can't restore files it changed.
+
 ### Grok Build
 
 - Write `[ui] permission_mode = "default"` into the rendered `config.toml`, whatever the preference says. Patchbay decides from there.

@@ -15,9 +15,9 @@ Download it from the [Releases page](https://github.com/jpsutton/patchbay/releas
 | Windows | `patchbayd-<version>-windows-x86_64.zip` |
 | macOS | `patchbayd-<version>-macos-aarch64.tar.gz` (Apple silicon) |
 
-The packages install `patchbayd`, its own copy of `grok` (the Grok Build agent) and the web UI under `/usr/lib/patchbayd`, with `patchbayd` on your `PATH` and two systemd units (see below). They don't conflict with the desktop app's packages. Other coding agents (Claude Code, OpenCode and so on) are found on `PATH` as in the desktop app.
+The packages install `patchbayd` and the web UI under `/usr/lib/patchbayd`, with `patchbayd` on your `PATH` and two systemd units (see below). They don't conflict with the desktop app's packages. The coding agent is built in. Other coding agents (Claude Code, OpenCode, Grok Build and so on) are found on `PATH` as in the desktop app.
 
-The archives hold the same three pieces. Keep them together, because the daemon finds `grok` and the UI relative to its own binary. On Linux, unpack the tarball into `~/.local/opt/patchbayd`, where its systemd unit expects it:
+The archives hold the same pieces. Keep them together, because the daemon finds the UI relative to its own binary. On Linux, unpack the tarball into `~/.local/opt/patchbayd`, where its systemd unit expects it:
 
 ```bash
 mkdir -p ~/.local/opt/patchbayd

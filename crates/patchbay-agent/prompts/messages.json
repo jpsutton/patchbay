@@ -1,0 +1,126 @@
+{
+  "skills": {
+    "full": "# Skills\n\nThese skills are installed. When a task matches one's description, load it with the Skill tool before you start, then follow it.\n\n{list}",
+    "min": "# Skills\n\nInstalled skills. Task matches description: load with Skill tool first, then follow.\n\n{list}"
+  },
+  "slash_command": {
+    "full": "The user ran the /{name} command. Its instructions follow; carry them out.\n\n{text}",
+    "min": "User ran /{name}. Instructions follow; carry out.\n\n{text}"
+  },
+  "hook_context": {
+    "full": "A hook added this context:\n{text}",
+    "min": "Hook context:\n{text}"
+  },
+  "hook_blocked_tool": {
+    "full": "A hook blocked this call: {reason}",
+    "min": "Hook blocked call: {reason}"
+  },
+  "hook_feedback": {
+    "full": "A hook reviewed the result: {reason}",
+    "min": "Hook on result: {reason}"
+  },
+  "hook_stop": {
+    "full": "A Stop hook asked you to keep going: {reason}",
+    "min": "Stop hook says keep going: {reason}"
+  },
+  "steered": {
+    "full": "The user sent the message below while you were working. Take it into account from here on; it may change what you should do next.",
+    "min": "User sent message below mid-work. Account for it from here; may change next steps."
+  },
+  "file_changed": {
+    "full": "{path} changed since you read it (the user or a tool edited it). Read it again before you edit it.",
+    "min": "{path} changed since read (user or tool edited). Re-read before edit."
+  },
+  "file_deleted": {
+    "full": "{path} was deleted since you read it.",
+    "min": "{path} deleted since read."
+  },
+  "model_changed": {
+    "full": "The session's model was changed to {model}. Earlier replies came from a different model.",
+    "min": "Session model changed to {model}. Earlier replies from different model."
+  },
+  "todo_stale": {
+    "full": "You have not used TodoWrite for a while. If the list below is out of date, update it; if the work is done, clear it. Current list:\n{list}",
+    "min": "TodoWrite unused a while. List below stale: update; work done: clear. Current list:\n{list}"
+  },
+  "plan_mode": {
+    "full": "# Plan mode\n\nThe session is in plan mode. Do not change files or run commands that change anything. Explore with Read, Glob and Grep, write the plan, then call ExitPlanMode with it.",
+    "min": "# Plan mode\n\nPlan mode. No file changes, no state-changing commands. Explore with Read, Glob, Grep, write plan, call ExitPlanMode with it."
+  },
+  "user_instructions": {
+    "full": "# The user's instructions\n\n{text}",
+    "min": "# The user's instructions\n\n{text}"
+  },
+  "project_instructions": {
+    "full": "# Project instructions ({path})\n\nThese are background context from the project, followed unless the user says otherwise.\n\n{text}",
+    "min": "# Project instructions ({path})\n\nProject background context; follow unless user says otherwise.\n\n{text}"
+  },
+  "declined": {
+    "full": "The user declined this tool call, so it did not run. Do not retry it or work around it; ask what they would like instead.",
+    "min": "User declined this tool call; not run. Don't retry or work around; ask what they want."
+  },
+  "cancelled_before_run": {
+    "full": "The tool call was cancelled before it ran.",
+    "min": "Tool call cancelled before run."
+  },
+  "unknown_tool": {
+    "full": "Unknown tool: {name}",
+    "min": "Unknown tool: {name}"
+  },
+  "not_in_plan_mode": {
+    "full": "{name} is not available in plan mode. Explore with Read, Glob and Grep, then call ExitPlanMode with your plan.",
+    "min": "{name} unavailable in plan mode. Explore with Read, Glob, Grep, then call ExitPlanMode with plan."
+  },
+  "interrupted": {
+    "full": "Interrupted by the user.",
+    "min": "Interrupted by user."
+  },
+  "notes_intro": {
+    "full": "Background subagents have finished. Their results are below; read them and carry on. Do not repeat them verbatim to the user unless asked.\n\n{body}",
+    "min": "Background subagents finished. Results below; read, carry on. Don't repeat verbatim to user unless asked.\n\n{body}"
+  },
+  "inbox": {
+    "full": "Message from the main agent:\n{text}",
+    "min": "Message from main agent:\n{text}"
+  },
+  "fork_note": {
+    "full": "You are a fork of the main agent: its conversation above is yours to read, but you are a separate run. Do exactly the directive below and then stop. Do not start subagents. Finish with a short report of what you found or did; that report is all the main agent sees.",
+    "min": "You are fork of main agent: conversation above is yours to read, but you are separate run. Do exactly directive below, then stop. No subagents. Finish with short report of what you found/did; report is all main agent sees."
+  },
+  "bg_started": {
+    "full": "Subagent {handle} ({kind}) started in the background. Its report arrives as a task notification; carry on, and do not poll. Stop it with TaskStop, or send it a message with SendMessage.",
+    "min": "Subagent {handle} ({kind}) started in background. Report arrives as task notification; carry on, don't poll. Stop with TaskStop, message with SendMessage."
+  },
+  "bg_continuing": {
+    "full": "{to} ({kind}) is continuing in the background; its report arrives as a task notification.",
+    "min": "{to} ({kind}) continuing in background; report arrives as task notification."
+  },
+  "continue_hint": {
+    "full": "[subagent {handle}; continue it with SendMessage]",
+    "min": "[subagent {handle}; continue with SendMessage]"
+  },
+  "compact_system": {
+    "full": "You summarize conversations between a user and a coding agent, faithfully and in detail.",
+    "min": "Summarize user/coding-agent conversations faithfully, in detail."
+  },
+  "compact_continue": {
+    "full": "The session continues from the conversation summarized above. Pick up where it left off. Do not repeat finished work, and do not mention the summary unless asked.",
+    "min": "Session continues from summary above. Pick up where it left off. No repeating finished work; don't mention summary unless asked."
+  },
+  "compact_focus": {
+    "full": "The user asked that the summary pay particular attention to: {focus}",
+    "min": "User asked summary focus on: {focus}"
+  },
+  "web_answer_system": {
+    "full": "You answer questions about a web page. Use only the page content. Be concise and quote sparingly.",
+    "min": "Answer questions about web page. Page content only. Concise, quote sparingly."
+  },
+  "web_answer_user": {
+    "full": "Page ({url}):\n---\n{text}\n---\n\n{prompt}",
+    "min": "Page ({url}):\n---\n{text}\n---\n\n{prompt}"
+  },
+  "search_sources": {
+    "full": "When you use these results, cite the pages as Markdown links in a Sources section at the end of your answer.",
+    "min": "Using these results: cite pages as Markdown links in Sources section at end of answer."
+  }
+}

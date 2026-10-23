@@ -1,4 +1,4 @@
-//! Render a private `$GROK_HOME/config.toml` for the Grok Build sidecar from Patchbay's providers.
+//! Render a private `$GROK_HOME/config.toml` for an external Grok Build from Patchbay's providers.
 //!
 //! API keys never touch this file: each provider key is passed to the child as an env var
 //! (`PATCHBAY_KEY_<n>`) referenced by `env_key` (Bearer) or `env_http_headers` (x-api-key).
@@ -82,7 +82,7 @@ pub fn render(db: &Db, default_model_ref: Option<&str>) -> Result<Rendered> {
         )])),
     );
     if !cc.plugins {
-        // No config cell for this; see patches/0004-claude-plugins-env-gate.patch.
+        // No config cell for this; only builds of Grok Build that read the env var honour it.
         env.push(("GROK_CLAUDE_PLUGINS_ENABLED".to_owned(), "false".to_owned()));
     }
     root.insert(
@@ -96,9 +96,14 @@ pub fn render(db: &Db, default_model_ref: Option<&str>) -> Result<Rendered> {
     let mut provider_tables = Table::new();
     for (i, (p, inline)) in db.list_providers()?.into_iter().enumerate() {
         let mut t = Table::new();
-        t.insert("base_url".into(), s(&providers::normalize_base_url(&p.base_url)));
+        let mut base_url = providers::normalize_base_url(&p.base_url);
+        if p.kind == ProviderKind::Gemini {
+            // Grok Build has no Gemini backend; Google serves the OpenAI dialect under /openai.
+            base_url.push_str("/openai");
+        }
+        t.insert("base_url".into(), s(&base_url));
         let backend = match p.kind {
-            ProviderKind::OpenaiChat => "chat_completions",
+            ProviderKind::OpenaiChat | ProviderKind::Gemini => "chat_completions",
             ProviderKind::OpenaiResponses => "responses",
             ProviderKind::Anthropic => "messages",
         };

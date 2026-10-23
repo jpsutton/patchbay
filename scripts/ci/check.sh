@@ -26,12 +26,5 @@ for f in $(git ls-files '*.desktop'); do
   check "desktop-file-validate $f" desktop-file-validate "$f"
 done
 check "PKGBUILD" bash -c 'cd packaging/linux/arch && makepkg --printsrcinfo >/dev/null'
-# shellcheck disable=SC2016 # expanded by the inner shell
-check "patches apply to vendor/grok-build" bash -c '
-  for p in patches/*.patch; do
-    git -C vendor/grok-build apply --check "../../$p" 2>/dev/null \
-      || git -C vendor/grok-build apply --reverse --check "../../$p" \
-      || { echo "$p does not apply"; exit 1; }
-  done'
 check "versions agree" scripts/ci/version.sh
 exit $((failures > 0))

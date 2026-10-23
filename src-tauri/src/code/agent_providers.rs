@@ -104,6 +104,7 @@ fn opencode(db: &Db, model_ref: &str) -> Result<Setup> {
             ProviderKind::OpenaiChat => "@ai-sdk/openai-compatible",
             ProviderKind::OpenaiResponses => "@ai-sdk/openai",
             ProviderKind::Anthropic => "@ai-sdk/anthropic",
+            ProviderKind::Gemini => "@ai-sdk/google",
         };
         let mut options = json!({ "baseURL": providers::normalize_base_url(&p.base_url) });
         if let Some(key) = providers::load_key(&p.id, inline.as_deref()) {

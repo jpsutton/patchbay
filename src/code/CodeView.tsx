@@ -4,6 +4,7 @@ import {
   api,
   errorText,
   estimateCost,
+  usesPatchbayModels,
   type AcpConfigOption,
   type AcpToolCall,
   type AgentId,
@@ -880,8 +881,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
           : "Starting agent…"
         : null;
   const acpModels = s?.models;
-  // Only Grok Build runs on Patchbay's models (`pb-<id>`); other agents bring their own.
-  const patchbayModels = session.agent === "grok";
+  // Patchbay's own agent and Grok Build run on Patchbay's models (`pb-<id>`); other agents bring their own.
+  const patchbayModels = usesPatchbayModels(session.agent);
   const currentModelRef = patchbayModels
     ? (acpModels?.currentModelId?.replace(/^pb-/, "") ?? session.modelRef)
     : (acpModels?.currentModelId ?? session.agentModel);
@@ -1082,7 +1083,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   ];
   const gaps = s?.approvalGaps ?? [];
 
-  const agentLabel = session.agent !== "grok" && (
+  const agentLabel = session.agent !== "patchbay" && (
     <span {...drag} className="shrink-0 text-[12px] text-muted" title="Coding agent">
       {AGENT_LABELS[session.agent] ?? session.agent}
     </span>

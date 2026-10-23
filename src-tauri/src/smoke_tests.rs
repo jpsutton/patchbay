@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use xai_grok_sampler::{RequestId, RetryPolicy, SamplerActor, SamplingEvent};
-use xai_grok_sampling_types::{ContentPart, ConversationItem, ConversationRequest};
+use patchbay_llm::{Client, Message, Part, Request, Role, SystemBlock};
+use tokio_util::sync::CancellationToken;
 
 use crate::db::{Db, Model, Provider, ProviderKind};
 use crate::providers::{self, Resolved};
@@ -37,43 +37,24 @@ fn mock_resolved(kind: ProviderKind) -> Resolved {
     }
 }
 
-async fn sample(kind: ProviderKind, parts: Vec<ContentPart>) -> String {
+async fn sample(kind: ProviderKind, parts: Vec<Part>) -> String {
     let r = mock_resolved(kind);
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let h = SamplerActor::spawn(providers::sampler_config(&r), RetryPolicy::default(), tx);
-    h.submit(
-        RequestId::random(),
-        ConversationRequest {
-            items: vec![
-                ConversationItem::system("be terse"),
-                ConversationItem::user_with_parts(parts),
-            ],
-            ..Default::default()
-        },
-    );
-    let mut out = String::new();
-    while let Some(ev) = rx.recv().await {
-        match ev {
-            SamplingEvent::ChannelToken { text, .. } => out.push_str(&text),
-            SamplingEvent::Completed { .. } => return out,
-            SamplingEvent::Failed { error, .. } => panic!("sampling failed: {error:?}"),
-            _ => {}
-        }
-    }
-    panic!("stream ended without terminal event")
+    let req = Request {
+        system: vec![SystemBlock::new("be terse")],
+        messages: vec![Message::with_parts(Role::User, parts)],
+        ..Default::default()
+    };
+    Client::new(providers::llm_config(&r))
+        .complete_text(&req, &CancellationToken::new())
+        .await
+        .unwrap_or_else(|e| panic!("sampling failed: {e}"))
 }
 
-fn parts() -> Vec<ContentPart> {
+fn parts() -> Vec<Part> {
     vec![
-        ContentPart::Text {
-            text: Arc::from("<file name=\"a.csv\" type=\"text/csv\">\na,b\n</file>"),
-        },
-        ContentPart::Image {
-            url: Arc::from("data:image/png;base64,iVBORw0KGgo="),
-        },
-        ContentPart::Text {
-            text: Arc::from("what is this?"),
-        },
+        Part::Text("<file name=\"a.csv\" type=\"text/csv\">\na,b\n</file>".into()),
+        Part::Image { mime: "image/png".into(), data: "iVBORw0KGgo=".into() },
+        Part::Text("what is this?".into()),
     ]
 }
 
@@ -109,8 +90,8 @@ async fn smoke_generate_title() {
 #[tokio::test]
 #[ignore]
 async fn smoke_anthropic_pdf_document() {
-    let pdf = ContentPart::Image { url: Arc::from("data:application/pdf;base64,JVBERi0xLjQK") };
-    let out = sample(ProviderKind::Anthropic, vec![pdf, ContentPart::Text { text: Arc::from("summarize") }]).await;
+    let pdf = Part::Document { mime: "application/pdf".into(), name: "a.pdf".into(), data: "JVBERi0xLjQK".into() };
+    let out = sample(ProviderKind::Anthropic, vec![pdf, Part::Text("summarize".into())]).await;
     println!("{out}");
     assert!(out.contains("[document application/pdf"), "{out}");
     assert!(out.contains("images seen: 0"), "{out}");
@@ -154,7 +135,13 @@ fn smoke_render_grok_config() {
     println!("GROK_HOME={}", dir.join("grok").display());
 }
 
-/// Full Code-tab path: CodeManager -> ACP client -> Grok Build sidecar -> mock model.
+/// The agent the Code smoke tests drive: `patchbay` (in-process) unless `PATCHBAY_SMOKE_AGENT`
+/// names another installed agent, such as `grok` (it must be on PATH).
+fn smoke_agent() -> String {
+    std::env::var("PATCHBAY_SMOKE_AGENT").unwrap_or_else(|_| "patchbay".into())
+}
+
+/// Full Code-tab path: CodeManager -> ACP client -> agent -> mock model.
 #[test]
 #[ignore]
 fn smoke_code_agent_edit_with_permission() {
@@ -207,7 +194,7 @@ fn smoke_code_agent_edit_with_permission() {
     })
     .unwrap();
     let session = db
-        .create_code_session(proj.to_str().unwrap(), Some("m"), "grok", "default")
+        .create_code_session(proj.to_str().unwrap(), Some("m"), &smoke_agent(), "default")
         .unwrap();
     crate::prefs::save(
         &db,
@@ -265,6 +252,19 @@ fn smoke_code_agent_edit_with_permission() {
             .acp_session_id
             .is_some()
     );
+
+    // The agent offers the compact-prompts option, and the app can switch it like any config option.
+    if smoke_agent() == "patchbay" {
+        let has_option = events.lock().unwrap().iter().any(|e| {
+            matches!(&e.event, CodeEvent::SessionReady { config_options, .. }
+                if config_options.as_array().is_some_and(|o| o.iter().any(|x| x["id"] == "minify_prompts" && x["currentValue"] == "off")))
+        });
+        assert!(has_option, "no minify_prompts option in sessionReady");
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(manager.set_config_option(&session.id, "minify_prompts".into(), "on".into()))
+            .expect("set the option");
+    }
 
     manager
         .send(
@@ -354,7 +354,7 @@ fn smoke_code_agent_edit_with_permission() {
     assert!(after.input >= before.input && after.output >= before.output, "{before:?} -> {after:?}");
 }
 
-/// Rewind via `x.ai/rewind/*`: dropping the first prompt reverts its file edit and its history.
+/// Rewind: dropping the first prompt reverts its file edit and its history.
 #[test]
 #[ignore]
 fn smoke_code_rewind() {
@@ -395,7 +395,7 @@ fn smoke_code_rewind() {
     })
     .unwrap();
     let session = db
-        .create_code_session(proj.to_str().unwrap(), Some("m"), "grok", "default")
+        .create_code_session(proj.to_str().unwrap(), Some("m"), &smoke_agent(), "default")
         .unwrap();
 
     let manager = Arc::new(CodeManager::default());
@@ -404,8 +404,13 @@ fn smoke_code_rewind() {
         let events = events.clone();
         let manager = manager.clone();
         Arc::new(move |env: Envelope| {
-            if let CodeEvent::Permission { request_id, .. } = &env.event {
-                manager.respond_permission(request_id, Some("allow-once".into()));
+            if let CodeEvent::Permission { request_id, request } = &env.event {
+                let allow = request["options"]
+                    .as_array()
+                    .and_then(|o| o.iter().find(|x| x["kind"] == "allow_once"))
+                    .and_then(|x| x["optionId"].as_str())
+                    .map(str::to_owned);
+                manager.respond_permission(request_id, allow);
             }
             events.lock().unwrap().push(env);
         })
@@ -501,7 +506,7 @@ fn smoke_code_rules_and_mcp() {
         params: Default::default(),
     })
     .unwrap();
-    let session = db.create_code_session(proj.to_str().unwrap(), Some("m"), "grok", "default").unwrap();
+    let session = db.create_code_session(proj.to_str().unwrap(), Some("m"), &smoke_agent(), "default").unwrap();
     db.add_permission_rule(proj.to_str().unwrap(), "edit", "").unwrap();
     let mock_mcp = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/mock-mcp.py");
     let mcp_log = root.join("mcp.log");
@@ -598,8 +603,9 @@ fn smoke_code_rules_and_mcp() {
     assert!(log.contains("initialize") && log.contains("tools/list"), "MCP server not used: {log:?}");
 }
 
-/// What the agent picks up from `~/.claude` follows the Claude-config preferences.
-/// Uses the real home directory, so it only asserts when you have Claude skills or plugins.
+/// What Grok Build picks up from `~/.claude` follows the Claude-config preferences. Needs `grok`
+/// on PATH (the test is skipped without it), and uses the real home directory, so it only
+/// asserts when you have Claude skills or plugins.
 #[test]
 #[ignore]
 fn smoke_claude_config_toggle() {
@@ -608,6 +614,11 @@ fn smoke_claude_config_toggle() {
 
     use crate::code::CodeManager;
     use crate::code::acp::{CodeEvent, Envelope, Sink};
+
+    if crate::code::agents::resolve(crate::code::agents::AgentKind::Grok, &Default::default()).is_err() {
+        eprintln!("skipped: Grok Build is not installed (`grok` on PATH)");
+        return;
+    }
 
     let commands_with = |skills: bool| -> Vec<String> {
         let root = std::env::temp_dir().join(format!("patchbay-smoke-claude-{skills}"));
@@ -678,19 +689,152 @@ fn smoke_claude_config_toggle() {
     println!("off: {off:?}");
     let off_extra: Vec<&String> = off.iter().filter(|n| !on.contains(n)).collect();
     assert!(off_extra.is_empty(), "turning skills off added commands: {off_extra:?}");
-    // Every user skill dir and installed Claude plugin must be gone when off.
+    // Every user skill dir must be gone when off. Plugins aren't checked: turning them off needs
+    // a Grok Build that honours GROK_CLAUDE_PLUGINS_ENABLED, which stock builds don't.
     let home = std::env::var("HOME").unwrap_or_default();
     let skill_dirs: Vec<String> = std::fs::read_dir(std::path::Path::new(&home).join(".claude/skills/synced"))
         .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
         .unwrap_or_default();
-    let installed: Vec<String> = std::fs::read_to_string(std::path::Path::new(&home).join(".claude/plugins/installed_plugins.json"))
-        .ok()
-        .and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok())
-        .and_then(|v| v["plugins"].as_object().map(|o| o.keys().map(|k| k.split('@').next().unwrap_or(k).to_owned()).collect()))
-        .unwrap_or_default();
-    let leaked: Vec<&String> = off
+    let leaked: Vec<&String> = off.iter().filter(|n| skill_dirs.iter().any(|s| n.ends_with(s.as_str()))).collect();
+    assert!(leaked.is_empty(), "Claude skills still loaded with the setting off: {leaked:?}");
+}
+
+/// Live: the built-in agent on the user's own Claude Code login (`~/.claude/.credentials.json`).
+/// Makes a few tiny real requests. `cargo test --lib live_claude_login -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn live_claude_login() {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    use crate::code::CodeManager;
+    use crate::code::acp::{AgentCmd, CodeEvent, Envelope, Sink};
+    use crate::db::AuthMode;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let root = std::env::temp_dir().join("patchbay-live-claude");
+    let _ = std::fs::remove_dir_all(&root);
+    let (data_dir, proj) = (root.join("data"), root.join("proj"));
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(&proj).unwrap();
+    let db = Arc::new(Db::open(&data_dir.join("db.sqlite")).unwrap());
+    let provider = Provider {
+        id: "claude".into(),
+        name: "Claude login".into(),
+        kind: ProviderKind::Anthropic,
+        base_url: "https://api.anthropic.com/v1".into(),
+        has_key: false,
+        auth_mode: AuthMode::ClaudeLogin,
+    };
+    db.upsert_provider(&provider, None).unwrap();
+    if std::env::var("PATCHBAY_LIVE_MINIFY").is_ok() {
+        crate::prefs::save(&db, &crate::prefs::Preferences { minify_prompts: true, ..Default::default() }).unwrap();
+        println!("(prompts minified)");
+    }
+
+    // 1. The login works at all: a token, and the model list.
+    let token = rt.block_on(crate::claude_auth::access_token()).expect("a Claude Code login is needed");
+    println!("1. token ok ({} chars, not shown)", token.len());
+    let models = rt
+        .block_on(providers::discover_models(&ProviderKind::Anthropic, &provider.base_url, Some(&token), providers::Auth::ClaudeLogin))
+        .expect("model list");
+    println!("   models: {:?}", models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>());
+    let want = std::env::var("PATCHBAY_LIVE_MODEL").unwrap_or_else(|_| "haiku".into());
+    let pick = models
         .iter()
-        .filter(|n| skill_dirs.iter().any(|s| n.ends_with(s.as_str())) || installed.iter().any(|p| n.starts_with(p.as_str())))
-        .collect();
-    assert!(leaked.is_empty(), "Claude skills or plugins still loaded with the setting off: {leaked:?}");
+        .find(|m| m.id.contains(&want))
+        .or_else(|| models.first())
+        .expect("at least one model")
+        .clone();
+    println!("   using {}", pick.id);
+    // The same model twice, under two providers, with and without reasoning effort.
+    db.upsert_provider(&Provider { id: "claude2".into(), name: "Claude login 2".into(), ..provider.clone() }, None).unwrap();
+    for (id, provider_id, effort) in [("plain", "claude", None), ("effort", "claude2", Some("low"))] {
+        db.upsert_model(&Model {
+            id: id.into(),
+            provider_id: provider_id.into(),
+            model_id: pick.id.clone(),
+            display_name: format!("{} ({id})", pick.display_name),
+            vision: true,
+            context_window: pick.context_window.map(|c| c as i64),
+            params: crate::db::ModelParams { reasoning_effort: effort.map(str::to_owned), max_output_tokens: Some(2048), ..Default::default() },
+        })
+        .unwrap();
+    }
+
+    // 2. A plain request through the client, as Chat makes it.
+    let mut resolved = providers::resolve(&db, "plain").unwrap();
+    rt.block_on(providers::ensure_token(&mut resolved)).expect("token");
+    let reply = rt
+        .block_on(crate::chat::name_with(&resolved, "Reply with one short word.", "Say hello".into()))
+        .expect("plain request");
+    println!("2. plain request ok: {reply:?}");
+
+    // 3 and 4. The agent: a tool call, then again with reasoning effort set.
+    let run = |model: &str, prompt: &str| -> (String, String, Vec<String>, Vec<String>) {
+        let session = db.create_code_session(proj.to_str().unwrap(), Some(model), "patchbay", "default").unwrap();
+        let manager = Arc::new(CodeManager::default());
+        let events: Arc<Mutex<Vec<Envelope>>> = Arc::default();
+        let sink: Sink = {
+            let (events, manager) = (events.clone(), manager.clone());
+            Arc::new(move |env: Envelope| {
+                if let CodeEvent::Permission { request_id, request } = &env.event {
+                    let allow = request["options"]
+                        .as_array()
+                        .and_then(|o| o.iter().find(|x| x["kind"] == "allow_once"))
+                        .and_then(|x| x["optionId"].as_str())
+                        .map(str::to_owned);
+                    manager.respond_permission(request_id, allow);
+                }
+                events.lock().unwrap().push(env);
+            })
+        };
+        manager.start(sink, db.clone(), &data_dir, &session.id).unwrap();
+        let wait = |pred: &dyn Fn(&CodeEvent) -> bool, what: &str| {
+            let t0 = Instant::now();
+            while !events.lock().unwrap().iter().any(|e| pred(&e.event)) {
+                assert!(t0.elapsed() < Duration::from_secs(120), "timed out: {what}\n{:#?}", events.lock().unwrap());
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        };
+        wait(&|e| matches!(e, CodeEvent::Status { state, .. } if state == "ready"), "ready");
+        manager.send(&session.id, AgentCmd::prompt(prompt)).unwrap();
+        wait(&|e| matches!(e, CodeEvent::PromptDone { .. } | CodeEvent::Error { .. }), "prompt done");
+        manager.stop(&session.id);
+        let evs = events.lock().unwrap();
+        let text = |kind: &str| -> String {
+            evs.iter()
+                .filter_map(|e| match &e.event {
+                    CodeEvent::Update { update } if update["sessionUpdate"] == kind => update["content"]["text"].as_str().map(str::to_owned),
+                    _ => None,
+                })
+                .collect()
+        };
+        let errors = evs.iter().filter_map(|e| if let CodeEvent::Error { message } = &e.event { Some(message.clone()) } else { None }).collect();
+        let tools = evs
+            .iter()
+            .filter_map(|e| match &e.event {
+                CodeEvent::Update { update } if update["sessionUpdate"] == "tool_call_update" && update["status"] == "completed" => {
+                    Some(update["content"][0]["content"]["text"].as_str().unwrap_or("").to_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        (text("agent_message_chunk"), text("agent_thought_chunk"), errors, tools)
+    };
+
+    let (text, _, errors, tools) = run("plain", "Use the Bash tool to run `echo live-ok`, then reply with just the word done.");
+    println!("3. agent tool call: errors={errors:?} tool_output={tools:?} reply={text:?}");
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(tools.iter().any(|t| t.contains("live-ok")), "the Bash call did not run: {tools:?}");
+    assert!(!text.trim().is_empty());
+
+    let (text, _, errors, _) = run("plain", "In two or three sentences: why use a mutex instead of an atomic counter?");
+    println!("5. reply style ({} chars): {text}", text.len());
+    assert!(errors.is_empty(), "{errors:?}");
+
+    let (text, thought, errors, _) = run("effort", "Reply with just the word ok.");
+    println!("4. agent with reasoning effort low: errors={errors:?} reply={text:?} thought_chars={}", thought.len());
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(!text.trim().is_empty());
 }

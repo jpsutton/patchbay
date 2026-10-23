@@ -4,14 +4,12 @@
 # Default formats: tar, deb and rpm on Linux; tar on macOS; zip on Windows.
 # Output: src-tauri/target/release/bundle/daemon/
 #
-# The daemon finds its Grok Build sidecar and the web UI next to its own binary, so each
-# format keeps the three together:
-#   tar/zip   patchbayd-<version>-<os>-<arch>/  bin/patchbayd, bin/grok, share/patchbay/web/
-#             (zip: patchbayd.exe, grok.exe and web/ side by side)
-#   deb/rpm   /usr/lib/patchbayd/{patchbayd,grok,web/}, /usr/bin/patchbayd, and systemd units
+# The daemon finds the web UI next to its own binary, so each format keeps the two together:
+#   tar/zip   patchbayd-<version>-<os>-<arch>/  bin/patchbayd, share/patchbay/web/
+#             (zip: patchbayd.exe and web/ side by side)
+#   deb/rpm   /usr/lib/patchbayd/{patchbayd,web/}, /usr/bin/patchbayd, and systemd units
 #             in /usr/lib/systemd/{user/patchbayd.service,system/patchbayd@.service}
-# Expects the frontend (pnpm build) and the release sidecar (PROFILE=release
-# scripts/build-sidecar.sh) to be built already, as the CI jobs do before bundling.
+# Expects the frontend (pnpm build) to be built already, as the CI jobs do before bundling.
 # deb needs dpkg-deb, rpm needs rpmbuild.
 set -euo pipefail
 
@@ -33,8 +31,6 @@ summary="Patchbay, headless: chats, Code sessions and the mesh, with a browser U
 description="patchbayd runs Patchbay without a window, for a server or any computer without a display. Use it from a browser, which gets the full Patchbay UI, or from the phone app and other computers in your mesh."
 
 [[ -f dist/index.html ]] || { echo "dist/ is missing; run pnpm build first" >&2; exit 1; }
-sidecar="src-tauri/binaries/grok-$triple$ext"
-[[ -f "$sidecar" ]] || { echo "$sidecar is missing; run PROFILE=release scripts/build-sidecar.sh" >&2; exit 1; }
 
 (cd src-tauri && cargo build --release --locked --bin patchbayd --no-default-features --features web)
 daemon="src-tauri/target/release/patchbayd$ext"
@@ -46,8 +42,6 @@ trap 'rm -rf "$stage"' EXIT
 
 notices() {
   install -m 644 LICENSE NOTICE THIRD_PARTY_NOTICES.md "$1/"
-  install -m 644 vendor/grok-build/THIRD-PARTY-NOTICES "$1/GROK_BUILD_THIRD_PARTY_NOTICES"
-  install -m 644 vendor/grok-build/third_party/NOTICE "$1/GROK_BUILD_VENDORED_NOTICE"
 }
 
 # The layout deb and rpm install.
@@ -56,7 +50,6 @@ system_root() {
   [[ -d "$r" ]] && { echo "$r"; return; }
   install -d "$r/usr/lib/patchbayd" "$r/usr/bin" "$r/usr/share/doc/patchbayd" "$r/usr/share/licenses/patchbayd"
   install -m 755 "$daemon" "$r/usr/lib/patchbayd/patchbayd"
-  install -m 755 "$sidecar" "$r/usr/lib/patchbayd/grok"
   cp -r dist "$r/usr/lib/patchbayd/web"
   ln -s ../lib/patchbayd/patchbayd "$r/usr/bin/patchbayd"
   install -Dm 644 packaging/linux/daemon/patchbayd.service "$r/usr/lib/systemd/user/patchbayd.service"
@@ -71,7 +64,6 @@ pack_tar() {
   local pkg="$stage/tar/$name"
   install -d "$pkg/bin" "$pkg/share/patchbay"
   install -m 755 "$daemon" "$pkg/bin/patchbayd"
-  install -m 755 "$sidecar" "$pkg/bin/grok"
   cp -r dist "$pkg/share/patchbay/web"
   if [[ $os == linux ]]; then
     # The user unit, pointed at the folder docs/headless.md unpacks into.
@@ -88,7 +80,6 @@ pack_zip() {
   local pkg="$stage/zip/$name"
   install -d "$pkg"
   install -m 755 "$daemon" "$pkg/patchbayd$ext"
-  install -m 755 "$sidecar" "$pkg/grok$ext"
   cp -r dist "$pkg/web"
   install -m 644 docs/headless.md "$pkg/README.md"
   notices "$pkg"

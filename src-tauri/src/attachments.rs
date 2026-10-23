@@ -1,16 +1,15 @@
 //! Attachments: ingest (sniff, store content-addressed), and conversion into model input —
-//! sampler `ContentPart`s for Chat, ACP `ContentBlock`s for Code.
+//! `patchbay_llm` parts for Chat, ACP `ContentBlock`s for Code.
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use xai_grok_sampling_types::ContentPart;
+use patchbay_llm::Part;
 
 use crate::db::{Attachment, Db, new_id};
 
@@ -270,28 +269,65 @@ fn prepare_pdf(bytes: Vec<u8>) -> Result<Vec<Prepared>> {
     Ok(out)
 }
 
-pub fn to_content_parts(prepared: Vec<Prepared>) -> Vec<ContentPart> {
+/// The text of a PDF's pages (`pages` like "3" or "1-5", at most 20 at a time), for the Code
+/// agent's Read tool. Scanned pages have no text and say so.
+pub fn pdf_text(path: &Path, pages: Option<&str>) -> Result<String> {
+    const MAX_PAGES: usize = 20;
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let doc = pdf_oxide::PdfDocument::from_bytes(bytes).map_err(|e| anyhow!("open PDF: {e}"))?;
+    let total = doc.page_count().map_err(|e| anyhow!("PDF page count: {e}"))?;
+    let (first, last) = match pages.map(str::trim).filter(|p| !p.is_empty()) {
+        None => (1, total.min(MAX_PAGES)),
+        Some(p) => {
+            let (a, b) = p.split_once('-').unwrap_or((p, p));
+            let a: usize = a.trim().parse().map_err(|_| anyhow!("pages must look like \"3\" or \"1-5\""))?;
+            let b: usize = b.trim().parse().map_err(|_| anyhow!("pages must look like \"3\" or \"1-5\""))?;
+            if a == 0 || b < a {
+                bail!("pages must look like \"3\" or \"1-5\"");
+            }
+            if b - a + 1 > MAX_PAGES {
+                bail!("read at most {MAX_PAGES} pages at a time");
+            }
+            (a, b.min(total))
+        }
+    };
+    if first > total {
+        bail!("the PDF has {total} pages");
+    }
+    let mut out = String::new();
+    for idx in first..=last {
+        let text = doc.extract_text(idx - 1).unwrap_or_default();
+        out.push_str(&format!("--- Page {idx} of {total} ---\n"));
+        if text.trim().is_empty() {
+            out.push_str("[no extractable text on this page; it may be a scan]\n");
+        } else {
+            out.push_str(text.trim_end());
+            out.push('\n');
+        }
+    }
+    if last < total {
+        out.push_str(&format!("\n[{} more pages; pass `pages` to read them]", total - last));
+    }
+    Ok(out)
+}
+
+pub fn to_content_parts(prepared: Vec<Prepared>) -> Vec<Part> {
     prepared
         .into_iter()
         .map(|p| match p {
-            Prepared::Text { text } => ContentPart::Text {
-                text: Arc::from(text),
-            },
-            Prepared::Image { mime, b64 } => ContentPart::Image {
-                url: Arc::from(format!("data:{mime};base64,{b64}")),
-            },
+            Prepared::Text { text } => Part::Text(text),
+            Prepared::Image { mime, b64 } => Part::Image { mime, data: b64 },
         })
         .collect()
 }
 
-/// The PDF itself as a base64 data URI; the patched Messages encoder turns it into a
-/// `document` block. Only for providers that read PDFs natively.
-pub fn pdf_document_part(att: &Attachment) -> Result<ContentPart> {
-    use base64::Engine;
+/// The PDF itself, base64-encoded. Only for providers that read PDFs natively.
+pub fn pdf_document_part(att: &Attachment) -> Result<Part> {
     let bytes = std::fs::read(&att.path).with_context(|| format!("read {}", att.path))?;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-    Ok(ContentPart::Image {
-        url: Arc::from(format!("data:application/pdf;base64,{b64}")),
+    Ok(Part::Document {
+        mime: "application/pdf".into(),
+        name: att.name.clone(),
+        data: B64.encode(bytes),
     })
 }
 

@@ -2,7 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use xai_grok_sampling_types::TokenUsage;
 
 /// Token counts for one call or a running total. `input` includes the cached buckets.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
@@ -33,15 +32,14 @@ impl Tokens {
         }
     }
 
-    pub fn from_sampler(u: &TokenUsage, cost_usd_ticks: Option<i64>) -> Tokens {
+    pub fn from_llm(u: &patchbay_llm::Usage) -> Tokens {
         Tokens {
-            input: u.prompt_tokens as u64,
-            cached_read: u.cached_prompt_tokens as u64,
-            cache_write: u.cache_creation_prompt_tokens as u64,
-            output: u.completion_tokens as u64,
-            reasoning: u.reasoning_tokens as u64,
-            // The sampler reports cost in ticks of 1e-10 USD.
-            cost_usd: cost_usd_ticks.filter(|t| *t > 0).map(|t| t as f64 / 1e10),
+            input: u.input,
+            cached_read: u.cached_read,
+            cache_write: u.cache_write,
+            output: u.output,
+            reasoning: u.reasoning,
+            cost_usd: u.cost_usd.filter(|c| *c > 0.0),
             api_ms: 0,
         }
     }
@@ -101,6 +99,10 @@ impl CodeUsageState {
         }
         if let Some(w) = update["size"].as_u64().filter(|w| *w > 0) {
             self.context_window = Some(w);
+        }
+        // Patchbay's own agent says where it compacts; Grok reports that in its status line.
+        if let Some(p) = update["_meta"]["autoCompactPercent"].as_u64() {
+            self.auto_compact_percent = Some(p);
         }
         if let Some(c) = update["cost"]["amount"].as_f64()
             && update["cost"]["currency"].as_str().is_none_or(|c| c.eq_ignore_ascii_case("USD"))

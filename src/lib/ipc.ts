@@ -2,7 +2,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import type { Activity } from "./activity";
 import type { UpdateInfo } from "./update";
 
-export type ProviderKind = "openai_chat" | "openai_responses" | "anthropic";
+export type ProviderKind = "openai_chat" | "openai_responses" | "anthropic" | "gemini";
 export type AuthMode = "api_key" | "claude_login";
 
 export interface Provider {
@@ -338,7 +338,7 @@ export interface CodeAttach {
   point?: EventPoint | null;
 }
 
-export type AgentId = "grok" | "claude-code" | "opencode" | "cursor" | "kilo" | "codex" | "gemini" | "antigravity";
+export type AgentId = "patchbay" | "grok" | "claude-code" | "opencode" | "cursor" | "kilo" | "codex" | "gemini" | "antigravity";
 
 /** One coding agent backend, as the Agents settings page lists it. */
 export interface AgentInfo {
@@ -346,7 +346,7 @@ export interface AgentInfo {
   label: string;
   available: boolean;
   program: string | null;
-  source: "override" | "bundled" | "path" | "npx" | null;
+  source: "builtin" | "override" | "path" | "npx" | null;
   version: string | null;
   error: string | null;
   installHint: string;
@@ -358,6 +358,7 @@ export interface AgentInfo {
 
 /** Labels for agent ids, for places that don't load the full list. */
 export const AGENT_LABELS: Record<AgentId, string> = {
+  patchbay: "Patchbay",
   grok: "Grok Build",
   "claude-code": "Claude Code",
   opencode: "OpenCode",
@@ -367,6 +368,9 @@ export const AGENT_LABELS: Record<AgentId, string> = {
   gemini: "Gemini CLI",
   antigravity: "Antigravity",
 };
+
+/** Agents that run on Patchbay's own providers and models (`pb-<id>` model ids). */
+export const usesPatchbayModels = (agent: string): boolean => agent === "patchbay" || agent === "grok";
 
 export type PromptDelivery = "sent" | "steered" | "queued";
 
@@ -567,6 +571,44 @@ export interface ClaudeConfig {
   mcpServers: boolean;
   hooks: boolean;
   plugins: boolean;
+  /** Plugins (`name@marketplace`) Patchbay's agent doesn't load. */
+  disabledPlugins: string[];
+  /** MCP servers from Claude's config Patchbay's agent doesn't start. */
+  disabledMcpServers: string[];
+}
+
+/** One part of the Claude Code setup and where it comes from (project, user, plugin <name>). */
+export interface ClaudeItem {
+  name: string;
+  description: string;
+  source: string;
+}
+
+/** What Patchbay's agent finds in the user's Claude Code setup, whatever the switches say. */
+export interface ClaudeOverview {
+  home: string | null;
+  project: string | null;
+  instructions: string[];
+  plugins: { id: string; name: string; enabledInClaude: boolean; disabled: boolean }[];
+  commands: ClaudeItem[];
+  skills: ClaudeItem[];
+  agents: ClaudeItem[];
+  mcpServers: { name: string; source: string; transport: string; disabled: boolean }[];
+  hooks: { event: string; matcher: string; command: string; source: string }[];
+}
+
+/** Limits of Patchbay's own agent; `null` keeps its default. */
+export interface AgentEngine {
+  /** Model requests one prompt may make (default 100). */
+  maxSteps: number | null;
+  /** Model requests one subagent run may make (default 40). */
+  subagentMaxSteps: number | null;
+  /** Retries of a request that fails before any output (default 2). */
+  requestRetries: number | null;
+  /** Seconds a reply stream may stay silent (default 180). */
+  idleTimeoutSecs: number | null;
+  /** Default shell command timeout in seconds (default 120). */
+  shellTimeoutSecs: number | null;
 }
 
 export interface Preferences {
@@ -586,14 +628,16 @@ export interface Preferences {
   agentPaths: Partial<Record<AgentId, string>>;
   /** Agents set to run on Patchbay's providers: agent id -> Patchbay model ref. */
   agentProviders: Partial<Record<AgentId, string>>;
-  /** Stop Claude Code turns when its plan's 5-hour or weekly usage reaches `percent`. */
+  /** Stop turns on a Claude plan (Claude Code, or Patchbay's agent on a Claude login) at `percent`. */
   usageLimit: { enabled: boolean; percent: number };
   permissionMode: "default" | "auto" | "always-approve";
   agentInstructions: string;
   webFetch: boolean;
+  minifyPrompts: boolean;
   autoCompactPercent: number | null;
   backgroundSummaries: boolean;
   claudeConfig: ClaudeConfig;
+  agentEngine: AgentEngine;
   terminalShell: string;
   terminalFontSize: number;
   /** Draw typed characters before a slow shell echoes them: auto = when echo lags. */
@@ -611,16 +655,27 @@ export const defaultPreferences: Preferences = {
   defaultSystemPrompt: "",
   expandReasoning: false,
   generateTitles: true,
-  defaultAgent: "grok",
+  defaultAgent: "patchbay",
   agentPaths: {},
   agentProviders: {},
   usageLimit: { enabled: true, percent: 95 },
   permissionMode: "default",
   agentInstructions: "",
   webFetch: false,
+  minifyPrompts: false,
   autoCompactPercent: null,
   backgroundSummaries: true,
-  claudeConfig: { skills: true, instructions: true, agents: true, mcpServers: true, hooks: true, plugins: true },
+  claudeConfig: {
+    skills: true,
+    instructions: true,
+    agents: true,
+    mcpServers: true,
+    hooks: true,
+    plugins: true,
+    disabledPlugins: [],
+    disabledMcpServers: [],
+  },
+  agentEngine: { maxSteps: null, subagentMaxSteps: null, requestRetries: null, idleTimeoutSecs: null, shellTimeoutSecs: null },
   terminalShell: "",
   terminalFontSize: 13,
   terminalLocalEcho: "auto",
@@ -673,6 +728,11 @@ export const api = {
   deleteModel: (id: string) => invoke<void>("delete_model", { id }),
   getPreferences: () => invoke<Preferences>("get_preferences"),
   setPreferences: (prefs: Preferences) => invoke<void>("set_preferences", { prefs }),
+  webSearchStatus: () =>
+    invoke<{ configured: boolean; source: "env" | "keychain" | "database" | null }>("web_search_status"),
+  claudeOverview: (cwd: string | null) => invoke<ClaudeOverview>("claude_overview", { cwd }),
+  setWebSearchKey: (key: string) => invoke<void>("set_web_search_key", { key }),
+  clearWebSearchKey: () => invoke<void>("clear_web_search_key"),
   getSetting: (key: string) => invoke<string | null>("get_setting", { key }),
   setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),
 

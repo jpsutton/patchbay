@@ -128,7 +128,7 @@ function WindowRow({ label, w, now, limit }: { label: string; w: PlanWindow | nu
 }
 
 /**
- * Claude plan usage from the last Claude Code report. Stays open until its button is clicked
+ * Claude plan usage from the last report of Claude Code, or of Patchbay's agent on a Claude login. Stays open until its button is clicked
  * again, so it can sit beside a running session.
  */
 export function PlanUsageBlade({ className }: { className: string }) {
@@ -136,6 +136,7 @@ export function PlanUsageBlade({ className }: { className: string }) {
   const open = useStore((s) => s.planOpen);
   const guard = useStore((s) => s.prefs.usageLimit);
   const openSettingsAt = useStore((s) => s.openSettingsAt);
+  const defaultAgent = useStore((s) => s.prefs.defaultAgent);
   const now = useNow(open);
   if (!open) return null;
   const limit = guard.enabled ? guard.percent : null;
@@ -152,7 +153,7 @@ export function PlanUsageBlade({ className }: { className: string }) {
       </div>
       {!limits || (!limits.fiveHour && !limits.sevenDay && !overage) ? (
         <p className="px-3 py-1.5 text-muted">
-          No usage reported yet. It shows up after a Claude Code turn signed in with a Claude plan.
+          No usage reported yet. It shows up after a turn on a Claude plan: Claude Code signed in with one, or Patchbay's agent on a Claude login provider.
         </p>
       ) : (
         <>
@@ -166,8 +167,8 @@ export function PlanUsageBlade({ className }: { className: string }) {
         </>
       )}
       <div className="mt-1 flex items-baseline justify-between border-t border-line px-3 pb-1 pt-2 text-[12px] text-muted">
-        <span>{limit != null ? `Claude Code stops at ${limit}%` : "Usage limit off"}</span>
-        <button className="text-accent-ink hover:underline" onClick={() => openSettingsAt("agent:claude-code")}>
+        <span>{limit != null ? `Turns stop at ${limit}%` : "Usage limit off"}</span>
+        <button className="text-accent-ink hover:underline" onClick={() => openSettingsAt(defaultAgent === "patchbay" ? "agent:patchbay" : "agent:claude-code")}>
           Change
         </button>
       </div>

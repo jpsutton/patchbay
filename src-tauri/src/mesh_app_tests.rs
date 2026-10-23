@@ -444,8 +444,8 @@ async fn phone_starts_a_session_on_another_computer() {
 
     // What B offers, asked through A.
     let opts = p.client.rpc("remote.new_session_options", json!({ "host": bn })).await.unwrap();
-    assert!(opts["agents"].as_array().unwrap().iter().any(|x| x["id"] == "grok"));
-    assert_eq!(opts["defaultAgent"], "grok");
+    assert!(opts["agents"].as_array().unwrap().iter().any(|x| x["id"] == "patchbay"));
+    assert_eq!(opts["defaultAgent"], "patchbay");
 
     // Browsing stays inside the home folder, and lists only visible folders.
     let home = p.client.rpc("remote.list_dirs", json!({ "host": bn })).await.unwrap();
@@ -561,7 +561,7 @@ async fn phone_chat_runs_on_the_picked_computer() {
 
 /// A gateway for trying the phone app by hand (an emulator reaches the host at 10.0.2.2):
 /// a mesh on `0.0.0.0:41890` whose passphrase is `PASS`, with a provider pointing at
-/// `scripts/mock-llm.py` (start it first) and a Grok Build session using it. Every phone that
+/// `scripts/mock-llm.py` (start it first) and a Patchbay agent session using it. Every phone that
 /// asks to join is approved. Each run is a new mesh.
 ///
 /// `cargo test --lib manual_phone_gateway -- --ignored --nocapture` (PATCHBAY_TEST_SECS limits it).
@@ -596,7 +596,7 @@ async fn manual_phone_gateway() {
     db.set_setting("default_model", "m-echo").unwrap();
     let proj = n.dir.join("proj");
     repo(&proj);
-    let s = db.create_code_session(&proj.to_string_lossy(), Some("m-agent"), "grok", "default").unwrap();
+    let s = db.create_code_session(&proj.to_string_lossy(), Some("m-agent"), "patchbay", "default").unwrap();
     db.update_code_session(&s.id, None, Some("Try !edit from the phone"), None).unwrap();
     let c = db.create_conversation(Some("m-echo")).unwrap();
     db.update_conversation(&c.id, Some("Hello from studio"), None, None).unwrap();
@@ -717,11 +717,11 @@ async fn usage_limit_stops_claude_turns() {
     assert_eq!(notices(), 1);
     let ev = a.events.lock().unwrap().iter().rev().find(|(_, p)| p["event"]["type"] == "notice").cloned().unwrap();
     let text = ev.1["event"]["message"].as_str().unwrap().to_owned();
-    assert!(text.starts_with("Stopped. Claude Code has used 96% of your plan's 5-hour limit"), "{text}");
+    assert!(text.starts_with("Stopped. You have used 96% of your Claude plan's 5-hour limit"), "{text}");
 
     emit(&a, &claude.id, CodeEvent::PromptDone { stop_reason: json!("cancelled") });
     let err = prompt(claude.id.clone()).await.unwrap_err();
-    assert!(err.0.starts_with("Not sent. Claude Code has used 97%"), "{}", err.0);
+    assert!(err.0.starts_with("Not sent. You have used 97%"), "{}", err.0);
 
     // Turning the guard off lets prompts through again.
     let mut prefs = prefs::load(&a.state.db);
