@@ -592,15 +592,15 @@ export function Composer({
             <div
               role="dialog"
               aria-label={footerLabel}
-              className="rounded-t-2xl border-t border-border bg-raised px-2 pb-[calc(env(safe-area-inset-bottom)+8px)] pt-2"
+              className="flex max-h-[calc(100%-env(safe-area-inset-top)-16px)] flex-col rounded-t-2xl border-t border-border bg-raised px-2 pb-[calc(env(safe-area-inset-bottom)+8px)] pt-2"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="px-3 pb-1 pt-1 text-[13px] text-muted">{footerLabel}</div>
+              <div className="shrink-0 px-3 pb-1 pt-1 text-[13px] text-muted">{footerLabel}</div>
               <ChipRows.Provider value={true}>
-                <div className="flex flex-col divide-y divide-line">{footer}</div>
+                <div className="flex min-h-0 flex-col divide-y divide-line overflow-y-auto overscroll-contain [&>*]:shrink-0">{footer}</div>
               </ChipRows.Provider>
               <button
-                className="mt-1 flex h-12 w-full items-center justify-center rounded-xl text-[16px] text-muted active:bg-panel-2"
+                className="mt-1 flex h-12 w-full shrink-0 items-center justify-center rounded-xl text-[16px] text-muted active:bg-panel-2"
                 onClick={() => setOptionsOpen(false)}
               >
                 Done

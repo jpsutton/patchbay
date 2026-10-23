@@ -13,7 +13,7 @@ Patchbay owns both. Two crates in `crates/` do the work, and the app wires them 
 | The app's side of that agent: providers, keys and settings for it | `src-tauri/src/code/native.rs` |
 | ACP client for every agent, built in or external | `src-tauri/src/code/acp.rs`, on `agent-client-protocol` 0.10.4 |
 
-The built-in agent runs inside the app and talks ACP to `acp.rs` over an in-memory pipe, so permissions, MCP settings, mesh relay, usage and the whole Code UI treat it like any other agent. `docs/design/harness.md` describes its design. External agents (Claude Code, OpenCode, Cursor CLI, Kilo Code, Codex, Gemini CLI, Grok Build) are spawned as child processes; `docs/design/agents.md` covers them.
+The built-in agent runs inside the app and talks ACP to `acp.rs` over an in-memory pipe, so permissions, MCP settings, mesh relay, usage and the whole Code UI treat it like any other agent. `docs/design/harness.md` describes its design. External agents (Claude Code, OpenCode, Cursor CLI, Kilo Code, Codex, Grok Build) are spawned as child processes; `docs/design/agents.md` covers them.
 
 ### Grok Build
 

@@ -11,7 +11,8 @@ import {
 } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { PermissionRulesList } from "./PermissionRules";
-import { Choice, Deferred, LongText, Row, Toggle } from "./PreferencesPage";
+import { Choice, Deferred, LongText, Row } from "./PreferencesPage";
+import { Toggle } from "../components/Toggle";
 import { input } from "./ProviderPage";
 import { Dot } from "../components/Dot";
 

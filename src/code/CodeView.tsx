@@ -48,6 +48,7 @@ import { isRemoteApp } from "../lib/platform";
 import {
   ActivityIcon,
   CheckIcon,
+  ChevronDownIcon,
   ChevronRightIcon,
   CopyIcon,
   FileDiffIcon,
@@ -61,6 +62,7 @@ import {
   XIcon,
 } from "../components/icons";
 import { ChipRows, ChipSelect, ChipText } from "../components/ChipSelect";
+import { Toggle } from "../components/Toggle";
 import { AgentImage, AttachedImage } from "../components/AgentImage";
 import { ModelRing } from "../lib/cable";
 import { JumpToBottom, ScrollFade, useStickyScroll } from "../lib/useStickyScroll";
@@ -87,6 +89,15 @@ export async function newSessionIn(dir: string, agent?: AgentId, host?: string |
 /** Choices of a select config option, flattening groups. */
 function configChoices(o: AcpConfigOption) {
   return o.options.flatMap((c) => ("options" in c ? c.options : [c]));
+}
+
+/**
+ * A select option whose only values are "on" and "off" (Claude Code's Fast mode, Patchbay's
+ * Compact prompts): agents send these as selects, but they read better as a switch.
+ */
+function isOnOff(o: AcpConfigOption) {
+  const values = configChoices(o).map((c) => c.value);
+  return values.length === 2 && values.includes("on") && values.includes("off");
 }
 
 /** An option's name. Claude Code calls its persona option "Agent", beside the agent picker. */
@@ -201,7 +212,19 @@ function MoreOptions({
                 <div className="text-[13px] text-fg">{optionName(o)}</div>
                 {o.description && <div className="text-[12px] leading-4 text-muted">{o.description}</div>}
               </div>
-              <ConfigChip option={o} disabled={disabled} onSet={onSet} />
+              {/* Keep the control whole: beside a long description a shrinking select hides its value. */}
+              <div className="shrink-0">
+                {isOnOff(o) ? (
+                  <Toggle
+                    label={optionName(o)}
+                    checked={o.currentValue === "on"}
+                    disabled={disabled}
+                    onChange={(on) => onSet(o, on ? "on" : "off")}
+                  />
+                ) : (
+                  <ConfigChip option={o} disabled={disabled} onSet={onSet} />
+                )}
+              </div>
             </div>
           ))}
         </div>
@@ -547,31 +570,69 @@ function UnrecognizedEntry({ text, raw, count }: { text: string; raw: string; co
   );
 }
 
+/**
+ * The plan, docked above the composer. It sits outside the transcript's scroller, so the
+ * transcript is shorter by its height and nothing renders underneath it. Collapsed it is one row:
+ * the current step and the progress. Expanded it lists every step.
+ */
 function PlanPanel({ plan }: { plan: NonNullable<CodeState["plan"]> }) {
+  const [open, setOpen] = useState(false);
   if (plan.length === 0) return null;
   const done = plan.filter((p) => p.status === "completed").length;
   // Cancelled steps stay listed but don't count toward the total.
   const total = plan.filter((p) => p.status !== "cancelled").length;
+  const current = plan.find((p) => p.status === "in_progress") ?? plan.find((p) => p.status === "pending");
+  const summary = current ? current.content : "All steps done";
   return (
-    <section aria-label="Plan" className="flex flex-col gap-2 rounded-xl border border-line bg-panel/60 px-3.5 py-3 text-[13px]">
-      <div className="flex items-center font-mono text-[11px] text-faint">
-        <span className="uppercase tracking-[0.06em]">Plan</span>
-        <span className="flex-1" />
-        <span>
+    <section aria-label="Plan" className="mb-2 flex flex-col rounded-xl border border-line bg-panel/60 text-[13px]">
+      <button
+        className="flex w-full min-w-0 items-center gap-2.5 px-3.5 py-2 text-left"
+        aria-expanded={open}
+        aria-label={open ? "Collapse plan" : "Expand plan"}
+        onClick={() => setOpen(!open)}
+      >
+        {open ? (
+          <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-faint">Plan</span>
+        ) : (
+          <>
+            <span className="flex h-5 w-3.5 shrink-0 items-center justify-center">
+              {current ? (
+                <span className="signal-pulse h-2 w-2 rounded-full bg-accent" />
+              ) : (
+                <span className="flex text-ok">
+                  <CheckIcon size={14} strokeWidth={2.4} />
+                </span>
+              )}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-fg">{summary}</span>
+          </>
+        )}
+        {open && <span className="flex-1" />}
+        <div
+          className="h-[3px] w-20 shrink-0 overflow-hidden rounded-full bg-panel-2"
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={total}
+          aria-valuenow={done}
+          aria-label="Plan progress"
+        >
+          <div className="h-full bg-accent transition-[width]" style={{ width: `${total ? (done / total) * 100 : 0}%` }} />
+        </div>
+        <span className="shrink-0 font-mono text-[11px] text-faint">
           {done} of {total}
         </span>
-      </div>
-      <div
-        className="h-[3px] overflow-hidden rounded-full bg-panel-2"
-        role="progressbar"
-        aria-valuemin={0}
-        aria-valuemax={total}
-        aria-valuenow={done}
-        aria-label="Plan progress"
-      >
-        <div className="h-full bg-accent transition-[width]" style={{ width: `${total ? (done / total) * 100 : 0}%` }} />
-      </div>
-      <ol className="flex flex-col gap-1">
+        <span className={`flex shrink-0 text-faint transition-transform ${open ? "" : "rotate-180"}`}>
+          <ChevronDownIcon size={14} />
+        </span>
+      </button>
+      {open && <PlanSteps plan={plan} />}
+    </section>
+  );
+}
+
+function PlanSteps({ plan }: { plan: NonNullable<CodeState["plan"]> }) {
+  return (
+      <ol className="flex max-h-48 flex-col gap-1 overflow-y-auto border-t border-line px-3.5 py-2.5">
         {plan.map((p, i) => (
           <li key={i} className="flex items-start gap-2.5">
             <span className="flex h-5 w-3.5 shrink-0 items-center justify-center">
@@ -605,7 +666,6 @@ function PlanPanel({ plan }: { plan: NonNullable<CodeState["plan"]> }) {
           </li>
         ))}
       </ol>
-    </section>
   );
 }
 
@@ -1013,10 +1073,6 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     }
     if (ready) rows.push({ key: "history-end", dim: true, render: () => <div className="border-t border-line" /> });
   }
-  if (s?.plan && s.plan.length > 0) {
-    const plan = s.plan;
-    rows.push({ key: "plan", render: () => <PlanPanel plan={plan} /> });
-  }
   if (s && (ready || !s.history)) {
     const canEdit = ready && !working && !!s.extensions.rewind;
     for (const r of entryRuns) {
@@ -1369,6 +1425,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                 ))}
               </ul>
             )}
+            {s?.plan && s.plan.length > 0 && <PlanPanel key={session.id} plan={s.plan} />}
             <Composer
               draftKey={`code:${session.id}`}
               busy={working}

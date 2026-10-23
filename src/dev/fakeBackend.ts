@@ -56,7 +56,6 @@ const FAKE_AGENTS: AgentInfo[] = [
   fakeAgent("cursor", "Cursor CLI", "/usr/bin/cursor-agent"),
   fakeAgent("kilo", "Kilo Code", null),
   fakeAgent("codex", "Codex", "/usr/bin/npx", { source: "npx", version: null }),
-  fakeAgent("gemini", "Gemini CLI", "/usr/bin/gemini"),
   fakeAgent("antigravity", "Antigravity", null),
 ];
 /** Config option values per fake session, for agents that report them (effort, Fast mode, persona). */
@@ -161,7 +160,7 @@ const tick = () => (clock = Math.max(now(), clock + 1));
 const pending = new Map<string, (opt: string | null) => void>();
 
 /**
- * Agents that want a sign-in first (as Codex, Gemini CLI and Antigravity do when signed out).
+ * Agents that want a sign-in first (as Codex and Antigravity do when signed out).
  * Claude Code's methods are terminal ones: its login command runs in a terminal.
  */
 const FAKE_AUTH: Partial<Record<AgentId, AuthChoice[]>> = {
@@ -172,11 +171,6 @@ const FAKE_AUTH: Partial<Record<AgentId, AuthChoice[]>> = {
   codex: [
     { id: "chat-gpt", name: "ChatGPT", description: "Use ChatGPT to authenticate", apiKey: false, terminal: false },
     { id: "api-key", name: "API Key", description: "Use an API key to authenticate", apiKey: true, terminal: false },
-  ],
-  gemini: [
-    { id: "oauth-personal", name: "Log in with Google", description: "Log in with your Google account", apiKey: false, terminal: false },
-    { id: "gemini-api-key", name: "Gemini API key", description: "Use an API key with Gemini Developer API", apiKey: true, terminal: false },
-    { id: "vertex-ai", name: "Vertex AI", description: "Use an API key with Vertex AI GenAI API", apiKey: false, terminal: false },
   ],
 };
 /** Fake agents signed in during this page load. The prompt `/logout` signs one out again. */

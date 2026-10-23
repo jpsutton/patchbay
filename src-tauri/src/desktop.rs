@@ -18,9 +18,19 @@ pub const EV_NEW_CHAT: &str = "tray://new-chat";
 pub const EV_QUICK_PROMPT: &str = "quick://prompt";
 pub const EV_NOTIFICATION_OPEN: &str = "notification://open";
 
+/// Where the main window was when the tray hid it. The window manager treats a window that is
+/// shown again like a new one and places it by its own policy (KWin centers it), so put it back.
+static MAIN_HIDDEN_AT: Mutex<Option<tauri::PhysicalPosition<i32>>> = Mutex::new(None);
+
 pub fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
+        if let Some(pos) = MAIN_HIDDEN_AT.lock().ok().and_then(|mut p| p.take())
+            && !w.is_visible().unwrap_or(true)
+            && !w.is_maximized().unwrap_or(false)
+        {
+            let _ = w.set_position(pos);
+        }
         let _ = w.show();
         let _ = w.set_focus();
     }
@@ -45,6 +55,9 @@ pub fn toggle_main(app: &AppHandle) {
         && !w.is_minimized().unwrap_or(false)
         && (w.is_focused().unwrap_or(false) || main_recently_focused());
     if in_front {
+        if let (Ok(pos), Ok(mut saved)) = (w.outer_position(), MAIN_HIDDEN_AT.lock()) {
+            *saved = Some(pos);
+        }
         let _ = w.hide();
     } else {
         show_main(app);
@@ -133,15 +146,37 @@ pub fn hide_quick(app: &AppHandle) {
     }
 }
 
-/// Replace the global quick-entry shortcut. Empty disables it.
+/// Register the saved quick-entry shortcut at startup: through the GlobalShortcuts portal on a
+/// Wayland session, else (or when the portal is unavailable) through the plugin.
+fn init_quick_shortcut(app: &AppHandle, accel: &str) {
+    #[cfg(target_os = "linux")]
+    if crate::portal_shortcuts::wayland_session() {
+        crate::portal_shortcuts::start(app.clone(), accel, register_quick_shortcut);
+        return;
+    }
+    register_quick_shortcut(app, accel);
+}
+
+fn register_quick_shortcut(app: &AppHandle, accel: &str) {
+    if let Err(e) = set_quick_shortcut(app, accel) {
+        tracing::warn!("quick entry shortcut: {e:#}");
+    }
+}
+
+/// Replace the global quick-entry shortcut. Empty disables it. On a Wayland session the
+/// GlobalShortcuts portal handles it when available (see `portal_shortcuts`).
 pub fn set_quick_shortcut(app: &AppHandle, accel: &str) -> Result<()> {
-    let gs = app.global_shortcut();
     let accel = accel.trim();
     let next = if accel.is_empty() {
         None
     } else {
         Some(Shortcut::from_str(accel).map_err(|e| anyhow!("invalid shortcut {accel}: {e}"))?)
     };
+    #[cfg(target_os = "linux")]
+    if crate::portal_shortcuts::update(accel) {
+        return Ok(());
+    }
+    let gs = app.global_shortcut();
     gs.unregister_all().map_err(|e| anyhow!("{e}"))?;
     if let Some(s) = next {
         gs.on_shortcut(s, |app, _s, ev| {
@@ -377,8 +412,20 @@ fn dispatch<R: tauri::Runtime>(invoke: tauri::ipc::Invoke<R>) {
     });
 }
 
+/// GDK backends to try, in order, when `GDK_BACKEND` is not set. X11 comes first so a Wayland
+/// session runs the app on XWayland. Native Wayland lets the compositor refuse to raise the
+/// window on a tray click (no xdg-activation token reaches us), places the window anew each
+/// time it is shown again, and ignores the quick-entry window's centering, always-on-top and
+/// skip-taskbar. Under XWayland all of these work. Unlike setting `GDK_BACKEND`, this does not
+/// leak into child processes (terminals, agents), and a user's `GDK_BACKEND=wayland` still wins.
+#[cfg(target_os = "linux")]
+const GDK_BACKENDS: &str = "x11,wayland,*";
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Must run before GTK opens its display, which happens when the Tauri app is built.
+    #[cfg(target_os = "linux")]
+    gtk::gdk::set_allowed_backends(GDK_BACKENDS);
     crate::init_tracing();
 
     tauri::Builder::default()
@@ -435,9 +482,7 @@ pub fn run() {
             if p.title_bar != "system" {
                 apply_title_bar(&handle, &p.title_bar);
             }
-            if let Err(e) = set_quick_shortcut(&handle, &p.quick_entry_shortcut) {
-                tracing::warn!("quick entry shortcut: {e:#}");
-            }
+            init_quick_shortcut(&handle, &p.quick_entry_shortcut);
             Ok(())
         })
         .on_window_event(|w, ev| {

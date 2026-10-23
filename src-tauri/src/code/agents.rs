@@ -26,7 +26,6 @@ pub enum AgentKind {
     Cursor,
     Kilo,
     Codex,
-    Gemini,
     Antigravity,
 }
 
@@ -34,10 +33,9 @@ pub enum AgentKind {
 pub const CLAUDE_ACP_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp@0.93.0";
 /// The Codex ACP adapter, which brings its own Codex binary.
 pub const CODEX_ACP_PACKAGE: &str = "@agentclientprotocol/codex-acp@2.2.2";
-pub const GEMINI_CLI_PACKAGE: &str = "@google/gemini-cli@0.64.0";
 
 impl AgentKind {
-    pub const ALL: [AgentKind; 9] = [
+    pub const ALL: [AgentKind; 8] = [
         AgentKind::Patchbay,
         AgentKind::Grok,
         AgentKind::ClaudeCode,
@@ -45,7 +43,6 @@ impl AgentKind {
         AgentKind::Cursor,
         AgentKind::Kilo,
         AgentKind::Codex,
-        AgentKind::Gemini,
         AgentKind::Antigravity,
     ];
 
@@ -59,7 +56,6 @@ impl AgentKind {
             AgentKind::Cursor => "cursor",
             AgentKind::Kilo => "kilo",
             AgentKind::Codex => "codex",
-            AgentKind::Gemini => "gemini",
             AgentKind::Antigravity => "antigravity",
         }
     }
@@ -77,7 +73,6 @@ impl AgentKind {
             AgentKind::Cursor => "Cursor CLI",
             AgentKind::Kilo => "Kilo Code",
             AgentKind::Codex => "Codex",
-            AgentKind::Gemini => "Gemini CLI",
             AgentKind::Antigravity => "Antigravity",
         }
     }
@@ -93,7 +88,6 @@ impl AgentKind {
             AgentKind::Cursor => (&["cursor-agent"], &["acp"]),
             AgentKind::Kilo => (&["kilo", "kilocode"], &["acp"]),
             AgentKind::Codex => (&["codex-acp"], &[]),
-            AgentKind::Gemini => (&["gemini"], &["--acp"]),
             // Google ships the ACP server only as an archive (see the ACP registry), so it is
             // rarely on PATH; Settings takes its path. The registry passes `--uid=` on Linux.
             AgentKind::Antigravity => (
@@ -108,7 +102,6 @@ impl AgentKind {
         match self {
             AgentKind::ClaudeCode => Some((CLAUDE_ACP_PACKAGE, &[])),
             AgentKind::Codex => Some((CODEX_ACP_PACKAGE, &[])),
-            AgentKind::Gemini => Some((GEMINI_CLI_PACKAGE, &["--acp"])),
             _ => None,
         }
     }
@@ -139,9 +132,6 @@ impl AgentKind {
             AgentKind::Codex => {
                 "Install Node.js (Patchbay then runs the adapter through npx), or `npm install -g @agentclientprotocol/codex-acp`. Sign in with `codex login`, or set OPENAI_API_KEY."
             }
-            AgentKind::Gemini => {
-                "Install Node.js (Patchbay then runs it through npx), or `npm install -g @google/gemini-cli`. Sign in by running `gemini`, or set GEMINI_API_KEY."
-            }
             AgentKind::Antigravity => {
                 "Download Google's Antigravity ACP server for your platform (listed in the ACP registry at agentclientprotocol.com), unpack it, and set the path to agy_acp_server in Settings."
             }
@@ -157,7 +147,6 @@ impl AgentKind {
             AgentKind::Cursor => "Run `cursor-agent login` in a terminal.",
             AgentKind::Kilo => "Run `kilo auth login` in a terminal.",
             AgentKind::Codex => "Run `codex login` in a terminal (`npm install -g @openai/codex` gets it), or set OPENAI_API_KEY.",
-            AgentKind::Gemini => "Run `gemini` in a terminal and choose a sign-in method, or set GEMINI_API_KEY.",
             AgentKind::Antigravity => {
                 "Set `auth.type` in ~/.gemini/antigravity-acp/settings.json (for example `gemini-api-key` with GEMINI_API_KEY set), or sign in from an editor that runs the Antigravity ACP server."
             }
@@ -222,14 +211,6 @@ impl ApprovalSetup {
                 gaps: &[
                     "Codex runs shell commands inside its read-only sandbox without asking.",
                     "Rules in your own Codex config (~/.codex) may let more run without asking.",
-                ],
-            },
-            AgentKind::Gemini => Self {
-                select_mode: Some("default".into()),
-                hide_modes: &["autoEdit", "yolo"],
-                gaps: &[
-                    "Gemini CLI reads, lists and searches files, and searches the web, without asking.",
-                    "Allow rules in your own Gemini CLI settings and policies run without asking.",
                 ],
             },
             AgentKind::Antigravity => Self {
@@ -773,11 +754,8 @@ mod tests {
             resolve(kind, &o).unwrap().args
         };
         assert_eq!(args(AgentKind::Codex), Vec::<String>::new());
-        assert_eq!(args(AgentKind::Gemini), vec!["--acp".to_owned()]);
         let agy = args(AgentKind::Antigravity);
         assert_eq!(agy, if cfg!(target_os = "linux") { vec!["--uid=".to_owned()] } else { vec![] });
-        // Through npx, the ACP arguments follow the package.
-        assert_eq!(AgentKind::Gemini.npx_package(), Some((GEMINI_CLI_PACKAGE, &["--acp"][..])));
         assert_eq!(AgentKind::Antigravity.npx_package(), None);
     }
 
