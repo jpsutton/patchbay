@@ -5,8 +5,12 @@
 #   scripts/android-e2e.sh doctor            what is installed and what is missing; changes nothing
 #   scripts/android-e2e.sh setup [--only S]  install what is missing: jdk, cmdline-tools, sdk, avd, rust
 #   scripts/android-e2e.sh up [options]      build, start everything, join the phone, check it shows the data
+#   scripts/android-e2e.sh test [options]    up --fresh --headless, run the scripted phone scenarios, stop everything
 #   scripts/android-e2e.sh status            what runs, and whether phone and node are the same source
 #   scripts/android-e2e.sh down [--emulator] stop the node and the mock model (and the emulator)
+#
+# `test` options: --only a,b (some scenarios), --no-up (the stack is already up from `up --fresh`), --keep (leave it
+# running), --no-build, --list. Scenarios the checkout has no code for are skipped; exit 1 only when one fails.
 #
 # `up` options: --fresh (new mesh, clean app data), --no-build, --headless (no emulator window),
 # --cold (boot the emulator without its snapshot).
@@ -621,6 +625,9 @@ cmd_up() {
         say "starting over: a new mesh and clean app data"
         node_stop
         rm -rf "$E2E_DIR/node" "$E2E_DIR/passphrase" "$E2E_DIR/seed.json"
+        # The projects the sessions work in too: a file an earlier run's edit made would turn this
+        # run's `!edit` into "file has not been read yet" instead of a permission request.
+        rm -rf "${E2E_DIR:?}/project" "${E2E_DIR:?}/alpha-app" "${E2E_DIR:?}/beta-lib"
     fi
     if [ "$build" = 1 ]; then
         node_stop
@@ -645,6 +652,33 @@ cmd_up() {
     cmd_shot >/dev/null
     printf '\nThe phone and the node are the same source, %s.\n' "$(stamp_get node id)"
     cmd_status
+}
+
+cmd_test() {
+    local only="" up=1 keep=0 build_flag=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --only) only=${2:?--only needs a list}; shift ;;
+            --no-up) up=0 ;;
+            --keep) keep=1 ;;
+            --no-build) build_flag=--no-build ;;
+            --list) node "$helpers/scenarios.mjs" --list; return ;;
+            *) die "test: unknown option $1" ;;
+        esac
+        shift
+    done
+    local rc=0
+    if [ "$up" = 1 ]; then
+        # shellcheck disable=SC2086
+        cmd_up --fresh --headless $build_flag || { cmd_down --emulator; die "the stack did not come up; no scenario ran"; }
+    fi
+    use_env
+    use_serial
+    # shellcheck disable=SC2046
+    node "$helpers/daemon.mjs" more-sessions $(daemon_flags) --root "$E2E_DIR" --mock-url "http://127.0.0.1:$MOCK_PORT/v1"
+    node "$helpers/scenarios.mjs" --seed "$E2E_DIR/seed.json" --src "$top" ${only:+--only "$only"} || rc=$?
+    if [ "$keep" = 0 ]; then cmd_down --emulator; fi
+    return "$rc"
 }
 
 cmd_status() {
@@ -704,6 +738,7 @@ case "$cmd" in
     shot) cmd_shot ;;
     logs) cmd_logs ;;
     up) cmd_up "$@" ;;
+    test) cmd_test "$@" ;;
     status) cmd_status ;;
     down) cmd_down "$@" ;;
     help | -h | --help) usage ;;

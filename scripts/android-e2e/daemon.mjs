@@ -10,7 +10,7 @@
 // The mesh passphrase comes from the environment (E2E_PASSPHRASE), not the command line, so it
 // doesn't show up in `ps`. Needs Node 22 or newer (a global WebSocket).
 
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 
 export const CHAT_TITLE = "E2E chat from the desktop";
 export const SESSION_TITLE = "E2E try !edit from the phone";
@@ -236,10 +236,34 @@ async function status(f) {
   }
 }
 
+/** More Code sessions in two further project folders under --root, for the phone's grouping and ordering. */
+async function moreSessions(f) {
+  need(f, "root", "mock-url");
+  const c = await connect(f);
+  try {
+    const { agent } = await ensureModels(c, f);
+    const have = new Set((await c.call("list_code_sessions")).map((s) => s.title));
+    for (const [dir, titles] of [
+      ["alpha-app", ["Alpha one", "Alpha two"]],
+      ["beta-lib", ["Beta one"]],
+    ]) {
+      const cwd = `${f.root}/${dir}`;
+      mkdirSync(cwd, { recursive: true });
+      for (const title of titles) {
+        if (have.has(title)) continue;
+        const s = await c.call("create_code_session", { cwd, modelRef: agent.id, agent: f.agent ?? "patchbay" });
+        await c.call("update_code_session", { id: s.id, title });
+      }
+    }
+  } finally {
+    c.close();
+  }
+}
+
 const [cmd, ...rest] = process.argv.slice(2);
-const commands = { seed, approve, status };
+const commands = { seed, approve, status, "more-sessions": moreSessions };
 if (!commands[cmd]) {
-  console.error("usage: daemon.mjs seed|approve|status --ws URL --token-file FILE ...");
+  console.error("usage: daemon.mjs seed|approve|status|more-sessions --ws URL --token-file FILE ...");
   process.exit(2);
 }
 commands[cmd](flags(rest)).catch((e) => {

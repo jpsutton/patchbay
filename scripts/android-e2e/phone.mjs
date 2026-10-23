@@ -10,11 +10,12 @@
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 const APP = "dev.patchbay.remote";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function adb(...args) {
+export function adb(...args) {
   return execFileSync("adb", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
@@ -27,7 +28,7 @@ function flags(argv) {
   return out;
 }
 
-async function until(what, ms, probe) {
+export async function until(what, ms, probe) {
   const end = Date.now() + ms;
   let last;
   while (Date.now() < end) {
@@ -44,7 +45,7 @@ async function until(what, ms, probe) {
 }
 
 /** Attaches to the app's page. The returned `done` removes the adb port forward again. */
-async function attach() {
+export async function attach() {
   const pid = await until("the app to run (is it installed and started?)", 40_000, () => {
     try {
       return adb("shell", "pidof", APP).split(/\s+/)[0];
@@ -90,6 +91,7 @@ async function attach() {
   };
   return {
     evalJs,
+    send,
     text: () => evalJs("document.body.innerText"),
     done: () => {
       ws.close();
@@ -109,7 +111,7 @@ const setInput = (index, value) => `(() => {
   el.dispatchEvent(new Event('input', { bubbles: true }));
 })()`;
 
-const clickButton = (label, exact) => `(() => {
+export const clickButton = (label, exact) => `(() => {
   const want = ${JSON.stringify(label)};
   const b = [...document.querySelectorAll('button')].find((x) => {
     const t = x.textContent.trim();
@@ -190,13 +192,16 @@ async function text() {
   }
 }
 
-const [cmd, ...rest] = process.argv.slice(2);
-const commands = { join, verify, text };
-if (!commands[cmd]) {
-  console.error("usage: phone.mjs join|verify|text ...");
-  process.exit(2);
+// Importing this file (scenarios.mjs does) must not run the command line.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const [cmd, ...rest] = process.argv.slice(2);
+  const commands = { join, verify, text };
+  if (!commands[cmd]) {
+    console.error("usage: phone.mjs join|verify|text ...");
+    process.exit(2);
+  }
+  commands[cmd](flags(rest)).catch((e) => {
+    console.error(`phone.mjs ${cmd}: ${e.message}`);
+    process.exit(1);
+  });
 }
-commands[cmd](flags(rest)).catch((e) => {
-  console.error(`phone.mjs ${cmd}: ${e.message}`);
-  process.exit(1);
-});
