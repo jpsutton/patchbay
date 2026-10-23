@@ -21,7 +21,7 @@ export function Settings() {
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const askConfirm = useStore((s) => s.askConfirm);
   const agentList = useAgentList();
-  // With no models yet, land where setup starts.
+  // Home is General. A caller can still name a section or "agent:<id>".
   const [sel, setSel] = useState<Selection>(() => {
     const st = useStore.getState();
     const wanted = PREF_SECTIONS.find((x) => x.id === st.settingsSection);
@@ -30,11 +30,7 @@ export function Settings() {
     if (wanted || agent) useStore.setState({ settingsSection: null });
     if (wanted) return { kind: "section", id: wanted.id };
     if (agent && agent in AGENT_LABELS) return { kind: "agent", id: agent };
-    return models.length > 0
-      ? { kind: "section", id: "general" }
-      : providers[0]
-        ? { kind: "provider", id: providers[0].id }
-        : { kind: "new" };
+    return { kind: "section", id: "general" };
   });
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
