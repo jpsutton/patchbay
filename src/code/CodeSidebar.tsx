@@ -4,7 +4,7 @@ import { memberName, remoteHost, useStore } from "../lib/store";
 import { ArchivedToggle, SectionLabel, SidebarItem } from "../components/SidebarItem";
 import { sessionActions, toggleSessionArchive } from "../lib/itemActions";
 import { fmtShort, matchesQuery } from "../lib/format";
-import { ChevronRightIcon, PlusIcon } from "../components/icons";
+import { ChevronRightIcon, GripVerticalIcon, PlusIcon } from "../components/icons";
 import { activityOf, strongest } from "../lib/activity";
 import { installedAgents, newSessionIn } from "./CodeView";
 import { ContextMenu } from "../components/ItemMenu";
@@ -323,6 +323,15 @@ export function CodeSidebar() {
                 setGroupMenu({ x: e.clientX, y: e.clientY });
               }}
             >
+              <button
+                className="-ml-2 flex h-6 w-3 shrink-0 cursor-grab touch-none items-center justify-center rounded text-faint opacity-0 hover:text-fg focus-visible:opacity-100 group-hover/header:opacity-100"
+                onPointerDown={(e) => startDrag(e, g.key)}
+                tabIndex={-1}
+                title="Drag to reorder"
+                aria-label={`Drag to reorder ${g.label}`}
+              >
+                <GripVerticalIcon size={12} />
+              </button>
               <button
                 className="flex min-w-0 flex-1 items-baseline gap-1.5 text-left"
                 onPointerDown={(e) => startDrag(e, g.key)}
