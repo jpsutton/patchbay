@@ -1,0 +1,46 @@
+# Phone end-to-end on Linux x64: builds the debug APK and a desktop-side node from this checkout, boots the
+# emulator (ubuntu-latest has KVM once the udev rule below is applied), and runs the scripted phone scenarios.
+# Manual only. It is a check that scripts/android-e2e.sh works on Linux; the local pre-push gate is how
+# phone changes are normally tested.
+name: android-e2e
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - run: scripts/ci/deps-ubuntu.sh
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install the JDK, Android SDK, NDK, emulator image and AVD
+        run: scripts/android-e2e.sh setup
+      - run: scripts/android-e2e.sh doctor
+      - name: Run the phone scenarios
+        run: scripts/android-e2e.sh test
+      - name: Logs
+        if: failure()
+        run: |
+          scripts/android-e2e.sh status || true
+          tail -n 200 ~/.cache/patchbay-android-e2e/*.log || true
