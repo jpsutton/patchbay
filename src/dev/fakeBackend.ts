@@ -348,6 +348,39 @@ function fakeHarnessReplay(csid: string) {
   user("[Request interrupted by user for tool use]");
 }
 
+/**
+ * `?readme=1`: "Windows installer testing" loads the transcript shown in the README's screenshot
+ * (`docs/images/code-tab-*.png`). Capture it at 1440×1010 with a device scale of 2.
+ */
+const readmeDemo = new URLSearchParams(location.search).has("readme");
+let readmeSessionId: string | null = null;
+
+function fakeReadmeReplay(csid: string) {
+  const s = db.code.find((c) => c.id === csid)!;
+  const up = (update: Record<string, unknown>) => codeEmit(csid, { type: "update", update } as CodeEnvelope["event"]);
+  const say = (sessionUpdate: string, text: string) => up({ sessionUpdate, content: { type: "text", text } });
+  const nsi = `${s.cwd}/packaging/windows/nulamp.nsi`;
+  const head = 'Name "nulamp"\nOutFile "${OUTFILE}"\nInstallDir "$PROGRAMFILES64\\nulamp"\n';
+  const tail = "RequestExecutionLevel admin\n";
+  say("user_message_chunk", "Upgrading with the Windows installer always resets the install folder to the default. Can you fix that and make sure the installer still builds?");
+  say("agent_thought_chunk", "The installer probably never reads back the folder it saved. Check the NSIS script.");
+  up({ sessionUpdate: "tool_call", toolCallId: "rm-search", title: "Search `InstallDir`", kind: "search", status: "completed", rawInput: { pattern: "InstallDir", path: s.cwd } });
+  up({ sessionUpdate: "tool_call", toolCallId: "rm-read", title: "Read `packaging/windows/nulamp.nsi`", kind: "read", status: "completed", rawInput: { path: nsi }, content: [{ type: "content", content: { type: "text", text: head + tail } }] });
+  say("agent_message_chunk", "Found it. The installer saves the folder to `HKLM\\Software\\nulamp` but never reads it back, so every upgrade falls back to the default. NSIS has `InstallDirRegKey` for exactly this.\n");
+  up({
+    sessionUpdate: "tool_call", toolCallId: "rm-edit", title: "Edit `packaging/windows/nulamp.nsi`", kind: "edit", status: "completed",
+    rawInput: { file_path: nsi },
+    content: [{ type: "diff", path: nsi, oldText: head + tail, newText: head + '; Upgrades reuse the folder the last install chose.\nInstallDirRegKey HKLM "Software\\nulamp" "InstallDir"\n' + tail }],
+    locations: [{ path: nsi, line: 1 }],
+  });
+  up({
+    sessionUpdate: "tool_call", toolCallId: "rm-build", title: "Execute `makensis -V2 packaging/windows/nulamp.nsi`", kind: "execute", status: "completed",
+    rawInput: { command: "makensis -V2 packaging/windows/nulamp.nsi" },
+    content: [{ type: "content", content: { type: "text", text: "Output: \"dist/nulamp-setup.exe\"\nTotal size: 4123456 bytes" } }],
+  });
+  say("agent_message_chunk", "Fixed. Upgrades now install into whatever folder you picked the first time.\n\n- **Change:** one `InstallDirRegKey` line in `nulamp.nsi`, reading the key the installer already writes.\n- **Checked:** `makensis` builds the setup with no warnings.\n\nFresh installs still default to `Program Files\\nulamp`.");
+}
+
 async function fakeChat(a: Record<string, unknown>, regenerate?: string) {
   const convId = a.conversationId as string;
   const ch = a.onEvent;
@@ -806,6 +839,12 @@ export function install() {
   const seed = (cwd: string, title: string, ago: number, activity: CodeSession["activity"], hostNode = ME) =>
     db.code.push({ id: id(), cwd, acpSessionId: null, title, modelRef: "m1", pinned: false, createdAt: now() - ago, updatedAt: now() - ago, activity, hostNode, epoch: 0, agent: "patchbay", agentModel: null, permissionMode: "default" });
   seed("/home/demo/Projects/nulamp", "Windows installer testing", 1000, "edit");
+  if (readmeDemo) {
+    readmeSessionId = db.code[db.code.length - 1].id;
+    Object.assign(db.models[0], { modelId: "qwen3-coder", displayName: "Qwen3 Coder" });
+    // A registry key, not a file: keep it from rendering as a file link.
+    (window as unknown as Record<string, unknown>).__fakeMissing = ["HKLM\\Software\\nulamp"];
+  }
   seed("/home/demo/Projects/nulamp", "Release to staging", 5000, "pr");
   seed("/home/demo/Projects/omnimark", "Interactive document controls", 3000, "branch", meshDemo ? "n-studio" : ME);
   seed("/home/demo/Work/omnimark", "Session overview", 9000, null, meshDemo ? "n-old" : ME);
@@ -1085,6 +1124,10 @@ export function install() {
               else if (csid === harnessSessionId) {
                 fakeHarnessReplay(csid);
                 fakeReady(csid, true);
+              } else if (csid === readmeSessionId) {
+                fakeReadmeReplay(csid);
+                fakeReady(csid, true);
+                codeEmit(csid, { type: "usage", usage: { totals: { input: 41000, cachedRead: 30000, cacheWrite: 0, output: 1800, reasoning: 0, costUsd: 0.07, apiMs: 0 }, contextTokens: 24000, contextWindow: 128000, autoCompactPercent: 85 } });
               } else fakeReady(csid);
             }, 400);
           }, 10);
