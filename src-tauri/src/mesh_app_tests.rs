@@ -45,7 +45,7 @@ async fn link(a: &Node, b: &Node) {
     let url = format!("127.0.0.1:{}", a.state.mesh.bound_port().unwrap());
     b.state.mesh.join(&url, PASS, "b").unwrap();
     until("join request", 10, || !a.state.mesh.status()["pending"].as_array().unwrap().is_empty()).await;
-    a.state.mesh.approve(b.state.mesh.node_id()).unwrap();
+    a.state.mesh.approve(b.state.mesh.node_id()).await.unwrap();
     until("membership", 10, || b.state.mesh.is_member()).await;
 }
 
@@ -246,8 +246,8 @@ fn phone() -> Phone {
     Phone { client, events }
 }
 
-/// A phone that leaves keeps its keys, and the computers keep its record. Joining again must
-/// still raise a request to approve, not hand it the session of an already admitted phone.
+/// A phone that leaves tells its gateway, so the computers drop it from their lists. It keeps
+/// its keys: joining again must raise a request to approve, not resume its old session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn phone_rejoins_after_leaving() {
     let a = node("alpha6");
@@ -259,14 +259,15 @@ async fn phone_rejoins_after_leaving() {
     let requested = || a.state.mesh.status()["pending"].as_array().unwrap().iter().any(|r| r["nodeId"] == pid);
     p.client.join(&url, PASS, "pocket").unwrap();
     until("phone's join request", 10, requested).await;
-    a.state.mesh.approve(&pid).unwrap();
+    a.state.mesh.approve(&pid).await.unwrap();
     until("phone online", 10, || p.client.status()["phase"] == "online").await;
 
     p.client.leave();
-    assert!(!members::get(&a.state.db, &pid).unwrap().unwrap().is_removed());
+    until("A learns the phone left", 10, || members::get(&a.state.db, &pid).unwrap().unwrap().has_left()).await;
+    assert!(!a.state.mesh.status()["members"].as_array().unwrap().iter().any(|m| m["nodeId"] == pid));
     p.client.join(&url, PASS, "pocket").unwrap();
     until("phone's second join request", 10, requested).await;
-    a.state.mesh.approve(&pid).unwrap();
+    a.state.mesh.approve(&pid).await.unwrap();
     until("phone admitted again", 10, || p.client.is_member()).await;
     until("phone online again", 10, || p.client.status()["phase"] == "online").await;
 }
@@ -299,7 +300,7 @@ async fn phone_joins_follows_resumes_and_switches_gateway() {
         a.state.mesh.status()["pending"].as_array().unwrap().iter().any(|r| r["nodeId"] == pid && r["role"] == "remote")
     })
     .await;
-    a.state.mesh.approve(&pid).unwrap();
+    a.state.mesh.approve(&pid).await.unwrap();
     until("phone admitted", 10, || p.client.is_member()).await;
     until("phone online", 10, || p.client.status()["phase"] == "online").await;
     let rec = members::get(&a.state.db, &pid).unwrap().unwrap();
@@ -398,7 +399,7 @@ async fn snapshot_leaves_out_a_turn_cut_off_from_its_host() {
         b.state.mesh.status()["pending"].as_array().unwrap().iter().any(|r| r["nodeId"] == pid)
     })
     .await;
-    b.state.mesh.approve(&pid).unwrap();
+    b.state.mesh.approve(&pid).await.unwrap();
     until("phone online", 10, || p.client.status()["phase"] == "online").await;
 
     // A turn on A, half done. While A is there, a snapshot through B carries it.
@@ -437,14 +438,14 @@ async fn phone_starts_a_session_on_another_computer() {
         a.state.mesh.status()["pending"].as_array().unwrap().iter().any(|r| r["nodeId"] == pid)
     })
     .await;
-    a.state.mesh.approve(&pid).unwrap();
+    a.state.mesh.approve(&pid).await.unwrap();
     until("phone online", 10, || p.client.status()["phase"] == "online").await;
     let bn = b.state.mesh.node_id().to_owned();
 
     // What B offers, asked through A.
     let opts = p.client.rpc("remote.new_session_options", json!({ "host": bn })).await.unwrap();
-    assert!(opts["agents"].as_array().unwrap().iter().any(|x| x["id"] == "grok"));
-    assert_eq!(opts["defaultAgent"], "grok");
+    assert!(opts["agents"].as_array().unwrap().iter().any(|x| x["id"] == "patchbay"));
+    assert_eq!(opts["defaultAgent"], "patchbay");
 
     // Browsing stays inside the home folder, and lists only visible folders.
     let home = p.client.rpc("remote.list_dirs", json!({ "host": bn })).await.unwrap();
@@ -527,7 +528,7 @@ async fn phone_chat_runs_on_the_picked_computer() {
         a.state.mesh.status()["pending"].as_array().unwrap().iter().any(|r| r["nodeId"] == pid)
     })
     .await;
-    a.state.mesh.approve(&pid).unwrap();
+    a.state.mesh.approve(&pid).await.unwrap();
     until("phone online", 10, || p.client.status()["phase"] == "online").await;
     let bn = b.state.mesh.node_id().to_owned();
 
@@ -560,7 +561,7 @@ async fn phone_chat_runs_on_the_picked_computer() {
 
 /// A gateway for trying the phone app by hand (an emulator reaches the host at 10.0.2.2):
 /// a mesh on `0.0.0.0:41890` whose passphrase is `PASS`, with a provider pointing at
-/// `scripts/mock-llm.py` (start it first) and a Grok Build session using it. Every phone that
+/// `scripts/mock-llm.py` (start it first) and a Patchbay agent session using it. Every phone that
 /// asks to join is approved. Each run is a new mesh.
 ///
 /// `cargo test --lib manual_phone_gateway -- --ignored --nocapture` (PATCHBAY_TEST_SECS limits it).
@@ -595,7 +596,7 @@ async fn manual_phone_gateway() {
     db.set_setting("default_model", "m-echo").unwrap();
     let proj = n.dir.join("proj");
     repo(&proj);
-    let s = db.create_code_session(&proj.to_string_lossy(), Some("m-agent"), "grok", "default").unwrap();
+    let s = db.create_code_session(&proj.to_string_lossy(), Some("m-agent"), "patchbay", "default").unwrap();
     db.update_code_session(&s.id, None, Some("Try !edit from the phone"), None).unwrap();
     let c = db.create_conversation(Some("m-echo")).unwrap();
     db.update_conversation(&c.id, Some("Hello from studio"), None, None).unwrap();
@@ -615,7 +616,7 @@ async fn serve_phones(n: &Node) {
         for p in st["pending"].as_array().cloned().unwrap_or_default() {
             let id = p["nodeId"].as_str().unwrap_or_default();
             eprintln!("approving {} ({}), code {}", p["name"], p["role"], p["code"]);
-            let _ = n.state.mesh.approve(id);
+            let _ = n.state.mesh.approve(id).await;
         }
         let members: Vec<String> =
             st["members"].as_array().unwrap().iter().map(|m| format!("{}:{}", m["name"], m["state"])).collect();
@@ -716,11 +717,11 @@ async fn usage_limit_stops_claude_turns() {
     assert_eq!(notices(), 1);
     let ev = a.events.lock().unwrap().iter().rev().find(|(_, p)| p["event"]["type"] == "notice").cloned().unwrap();
     let text = ev.1["event"]["message"].as_str().unwrap().to_owned();
-    assert!(text.starts_with("Stopped. Claude Code has used 96% of your plan's 5-hour limit"), "{text}");
+    assert!(text.starts_with("Stopped. You have used 96% of your Claude plan's 5-hour limit"), "{text}");
 
     emit(&a, &claude.id, CodeEvent::PromptDone { stop_reason: json!("cancelled") });
     let err = prompt(claude.id.clone()).await.unwrap_err();
-    assert!(err.0.starts_with("Not sent. Claude Code has used 97%"), "{}", err.0);
+    assert!(err.0.starts_with("Not sent. You have used 97%"), "{}", err.0);
 
     // Turning the guard off lets prompts through again.
     let mut prefs = prefs::load(&a.state.db);
@@ -747,4 +748,45 @@ async fn usage_limit_stops_claude_turns() {
     assert!(a.events.lock().unwrap().iter().any(|(n, p)| n == "code://plan-limits" && p["sevenDay"]["utilization"] == 0.3));
     let again = AppState::new(a.state.db.clone(), a.dir.clone(), a.state.mesh.clone(), Arc::new(|_: &str, _: Value| {}));
     assert_eq!(again.code.plan.latest().and_then(|l| l.five_hour).map(|w| w.utilization), Some(0.97));
+}
+
+/// A phone can decide a join request that waits on any computer, with its own signature.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn phone_decides_join_requests_waiting_on_any_computer() {
+    let (a, b, c, d) = (node("alpha8"), node("bravo8"), node("charlie8"), node("delta8"));
+    link(&a, &b).await;
+    let p = phone();
+    let pid = p.client.node_id();
+    let url_a = format!("127.0.0.1:{}", a.state.mesh.bound_port().unwrap());
+    p.client.join(&url_a, PASS, "pocket").unwrap();
+    until("phone's join request", 10, || {
+        a.state.mesh.status()["pending"].as_array().unwrap().iter().any(|r| r["nodeId"] == pid)
+    })
+    .await;
+    a.state.mesh.approve(&pid).await.unwrap();
+    until("phone online", 10, || p.client.status()["phase"] == "online").await;
+
+    // C asks B; the phone, whichever of them it is connected through, is told and approves.
+    until("B listens", 5, || b.state.mesh.bound_port().is_some()).await;
+    let url_b = format!("127.0.0.1:{}", b.state.mesh.bound_port().unwrap());
+    c.state.mesh.join(&url_b, PASS, "c").unwrap();
+    let cid = c.state.mesh.node_id().to_owned();
+    let waiting = |id: &str| p.client.status()["pending"].as_array().unwrap().iter().any(|r| r["nodeId"] == id);
+    until("request reaches the phone", 10, || waiting(&cid)).await;
+    until("joiner code", 5, || c.state.mesh.status()["joining"]["code"].is_string()).await;
+    let seen = p.client.status()["pending"].as_array().unwrap().iter().find(|r| r["nodeId"] == cid.as_str()).cloned().unwrap();
+    assert_eq!(seen["code"], c.state.mesh.status()["joining"]["code"], "the phone shows the joiner's code");
+    assert_eq!(seen["host"], b.state.mesh.node_id());
+    p.client.approve(&cid).await.unwrap();
+    until("charlie joins", 10, || c.state.mesh.is_member()).await;
+    assert_eq!(members::get(&c.state.db, &cid).unwrap().unwrap().approver, pid, "the admission carries the phone's signature");
+    until("request clears", 10, || !waiting(&cid)).await;
+
+    // And it can turn one away.
+    d.state.mesh.join(&url_a, PASS, "d").unwrap();
+    let did = d.state.mesh.node_id().to_owned();
+    until("second request reaches the phone", 10, || waiting(&did)).await;
+    p.client.reject(&did).await.unwrap();
+    until("delta is turned away", 10, || d.state.mesh.status()["joining"]["status"] == "rejected").await;
+    assert!(!d.state.mesh.is_member());
 }

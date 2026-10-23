@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { AGENT_LABELS, api, errorText, estimateCost, type Tokens, type UsageReport } from "../lib/ipc";
+import { AGENT_LABELS, api, errorText, estimateCost, usesPatchbayModels, type Tokens, type UsageReport } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { fmtTokens } from "../components/UsageBar";
 import { Choice } from "./PreferencesPage";
@@ -143,10 +143,10 @@ export function UsagePage() {
       cost += c;
       replies += r.replies;
     }
-    // Only Grok Build runs on Patchbay's models; other agents bring their own, so `modelRef` is
-    // just the default it was created with and its prices don't apply.
+    // Only Patchbay's agent and Grok Build run on Patchbay's models; other agents bring their own,
+    // so `modelRef` is just the default it was created with and its prices don't apply.
     const code = report.code.map((s) => {
-      const own = s.agent !== "grok";
+      const own = !usesPatchbayModels(s.agent);
       return {
         ...s,
         label: own ? [s.agentModel, AGENT_LABELS[s.agent] ?? s.agent].filter(Boolean).join(" · ") : label(s.modelRef),

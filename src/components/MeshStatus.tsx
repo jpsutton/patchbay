@@ -68,10 +68,11 @@ export function MeshChip() {
     >
       <span className={`h-2 w-2 shrink-0 rounded-full ${dotClass(mesh)}`} aria-hidden="true" />
       {err ? (
-        "Mesh error"
+        // The word drops out in a narrow sidebar footer; the dot (red on error) and count stay.
+        <span className="@max-[320px]/footer:hidden">Mesh error</span>
       ) : (
         <>
-          Mesh
+          <span className="@max-[320px]/footer:hidden">Mesh</span>
           {others.length > 0 && (
             <span className="meta text-faint">
               {online}/{others.length}

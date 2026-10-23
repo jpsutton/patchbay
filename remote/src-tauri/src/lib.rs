@@ -4,7 +4,7 @@
 
 mod keystore;
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,11 +13,12 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use patchbay_mesh::client::{self, RemoteClient};
 use patchbay_mesh::remote as rmt;
+use patchbay_mesh::wire::{EV_JOIN_REQUEST, EV_JOIN_RESOLVED};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_notification::{Action, ActionPerformed, ActionType, NotificationExt};
 use tauri_plugin_remote_platform::PlatformExt;
 
 /// Chat topics followed at once; the oldest is dropped beyond this.
@@ -27,6 +28,8 @@ const UPLOAD_CHUNK: usize = 3 * 1024 * 1024;
 /// How long the lists stay fresh without a change notice from the gateway.
 const INDEX_TTL: Duration = Duration::from_secs(20);
 const CATALOG_TTL: Duration = Duration::from_secs(120);
+/// The notification action set of a join request: Approve and Decline buttons.
+const JOIN_ACTIONS: &str = "join-request";
 
 #[derive(Debug)]
 pub struct CmdError(String);
@@ -61,6 +64,16 @@ struct Remote {
     /// This phone's own settings and preferences.
     local: Mutex<serde_json::Map<String, Value>>,
     foreground: AtomicBool,
+    /// Join requests (by node id) already announced with a notification.
+    join_notified: Mutex<HashSet<String>>,
+    /// What the user chose on a join request's notification, until the window picks it up:
+    /// `{ action: "open" | "approve" | "reject", nodeId }`.
+    join_action: Mutex<Option<Value>>,
+}
+
+/// A notification id for a join request, so a repeat replaces it instead of stacking.
+fn join_notification_id(node: &str) -> i32 {
+    (node.bytes().fold(17u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32)) & 0x7fff_ffff) as i32
 }
 
 impl Remote {
@@ -103,6 +116,63 @@ impl Remote {
         if let Err(e) = self.app.notification().builder().title(title).body(body).show() {
             tracing::debug!("notification: {e}");
         }
+    }
+
+    /// Tell the user a node waits to join, with Approve and Decline in the notification shade and
+    /// the code to compare in its text. Tapping it opens the membership screen. Only while the
+    /// app is out of sight (on screen, the home view shows the request), and once per request.
+    fn notify_join(&self, req: &Value) {
+        if self.foreground.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(id) = req["nodeId"].as_str() else { return };
+        if !self.join_notified.lock().unwrap().insert(id.to_owned()) {
+            return;
+        }
+        let name = req["name"].as_str().unwrap_or("A device");
+        let phone = if req["role"] == "remote" { " as a phone" } else { "" };
+        let mut body = format!("Approve only if it shows the code {}.", req["code"].as_str().unwrap_or_default());
+        if let Some(host) = req["hostName"].as_str() {
+            body.push_str(&format!(" Waiting on {host}."));
+        }
+        let shown = self
+            .app
+            .notification()
+            .builder()
+            .id(join_notification_id(id))
+            .title(format!("{name} wants to join your mesh{phone}"))
+            .body(body)
+            .action_type_id(JOIN_ACTIONS)
+            .extra("nodeId", id)
+            .auto_cancel()
+            .show();
+        if let Err(e) = shown {
+            tracing::debug!("notification: {e}");
+        }
+    }
+
+    /// Notify what is already waiting, as the app leaves the screen.
+    fn notify_pending_joins(&self) {
+        let pending = self.client.status()["pending"].as_array().cloned().unwrap_or_default();
+        for req in &pending {
+            self.notify_join(req);
+        }
+    }
+
+    /// The user tapped a join request's notification or one of its buttons. The window decides
+    /// what to do (after the lock screen, if one is on), so keep it until it asks.
+    fn on_notification_action(&self, performed: &ActionPerformed) {
+        let Some(node) = performed.notification().and_then(|n| n.extra().get("nodeId")).and_then(Value::as_str) else {
+            return;
+        };
+        let action = match performed.action_id() {
+            "approve" => "approve",
+            "reject" => "reject",
+            _ => "open",
+        };
+        let v = json!({ "action": action, "nodeId": node });
+        *self.join_action.lock().unwrap() = Some(v.clone());
+        self.emit("remote://join-action", v);
     }
 
     fn title_of(&self, list: &str, id: &str) -> String {
@@ -157,6 +227,14 @@ impl Remote {
             rmt::EV_INDEX => {
                 self.forget_index();
                 self.emit("mesh://changed", json!({ "tables": ["conversations", "messages", "code_sessions"] }));
+            }
+            EV_JOIN_REQUEST => self.notify_join(&payload),
+            EV_JOIN_RESOLVED => {
+                if let Some(id) = payload["nodeId"].as_str() {
+                    self.join_notified.lock().unwrap().remove(id);
+                    // Decided somewhere else: take the buttons out of the shade.
+                    let _ = self.app.notification().remove_active(vec![join_notification_id(id)]);
+                }
             }
             client::EV_STATUS | client::EV_MEMBERS => {
                 self.emit("remote://status", self.client.status());
@@ -272,6 +350,27 @@ fn remote_kick(r: Shared<'_>) {
 fn remote_set_foreground(r: Shared<'_>, foreground: bool) {
     r.foreground.store(foreground, Ordering::Relaxed);
     r.client.set_foreground(foreground);
+    if !foreground {
+        r.notify_pending_joins();
+    }
+}
+
+/// Admit a node waiting to join, with this phone's signature.
+#[tauri::command]
+async fn mesh_approve(r: Shared<'_>, node_id: String) -> CmdResult<()> {
+    Ok(r.client.approve(&node_id).await?)
+}
+
+/// Turn a node waiting to join away.
+#[tauri::command]
+async fn mesh_reject(r: Shared<'_>, node_id: String) -> CmdResult<()> {
+    Ok(r.client.reject(&node_id).await?)
+}
+
+/// What the user chose on a join request's notification while the window wasn't looking.
+#[tauri::command]
+fn remote_take_join_action(r: Shared<'_>) -> Option<Value> {
+    r.join_action.lock().unwrap().take()
 }
 
 /// Stop following a session or conversation the window no longer shows.
@@ -823,7 +922,25 @@ pub fn run() {
                 catalog: Mutex::default(),
                 local: Mutex::new(local),
                 foreground: AtomicBool::new(true),
+                join_notified: Mutex::default(),
+                join_action: Mutex::default(),
             }));
+            // Join requests come with Approve and Decline buttons; tapping any of them reports back.
+            let notifications = app.notification();
+            let buttons = ActionType::builder(JOIN_ACTIONS)
+                .actions(vec![Action::builder("approve", "Approve").build(), Action::builder("reject", "Decline").build()])
+                .build();
+            if let Err(e) = notifications.register_action_types(vec![buttons]) {
+                tracing::debug!("notification actions: {e}");
+            }
+            let h = app.handle().clone();
+            if let Err(e) = notifications.on_action(move |performed| {
+                if let Some(r) = h.try_state::<Arc<Remote>>() {
+                    r.on_notification_action(performed);
+                }
+            }) {
+                tracing::debug!("notification actions: {e}");
+            }
             tauri::async_runtime::spawn(async move { client.start() });
             watch_network(app.state::<Arc<Remote>>().client.clone());
             Ok(())
@@ -836,6 +953,9 @@ pub fn run() {
             remote_leave,
             remote_kick,
             remote_set_foreground,
+            mesh_approve,
+            mesh_reject,
+            remote_take_join_action,
             remote_unwatch,
             remote_keep_alive,
             remote_unlock,

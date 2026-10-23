@@ -1,7 +1,7 @@
 {
   "name": "patchbay",
   "private": true,
-  "version": "0.11.0",
+  "version": "0.12.0",
   "license": "Apache-2.0",
   "type": "module",
   "packageManager": "pnpm@11.25.0",
@@ -12,7 +12,6 @@
     "build:remote": "tsc --noEmit && vite build --config vite.remote.config.ts",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri",
-    "sidecar": "scripts/build-sidecar.sh",
     "notices": "node scripts/third-party-notices.mjs"
   },
   "dependencies": {

@@ -81,7 +81,7 @@ export function codeToMarkdown(session: CodeSession, entries: Entry[], toolCalls
         out.push(e.text, "");
         break;
       case "image":
-        out.push(`![Image from the agent](data:${e.mimeType};base64,${e.data})`, "");
+        out.push(`![${e.from === "user" ? "Your image" : "Image from the agent"}](data:${e.mimeType};base64,${e.data})`, "");
         break;
       case "thought":
         out.push("<details><summary>Thinking</summary>", "", e.text, "", "</details>", "");

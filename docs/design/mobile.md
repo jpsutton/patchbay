@@ -62,6 +62,7 @@ All are `Rpc` messages from the phone to its gateway (`src-tauri/src/gateway.rs`
 | `remote.transcript`, `remote.usage`, `remote.update_code_session` | The transcript cache, usage, and the title. |
 | `remote.attach_put`, `remote.thumbnail` | Upload an attachment in 3 MB chunks; an image's thumbnail. |
 | `remote.subscribe`, `remote.unsubscribe` | Follow topics, each from a point (section 3). |
+| `remote.admit`, `remote.reject` | Decide a join request waiting on any member (section 7, "Join requests"). |
 
 `remote.code` names the phone as the prompt's origin, so the phone shows its own prompts and every other window shows them as the phone's.
 
@@ -151,6 +152,7 @@ The Android parts sit in a small Tauri plugin (`remote/plugin`) with three calls
 
 - **Network changes.** The backend checks the network interfaces' addresses every two seconds, in Rust, so iOS gets it too. A change makes the client ping its gateway at once and race for another if it doesn't answer within four seconds, instead of waiting for heartbeats to time out.
 - **Background.** When the app leaves the screen while an agent or a reply runs, a foreground service with a quiet notification keeps the process and its connection alive (Android 15 limits these to six hours a day). The backend raises local notifications for permission requests, finished turns and finished replies while the app is out of sight. Turning "Stay connected in the background" off, or on iOS, the app reconnects and resumes when it returns.
+- **Join requests.** Every gateway sends its phones the `mesh://join-request` and `mesh://join-resolved` events described in mesh.md, and the list of open requests when a phone connects. The client believes a request only from a host it has a record for, with a matching code. A phone approves with its own identity: it signs the admission record (`RemoteClient::approve`) and the gateway passes it to the host as `mesh.admit`, which accepts a phone's signature as a member's. Out of sight, the backend raises a notification per request with Approve and Decline actions and the code in its text (`tauri-plugin-notification` action types). On Android every action opens the app, so the backend keeps what the user chose until the window asks (`remote_take_join_action`), which is after the lock screen if one is on. Tapping the notification opens Settings, which lists the requests with their codes.
 - **Heartbeats.** The phone pings every 15 seconds on screen and every 60 seconds in the background, and gives up after three missed. The gateway drops a phone silent for 200 seconds.
 
 ## 8. Releases and the F-Droid repository
@@ -170,4 +172,3 @@ Human time: creating the APK signing key and the repository key, backing both up
 ## Open questions
 
 - Whether the phone keeps a small encrypted on-disk cache of recently viewed transcripts, so the app shows something before the first round trip.
-- Whether a remote member should be able to approve new members. The default is no: only full members approve.

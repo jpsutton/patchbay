@@ -37,7 +37,7 @@ The passphrase can be something you can remember. See [How the mesh stays privat
 1. On the new computer, open **Settings → Mesh**.
 2. Under **Join a mesh**, enter the address of a computer already in the mesh, then the passphrase, and click **Ask to join**. The address can be an IP address (`100.64.0.7`), a host name, an address with a port (`100.64.0.7:41890`) or a URL (`wss://mesh.example.com`).
 3. The new computer shows a six-digit code.
-4. The computer it connected to shows a join request with a code. Check that both codes match, then click **Approve**.
+4. Every computer in the mesh shows a join request with a code in **Settings → Mesh**, not only the one the new computer connected to. Phones in the mesh show it too. On any of them, check that both codes match, then click **Approve**.
 
 If the codes differ, click **Decline**: something sits between the two computers.
 
@@ -91,7 +91,7 @@ In **Settings → Mesh**, click **Remove** next to the computer. It is disconnec
 
 Removing a computer also changes the key that encrypts synced secrets. However, the removed computer keeps the copies of chats, sessions and API keys it already has. If it might be in the wrong hands, replace those API keys with your providers.
 
-To take the current computer out of the mesh, click **Leave mesh**. It stops syncing and forgets the passphrase, and keeps its own copy of everything.
+To take the current computer out of the mesh, click **Leave mesh**. It tells the members it can reach that it's leaving, and they drop it from their lists. Then it stops syncing and forgets the passphrase, and keeps its own copy of everything. If it can't reach any member when it leaves, remove it from one of them as well.
 
 ## From your phone
 
@@ -104,7 +104,7 @@ Add Patchbay's F-Droid repository to F-Droid, Droid-ify or Neo Store: open `http
 ### Join
 
 1. In the app, enter the address of any computer in the mesh, as for adding a computer, then the passphrase and a name for the phone, and tap **Join**.
-2. The phone shows a six-digit code. On that computer, **Settings → Mesh** shows a request to join as a phone. Check that the codes match, then click **Approve**.
+2. The phone shows a six-digit code. **Settings → Mesh** on any computer in the mesh shows a request to join as a phone, and so do other phones. Check that the codes match, then click **Approve**.
 
 The computer must run a Patchbay version that serves phones; the app says so if it doesn't.
 
@@ -114,7 +114,15 @@ The phone connects through whichever of your computers it reaches first: on your
 
 The **Code** tab groups sessions by computer, and marks those that are working and those that **Need you**. While an agent or a reply is running and you switch away from the app, it can stay connected in the background (Android shows a quiet notification for that) and notifies you of permission requests and finished turns. Turn that off, or turn on the fingerprint or screen lock, in the app's **Settings**.
 
-To remove the phone, click **Remove** next to it in **Settings → Mesh** on any computer. It never had API keys, so there's nothing to replace.
+### Approving new computers from your phone
+
+When another computer or phone asks to join, the phone can decide it, whichever computer the newcomer connected to. While the app is out of sight, a notification shows the newcomer's name and its code, with **Approve** and **Decline** buttons. Tapping the notification opens **Settings** in the app, where the request shows its code. With the app open, a banner on the home screen leads there. Check that the code matches the one on the new device before you approve.
+
+Android opens the app when you tap a notification button. If you turned on the fingerprint or screen lock, the app asks for it first, and then applies your choice.
+
+A computer approved from a phone gets all your chats, sessions and API keys, like any other. Keep the lock on if others might pick up your phone.
+
+To take the phone out from the phone itself, use **Leave the mesh** in its settings. The computers drop it from their lists, provided one of them is reachable at that moment. To remove the phone from a computer, click **Remove** next to it in **Settings → Mesh** on any computer. It never had API keys, so there's nothing to replace.
 
 ## Cloudflare Tunnel
 
@@ -139,7 +147,7 @@ Patchbay can't sign in to Cloudflare Access, so don't protect this hostname with
 
 - **The passphrase never crosses the network.** Each connection proves both sides know it with SPAKE2, a password-authenticated key exchange. Someone who records a connection can't test passphrases against the recording. Each guess needs a live connection attempt, and Patchbay slows those down after every failure. That is why a passphrase you can remember is fine.
 - **Everything is encrypted.** The SPAKE2 result keys a [Noise](https://noiseprotocol.org) session, which encrypts all traffic with forward secrecy. Traffic relayed through another computer is encrypted end to end, so the relaying computer can't read it.
-- **The passphrase alone doesn't let a computer in.** A member must approve each new computer after comparing the codes. Approvals and removals are signed records that every computer checks.
+- **The passphrase alone doesn't let a computer in.** Any member, or any phone in the mesh, must approve each new computer after comparing the codes. Approvals and removals are signed records that every computer checks.
 - **Each computer has its own keys.** A computer that knows the passphrase still can't pose as a member, because each member's keys are fixed in its signed record.
 - **Secrets are encrypted at rest.** Synced API keys and MCP secrets sit in each computer's database encrypted with a key only members have.
 
@@ -158,7 +166,7 @@ Behind a Cloudflare Tunnel, every connection arrives from the tunnel's local add
 
 ## Limitations
 
-- Moving the agent's own session history works with Grok Build, the agent Patchbay ships with. With other agents, the moved session starts fresh and gets the conversation so far as context on its first prompt.
+- Moving the agent's own session history works with Patchbay's built-in agent and with Grok Build. With other agents, the moved session starts fresh and gets the conversation so far as context on its first prompt.
 - Window preferences (theme, text size, shortcuts and similar) stay per computer.
 - Two copies of the same Patchbay database can't both join a mesh, because they share one identity. Use a fresh install on each computer instead of copying the data folder.
 

@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
-import { api, errorText, type CodeEnvelope, type CodeSession, type MeshChatEvent, type MeshMember } from "../lib/ipc";
+import { api, errorText, type CodeEnvelope, type CodeSession, type MeshChatEvent, type MeshMember, type MeshStatus } from "../lib/ipc";
 import { codeEventArrived, memberName, memberOnline, useStore } from "../lib/store";
 import { ChatView } from "../chat/ChatView";
 import { CodeView } from "../code/CodeView";
@@ -29,6 +29,14 @@ export interface RemoteStatus {
   resumed: boolean | null;
   joining: { url: string; code: string | null; status: "connecting" | "waiting" | "failed" | "rejected"; error: string | null } | null;
   members: MeshMember[];
+  /** Nodes waiting to join, on any computer; this phone may decide them. */
+  pending: MeshStatus["pending"];
+}
+
+/** What the user chose on a join request's notification (see remote/src-tauri, `on_notification_action`). */
+interface JoinAction {
+  action: "open" | "approve" | "reject";
+  nodeId: string;
 }
 
 /** What a gateway knows a Code session is doing. */
@@ -51,6 +59,7 @@ const remote = {
   keepAlive: (on: boolean) => invoke<void>("remote_keep_alive", { on }),
   unlock: (reason: string) => invoke<boolean>("remote_unlock", { reason }),
   live: () => invoke<Record<string, Live>>("remote_live"),
+  takeJoinAction: () => invoke<JoinAction | null>("remote_take_join_action"),
 };
 
 // Per-device conveniences, so plain local storage.
@@ -86,19 +95,27 @@ const ghostCls = "flex h-11 w-full items-center justify-center rounded-[10px] px
 export function RemoteApp() {
   const [status, setStatus] = useState<RemoteStatus | null>(null);
   const [locked, setLocked] = useState(() => flag(LOCK_KEY, false));
-
+  // A tap on a join request's notification, or on its Approve or Decline button. It waits here
+  // through the lock screen, so a button in the shade can't get around the lock.
+  const [joinAction, setJoinAction] = useState<JoinAction | null>(null);
+  const joinActionDone = useCallback(() => setJoinAction(null), []);
   useEffect(() => {
     remote.status().then(setStatus, () => {});
     const un = listen<RemoteStatus>("remote://status", (ev) => setStatus(ev.payload));
+    // The app may have been started by the notification, before this window listened.
+    const take = () => remote.takeJoinAction().then((a) => a && setJoinAction(a), () => {});
+    take();
+    const act = listen("remote://join-action", take);
     return () => {
       un.then((f) => f());
+      act.then((f) => f());
     };
   }, []);
 
   if (!status) return <div className="h-full bg-bg" />;
   if (!status.member) return <JoinScreen status={status} />;
   if (locked) return <LockScreen onUnlocked={() => setLocked(false)} />;
-  return <Main status={status} onLock={() => setLocked(true)} />;
+  return <Main status={status} onLock={() => setLocked(true)} joinAction={joinAction} onJoinActionDone={joinActionDone} />;
 }
 
 function Screen({ children }: { children: ReactNode }) {
@@ -130,10 +147,10 @@ function JoinScreen({ status }: { status: RemoteStatus }) {
   if (j?.status === "waiting" && j.code) {
     return (
       <Screen>
-        <Brand line="Approve this phone on the computer" />
+        <Brand line="Approve this phone" />
         <p className="text-muted">
-          Open Patchbay on the computer at <span className="font-mono text-fg">{j.url.replace(/^wss?:\/\//, "")}</span>, go
-          to Settings → Mesh, and check it shows this code before you approve:
+          Any computer in the mesh can approve it. Open Patchbay on one, go to Settings → Mesh, or approve it from another
+          phone in the mesh, and check it shows this code before you approve:
         </p>
         <div className="rounded-xl border border-border bg-panel py-5 text-center font-mono text-[34px] tracking-[0.12em]">
           {j.code}
@@ -224,7 +241,17 @@ function LockScreen({ onUnlocked }: { onUnlocked: () => void }) {
 
 type View = { kind: "home" } | { kind: "chat" } | { kind: "code" };
 
-function Main({ status, onLock }: { status: RemoteStatus; onLock: () => void }) {
+function Main({
+  status,
+  onLock,
+  joinAction,
+  onJoinActionDone,
+}: {
+  status: RemoteStatus;
+  onLock: () => void;
+  joinAction: JoinAction | null;
+  onJoinActionDone: () => void;
+}) {
   const [view, setView] = useState<View>({ kind: "home" });
   const [tab, setTab] = useState<"chats" | "code">(() => {
     try {
@@ -241,6 +268,33 @@ function Main({ status, onLock }: { status: RemoteStatus; onLock: () => void }) 
   const hiddenAt = useRef<number | null>(null);
   const liveRef = useRef(live);
   liveRef.current = live;
+
+  // A join request's notification: tapping it opens the membership screen with the code; its
+  // buttons decide at once. After a cold start the request may not have reached us yet.
+  useEffect(() => {
+    if (!joinAction) return;
+    const { action, nodeId } = joinAction;
+    if (action === "open") {
+      setSettings(true);
+      onJoinActionDone();
+      return;
+    }
+    const req = status.pending.find((p) => p.nodeId === nodeId);
+    if (req) {
+      onJoinActionDone();
+      const done = action === "approve" ? api.meshApprove(nodeId) : api.meshReject(nodeId);
+      done.then(
+        () => setToast(`${action === "approve" ? "Approved" : "Declined"} ${req.name}`),
+        (e) => setToast(errorText(e)),
+      );
+      return;
+    }
+    const t = setTimeout(() => {
+      setToast("That join request is gone");
+      onJoinActionDone();
+    }, 6000);
+    return () => clearTimeout(t);
+  }, [joinAction, status.pending, onJoinActionDone, setToast]);
 
   // Load what the gateway knows, and follow its changes.
   useEffect(() => {
@@ -578,6 +632,17 @@ function Home({
           <SettingsIcon size={18} />
         </button>
       </header>
+      {status.pending.length > 0 && (
+        <button
+          className="mx-4 mb-2 flex items-center gap-2 rounded-xl border border-accent/50 bg-accent/10 px-3 py-2.5 text-left text-[14px] active:bg-accent/20"
+          onClick={onSettings}
+        >
+          <span className="min-w-0 flex-1 truncate">
+            {status.pending[0].name} asks to join{status.pending.length > 1 ? ` (+${status.pending.length - 1} more)` : ""}
+          </span>
+          <span className="shrink-0 font-semibold text-accent-ink">Review</span>
+        </button>
+      )}
       <div className="px-4 pb-2">
         <div role="tablist" className="grid grid-cols-2 gap-1 rounded-[11px] border border-line bg-panel p-1">
           {(["chats", "code"] as const).map((t) => (
@@ -724,6 +789,52 @@ function Toggle({ label, sub, on, onChange }: { label: string; sub: string; on: 
   );
 }
 
+function JoinRequests({ pending }: { pending: RemoteStatus["pending"] }) {
+  const setToast = useStore((s) => s.setToast);
+  const [busy, setBusy] = useState<string | null>(null);
+  const decide = async (id: string, approve: boolean) => {
+    setBusy(id);
+    try {
+      await (approve ? api.meshApprove(id) : api.meshReject(id));
+    } catch (e) {
+      setToast(errorText(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  if (pending.length === 0) return null;
+  return (
+    <div className="mb-6 flex flex-col gap-3">
+      <div className="font-mono text-[11px] uppercase tracking-[0.06em] text-faint">Join requests</div>
+      {pending.map((p) => (
+        <section key={p.nodeId} className="flex flex-col gap-3 rounded-xl border border-accent/50 bg-accent/5 p-4" aria-label={`Join request from ${p.name}`}>
+          <div>
+            <div className="text-[15px] font-medium">
+              {p.name} asks to join{p.role === "remote" ? " as a phone" : ""}
+            </div>
+            <div className="mt-0.5 text-[12.5px] leading-5 text-muted">
+              Approve only if {p.name} shows this same code.{" "}
+              {p.role === "remote"
+                ? "It can read every chat and session and run commands through their agents, but gets no API keys."
+                : "It will get all chats, sessions and API keys."}
+              {p.hostName && <span className="text-faint"> It is connected to {p.hostName}.</span>}
+            </div>
+          </div>
+          <div className="rounded-xl border border-border bg-panel py-3 text-center font-mono text-[28px] tracking-[0.12em]">{p.code}</div>
+          <div className="grid grid-cols-2 gap-2">
+            <button className={ghostCls + " border border-border"} disabled={busy === p.nodeId} onClick={() => decide(p.nodeId, false)}>
+              Decline
+            </button>
+            <button className={primaryCls} disabled={busy === p.nodeId} onClick={() => decide(p.nodeId, true)}>
+              Approve
+            </button>
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
 function SettingsSheet({ status, onClose }: { status: RemoteStatus; onClose: () => void }) {
   const [lock, setLock] = useState(() => flag(LOCK_KEY, false));
   const [stay, setStay] = useState(() => flag(STAY_KEY, true));
@@ -738,6 +849,7 @@ function SettingsSheet({ status, onClose }: { status: RemoteStatus; onClose: () 
         </button>
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-[calc(env(safe-area-inset-bottom)+24px)]">
+        <JoinRequests pending={status.pending} />
         <div className="font-mono text-[11px] uppercase tracking-[0.06em] text-faint">This phone</div>
         <div className="mt-2 rounded-xl border border-line bg-panel px-4 py-3">
           <div className="text-[15px]">{status.name}</div>
@@ -786,7 +898,7 @@ function SettingsSheet({ status, onClose }: { status: RemoteStatus; onClose: () 
           onClick={async () => {
             const { ok } = await askConfirm({
               title: "Leave the mesh?",
-              body: "This phone forgets the mesh. To join again you'll need the passphrase and an approval. Remove it on a computer too, so its record goes.",
+              body: "This phone forgets the mesh. To join again you'll need the passphrase and an approval. If no computer is reachable right now, remove it on a computer too, so it drops off their lists.",
               confirmLabel: "Leave",
               danger: true,
             });

@@ -37,7 +37,7 @@ pub struct Preferences {
     pub generate_titles: bool,
 
     // ---- Code agents ----
-    /// Agent for new Code sessions: an `AgentKind` id (grok, claude-code, opencode, cursor, kilo).
+    /// Agent for new Code sessions: an `AgentKind` id (patchbay, grok, claude-code, opencode, cursor, kilo).
     pub default_agent: String,
     /// Executable overrides, agent id -> path; agents not listed are looked up on PATH.
     pub agent_paths: crate::code::agents::AgentPaths,
@@ -54,12 +54,17 @@ pub struct Preferences {
     /// Appended to the agent's system prompt for every session (agents that accept one).
     pub agent_instructions: String,
     pub web_fetch: bool,
+    /// Send Patchbay's own agent's prompts in a shortened form to save input tokens (a session
+    /// can override it).
+    pub minify_prompts: bool,
     /// Default auto-compact threshold; a model's own setting wins.
     pub auto_compact_percent: Option<u8>,
     /// Extra model calls for session titles and recaps.
     pub background_summaries: bool,
     /// What the agent may pick up from your Claude Code setup (`~/.claude`, project `.claude/`).
     pub claude_config: ClaudeConfig,
+    /// Limits of Patchbay's own agent; unset fields keep its defaults.
+    pub agent_engine: AgentEngine,
 
     // ---- Terminal ----
     /// Empty = the user's login shell.
@@ -85,6 +90,26 @@ pub struct ClaudeConfig {
     pub hooks: bool,
     /// Claude Code plugins (which can bundle skills, agents, hooks and MCP servers).
     pub plugins: bool,
+    /// Plugins (`name@marketplace`) Patchbay's agent doesn't load, whatever Claude Code's setting.
+    pub disabled_plugins: Vec<String>,
+    /// MCP servers from Claude's config that Patchbay's agent doesn't start, by name.
+    pub disabled_mcp_servers: Vec<String>,
+}
+
+/// Limits of Patchbay's own agent. `None` = the agent's default.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AgentEngine {
+    /// Model requests one prompt may make (default 100).
+    pub max_steps: Option<u32>,
+    /// Model requests one subagent run may make (default 40).
+    pub subagent_max_steps: Option<u32>,
+    /// Retries of a model request that fails before any output (default 2).
+    pub request_retries: Option<u32>,
+    /// Give up on a reply stream silent this long, in seconds (default 180).
+    pub idle_timeout_secs: Option<u32>,
+    /// Shell commands time out after this many seconds unless the agent asks for longer (default 120).
+    pub shell_timeout_secs: Option<u32>,
 }
 
 /// When Claude Code runs on a Claude plan: stop its turns once the 5-hour or weekly window
@@ -104,7 +129,16 @@ impl Default for UsageLimit {
 
 impl Default for ClaudeConfig {
     fn default() -> Self {
-        Self { skills: true, instructions: true, agents: true, mcp_servers: true, hooks: true, plugins: true }
+        Self {
+            skills: true,
+            instructions: true,
+            agents: true,
+            mcp_servers: true,
+            hooks: true,
+            plugins: true,
+            disabled_plugins: Vec::new(),
+            disabled_mcp_servers: Vec::new(),
+        }
     }
 }
 
@@ -121,16 +155,18 @@ impl Default for Preferences {
             default_system_prompt: String::new(),
             expand_reasoning: false,
             generate_titles: true,
-            default_agent: "grok".into(),
+            default_agent: "patchbay".into(),
             agent_paths: Default::default(),
             agent_providers: Default::default(),
             usage_limit: UsageLimit::default(),
             permission_mode: "default".into(),
             agent_instructions: String::new(),
             web_fetch: false,
+            minify_prompts: false,
             auto_compact_percent: None,
             background_summaries: true,
             claude_config: ClaudeConfig::default(),
+            agent_engine: AgentEngine::default(),
             terminal_shell: String::new(),
             terminal_font_size: 13,
             terminal_local_echo: "auto".into(),

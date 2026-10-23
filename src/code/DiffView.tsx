@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { structuredPatch } from "diff";
+import { FileLink } from "../components/FileLink";
 
 export function diffStats(oldText: string | null, newText: string): { add: number; del: number } {
   const p = structuredPatch("a", "b", oldText ?? "", newText, "", "", { context: 0 });
@@ -37,7 +38,9 @@ export function DiffView({
   return (
     <div className="overflow-hidden rounded-xl border border-line font-mono text-[12.5px] leading-5">
       <div className="flex h-8 items-center gap-2 border-b border-line bg-panel px-3 text-[12px]">
-        <span className="truncate text-fg/90">{path}</span>
+        <FileLink text={path} exact className="min-w-0 truncate">
+          <span className="truncate text-fg/90">{path}</span>
+        </FileLink>
         {isNew && <span className="rounded-[5px] bg-ok/15 px-1.5 text-[11px] text-ok">new</span>}
       </div>
       <div className="overflow-auto" style={{ maxHeight }}>

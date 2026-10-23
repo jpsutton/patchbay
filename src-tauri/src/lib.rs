@@ -305,6 +305,27 @@ async fn set_preferences(state: &AppState, prefs: prefs::Preferences) -> CmdResu
     Ok(())
 }
 
+/// Whether web search has a Brave API key, and where it comes from (`env`, `keychain`, `database`).
+async fn web_search_status(state: &AppState) -> CmdResult<serde_json::Value> {
+    let found = providers::web_search_key(&state.db);
+    Ok(serde_json::json!({ "configured": found.is_some(), "source": found.map(|(_, s)| s) }))
+}
+
+/// What Patchbay's agent finds in the user's Claude Code setup (and `cwd`'s project), for Settings.
+async fn claude_overview(state: &AppState, cwd: Option<String>) -> CmdResult<serde_json::Value> {
+    let prefs = prefs::load(&state.db);
+    let cwd = cwd.map(std::path::PathBuf::from);
+    Ok(tokio::task::spawn_blocking(move || code::native::claude_overview(&prefs, cwd.as_deref())).await.map_err(anyhow::Error::from)?)
+}
+
+async fn set_web_search_key(state: &AppState, key: String) -> CmdResult<()> {
+    Ok(providers::set_web_search_key(&state.db, &key)?)
+}
+
+async fn clear_web_search_key(state: &AppState) -> CmdResult<()> {
+    Ok(providers::clear_web_search_key(&state.db)?)
+}
+
 async fn get_setting(state: &AppState, key: String) -> CmdResult<Option<String>> {
     Ok(state.db.get_setting(&key)?)
 }
@@ -485,6 +506,16 @@ async fn attachment_thumbnail(state: &AppState, id: String) -> CmdResult<String>
         .get_attachment(&id)?
         .ok_or_else(|| CmdError("attachment not found".into()))?;
     Ok(tokio::task::spawn_blocking(move || attachments::thumbnail(&att)).await??)
+}
+
+/// An image attachment as a data URL, at the size the agent was sent.
+async fn attachment_image(state: &AppState, id: String) -> CmdResult<String> {
+    let att = state
+        .db
+        .get_attachment(&id)?
+        .ok_or_else(|| CmdError("attachment not found".into()))?;
+    let dir = state.data_dir.clone();
+    Ok(tokio::task::spawn_blocking(move || attachments::image_data_url(&dir, &att)).await??)
 }
 
 // ---------------- code ----------------
@@ -730,12 +761,23 @@ async fn wire_log_save(state: &AppState) -> CmdResult<String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// Whether the session runs Claude Code on its own sign-in, which may be a Claude plan with
-/// usage limits (not on a Patchbay provider, which bills by the token).
+/// Whether the session may run on a Claude plan with usage limits: Claude Code on its own
+/// sign-in (not on a Patchbay provider, which bills by the token), or Patchbay's agent on a
+/// model whose provider uses the Claude login.
 fn on_claude_plan(state: &AppState, prefs: &prefs::Preferences, id: &str) -> bool {
-    let claude = code::agents::AgentKind::ClaudeCode.id();
-    !prefs.agent_providers.contains_key(claude)
-        && state.db.get_code_session(id).ok().flatten().is_some_and(|s| s.agent == claude)
+    use code::agents::AgentKind;
+    let Some(session) = state.db.get_code_session(id).ok().flatten() else {
+        return false;
+    };
+    match AgentKind::parse(&session.agent) {
+        Some(AgentKind::ClaudeCode) => !prefs.agent_providers.contains_key(AgentKind::ClaudeCode.id()),
+        Some(AgentKind::Patchbay) => session
+            .model_ref
+            .and_then(|r| state.db.get_model(&r).ok().flatten())
+            .and_then(|m| state.db.get_provider(&m.provider_id).ok().flatten())
+            .is_some_and(|(p, _)| p.auth_mode == db::AuthMode::ClaudeLogin),
+        _ => false,
+    }
 }
 
 /// Past the usage limit, cancel every running Claude Code turn on the plan. The agent stops
@@ -1222,8 +1264,9 @@ async fn code_permission_respond(
 
 // ---------------- moving sessions between nodes ----------------
 
-fn grok_home(state: &AppState) -> PathBuf {
-    state.data_dir.join("grok")
+/// Where agents keep session state Patchbay can move between computers (see `agent_state`).
+fn agent_home(state: &AppState) -> PathBuf {
+    state.data_dir.clone()
 }
 
 /// Commits the target already has at `cwd`, so the bundle can leave them out.
@@ -1251,7 +1294,7 @@ async fn package_local(state: &AppState, id: &str, kind: &str, have: Vec<String>
         tokio::task::spawn_blocking(move || code.stop_and_wait(&sid, std::time::Duration::from_secs(5))).await?;
     }
     let s = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("no such session"))?;
-    let (dir, home, kind2) = (state.data_dir.clone(), grok_home(state), kind.to_owned());
+    let (dir, home, kind2) = (state.data_dir.clone(), agent_home(state), kind.to_owned());
     let res = tokio::task::spawn_blocking(move || handoff::package(&dir, &home, &s, &kind2, &have)).await?;
     match res {
         Ok((out, meta)) => {
@@ -1306,7 +1349,7 @@ async fn import_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Result<O
     let meta: handoff::Meta = serde_json::from_value(r["meta"].clone())?;
     let result: anyhow::Result<Option<String>> = async {
         let dir = fetch_package(state, &host, &token, &meta).await?;
-        let (home, target, from) = (grok_home(state), PathBuf::from(cwd), host_name.clone());
+        let (home, target, from) = (agent_home(state), PathBuf::from(cwd), host_name.clone());
         let m = meta.clone();
         let d = dir.clone();
         let (restored, note) = tokio::task::spawn_blocking(move || handoff::unpack(&d, &m, &home, &target, &from)).await??;
@@ -1353,7 +1396,7 @@ async fn take_over_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Resul
     if state.mesh.connected(&host) {
         anyhow::bail!("{host_name} is online; move the session instead");
     }
-    let (dir, home, target) = (state.data_dir.clone(), grok_home(state), PathBuf::from(cwd));
+    let (dir, home, target) = (state.data_dir.clone(), agent_home(state), PathBuf::from(cwd));
     let (sid, from) = (id.to_owned(), host_name.clone());
     let (restored, note) = if handoff::checkpoint(&state.data_dir, id).is_some() {
         tokio::task::spawn_blocking(move || handoff::restore_checkpoint(&dir, &home, &sid, &target, &from)).await??
@@ -1673,11 +1716,11 @@ async fn mesh_cancel_join(state: &AppState) -> CmdResult<()> {
 }
 
 async fn mesh_approve(state: &AppState, node_id: String) -> CmdResult<()> {
-    Ok(state.mesh.approve(&node_id)?)
+    Ok(state.mesh.approve(&node_id).await?)
 }
 
 async fn mesh_reject(state: &AppState, node_id: String) -> CmdResult<()> {
-    state.mesh.reject(&node_id);
+    state.mesh.reject(&node_id).await?;
     Ok(())
 }
 

@@ -143,26 +143,27 @@ gpg --verify SHA256SUMS.sig SHA256SUMS && sha256sum --check --ignore-missing SHA
 
 ## Building from source
 
-You need Rust, Node.js 20 or newer with pnpm, and `protoc` (the Protocol Buffers compiler). On Linux you also need the [Tauri system packages](https://v2.tauri.app/start/prerequisites/), including WebKitGTK 4.1.
+You need Rust, Node.js 20 or newer with pnpm. On Linux you also need the [Tauri system packages](https://v2.tauri.app/start/prerequisites/), including WebKitGTK 4.1.
 
 ```bash
-git clone --recurse-submodules https://github.com/jpsutton/patchbay.git
+git clone https://github.com/jpsutton/patchbay.git
 ```
 
 ```bash
-cd patchbay && pnpm install && PROFILE=release scripts/build-sidecar.sh && pnpm tauri build
+cd patchbay && pnpm install && pnpm tauri build
 ```
 
-The first build compiles the coding agent and takes several minutes. The finished app and installers land in `src-tauri/target/release/bundle/`.
+The finished app and installers land in `src-tauri/target/release/bundle/`.
 
 To work on Patchbay itself, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## How it works
 
-Patchbay's built-in coding agent is [Grok Build](https://github.com/xai-org/grok-build), the open-source agent from xAI, with a few small fixes so it works with any provider. Patchbay turns off its telemetry and auto-updates.
+Patchbay has its own coding agent, built into the app. It runs on the providers and models you set up, and talks to them directly in whichever API they speak: OpenAI Chat Completions (which also covers Ollama, LM Studio, OpenRouter and most other hosts), OpenAI Responses, Anthropic Messages and Google Gemini. It reads, searches and edits files, runs commands, fetches web pages, calls your MCP servers, plans before it changes anything, runs subagents, summarizes long conversations to keep going, and can rewind a session together with the files it changed. How it works is in [docs/design/harness.md](docs/design/harness.md).
 
 Patchbay talks to coding agents over the [Agent Client Protocol](https://agentclientprotocol.com), an open standard. So a Code session can also run an agent you already have installed and signed in to:
 
+- [Grok Build](https://github.com/xai-org/grok-build), when `grok` is on your `PATH` (or its path is set in Settings). It runs on your Patchbay providers.
 - [Claude Code](https://claude.com/claude-code), through the [Claude Agent ACP adapter](https://github.com/agentclientprotocol/claude-agent-acp). Patchbay runs the adapter with `npx` when it isn't installed.
 - [OpenCode](https://opencode.ai)
 - [Cursor CLI](https://cursor.com/cli)
@@ -172,11 +173,11 @@ These agents use their own sign-in and model list. Pick the default agent in Set
 
 ## Known limitations
 
-- Only Anthropic models read PDFs directly. Other models get the PDF's text, or page images when a page has no text.
+- Only Anthropic and Gemini models read PDFs directly. Other models get the PDF's text, or page images when a page has no text.
 - Chat can't use tools yet, so MCP servers only work in the Code tab.
 - On Wayland, the global shortcut may not work. The tray icon on Linux needs a desktop that supports tray icons (StatusNotifier).
 - No auto-update yet, and no support for Office files (Word, Excel, PowerPoint).
 
 ## License
 
-Patchbay is licensed under the [Apache License 2.0](LICENSE). It includes Grok Build (Apache-2.0, © SpaceXAI) and other open-source components; see [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Patchbay is licensed under the [Apache License 2.0](LICENSE). It includes open-source components; see [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

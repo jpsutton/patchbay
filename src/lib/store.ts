@@ -47,7 +47,7 @@ export type Entry =
   | { kind: "user"; text: string; attachments?: Attachment[]; promptId?: string }
   | { kind: "agent"; text: string }
   /** An image the agent sent in its reply (an ACP image block). */
-  | { kind: "image"; data: string; mimeType: string }
+  | { kind: "image"; data: string; mimeType: string; from?: "user" }
   | { kind: "thought"; text: string }
   | { kind: "tool"; id: string }
   | { kind: "error"; text: string }
@@ -464,13 +464,15 @@ function reduceUpdate(s: CodeState, u: AcpUpdate, agent: AgentId | undefined): C
     return isForegroundUpdate(u, prev) ? { ...next, lastForegroundAt: Date.now() } : next;
   };
   switch (u.sessionUpdate) {
-    case "user_message_chunk":
+    case "user_message_chunk": {
       // Live prompts are echoed locally; only replayed history (session/load) adds user entries.
       if (s.busy) return s;
-      return {
-        ...s,
-        entries: appendUserChunk(s.entries, withoutNote(textOf((u as unknown as { content: { type: string; text?: string } }).content))),
-      };
+      const c = (u as unknown as { content: { type: string; text?: string; data?: string; mimeType?: string } }).content;
+      if (c?.type === "image" && c.data && c.mimeType) {
+        return { ...s, entries: [...s.entries, { kind: "image", data: c.data, mimeType: c.mimeType, from: "user" }] };
+      }
+      return { ...s, entries: appendUserChunk(s.entries, withoutNote(textOf(c))) };
+    }
     case "agent_message_chunk": {
       const c = (u as unknown as { content: { type: string; text?: string; data?: string; mimeType?: string } }).content;
       if (c?.type === "image" && c.data && c.mimeType) {
@@ -804,6 +806,7 @@ export const useStore = create<Store>((set, get) => ({
       ...loaded,
       claudeConfig: { ...defaultPreferences.claudeConfig, ...loaded?.claudeConfig },
       usageLimit: { ...defaultPreferences.usageLimit, ...loaded?.usageLimit },
+      agentEngine: { ...defaultPreferences.agentEngine, ...loaded?.agentEngine },
     };
     set({ prefs });
     applyUiPrefs(prefs);

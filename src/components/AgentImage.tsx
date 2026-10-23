@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { api, type Attachment } from "../lib/ipc";
 import { XIcon } from "./icons";
 
 /** Object URLs for image data, shared by everything showing the same image, with their users. */
@@ -73,6 +74,45 @@ export function AgentImage({ data, mimeType, alt }: { data: string; mimeType: st
   );
 }
 
+/**
+ * An image the user attached, shown inline from its thumbnail; a click opens it full size.
+ * Shows `fallback` instead when this node can't read the attachment (it was sent from another).
+ */
+export function AttachedImage({ att, fallback }: { att: Attachment; fallback: ReactNode }) {
+  const [thumb, setThumb] = useState<string | null | undefined>(undefined);
+  const [full, setFull] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    api
+      .attachmentThumbnail(att.id)
+      .then((t) => live && setThumb(t))
+      .catch(() => live && setThumb(null));
+    return () => {
+      live = false;
+    };
+  }, [att.id]);
+  if (thumb === null) return <>{fallback}</>;
+  const open = () =>
+    api
+      .attachmentImage(att.id)
+      .catch(() => thumb!)
+      .then(setFull);
+  return (
+    <>
+      <button
+        className="block h-40 w-fit max-w-full overflow-hidden rounded-lg border border-line bg-bg"
+        onClick={open}
+        disabled={!thumb}
+        title={att.name}
+        aria-label={`Open ${att.name}`}
+      >
+        {thumb && <img src={thumb} alt={att.name} className="block h-full max-w-full object-contain" />}
+      </button>
+      {full && <ImageViewer src={full} alt={att.name} onClose={() => setFull(null)} />}
+    </>
+  );
+}
+
 type View = { s: number; x: number; y: number };
 const FIT: View = { s: 1, x: 0, y: 0 };
 /** Movement under this many pixels, released quickly, is a tap rather than a drag. */
@@ -84,7 +124,7 @@ const TAP_MS = 300;
  * fingers or pointer, one finger or the mouse pans a zoomed image, and a tap on the image toggles
  * between fitted and actual size. A tap outside the image, the close button or Escape closes.
  */
-function ImageViewer({ src, alt, onClose }: { src: string; alt?: string; onClose: () => void }) {
+export function ImageViewer({ src, alt, onClose }: { src: string; alt?: string; onClose: () => void }) {
   const stage = useRef<HTMLDivElement>(null);
   const img = useRef<HTMLImageElement>(null);
   const [view, setView] = useState<View>(FIT);

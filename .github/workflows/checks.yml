@@ -102,8 +102,6 @@ jobs:
         run: pacman -Syu --noconfirm --needed git shellcheck desktop-file-utils
 
       - uses: actions/checkout@v4
-        with:
-          submodules: true
 
       - name: scripts/ci/check.sh
         run: |
@@ -124,8 +122,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -147,15 +143,11 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
       - run: scripts/ci/deps-ubuntu.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
-      - name: Apply patches and stage a placeholder sidecar
-        run: scripts/apply-patches.sh && scripts/ci/stub-sidecar.sh
       - name: Unit tests
         working-directory: src-tauri
         run: cargo test --lib --locked --features ipc-test
@@ -165,6 +157,21 @@ jobs:
       - name: Mesh protocol crate tests
         working-directory: crates/patchbay-mesh
         run: cargo test --locked
+      - name: LLM client crate tests
+        working-directory: crates/patchbay-llm
+        run: cargo test --locked
+      - name: Coding agent crate tests
+        working-directory: crates/patchbay-agent
+        run: cargo test --locked
+      # The mock model speaks all four wire formats, so these exercise the client and the agent
+      # end to end (and the app's Code smoke tests, which start the agent in process).
+      - name: End-to-end tests against the mock model
+        run: |
+          python3 scripts/mock-llm.py --port 8765 &
+          sleep 1
+          (cd crates/patchbay-llm && cargo test --locked -- --ignored)
+          (cd crates/patchbay-agent && cargo test --locked -- --ignored)
+          (cd src-tauri && cargo test --lib --locked --features ipc-test smoke -- --ignored)
 
   # The phone app (remote/) on Linux: its frontend builds and its backend compiles. The APK
   # itself builds on release pull requests (build.yml).

@@ -1,9 +1,10 @@
-import { memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AGENT_LABELS,
   api,
   errorText,
   estimateCost,
+  usesPatchbayModels,
   type AcpConfigOption,
   type AcpToolCall,
   type AgentId,
@@ -27,6 +28,7 @@ import {
 import { HostBadge, MoveDialog, OfflineHostBanner } from "./HostControls";
 import { Composer } from "../components/Composer";
 import { Markdown } from "../components/Markdown";
+import { FileLinkContext } from "../components/FileLink";
 import { EditMessage } from "../components/EditMessage";
 import { UsageBar } from "../components/UsageBar";
 import { TerminalPane } from "../terminal/TerminalPane";
@@ -59,7 +61,7 @@ import {
   XIcon,
 } from "../components/icons";
 import { ChipRows, ChipSelect, ChipText } from "../components/ChipSelect";
-import { AgentImage } from "../components/AgentImage";
+import { AgentImage, AttachedImage } from "../components/AgentImage";
 import { ModelRing } from "../lib/cable";
 import { JumpToBottom, ScrollFade, useStickyScroll } from "../lib/useStickyScroll";
 
@@ -140,6 +142,13 @@ function MoreOptions({
   const rows = useContext(ChipRows);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  // The popup is 20rem wide and opens rightward from the button; in a narrow window (a tiled
+  // one, say) that runs off the edge, so it opens leftward from the button's right edge instead.
+  const [alignRight, setAlignRight] = useState(false);
+  useLayoutEffect(() => {
+    if (!open || !ref.current) return;
+    setAlignRight(ref.current.getBoundingClientRect().left + 320 > window.innerWidth - 8);
+  }, [open]);
   useEffect(() => {
     if (!open) return;
     const close = (e: MouseEvent) => {
@@ -181,7 +190,9 @@ function MoreOptions({
         <div
           role="dialog"
           aria-label="More agent options"
-          className="absolute bottom-full left-0 z-30 mb-1.5 flex w-80 flex-col rounded-xl border border-border bg-raised p-1 shadow-float"
+          className={`absolute bottom-full z-30 mb-1.5 flex w-80 max-w-[calc(100vw-16px)] flex-col rounded-xl border border-border bg-raised p-1 shadow-float ${
+            alignRight ? "right-0" : "left-0"
+          }`}
         >
           {options.map((o) => (
             <div key={o.id} className="flex items-center justify-between gap-3 rounded-md px-2.5 py-2">
@@ -390,14 +401,25 @@ function UserEntry({
       </div>
     );
   }
+  const atts = e.attachments ?? [];
+  const images = atts.filter((a) => a.kind === "image");
+  const files = atts.filter((a) => a.kind !== "image");
+  const names = (list: Attachment[]) => (
+    <div className="flex items-center gap-1.5 text-xs text-muted">
+      <PaperclipIcon size={13} />
+      {list.map((a) => a.name).join(", ")}
+    </div>
+  );
   return (
     <div className="group flex flex-col items-end gap-1.5">
-      {e.attachments && e.attachments.length > 0 && (
-        <div className="flex items-center gap-1.5 text-xs text-muted">
-          <PaperclipIcon size={13} />
-          {e.attachments.map((a) => a.name).join(", ")}
+      {images.length > 0 && (
+        <div className="flex max-w-[82%] flex-wrap justify-end gap-2">
+          {images.map((a) => (
+            <AttachedImage key={a.id} att={a} fallback={names([a])} />
+          ))}
         </div>
       )}
+      {files.length > 0 && names(files)}
       {e.text && (
         <div className="max-w-[82%] whitespace-pre-wrap rounded-[16px_16px_4px_16px] border border-line bg-panel-2 px-3.5 py-2.5 leading-6">
           {e.text}
@@ -474,7 +496,13 @@ const EntryView = memo(function EntryView({
     case "agent":
       return <AgentEntry text={e.text} />;
     case "image":
-      return <AgentImage data={e.data} mimeType={e.mimeType} alt="Image from the agent" />;
+      return e.from === "user" ? (
+        <div className="flex justify-end">
+          <AgentImage data={e.data} mimeType={e.mimeType} alt="Your image" />
+        </div>
+      ) : (
+        <AgentImage data={e.data} mimeType={e.mimeType} alt="Image from the agent" />
+      );
     case "thought":
       return <Thought text={e.text} />;
     case "tool": {
@@ -836,6 +864,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const s = state;
   const status = s?.status ?? "idle";
   const host = remoteHost(session, mesh);
+  // Paths in the transcript open here only when the session's files are on this computer.
+  const fileLinks = { cwd: session.cwd, local: !host };
   // The offline banner offers the way forward instead of a restart that can't work.
   const hostOffline = !!host && !memberOnline(mesh, host);
   const ready = status === "ready";
@@ -860,8 +890,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
           : "Starting agent…"
         : null;
   const acpModels = s?.models;
-  // Only Grok Build runs on Patchbay's models (`pb-<id>`); other agents bring their own.
-  const patchbayModels = session.agent === "grok";
+  // Patchbay's own agent and Grok Build run on Patchbay's models (`pb-<id>`); other agents bring their own.
+  const patchbayModels = usesPatchbayModels(session.agent);
   const currentModelRef = patchbayModels
     ? (acpModels?.currentModelId?.replace(/^pb-/, "") ?? session.modelRef)
     : (acpModels?.currentModelId ?? session.agentModel);
@@ -1062,7 +1092,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   ];
   const gaps = s?.approvalGaps ?? [];
 
-  const agentLabel = session.agent !== "grok" && (
+  const agentLabel = session.agent !== "patchbay" && (
     <span {...drag} className="shrink-0 text-[12px] text-muted" title="Coding agent">
       {AGENT_LABELS[session.agent] ?? session.agent}
     </span>
@@ -1161,6 +1191,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   );
 
   return (
+    <FileLinkContext.Provider value={fileLinks}>
     <div className="flex h-full min-w-0 flex-1 flex-col">
       <header {...drag} className={`flex h-12 shrink-0 items-center gap-1 border-b border-line pr-3 ${leading ? "pl-1" : "pl-6"}`}>
         {leading}
@@ -1475,5 +1506,6 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
       )}
       {moving && <MoveDialog session={session} takeOver={moving === "takeOver"} onClose={() => setMoving(null)} />}
     </div>
+    </FileLinkContext.Provider>
   );
 }

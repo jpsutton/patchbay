@@ -1,4 +1,4 @@
-//! Chat tab: plain streaming chat over Grok Build's sampler (`xai-grok-sampler`).
+//! Chat tab: plain streaming chat over `patchbay-llm`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -7,8 +7,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Result, anyhow};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
-use xai_grok_sampler::{RequestId, RetryPolicy, SamplerActor, SamplingChannel, SamplingEvent};
-use xai_grok_sampling_types::{ContentPart, ConversationItem, ConversationRequest};
+use patchbay_llm::{Client, Event, Message as LlmMessage, Part, Request, Role, SystemBlock};
 
 use crate::attachments;
 use crate::db::{Db, Message};
@@ -77,9 +76,9 @@ impl ChatManager {
     }
 }
 
-/// `native_pdf`: send PDFs as documents (Anthropic Messages reads them natively) instead of
+/// `native_pdf`: send PDFs as documents (Anthropic and Gemini read them natively) instead of
 /// our text extraction.
-fn user_item(data_dir: &std::path::Path, db: &Db, m: &Message, native_pdf: bool) -> Result<ConversationItem> {
+fn user_item(data_dir: &std::path::Path, db: &Db, m: &Message, native_pdf: bool) -> Result<LlmMessage> {
     let mut parts = Vec::new();
     for a in &m.attachments {
         let att = db
@@ -94,11 +93,9 @@ fn user_item(data_dir: &std::path::Path, db: &Db, m: &Message, native_pdf: bool)
         )?));
     }
     if !m.content.is_empty() || parts.is_empty() {
-        parts.push(ContentPart::Text {
-            text: Arc::from(m.content.as_str()),
-        });
+        parts.push(Part::Text(m.content.clone()));
     }
-    Ok(ConversationItem::user_with_parts(parts))
+    Ok(LlmMessage::with_parts(Role::User, parts))
 }
 
 /// The model's view of the branch ending at `leaf_id` (a user message).
@@ -109,21 +106,21 @@ fn build_history(
     leaf_id: &str,
     system_prompt: Option<&str>,
     native_pdf: bool,
-) -> Result<Vec<ConversationItem>> {
-    let mut items = Vec::new();
+) -> Result<Request> {
+    let mut req = Request::default();
     if let Some(sp) = system_prompt.filter(|s| !s.trim().is_empty()) {
-        items.push(ConversationItem::system(sp));
+        req.system.push(SystemBlock::new(sp));
     }
     for m in db.path_to(conversation_id, leaf_id)? {
         match m.role.as_str() {
-            "user" => items.push(user_item(data_dir, db, &m, native_pdf)?),
+            "user" => req.messages.push(user_item(data_dir, db, &m, native_pdf)?),
             "assistant" if !m.content.is_empty() => {
-                items.push(ConversationItem::assistant(m.content.clone()))
+                req.messages.push(LlmMessage::assistant(m.content.clone()))
             }
             _ => {}
         }
     }
-    Ok(items)
+    Ok(req)
 }
 
 fn derive_title(text: &str, attachment_names: &[String]) -> String {
@@ -233,17 +230,20 @@ pub async fn send(
         }
     }
 
-    let mut history = {
+    let mut request = {
         let db = db.clone();
         let data_dir = data_dir.clone();
         let cid = conversation_id.clone();
         let sp = conv.system_prompt.clone();
         let leaf = user_id.clone();
-        let native_pdf = resolved.provider.kind == crate::db::ProviderKind::Anthropic;
+        let native_pdf = matches!(
+            resolved.provider.kind,
+            crate::db::ProviderKind::Anthropic | crate::db::ProviderKind::Gemini
+        );
         tokio::task::spawn_blocking(move || build_history(&data_dir, &db, &cid, &leaf, sp.as_deref(), native_pdf))
             .await??
     };
-    providers::prepare_items(&resolved, &mut history);
+    providers::prepare_request(&resolved, &mut request);
 
     let token = CancellationToken::new();
     manager
@@ -252,91 +252,49 @@ pub async fn send(
         .unwrap()
         .insert(conversation_id.clone(), token.clone());
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let handle = SamplerActor::spawn(
-        providers::sampler_config(&resolved),
-        RetryPolicy::default(),
-        tx,
-    );
-    let request_id = RequestId::random();
-    handle.submit(
-        request_id.clone(),
-        ConversationRequest {
-            items: history,
-            ..Default::default()
-        },
-    );
-
+    let client = Client::new(providers::llm_config(&resolved));
     let mut content = String::new();
     let mut reasoning = String::new();
     let mut error: Option<String> = None;
     let mut usage: Option<Tokens> = None;
     let mut cancelled = false;
-    loop {
-        tokio::select! {
-            _ = token.cancelled() => {
-                cancelled = true;
-                handle.cancel(request_id.clone());
-                let _ = channel.send(ChatEvent::Done { stop_reason: Some("cancelled".into()), usage: None });
-                break;
+    let result = client
+        .complete(&request, &token, |ev| match ev {
+            Event::Text(text) => {
+                content.push_str(&text);
+                let _ = channel.send(ChatEvent::Text { text });
             }
-            ev = rx.recv() => {
-                let Some(ev) = ev else {
-                    error = Some("sampler stopped unexpectedly".into());
-                    break;
-                };
-                match ev {
-                    SamplingEvent::ChannelToken { channel: ch, text, .. } => match ch {
-                        SamplingChannel::Reasoning => {
-                            reasoning.push_str(&text);
-                            let _ = channel.send(ChatEvent::Reasoning { text });
-                        }
-                        _ => {
-                            content.push_str(&text);
-                            let _ = channel.send(ChatEvent::Text { text });
-                        }
-                    },
-                    SamplingEvent::Retrying { attempt, max_retries, reason, .. } => {
-                        let _ = channel.send(ChatEvent::Status {
-                            message: format!("Retrying ({attempt}/{max_retries}): {reason}"),
-                        });
-                    }
-                    SamplingEvent::ImagesStripped { stripped_urls, .. } => {
-                        let _ = channel.send(ChatEvent::Status {
-                            message: format!("{} image(s) were rejected by the endpoint and removed", stripped_urls.len()),
-                        });
-                    }
-                    SamplingEvent::Completed { response, .. } => {
-                        if content.is_empty()
-                            && let Some(a) = response.assistant()
-                        {
-                            content = a.content.to_string();
-                            if !content.is_empty() {
-                                let _ = channel.send(ChatEvent::Text { text: content.clone() });
-                            }
-                        }
-                        usage = response
-                            .usage
-                            .as_ref()
-                            .map(|u| Tokens::from_sampler(u, response.cost_usd_ticks));
-                        let _ = channel.send(ChatEvent::Done {
-                            stop_reason: response.stop_reason.as_ref().map(|r| format!("{r:?}")),
-                            usage,
-                        });
-                        break;
-                    }
-                    SamplingEvent::Failed { error: e, .. } => {
-                        let msg = match e.status_code {
-                            Some(code) => format!("{} (HTTP {code})", e.message),
-                            None => e.message,
-                        };
-                        error = Some(msg);
-                        break;
-                    }
-                    _ => {}
+            Event::Reasoning(text) => {
+                reasoning.push_str(&text);
+                let _ = channel.send(ChatEvent::Reasoning { text });
+            }
+            Event::Retrying { attempt, max, reason } => {
+                let _ = channel.send(ChatEvent::Status {
+                    message: format!("Retrying ({attempt}/{max}): {reason}"),
+                });
+            }
+            Event::ToolCall(_) => {}
+        })
+        .await;
+    match result {
+        Ok(response) => {
+            if content.is_empty() {
+                content = response.message.text();
+                if !content.is_empty() {
+                    let _ = channel.send(ChatEvent::Text { text: content.clone() });
                 }
             }
+            usage = response.usage.as_ref().map(Tokens::from_llm);
+            let _ = channel.send(ChatEvent::Done {
+                stop_reason: Some(response.stop.label().to_owned()),
+                usage,
+            });
         }
+        Err(e) if e.cancelled => {
+            cancelled = true;
+            let _ = channel.send(ChatEvent::Done { stop_reason: Some("cancelled".into()), usage: None });
+        }
+        Err(e) => error = Some(e.to_string()),
     }
     manager.running.lock().unwrap().remove(&conversation_id);
 
@@ -391,38 +349,13 @@ pub(crate) fn clip(s: &str, max: usize) -> String {
 }
 
 /// One non-streaming-style completion: collects the visible text of a single reply.
-pub(crate) async fn complete_text(
-    resolved: &providers::Resolved,
-    mut items: Vec<ConversationItem>,
-) -> Result<String> {
-    providers::prepare_items(resolved, &mut items);
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let handle = SamplerActor::spawn(providers::sampler_config(resolved), RetryPolicy::default(), tx);
-    handle.submit(
-        RequestId::random(),
-        ConversationRequest {
-            items,
-            ..Default::default()
-        },
-    );
-    let mut out = String::new();
-    while let Some(ev) = rx.recv().await {
-        match ev {
-            SamplingEvent::ChannelToken { channel: SamplingChannel::Reasoning, .. } => {}
-            SamplingEvent::ChannelToken { text, .. } => out.push_str(&text),
-            SamplingEvent::Completed { response, .. } => {
-                if out.is_empty()
-                    && let Some(a) = response.assistant()
-                {
-                    out = a.content.to_string();
-                }
-                return Ok(out);
-            }
-            SamplingEvent::Failed { error, .. } => return Err(anyhow!(error.message)),
-            _ => {}
-        }
-    }
-    Err(anyhow!("sampler stopped unexpectedly"))
+pub(crate) async fn complete_text(resolved: &providers::Resolved, mut request: Request) -> Result<String> {
+    providers::prepare_request(resolved, &mut request);
+    let client = Client::new(providers::llm_config(resolved));
+    client
+        .complete_text(&request, &CancellationToken::new())
+        .await
+        .map_err(|e| anyhow!(e.to_string()))
 }
 
 const TITLE_PROMPT: &str = "You name chat conversations. Reply with a short title for the conversation \
@@ -447,11 +380,7 @@ pub(crate) async fn name_with(
     system_prompt: &str,
     convo: String,
 ) -> Result<Option<String>> {
-    let raw = complete_text(
-        resolved,
-        vec![ConversationItem::system(system_prompt), ConversationItem::user(convo)],
-    )
-    .await?;
+    let raw = complete_text(resolved, Request::simple(system_prompt, convo)).await?;
     Ok(clean_title(&raw))
 }
 
@@ -493,26 +422,5 @@ mod tests {
         assert_eq!(derive_title("\n  hello world\nmore", &[]), "hello world");
         assert_eq!(derive_title("", &["report.pdf".into()]), "report.pdf");
         assert!(derive_title(&"x".repeat(80), &[]).ends_with('…'));
-    }
-}
-
-#[cfg(test)]
-mod wire_tests {
-    use xai_grok_sampling_types::types::ChatCompletionChunk;
-
-    /// Some OpenAI-compatible hosts (e.g. Fireworks) send explicit `null` for numeric fields.
-    #[test]
-    fn chunk_with_null_numbers_parses() {
-        let raw = r#"{"id":"x","object":"chat.completion.chunk","created":1,"model":"m",
-            "choices":[{"index":0,"delta":{"tool_calls":[{"index":null,"id":"c","type":"function",
-            "function":{"name":"f","arguments":"{}"}}]},"finish_reason":null}],
-            "usage":{"prompt_tokens":10,"completion_tokens":null,"total_tokens":10,
-            "prompt_tokens_details":{"cached_tokens":null},
-            "completion_tokens_details":{"reasoning_tokens":null}}}"#;
-        let c: ChatCompletionChunk = serde_json::from_str(raw).expect("parse");
-        let u = c.usage.unwrap();
-        assert_eq!(u.completion_tokens, 0);
-        assert_eq!(u.prompt_tokens_details.unwrap().cached_tokens, 0);
-        assert_eq!(c.choices[0].delta.tool_calls[0].index, 0);
     }
 }

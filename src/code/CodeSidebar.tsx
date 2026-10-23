@@ -96,6 +96,8 @@ export function CodeSidebar() {
     group: Group;
     agents: AgentInfo[];
   } | null>(null);
+  /** Right-click on a group header: collapse/expand actions. */
+  const [groupMenu, setGroupMenu] = useState<{ x: number; y: number } | null>(null);
 
   const matching = useMemo(() => sessions.filter((s) => matchesQuery(query, s.title, s.cwd)), [sessions, query]);
   const hits = useMemo(() => matching.filter((s) => s.archivedAt == null), [matching]);
@@ -211,6 +213,14 @@ export function CodeSidebar() {
       return next;
     });
 
+  const setAllCollapsed = (fold: boolean) =>
+    setCollapsed(() => {
+      // While searching everything is shown, so leave the saved state alone.
+      const next = fold ? new Set(groups.map((g) => g.key)) : new Set<string>();
+      if (!query.trim()) saveCollapsed(next);
+      return next;
+    });
+
   // No line where the drop would leave the folder in place.
   const from = drag ? groups.findIndex((g) => g.key === drag.key) : -1;
   const dropAt = drag && drag.index !== from && drag.index !== from + 1 ? drag.index : null;
@@ -304,7 +314,14 @@ export function CodeSidebar() {
           >
             {dropAt === i && <DropLine top />}
             {dropAt === groups.length && i === groups.length - 1 && <DropLine />}
-            <div className="group/header mx-2 mt-2 flex items-center gap-1 rounded-lg py-1 pl-2.5 pr-1 hover:bg-panel-2/50">
+            <div
+              className="group/header mx-2 mt-2 flex items-center gap-1 rounded-lg py-1 pl-2.5 pr-1 hover:bg-panel-2/50"
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setAgentMenu(null);
+                setGroupMenu({ x: e.clientX, y: e.clientY });
+              }}
+            >
               <button
                 className="flex min-w-0 flex-1 items-baseline gap-1.5 text-left"
                 onPointerDown={(e) => startDrag(e, g.key)}
@@ -341,6 +358,7 @@ export function CodeSidebar() {
                 }}
                 onContextMenu={(e) => {
                   e.preventDefault();
+                  e.stopPropagation();
                   const at = { x: e.clientX, y: e.clientY, group: g };
                   installedAgents(g.host).then((agents) =>
                     setAgentMenu({ ...at, agents: agents.filter((a) => a.available) }),
@@ -360,6 +378,17 @@ export function CodeSidebar() {
           </div>
         );
       })}
+      {groupMenu && groups.length > 0 && (
+        <ContextMenu
+          x={groupMenu.x}
+          y={groupMenu.y}
+          actions={[
+            { label: "Collapse all groups", onSelect: () => setAllCollapsed(true) },
+            { label: "Expand all groups", onSelect: () => setAllCollapsed(false) },
+          ]}
+          onClose={() => setGroupMenu(null)}
+        />
+      )}
       {agentMenu && agentMenu.agents.length > 0 && (
         <ContextMenu
           x={agentMenu.x}

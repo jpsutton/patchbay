@@ -18,6 +18,8 @@ use crate::db::{CodeSession, Db};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentKind {
+    /// Patchbay's own agent, run inside the app (`crates/patchbay-agent`).
+    Patchbay,
     Grok,
     ClaudeCode,
     Opencode,
@@ -35,7 +37,8 @@ pub const CODEX_ACP_PACKAGE: &str = "@agentclientprotocol/codex-acp@2.2.2";
 pub const GEMINI_CLI_PACKAGE: &str = "@google/gemini-cli@0.64.0";
 
 impl AgentKind {
-    pub const ALL: [AgentKind; 8] = [
+    pub const ALL: [AgentKind; 9] = [
+        AgentKind::Patchbay,
         AgentKind::Grok,
         AgentKind::ClaudeCode,
         AgentKind::Opencode,
@@ -49,6 +52,7 @@ impl AgentKind {
     /// The id stored in `code_sessions.agent` and preferences.
     pub fn id(self) -> &'static str {
         match self {
+            AgentKind::Patchbay => "patchbay",
             AgentKind::Grok => "grok",
             AgentKind::ClaudeCode => "claude-code",
             AgentKind::Opencode => "opencode",
@@ -66,6 +70,7 @@ impl AgentKind {
 
     pub fn label(self) -> &'static str {
         match self {
+            AgentKind::Patchbay => "Patchbay",
             AgentKind::Grok => "Grok Build",
             AgentKind::ClaudeCode => "Claude Code",
             AgentKind::Opencode => "OpenCode",
@@ -80,7 +85,9 @@ impl AgentKind {
     /// Executables to look for on PATH, in order, and the arguments that start ACP on stdio.
     fn program(self) -> (&'static [&'static str], &'static [&'static str]) {
         match self {
-            AgentKind::Grok => (&[], &[]),
+            AgentKind::Patchbay => (&[], &[]),
+            // `prepare_grok` adds the arguments that start its ACP server.
+            AgentKind::Grok => (&["grok"], &[]),
             AgentKind::ClaudeCode => (&["claude-agent-acp"], &[]),
             AgentKind::Opencode => (&["opencode"], &["acp"]),
             AgentKind::Cursor => (&["cursor-agent"], &["acp"]),
@@ -109,12 +116,20 @@ impl AgentKind {
     /// True when the agent runs on Patchbay's providers and models; the others bring their own
     /// sign-in and model list.
     pub fn uses_patchbay_models(self) -> bool {
-        self == AgentKind::Grok
+        matches!(self, AgentKind::Patchbay | AgentKind::Grok)
+    }
+
+    /// Runs inside Patchbay: nothing to install or launch.
+    pub fn is_builtin(self) -> bool {
+        self == AgentKind::Patchbay
     }
 
     pub fn install_hint(self) -> &'static str {
         match self {
-            AgentKind::Grok => "Bundled with Patchbay; in a dev checkout run scripts/build-sidecar.sh.",
+            AgentKind::Patchbay => "Built into Patchbay. Add a provider and model in Settings.",
+            AgentKind::Grok => {
+                "Install Grok Build (https://github.com/xai-org/grok-build) so that `grok` is on your PATH, or set its path in Settings."
+            }
             AgentKind::ClaudeCode => {
                 "Install Node.js (Patchbay then runs the adapter through npx), or `npm install -g @agentclientprotocol/claude-agent-acp`. Sign in with `claude`."
             }
@@ -136,7 +151,7 @@ impl AgentKind {
     /// How to sign in, for an `auth_required` error.
     pub fn login_hint(self) -> &'static str {
         match self {
-            AgentKind::Grok => "Add a provider and model in Settings.",
+            AgentKind::Patchbay | AgentKind::Grok => "Add a provider and model in Settings.",
             AgentKind::ClaudeCode => "Run `claude` in a terminal and sign in with /login.",
             AgentKind::Opencode => "Run `opencode auth login` in a terminal.",
             AgentKind::Cursor => "Run `cursor-agent login` in a terminal.",
@@ -187,6 +202,11 @@ pub struct ApprovalSetup {
 impl ApprovalSetup {
     fn for_agent(kind: AgentKind) -> Self {
         match kind {
+            AgentKind::Patchbay => Self {
+                select_mode: None,
+                hide_modes: &[],
+                gaps: &["Reads and searches inside the project run without asking."],
+            },
             // Grok's own mode is pinned to "default" in its config.toml (grok_config.rs).
             AgentKind::Grok | AgentKind::Opencode | AgentKind::Kilo => Self::default(),
             AgentKind::ClaudeCode => Self {
@@ -243,10 +263,10 @@ fn ask_everything() -> serde_json::Map<String, Value> {
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum Source {
+    /// Runs inside Patchbay.
+    Builtin,
     /// The path set in Settings.
     Override,
-    /// Next to Patchbay's own executable, or the dev-staged sidecar.
-    Bundled,
     Path,
     /// `npx`, which downloads the package on first use.
     Npx,
@@ -273,6 +293,8 @@ pub struct Launch {
     /// How to sign in, for an `auth_required` error.
     pub login_hint: &'static str,
     pub approvals: ApprovalSetup,
+    /// Run this agent inside the app instead of spawning `program`.
+    pub native: Option<super::acp::NativeAgent>,
 }
 
 /// User overrides from Settings: agent id -> executable path.
@@ -341,20 +363,20 @@ fn is_executable(p: &Path) -> bool {
     }
 }
 
-/// Find the agent's executable: the Settings override, then the bundled copy (Grok), PATH, and
-/// for the agents published on npm a fallback to `npx`.
+/// Find the agent's executable: the Settings override, then PATH, and for the agents published
+/// on npm a fallback to `npx`.
 pub fn resolve(kind: AgentKind, overrides: &AgentPaths) -> Result<Resolved> {
     let (names, acp_args) = kind.program();
     let args: Vec<String> = acp_args.iter().map(|s| (*s).to_owned()).collect();
+    if kind.is_builtin() {
+        return Ok(Resolved { program: PathBuf::new(), args, source: Source::Builtin });
+    }
     if let Some(p) = overrides.get(kind.id()).map(|p| p.trim()).filter(|p| !p.is_empty()) {
         let program = PathBuf::from(p);
         if !program.is_file() {
             return Err(anyhow!("{} path {p} does not exist", kind.label()));
         }
         return Ok(Resolved { program, args, source: Source::Override });
-    }
-    if kind == AgentKind::Grok {
-        return super::sidecar_path().map(|program| Resolved { program, args, source: Source::Bundled });
     }
     if let Some(program) = names.iter().find_map(|n| which(n)) {
         return Ok(Resolved { program, args, source: Source::Path });
@@ -413,6 +435,12 @@ fn detect(kind: AgentKind, overrides: &AgentPaths) -> AgentInfo {
         supports_instructions: supports_instructions(kind),
         takes_providers: agent_providers::supported(kind),
     };
+    if kind.is_builtin() {
+        info.available = true;
+        info.source = Some(Source::Builtin);
+        info.version = Some(env!("CARGO_PKG_VERSION").to_owned());
+        return info;
+    }
     match resolve(kind, overrides) {
         Ok(r) => {
             info.available = true;
@@ -486,14 +514,17 @@ fn session_meta(kind: AgentKind, rules: &str) -> Value {
 
 /// True when this agent receives Settings → Code → custom instructions.
 pub fn supports_instructions(kind: AgentKind) -> bool {
-    matches!(kind, AgentKind::Grok | AgentKind::ClaudeCode | AgentKind::Codex | AgentKind::Antigravity)
+    matches!(kind, AgentKind::Patchbay | AgentKind::Grok | AgentKind::ClaudeCode | AgentKind::Codex | AgentKind::Antigravity)
 }
 
 /// Build the launch for a session's agent: executable, arguments, environment and config.
-pub fn prepare(db: &Db, data_dir: &Path, session: &CodeSession) -> Result<Launch> {
+pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) -> Result<Launch> {
     let kind = AgentKind::parse(&session.agent)
         .ok_or_else(|| anyhow!("unknown coding agent {:?}", session.agent))?;
     let prefs = crate::prefs::load(db);
+    if kind == AgentKind::Patchbay {
+        return prepare_patchbay(db, data_dir, session);
+    }
     let resolved = resolve(kind, &prefs.agent_paths)?;
     let session_meta = session_meta(kind, &prefs.agent_instructions);
     if kind == AgentKind::Grok {
@@ -546,6 +577,31 @@ pub fn prepare(db: &Db, data_dir: &Path, session: &CodeSession) -> Result<Launch
         initial_model: session.agent_model.clone(),
         login_hint: kind.login_hint(),
         approvals: ApprovalSetup::for_agent(kind),
+        native: None,
+    })
+}
+
+/// Patchbay's own agent: no process, and its models arrive through the host, not a config file.
+fn prepare_patchbay(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) -> Result<Launch> {
+    if db.list_models()?.is_empty() {
+        return Err(anyhow!("add a provider and model in Settings first"));
+    }
+    let initial_model = session
+        .model_ref
+        .as_deref()
+        .filter(|r| db.get_model(r).ok().flatten().is_some())
+        .map(grok_config::model_key);
+    Ok(Launch {
+        program: PathBuf::new(),
+        args: Vec::new(),
+        env: Vec::new(),
+        env_remove: Vec::new(),
+        ext: Extensions { patchbay_models: true, rewind: true, ..Extensions::default() },
+        session_meta: json!({ "model": initial_model }),
+        initial_model,
+        login_hint: AgentKind::Patchbay.login_hint(),
+        approvals: ApprovalSetup::for_agent(AgentKind::Patchbay),
+        native: Some(super::native::launcher(db.clone(), data_dir)),
     })
 }
 
@@ -594,6 +650,7 @@ fn prepare_grok(
         initial_model: None,
         login_hint: "",
         approvals: ApprovalSetup::for_agent(AgentKind::Grok),
+        native: None,
     })
 }
 
@@ -638,7 +695,7 @@ mod tests {
     fn opencode_launch_carries_patchbay_providers_when_chosen() {
         let dir = std::env::temp_dir().join(format!("pb-ag-{}", crate::db::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let db = Db::open(&dir.join("db.sqlite")).unwrap();
+        let db = std::sync::Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
         let url = std::env::var("PB_MOCK_URL").unwrap_or_else(|_| "http://127.0.0.1:8799/v1".into());
         let p = crate::db::Provider { id: "fw".into(), name: "Fireworks".into(), kind: crate::db::ProviderKind::OpenaiChat, base_url: url, has_key: true, auth_mode: Default::default(), };
         db.upsert_provider(&p, Some("secret")).unwrap();
@@ -686,7 +743,7 @@ mod tests {
     fn codex_launch_asks_and_carries_instructions() {
         let dir = std::env::temp_dir().join(format!("pb-ag-{}", crate::db::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let db = Db::open(&dir.join("db.sqlite")).unwrap();
+        let db = std::sync::Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
         let mut o = AgentPaths::new();
         o.insert("codex".into(), std::env::current_exe().unwrap().to_string_lossy().into_owned());
         let mut prefs = crate::prefs::Preferences { agent_paths: o, ..Default::default() };

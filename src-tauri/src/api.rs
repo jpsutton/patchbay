@@ -112,6 +112,10 @@ commands! {
     set_preferences(prefs);
     get_setting(key);
     set_setting(key, value);
+    web_search_status();
+    claude_overview(cwd);
+    set_web_search_key(key);
+    clear_web_search_key();
     list_conversations();
     create_conversation(model_ref);
     update_conversation(id, title, model_ref, system_prompt, pinned, archived);
@@ -125,6 +129,7 @@ commands! {
     add_attachment_path(path);
     add_attachment_bytes(name, data_base64);
     attachment_thumbnail(id);
+    attachment_image(id);
     list_code_sessions();
     create_code_session(cwd, model_ref, agent, host);
     list_agents(host);

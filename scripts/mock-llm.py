@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Mock LLM server for local Patchbay testing.
 
-Speaks OpenAI Chat Completions (streaming) and Anthropic Messages (streaming) at
-http://127.0.0.1:PORT/v1. Replies echo what the model "saw" (text, image count,
+Speaks OpenAI Chat Completions, OpenAI Responses, Anthropic Messages and Gemini
+(streaming) at http://127.0.0.1:PORT/v1 (Gemini: /v1/models/<id>:streamGenerateContent). Replies echo what the model "saw" (text, image count,
 attached file names). When the request carries tools, a user message containing
 `!run` triggers a shell tool call, `!edit` a file-creating edit call and `!tools` lists
-the offered tool names, so the Code tab's permission prompts, diff view and MCP wiring can
+the offered tool names, `!ask` asks a multiple-choice question and `!task` starts a subagent, so the Code tab's permission prompts, diff view and MCP wiring can
 be exercised.
 
 Usage: scripts/mock-llm.py [--port 8765]
@@ -62,7 +62,7 @@ def find_tool(tools, want):
     """Pick a tool by its parameter names (works for OpenAI and Anthropic tool shapes)."""
     for t in tools or []:
         fn = t.get("function", t)
-        props = (fn.get("parameters") or fn.get("input_schema") or {}).get("properties", {})
+        props = (fn.get("parameters") or fn.get("input_schema") or fn.get("parametersJsonSchema") or {}).get("properties", {})
         if want <= set(props):
             return fn.get("name")
     return None
@@ -74,7 +74,7 @@ def fill_required(tools, name, args):
         fn = t.get("function", t)
         if fn.get("name") != name:
             continue
-        schema = fn.get("parameters") or fn.get("input_schema") or {}
+        schema = fn.get("parameters") or fn.get("input_schema") or fn.get("parametersJsonSchema") or {}
         props = schema.get("properties", {})
         for key in schema.get("required", []):
             if key in args:
@@ -96,7 +96,14 @@ def decide(user_text, images, after_tool, tools):
         plan = ("text", plan[1] + "\n\n- custom instructions: seen")
     if plan[0] == "tool":
         return ("tool", plan[1], fill_required(tools, plan[1], plan[2]))
+    if plan[0] == "tools":
+        return ("tools", [(n, fill_required(tools, n, a)) for n, a in plan[1]])
     return plan
+
+
+def calls_of(plan):
+    """The tool calls of a plan, as [(name, args)]."""
+    return [(plan[1], plan[2])] if plan[0] == "tool" else list(plan[1])
 
 
 def _decide(user_text, images, after_tool, tools):
@@ -111,6 +118,36 @@ def _decide(user_text, images, after_tool, tools):
         name = find_tool(tools, {"command"})
         if name:
             return ("tool", name, {"command": "echo patchbay-ok && ls"})
+    if "!size" in user_text:
+        return ("text", f"request bytes: {len(json.dumps(LAST_BODY.get('body', {})))}")
+    if "!search" in user_text:
+        name = find_tool(tools, {"query"})
+        if name:
+            return ("tool", name, {"query": "patchbay search test"})
+    task = find_tool(tools, {"subagent_type", "prompt"})
+    if task and "!par" in user_text:
+        job = lambda tag: {"description": f"job {tag}", "prompt": f"Report PAR-{tag}", "subagent_type": "explore"}
+        return ("tools", [(task, job("A")), (task, job("B"))])
+    if task and "!bg" in user_text:
+        return ("tool", task, {"description": "slow job", "prompt": "Report BG-DONE", "subagent_type": "explore", "run_in_background": True, "name": "scout"})
+    if task and "!fork" in user_text:
+        return ("tool", task, {"description": "branch off", "prompt": "Report FORK-OK", "subagent_type": "fork"})
+    if task and "!named" in user_text:
+        return ("tool", task, {"description": "named job", "prompt": "Report NAMED-OK", "subagent_type": "general-purpose", "name": "worker"})
+    if task and "!wt" in user_text:
+        return ("tool", task, {"description": "isolated edit", "prompt": "!edit please", "subagent_type": "general-purpose", "isolation": "worktree"})
+    if "!msg" in user_text:
+        name = find_tool(tools, {"to", "message"})
+        if name:
+            return ("tool", name, {"to": "worker", "message": "Report MSG-OK"})
+    if "!ask" in user_text:
+        name = find_tool(tools, {"questions"})
+        if name:
+            return ("tool", name, {"questions": [{"question": "Which one?", "options": [{"label": "Alpha"}, {"label": "Beta"}]}]})
+    if "!task" in user_text:
+        name = find_tool(tools, {"subagent_type", "prompt"})
+        if name:
+            return ("tool", name, {"description": "look around", "prompt": "Report the word SUBAGENT-OK", "subagent_type": "explore"})
     if "!edit" in user_text:
         name = find_tool(tools, {"file_path", "old_string", "new_string"})
         if name:
@@ -169,6 +206,13 @@ class Handler(BaseHTTPRequestHandler):
         return f"authorization={'yes' if auth else 'no'} x-api-key={'yes' if xkey else 'no'} anthropic-version={ver}"
 
     def do_GET(self):
+        if self.path.split("?")[0].endswith("/res/v1/web/search"):
+            # Brave Search: needs the subscription token, answers with a tiny result set.
+            if self.headers.get("x-subscription-token") != "brave-test-key":
+                return self._json(403, {"error": {"detail": "Subscription token invalid"}})
+            return self._json(200, {"web": {"results": [
+                {"title": "Mock <strong>result</strong>", "url": "https://example.com/mock", "description": "BRAVE-MOCK-HIT &amp; more", "age": "1 day ago"},
+            ]}})
         if self.path.rstrip("/").endswith("/models"):
             log("GET", self.path, self._auth_summary())
             return self._json(200, {"object": "list", "data": [{"id": m, "object": "model"} for m in MODELS]})
@@ -185,6 +229,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.chat(body)
         if path.endswith("/messages"):
             return self.messages(body)
+        if path.endswith("/responses"):
+            return self.openai_responses(body)
+        if ":streamGenerateContent" in path:
+            return self.gemini(body)
         self._json(404, {"error": f"unsupported path {path}"})
 
     # ---- OpenAI Chat Completions ----
@@ -243,18 +291,19 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(0.01)
             finish = "stop"
         else:
-            _, name, args = plan
-            self._send(chunk({"content": f"Calling `{name}`.\n"}))
-            self._send(
-                chunk(
-                    {
-                        "tool_calls": [
-                            {"index": 0, "id": f"call_{int(time.time()*1000)}", "type": "function",
-                             "function": {"name": name, "arguments": json.dumps(args)}}
-                        ]
-                    }
+            calls = calls_of(plan)
+            self._send(chunk({"content": f"Calling `{calls[0][0]}`.\n"}))
+            for i, (name, args) in enumerate(calls):
+                self._send(
+                    chunk(
+                        {
+                            "tool_calls": [
+                                {"index": i, "id": f"call_{int(time.time()*1000)}_{i}", "type": "function",
+                                 "function": {"name": name, "arguments": json.dumps(args)}}
+                            ]
+                        }
+                    )
                 )
-            )
             finish = "tool_calls"
         self._send(chunk({}, finish))
         self._send(
@@ -298,15 +347,103 @@ class Handler(BaseHTTPRequestHandler):
             ev("content_block_stop", {"index": 0})
             stop = "end_turn"
         else:
-            _, name, args = plan
-            ev("content_block_delta", {"index": 0, "delta": {"type": "text_delta", "text": f"Calling `{name}`.\n"}})
+            calls = calls_of(plan)
+            ev("content_block_delta", {"index": 0, "delta": {"type": "text_delta", "text": f"Calling `{calls[0][0]}`.\n"}})
             ev("content_block_stop", {"index": 0})
-            ev("content_block_start", {"index": 1, "content_block": {"type": "tool_use", "id": f"toolu_{int(time.time()*1000)}", "name": name, "input": {}}})
-            ev("content_block_delta", {"index": 1, "delta": {"type": "input_json_delta", "partial_json": json.dumps(args)}})
-            ev("content_block_stop", {"index": 1})
+            for i, (name, args) in enumerate(calls):
+                ev("content_block_start", {"index": 1 + i, "content_block": {"type": "tool_use", "id": f"toolu_{int(time.time()*1000)}_{i}", "name": name, "input": {}}})
+                ev("content_block_delta", {"index": 1 + i, "delta": {"type": "input_json_delta", "partial_json": json.dumps(args)}})
+                ev("content_block_stop", {"index": 1 + i})
             stop = "tool_use"
         ev("message_delta", {"delta": {"stop_reason": stop, "stop_sequence": None}, "usage": {"output_tokens": 17}})
         ev("message_stop", {})
+
+
+    # ---- OpenAI Responses ----
+    def openai_responses(self, body):
+        items = body.get("input") or []
+        texts, images, after_tool = [], 0, False
+        for it in reversed(items):
+            if it.get("type") == "function_call_output":
+                after_tool = True
+                texts.insert(0, str(it.get("output", "")))
+                continue
+            if it.get("role") != "user":
+                break
+            for p in it.get("content") or []:
+                if p.get("type") == "input_text":
+                    texts.insert(0, p.get("text", ""))
+                elif p.get("type") == "input_image":
+                    images += 1
+                elif p.get("type") == "input_file":
+                    texts.insert(0, f"[document {len(p.get('file_data', ''))} chars]")
+        plan = decide("\n".join(texts), images, after_tool, body.get("tools"))
+        model = body.get("model", "mock")
+        self._sse_start()
+        ev = lambda name, obj: self._send(json.dumps({"type": name, **obj}), event=name)
+        ev("response.created", {"response": {"id": "resp_mock", "status": "in_progress"}})
+        # A reasoning item first, so the encrypted round trip is exercised.
+        ev("response.output_item.done", {"output_index": 0, "item": {"type": "reasoning", "id": "rs_mock", "summary": [{"type": "summary_text", "text": "thinking"}], "encrypted_content": "mock-encrypted"}})
+        if plan[0] == "text":
+            for piece in re.findall(r"\S+\s*|\s+", plan[1]):
+                ev("response.output_text.delta", {"output_index": 1, "delta": piece})
+                time.sleep(0.01)
+            ev("response.output_item.done", {"output_index": 1, "item": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": plan[1]}]}})
+        else:
+            for i, (name, args) in enumerate(calls_of(plan)):
+                ev("response.output_item.done", {"output_index": 1 + i, "item": {"type": "function_call", "call_id": f"call_{int(time.time()*1000)}_{i}", "name": name, "arguments": json.dumps(args)}})
+        ev("response.completed", {"response": {"id": "resp_mock", "status": "completed", "model": model,
+                                                "usage": {"input_tokens": 42, "output_tokens": 17,
+                                                          "input_tokens_details": {"cached_tokens": 0},
+                                                          "output_tokens_details": {"reasoning_tokens": 0}}}})
+
+    # ---- Gemini generateContent ----
+    def gemini(self, body):
+        if not (self.headers.get("x-goog-api-key") or self.headers.get("authorization")):
+            return self._json(403, {"error": {"code": 403, "message": "API key missing", "status": "PERMISSION_DENIED"}})
+        contents = body.get("contents") or []
+        texts, images, after_tool = [], 0, False
+        for c in reversed(contents):
+            if c.get("role") != "user":
+                break
+            for p in c.get("parts") or []:
+                if "text" in p:
+                    texts.insert(0, p["text"])
+                elif "inlineData" in p:
+                    mime = p["inlineData"].get("mimeType", "")
+                    if mime == "application/pdf":
+                        texts.insert(0, f"[document {mime}]")
+                    else:
+                        images += 1
+                elif "functionResponse" in p:
+                    after_tool = True
+                    texts.insert(0, json.dumps(p["functionResponse"].get("response")))
+        tools = [d for t in body.get("tools") or [] for d in t.get("functionDeclarations") or []]
+        plan = decide("\n".join(texts), images, after_tool, tools)
+        self._sse_start()
+
+        def chunk(parts, finish=None, usage=False):
+            cand = {"content": {"role": "model", "parts": parts}}
+            if finish:
+                cand["finishReason"] = finish
+            out = {"candidates": [cand], "modelVersion": "mock"}
+            if usage:
+                out["usageMetadata"] = {"promptTokenCount": 42, "candidatesTokenCount": 17, "totalTokenCount": 59}
+            self._send(json.dumps(out))
+
+        chunk([{"text": "thinking", "thought": True}])
+        if plan[0] == "text":
+            pieces = re.findall(r"\S+\s*|\s+", plan[1])
+            for piece in pieces[:-1]:
+                chunk([{"text": piece}])
+                time.sleep(0.01)
+            chunk([{"text": pieces[-1]}], "STOP", True)
+        else:
+            chunk([{"functionCall": {"name": name, "args": args}, "thoughtSignature": "mock-sig"} for name, args in calls_of(plan)], "STOP", True)
+
+
+def _plan_for_rounds(text, images, after_tool, tools):
+    return decide(text, images, after_tool, tools)
 
 
 def main():

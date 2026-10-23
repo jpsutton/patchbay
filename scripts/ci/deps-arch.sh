@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Sourced by the CI scripts that run in an archlinux container (as root):
-# the packages Patchbay and the grok sidecar build with.
+# the packages Patchbay builds with.
 set -euo pipefail
 pacman -Syu --noconfirm --needed \
   base-devel git rust nodejs pnpm protobuf \

@@ -280,6 +280,9 @@ function Member() {
               {p.role === "remote"
                 ? `Approve only if ${p.name} shows the same code. It can read every chat and session and run commands through their agents, but gets no API keys.`
                 : `Approve only if ${p.name} shows the same code. It will get all chats, sessions and API keys.`}
+              {p.host && p.host !== mesh.nodeId && p.hostName && (
+                <span className="text-faint"> It is connected to {p.hostName}; approving here works too.</span>
+              )}
             </div>
           </div>
           <Code code={p.code} />
@@ -417,7 +420,7 @@ function Member() {
         onClick={async () => {
           const { ok } = await askConfirm({
             title: "Leave the mesh?",
-            body: "This computer stops syncing and forgets the passphrase. Its chats and sessions stay here.",
+            body: "This computer tells the connected members it's leaving, then stops syncing and forgets the passphrase. Its chats and sessions stay here.",
             confirmLabel: "Leave",
             danger: true,
           });

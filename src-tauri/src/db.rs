@@ -232,6 +232,7 @@ pub enum ProviderKind {
     OpenaiChat,
     OpenaiResponses,
     Anthropic,
+    Gemini,
 }
 
 impl ProviderKind {
@@ -240,6 +241,7 @@ impl ProviderKind {
             Self::OpenaiChat => "openai_chat",
             Self::OpenaiResponses => "openai_responses",
             Self::Anthropic => "anthropic",
+            Self::Gemini => "gemini",
         }
     }
 
@@ -247,6 +249,7 @@ impl ProviderKind {
         match s {
             "openai_responses" => Self::OpenaiResponses,
             "anthropic" => Self::Anthropic,
+            "gemini" => Self::Gemini,
             _ => Self::OpenaiChat,
         }
     }
@@ -332,14 +335,12 @@ pub struct Pricing {
 }
 
 impl ModelParams {
-    pub fn reasoning_effort(&self) -> Option<xai_grok_sampling_types::ReasoningEffort> {
-        let e = self.reasoning_effort.as_deref()?;
-        serde_json::from_value(serde_json::Value::String(e.to_owned())).ok()
+    pub fn reasoning_effort(&self) -> Option<patchbay_llm::Effort> {
+        patchbay_llm::Effort::parse(self.reasoning_effort.as_deref()?)
     }
 
-    pub fn reasoning_summary(&self) -> Option<xai_grok_sampling_types::ReasoningSummary> {
-        let e = self.reasoning_summary.as_deref()?;
-        serde_json::from_value(serde_json::Value::String(e.to_owned())).ok()
+    pub fn reasoning_summary(&self) -> Option<patchbay_llm::Summary> {
+        patchbay_llm::Summary::parse(self.reasoning_summary.as_deref()?)
     }
 
     /// Reject values providers would refuse, so mistakes surface in Settings, not mid-chat.

@@ -33,6 +33,8 @@ export function useStickyScroll(deps: DependencyList) {
     if (!el || !content) return;
     const ro = new ResizeObserver(() => {
       if (stick.current) el.scrollTop = el.scrollHeight;
+      // Detached just above the bottom, growth fires no scroll event: refresh the jump button here.
+      else setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX);
     });
     ro.observe(content);
     ro.observe(el);
@@ -40,13 +42,19 @@ export function useStickyScroll(deps: DependencyList) {
   }, [el]);
 
   const lastTop = useRef(0);
+  const lastHeight = useRef(0);
   const onScroll = (e: UIEvent<HTMLDivElement>) => {
     const node = e.currentTarget;
     const near = node.scrollHeight - node.scrollTop - node.clientHeight < NEAR_BOTTOM_PX;
-    // Only an upward scroll detaches; layout shifts while content renders must not.
-    if (near) stick.current = true;
-    else if (node.scrollTop < lastTop.current) stick.current = false;
+    // Any upward scroll detaches, even inside the near-bottom zone: smooth scrolling moves a few
+    // pixels per frame, so checking `near` first would re-pin on every streamed chunk and the user
+    // could never scroll away. A scrollTop drop from content shrinking is a layout shift, not the
+    // user, and must not detach.
+    const shrank = node.scrollHeight < lastHeight.current;
+    if (node.scrollTop < lastTop.current && !shrank) stick.current = false;
+    else if (near) stick.current = true;
     lastTop.current = node.scrollTop;
+    lastHeight.current = node.scrollHeight;
     setAtBottom(near);
     setAtTop(node.scrollTop < 1);
   };
