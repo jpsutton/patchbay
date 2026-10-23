@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import type { Preferences } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { isWeb } from "../lib/platform";
+import { Toggle } from "../components/Toggle";
 import { input } from "./ProviderPage";
 import { DiagnosticsPage } from "./DiagnosticsPage";
 import { McpPage } from "./McpPage";
@@ -58,22 +59,6 @@ export function Choice<T extends string>({
         </button>
       ))}
     </div>
-  );
-}
-
-export function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
-  return (
-    <button
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      className={`relative h-5 w-9 rounded-full transition-colors ${checked ? "bg-accent" : "bg-panel-2 ring-1 ring-border"}`}
-      onClick={() => onChange(!checked)}
-    >
-      <span
-        className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${checked ? "left-[18px]" : "left-0.5"}`}
-      />
-    </button>
   );
 }
 
