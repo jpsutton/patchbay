@@ -125,7 +125,9 @@ rust_bin() {
 use_env() {
     local rb
     JAVA_HOME=$(find_jdk) || die "no JDK 21; run: scripts/android-e2e.sh setup --only jdk"
-    export JAVA_HOME ANDROID_HOME=$sdk ANDROID_SDK_ROOT=$sdk NDK_HOME=$sdk/ndk/$ndk_version
+    # avdmanager and the emulator both read this; left unset, ANDROID_USER_HOME or ANDROID_SDK_HOME (CI images set them) can move the AVD.
+    mkdir -p "$avd_home"
+    export JAVA_HOME ANDROID_HOME=$sdk ANDROID_SDK_ROOT=$sdk NDK_HOME=$sdk/ndk/$ndk_version ANDROID_AVD_HOME=$avd_home
     rb=$(rust_bin || true)
     PATH="${rb:+$rb:}$JAVA_HOME/bin:$sdk/cmdline-tools/latest/bin:$sdk/platform-tools:$sdk/emulator:$PATH"
     export PATH
