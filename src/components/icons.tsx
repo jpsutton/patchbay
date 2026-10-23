@@ -439,6 +439,17 @@ export const BrainIcon = icon(
 
 export const DotIcon = icon(<circle cx="12" cy="12" r="1.5" />);
 
+export const GripVerticalIcon = icon(
+  <>
+    <circle cx="9" cy="6" r="1" />
+    <circle cx="9" cy="12" r="1" />
+    <circle cx="9" cy="18" r="1" />
+    <circle cx="15" cy="6" r="1" />
+    <circle cx="15" cy="12" r="1" />
+    <circle cx="15" cy="18" r="1" />
+  </>,
+);
+
 export const MonitorIcon = icon(
   <>
     <rect width="20" height="14" x="2" y="3" rx="2" />
