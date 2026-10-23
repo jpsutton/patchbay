@@ -786,7 +786,7 @@ function SettingsSheet({ status, onClose }: { status: RemoteStatus; onClose: () 
           onClick={async () => {
             const { ok } = await askConfirm({
               title: "Leave the mesh?",
-              body: "This phone forgets the mesh. To join again you'll need the passphrase and an approval. Remove it on a computer too, so its record goes.",
+              body: "This phone forgets the mesh. To join again you'll need the passphrase and an approval. If no computer is reachable right now, remove it on a computer too, so it drops off their lists.",
               confirmLabel: "Leave",
               danger: true,
             });

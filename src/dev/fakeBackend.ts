@@ -978,12 +978,14 @@ export function install() {
           db.attachments.push(att);
           return att;
         }
-        case "attachment_thumbnail": {
+        case "attachment_thumbnail":
+        case "attachment_image": {
+          const n = cmd === "attachment_image" ? 512 : 64;
           const c = document.createElement("canvas");
-          c.width = c.height = 64;
+          c.width = c.height = n;
           const g = c.getContext("2d")!;
-          g.fillStyle = "#e5534b"; g.fillRect(0, 0, 64, 64);
-          g.fillStyle = "#fff"; g.fillRect(16, 16, 32, 32);
+          g.fillStyle = "#e5534b"; g.fillRect(0, 0, n, n);
+          g.fillStyle = "#fff"; g.fillRect(n / 4, n / 4, n / 2, n / 2);
           return c.toDataURL();
         }
 
@@ -994,6 +996,17 @@ export function install() {
         case "write_text_file":
           console.info("fake backend: write", a.path, String(a.contents).length, "chars");
           (window as unknown as Record<string, unknown>).__lastExport = { path: a.path, contents: a.contents };
+          return null;
+        // Paths under /home/demo, or relative to a session folder, exist; set window.__fakeMissing
+        // to a list of paths that don't.
+        case "local_path_exists": {
+          const p = String(a.path);
+          const missing = ((window as unknown as Record<string, unknown>).__fakeMissing as string[] | undefined) ?? [];
+          return !missing.includes(p) && (p.startsWith("/home/demo") || p.startsWith("~/") || (!p.startsWith("/") && !!a.cwd));
+        }
+        case "open_local_path":
+          console.info("fake backend: open path", a.path, "in", a.cwd);
+          (window as unknown as Record<string, unknown>).__lastOpenedPath = { path: a.path, cwd: a.cwd };
           return null;
         // Set window.__fakeUpdate = { version, notes } before the first check to see the update button.
         case "update_check":

@@ -393,6 +393,17 @@ pub fn thumbnail(att: &Attachment) -> Result<String> {
     Ok(format!("data:image/png;base64,{}", B64.encode(&out)))
 }
 
+/// The prepared (resized, cached) image as a data URL, for full-size viewing.
+pub fn image_data_url(data_dir: &Path, att: &Attachment) -> Result<String> {
+    if att.kind != "image" {
+        bail!("not an image");
+    }
+    match prepare(data_dir, att)?.into_iter().next() {
+        Some(Prepared::Image { mime, b64 }) => Ok(format!("data:{mime};base64,{b64}")),
+        _ => bail!("image could not be prepared"),
+    }
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

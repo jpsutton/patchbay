@@ -54,6 +54,8 @@ A member's `node_id` is bound to the keys in its record. A connection that prese
 
 Removal signs `removed_by`/`removed_at` into the record. The remover rotates the data key. Connections to the removed node close two seconds later, so the removal record reaches it first and it stops itself.
 
+Leaving is a removal the member signs for itself (`removed_by` is its own id). A computer that leaves stores that record and waits half a second, so sync carries it to the connected members before it stops. A phone sends it to its gateway as `remote.leave`, and the gateway stores it and lets it sync on. Members drop a node that left from their lists. A node removed by someone else stays listed as removed. A node that leaves while it can't reach any member stays listed until a member removes it.
+
 ### Discovery
 
 There is no broadcast across L3. A node learns peer addresses from:

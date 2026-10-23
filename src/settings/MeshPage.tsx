@@ -417,7 +417,7 @@ function Member() {
         onClick={async () => {
           const { ok } = await askConfirm({
             title: "Leave the mesh?",
-            body: "This computer stops syncing and forgets the passphrase. Its chats and sessions stay here.",
+            body: "This computer tells the connected members it's leaving, then stops syncing and forgets the passphrase. Its chats and sessions stay here.",
             confirmLabel: "Leave",
             danger: true,
           });

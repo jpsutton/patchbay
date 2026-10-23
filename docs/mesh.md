@@ -91,7 +91,7 @@ In **Settings → Mesh**, click **Remove** next to the computer. It is disconnec
 
 Removing a computer also changes the key that encrypts synced secrets. However, the removed computer keeps the copies of chats, sessions and API keys it already has. If it might be in the wrong hands, replace those API keys with your providers.
 
-To take the current computer out of the mesh, click **Leave mesh**. It stops syncing and forgets the passphrase, and keeps its own copy of everything.
+To take the current computer out of the mesh, click **Leave mesh**. It tells the members it can reach that it's leaving, and they drop it from their lists. Then it stops syncing and forgets the passphrase, and keeps its own copy of everything. If it can't reach any member when it leaves, remove it from one of them as well.
 
 ## From your phone
 
@@ -114,7 +114,7 @@ The phone connects through whichever of your computers it reaches first: on your
 
 The **Code** tab groups sessions by computer, and marks those that are working and those that **Need you**. While an agent or a reply is running and you switch away from the app, it can stay connected in the background (Android shows a quiet notification for that) and notifies you of permission requests and finished turns. Turn that off, or turn on the fingerprint or screen lock, in the app's **Settings**.
 
-To remove the phone, click **Remove** next to it in **Settings → Mesh** on any computer. It never had API keys, so there's nothing to replace.
+To take the phone out from the phone itself, use **Leave the mesh** in its settings. The computers drop it from their lists, provided one of them is reachable at that moment. To remove the phone from a computer, click **Remove** next to it in **Settings → Mesh** on any computer. It never had API keys, so there's nothing to replace.
 
 ## Cloudflare Tunnel
 

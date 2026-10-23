@@ -28,6 +28,7 @@ import {
 import { HostBadge, MoveDialog, OfflineHostBanner } from "./HostControls";
 import { Composer } from "../components/Composer";
 import { Markdown } from "../components/Markdown";
+import { FileLinkContext } from "../components/FileLink";
 import { EditMessage } from "../components/EditMessage";
 import { UsageBar } from "../components/UsageBar";
 import { TerminalPane } from "../terminal/TerminalPane";
@@ -60,7 +61,7 @@ import {
   XIcon,
 } from "../components/icons";
 import { ChipRows, ChipSelect, ChipText } from "../components/ChipSelect";
-import { AgentImage } from "../components/AgentImage";
+import { AgentImage, AttachedImage } from "../components/AgentImage";
 import { ModelRing } from "../lib/cable";
 import { JumpToBottom, ScrollFade, useStickyScroll } from "../lib/useStickyScroll";
 
@@ -391,14 +392,25 @@ function UserEntry({
       </div>
     );
   }
+  const atts = e.attachments ?? [];
+  const images = atts.filter((a) => a.kind === "image");
+  const files = atts.filter((a) => a.kind !== "image");
+  const names = (list: Attachment[]) => (
+    <div className="flex items-center gap-1.5 text-xs text-muted">
+      <PaperclipIcon size={13} />
+      {list.map((a) => a.name).join(", ")}
+    </div>
+  );
   return (
     <div className="group flex flex-col items-end gap-1.5">
-      {e.attachments && e.attachments.length > 0 && (
-        <div className="flex items-center gap-1.5 text-xs text-muted">
-          <PaperclipIcon size={13} />
-          {e.attachments.map((a) => a.name).join(", ")}
+      {images.length > 0 && (
+        <div className="flex max-w-[82%] flex-wrap justify-end gap-2">
+          {images.map((a) => (
+            <AttachedImage key={a.id} att={a} fallback={names([a])} />
+          ))}
         </div>
       )}
+      {files.length > 0 && names(files)}
       {e.text && (
         <div className="max-w-[82%] whitespace-pre-wrap rounded-[16px_16px_4px_16px] border border-line bg-panel-2 px-3.5 py-2.5 leading-6">
           {e.text}
@@ -475,7 +487,13 @@ const EntryView = memo(function EntryView({
     case "agent":
       return <AgentEntry text={e.text} />;
     case "image":
-      return <AgentImage data={e.data} mimeType={e.mimeType} alt="Image from the agent" />;
+      return e.from === "user" ? (
+        <div className="flex justify-end">
+          <AgentImage data={e.data} mimeType={e.mimeType} alt="Your image" />
+        </div>
+      ) : (
+        <AgentImage data={e.data} mimeType={e.mimeType} alt="Image from the agent" />
+      );
     case "thought":
       return <Thought text={e.text} />;
     case "tool": {
@@ -837,6 +855,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const s = state;
   const status = s?.status ?? "idle";
   const host = remoteHost(session, mesh);
+  // Paths in the transcript open here only when the session's files are on this computer.
+  const fileLinks = { cwd: session.cwd, local: !host };
   // The offline banner offers the way forward instead of a restart that can't work.
   const hostOffline = !!host && !memberOnline(mesh, host);
   const ready = status === "ready";
@@ -1162,6 +1182,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   );
 
   return (
+    <FileLinkContext.Provider value={fileLinks}>
     <div className="flex h-full min-w-0 flex-1 flex-col">
       <header {...drag} className={`flex h-12 shrink-0 items-center gap-1 border-b border-line pr-3 ${leading ? "pl-1" : "pl-6"}`}>
         {leading}
@@ -1476,5 +1497,6 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
       )}
       {moving && <MoveDialog session={session} takeOver={moving === "takeOver"} onClose={() => setMoving(null)} />}
     </div>
+    </FileLinkContext.Provider>
   );
 }

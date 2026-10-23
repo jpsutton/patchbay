@@ -7,6 +7,17 @@ import "katex/dist/katex.min.css";
 import { normalizeMath } from "../lib/math";
 import { isExternalUrl, openExternal } from "../lib/external";
 import { CheckIcon, CopyIcon } from "./icons";
+import { FileLink, InLinkContext } from "./FileLink";
+
+/** A link target as a path: `file://` URLs decoded, anything else as written. */
+function fileHref(href: string): string {
+  if (!/^file:\/\//i.test(href)) return href;
+  try {
+    return decodeURIComponent(href.replace(/^file:\/\/(localhost)?/i, ""));
+  } catch {
+    return href;
+  }
+}
 
 const cache = new Map<string, string>();
 
@@ -146,24 +157,34 @@ function MarkdownImpl({ text }: { text: string }) {
           code: ({ className, children }) => {
             const m = /language-([\w+-]+)/.exec(className ?? "");
             const s = String(children ?? "");
-            if (!m && !s.includes("\n")) return <code>{children}</code>;
+            if (!m && !s.includes("\n"))
+              return (
+                <FileLink text={s}>
+                  <code>{children}</code>
+                </FileLink>
+              );
             const code = s.replace(/\n$/, "");
             if (m?.[1] === "mermaid") return <MermaidBlock code={code} />;
             return <CodeBlock code={code} lang={m?.[1] ?? ""} />;
           },
-          a: ({ href, children }) => (
-            <a
-              href={href}
-              title={href}
-              rel="noreferrer"
-              onClick={(e) => {
-                e.preventDefault();
-                if (isExternalUrl(href)) openExternal(href);
-              }}
-            >
-              {children}
-            </a>
-          ),
+          a: ({ href, children }) => {
+            const inner = <InLinkContext.Provider value={true}>{children}</InLinkContext.Provider>;
+            // A link to a file, e.g. `[spec](re/SPEC.md)`, opens it like a mentioned path does.
+            if (href && !isExternalUrl(href)) return <FileLink text={fileHref(href)}>{inner}</FileLink>;
+            return (
+              <a
+                href={href}
+                title={href}
+                rel="noreferrer"
+                onClick={(e) => {
+                  e.preventDefault();
+                  if (isExternalUrl(href)) openExternal(href);
+                }}
+              >
+                {inner}
+              </a>
+            );
+          },
         }}
       >
         {normalizeMath(text)}

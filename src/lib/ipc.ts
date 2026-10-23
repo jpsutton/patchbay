@@ -792,6 +792,7 @@ export const api = {
   addAttachmentBytes: (name: string, dataBase64: string) =>
     invoke<Attachment>("add_attachment_bytes", { name, dataBase64 }),
   attachmentThumbnail: (id: string) => invoke<string>("attachment_thumbnail", { id }),
+  attachmentImage: (id: string) => invoke<string>("attachment_image", { id }),
 
   listCodeSessions: () => invoke<CodeSession[]>("list_code_sessions"),
   /** With `host`, the session runs on that computer, in its folder `cwd`. */
@@ -908,6 +909,10 @@ export const api = {
   termClose: (id: string) => invoke<void>("term_close", { id }),
 
   writeTextFile: (path: string, contents: string) => invoke<void>("write_text_file", { path, contents }),
+  /** Native app only: whether a path from a transcript exists here (relative ones under `cwd`). */
+  localPathExists: (path: string, cwd: string | null) => invoke<boolean>("local_path_exists", { path, cwd }),
+  /** Native app only: open that path in the OS's default app, or reveal it if it would run. */
+  openLocalPath: (path: string, cwd: string | null) => invoke<void>("open_local_path", { path, cwd }),
   /** Native app only: a newer release it can install itself, or null. */
   updateCheck: () => invoke<UpdateInfo | null>("update_check"),
   /** Native app only: install what `updateCheck` found and restart. */

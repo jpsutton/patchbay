@@ -42,26 +42,58 @@ function tone(pct: number, limit: number | null) {
   return "ok";
 }
 
-/** The sidebar footer's toggle for the Claude plan usage blade. */
+/** A window's usage as a whole percent; 0 once it has reset, null if never reported. */
+const windowPct = (w: PlanWindow | null, now: number) => {
+  if (!w) return null;
+  const current = live(w, now);
+  return current ? Math.round(current.utilization * 100) : 0;
+};
+
+const barClass = (t: ReturnType<typeof tone>) => (t === "danger" ? "bg-danger" : t === "warn" ? "bg-warn" : "bg-ok");
+
+/** The sidebar footer's toggle for the Claude plan usage blade: one mini bar per window. */
 export function PlanUsageButton() {
   const limits = useStore((s) => s.planLimits);
   const open = useStore((s) => s.planOpen);
   const setOpen = useStore((s) => s.setPlanOpen);
   const guard = useStore((s) => s.prefs.usageLimit);
   const now = useNow(true);
-  const pct = peak(limits, now);
-  const t = pct == null ? null : tone(pct, guard.enabled ? guard.percent : null);
+  const limit = guard.enabled ? guard.percent : null;
+  const rows = [
+    { label: "5h", pct: windowPct(limits?.fiveHour ?? null, now) },
+    { label: "wk", pct: windowPct(limits?.sevenDay ?? null, now) },
+  ].filter((r): r is { label: string; pct: number } => r.pct != null);
+  const overage = limits?.overageUntil != null && limits.overageUntil > now;
+  // Overage with no window reported still deserves a number.
+  const pct = rows.length ? null : peak(limits, now);
+  const t = pct == null ? null : tone(pct, limit);
+  const title = rows.length
+    ? `Claude plan usage: ${rows.map((r) => `${r.label === "5h" ? "5-hour" : "weekly"} ${r.pct}%`).join(", ")}`
+    : "Claude plan usage";
   return (
     <button
       className={`flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-2 text-[13px] hover:bg-panel-2 hover:text-fg ${
         open ? "bg-panel-2 text-fg" : "text-muted"
       }`}
-      title="Claude plan usage"
-      aria-label="Claude plan usage"
+      title={title}
+      aria-label={title}
       aria-expanded={open}
       onClick={() => setOpen(!open)}
     >
-      <GaugeIcon size={16} />
+      <GaugeIcon size={16} className={overage ? "text-danger" : undefined} />
+      {rows.length > 0 && (
+        <span className="flex flex-col gap-[3px]" aria-hidden="true">
+          {rows.map((r) => (
+            <span key={r.label} className="flex items-center gap-[5px] text-[10.5px] leading-none">
+              <span className="w-3 text-faint @max-[300px]/footer:hidden">{r.label}</span>
+              <span className="h-1 w-[30px] overflow-hidden rounded-full bg-border">
+                <span className={`block h-full rounded-full ${barClass(tone(r.pct, limit))}`} style={{ width: `${Math.min(100, r.pct)}%` }} />
+              </span>
+              <span className="w-[4ch] text-right text-fg tabular-nums">{r.pct}%</span>
+            </span>
+          ))}
+        </span>
+      )}
       {pct != null && (
         <span className={`meta ${t === "danger" ? "text-danger" : t === "warn" ? "text-warn" : ""}`}>{pct}%</span>
       )}
@@ -84,7 +116,7 @@ function WindowRow({ label, w, now, limit }: { label: string; w: PlanWindow | nu
       </div>
       <div className="relative mt-1.5 h-1.5 overflow-hidden rounded-full bg-panel-2" aria-hidden="true">
         <div
-          className={`h-full rounded-full ${t === "danger" ? "bg-danger" : t === "warn" ? "bg-warn" : "bg-ok"}`}
+          className={`h-full rounded-full ${barClass(t)}`}
           style={{ width: `${Math.min(100, pct)}%` }}
         />
         {limit != null && limit < 100 && (
