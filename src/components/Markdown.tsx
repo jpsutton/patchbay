@@ -6,6 +6,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { normalizeMath } from "../lib/math";
 import { isExternalUrl, openExternal } from "../lib/external";
+import { SessionImage } from "./AgentImage";
 import { CheckIcon, CopyIcon } from "./icons";
 import { FileLink, InLinkContext } from "./FileLink";
 
@@ -146,13 +147,26 @@ export function CodeBlock({
   );
 }
 
-function MarkdownImpl({ text }: { text: string }) {
+/** A path on the session's computer, rather than a picture the page can load itself. */
+function isLocalImageSrc(src: string | undefined): src is string {
+  if (!src) return false;
+  const s = src.trim();
+  return s.length > 0 && !/^(https?:|data:|blob:|\/\/)/i.test(s);
+}
+
+function MarkdownImpl({ text, sessionId }: { text: string; sessionId?: string }) {
   return (
     <div className="prose-chat">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: false }]]}
         rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]}
         components={{
+          img: ({ src, alt }) => {
+            const source = typeof src === "string" ? src : undefined;
+            const name = typeof alt === "string" ? alt : undefined;
+            if (sessionId && isLocalImageSrc(source)) return <SessionImage sessionId={sessionId} src={source} alt={name} />;
+            return <img src={source} alt={name ?? ""} className="my-3 max-h-[28rem] max-w-full rounded-lg border border-line object-contain" />;
+          },
           pre: ({ children }) => <>{children}</>,
           code: ({ className, children }) => {
             const m = /language-([\w+-]+)/.exec(className ?? "");

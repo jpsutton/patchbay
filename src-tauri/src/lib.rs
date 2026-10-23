@@ -1553,6 +1553,14 @@ impl mesh::RpcHandler for MeshRpc {
                 let files = tokio::task::spawn_blocking(move || files::list(std::path::Path::new(&s.cwd))).await??;
                 Ok(json!(files))
             }
+            "code.image" => {
+                let id = id()?;
+                ensure_local_host(state, &id)?;
+                let path = param(&p, "path")?.to_owned();
+                let s = state.db.get_code_session(&id)?.ok_or_else(|| anyhow::anyhow!("no such session"))?;
+                let url = tokio::task::spawn_blocking(move || files::session_image(std::path::Path::new(&s.cwd), &path)).await??;
+                Ok(json!(url))
+            }
             "chat.cancel" => {
                 state.chat.cancel(param(&p, "conversationId")?);
                 Ok(Value::Null)
@@ -1930,6 +1938,16 @@ async fn list_project_files(state: &AppState, cwd: String, session_id: Option<St
         return Ok(serde_json::from_value(v)?);
     }
     Ok(tokio::task::spawn_blocking(move || files::list(std::path::Path::new(&cwd))).await??)
+}
+
+/// A picture a reply linked, read on the computer that holds the session.
+async fn code_session_image(state: &AppState, id: String, path: String) -> CmdResult<String> {
+    if let Some(host) = remote_host(state, &id)? {
+        let v = state.mesh.rpc(&host, "code.image", serde_json::json!({ "id": id, "path": path })).await?;
+        return v.as_str().map(str::to_owned).ok_or_else(|| CmdError("no image".into()));
+    }
+    let s = state.db.get_code_session(&id)?.ok_or_else(|| CmdError("no such session".into()))?;
+    Ok(tokio::task::spawn_blocking(move || files::session_image(std::path::Path::new(&s.cwd), &path)).await??)
 }
 
 async fn list_mcp_servers(state: &AppState) -> CmdResult<Vec<McpServer>> {

@@ -847,6 +847,11 @@ async fn code_usage(r: Shared<'_>, id: String) -> CmdResult<Value> {
 }
 
 #[tauri::command]
+async fn code_session_image(r: Shared<'_>, id: String, path: String) -> CmdResult<Value> {
+    r.code("code.image", json!({ "id": id, "path": path })).await
+}
+
+#[tauri::command]
 async fn list_project_files(r: Shared<'_>, session_id: Option<String>) -> CmdResult<Value> {
     match session_id {
         Some(id) => r.code("code.files", json!({ "id": id })).await,
@@ -1009,6 +1014,7 @@ pub fn run() {
             code_permission_respond,
             code_usage,
             list_project_files,
+            code_session_image,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Patchbay Remote");
