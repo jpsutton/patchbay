@@ -59,7 +59,7 @@ import {
   XIcon,
 } from "../components/icons";
 import { ChipRows, ChipSelect, ChipText } from "../components/ChipSelect";
-import { AgentImage } from "../components/AgentImage";
+import { AgentImage, AttachedImage } from "../components/AgentImage";
 import { ModelRing } from "../lib/cable";
 import { JumpToBottom, ScrollFade, useStickyScroll } from "../lib/useStickyScroll";
 
@@ -390,14 +390,25 @@ function UserEntry({
       </div>
     );
   }
+  const atts = e.attachments ?? [];
+  const images = atts.filter((a) => a.kind === "image");
+  const files = atts.filter((a) => a.kind !== "image");
+  const names = (list: Attachment[]) => (
+    <div className="flex items-center gap-1.5 text-xs text-muted">
+      <PaperclipIcon size={13} />
+      {list.map((a) => a.name).join(", ")}
+    </div>
+  );
   return (
     <div className="group flex flex-col items-end gap-1.5">
-      {e.attachments && e.attachments.length > 0 && (
-        <div className="flex items-center gap-1.5 text-xs text-muted">
-          <PaperclipIcon size={13} />
-          {e.attachments.map((a) => a.name).join(", ")}
+      {images.length > 0 && (
+        <div className="flex max-w-[82%] flex-wrap justify-end gap-2">
+          {images.map((a) => (
+            <AttachedImage key={a.id} att={a} fallback={names([a])} />
+          ))}
         </div>
       )}
+      {files.length > 0 && names(files)}
       {e.text && (
         <div className="max-w-[82%] whitespace-pre-wrap rounded-[16px_16px_4px_16px] border border-line bg-panel-2 px-3.5 py-2.5 leading-6">
           {e.text}
@@ -474,7 +485,13 @@ const EntryView = memo(function EntryView({
     case "agent":
       return <AgentEntry text={e.text} />;
     case "image":
-      return <AgentImage data={e.data} mimeType={e.mimeType} alt="Image from the agent" />;
+      return e.from === "user" ? (
+        <div className="flex justify-end">
+          <AgentImage data={e.data} mimeType={e.mimeType} alt="Your image" />
+        </div>
+      ) : (
+        <AgentImage data={e.data} mimeType={e.mimeType} alt="Image from the agent" />
+      );
     case "thought":
       return <Thought text={e.text} />;
     case "tool": {

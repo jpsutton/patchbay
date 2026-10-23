@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { api, errorText, estimateCost, type Attachment, type ChatEvent, type Message } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { AttachmentChip, Composer } from "../components/Composer";
+import { AttachedImage } from "../components/AgentImage";
 import { Markdown } from "../components/Markdown";
 import { EditMessage } from "../components/EditMessage";
 import { fmtTokens, UsageBar } from "../components/UsageBar";
@@ -134,9 +135,13 @@ function MessageRow({
       >
         {m.attachments.length > 0 && (
           <div className="flex flex-wrap justify-end gap-2">
-            {m.attachments.map((a) => (
-              <AttachmentChip key={a.id} att={a} />
-            ))}
+            {m.attachments.map((a) =>
+              a.kind === "image" ? (
+                <AttachedImage key={a.id} att={a} fallback={<AttachmentChip att={a} />} />
+              ) : (
+                <AttachmentChip key={a.id} att={a} />
+              ),
+            )}
           </div>
         )}
         {m.content && (
