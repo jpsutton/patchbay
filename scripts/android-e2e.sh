@@ -673,7 +673,8 @@ cmd_test() {
     local rc=0
     if [ "$up" = 1 ]; then
         # shellcheck disable=SC2086
-        cmd_up --fresh --headless $build_flag || { cmd_down --emulator; die "the stack did not come up; no scenario ran"; }
+        # In a subshell: `die` exits, and that must not skip stopping what `up` already started.
+        ( cmd_up --fresh --headless $build_flag ) || { cmd_down --emulator; die "the stack did not come up; no scenario ran"; }
     fi
     use_env
     use_serial
