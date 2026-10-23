@@ -38,6 +38,43 @@ pub struct Hello {
     pub features: Vec<String>,
 }
 
+/// Live event: a node asks to join and waits on `host`, a member. Every member that gets it may
+/// decide the request, not only the host. Payload: [`JoinRequest`]. Sent as an event, not a
+/// message of its own, so nodes that predate it ignore it.
+pub const EV_JOIN_REQUEST: &str = "mesh://join-request";
+/// Live event: the request is decided or gone (`nodeId`). Sent by the host.
+pub const EV_JOIN_RESOLVED: &str = "mesh://join-resolved";
+
+/// A node waiting to be admitted, as its host announces it to the other members and phones.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JoinRequest {
+    pub node_id: String,
+    pub name: String,
+    /// The six-digit code both the joiner and the host show.
+    pub code: String,
+    /// What the approver signs into the admission record.
+    pub sign_pub: String,
+    pub noise_pub: String,
+    /// `Some("remote")` for a phone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// The member the node is connected to; the admission goes back to it.
+    pub host: String,
+}
+
+impl JoinRequest {
+    /// Whether `code` is the one the host's key and the joiner's key give. An approver checks
+    /// this before it signs, so the code it shows is tied to the key it admits.
+    pub fn code_matches(&self, host_noise_pub: &str) -> bool {
+        use crate::keys::hex32;
+        match (hex32(host_noise_pub), hex32(&self.noise_pub)) {
+            (Ok(h), Ok(j)) => crate::handshake::confirmation_code(&h, &j) == self.code,
+            _ => false,
+        }
+    }
+}
+
 /// One node's direct connections, flooded through the mesh so every node can find relay paths.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

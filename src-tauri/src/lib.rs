@@ -1716,11 +1716,11 @@ async fn mesh_cancel_join(state: &AppState) -> CmdResult<()> {
 }
 
 async fn mesh_approve(state: &AppState, node_id: String) -> CmdResult<()> {
-    Ok(state.mesh.approve(&node_id)?)
+    Ok(state.mesh.approve(&node_id).await?)
 }
 
 async fn mesh_reject(state: &AppState, node_id: String) -> CmdResult<()> {
-    state.mesh.reject(&node_id);
+    state.mesh.reject(&node_id).await?;
     Ok(())
 }
 

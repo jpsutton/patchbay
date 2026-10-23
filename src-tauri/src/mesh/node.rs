@@ -21,7 +21,7 @@ use super::members::{self, Member, ROLE_REMOTE};
 use super::remote::{self as rmt, Live, Numbering, Ring};
 use super::secrets::{self, DataKey};
 use super::sync::{self, Applied, LocalDefaults, Op, VersionVector};
-use super::wire::{FEATURE_GATEWAY, Hello, LinkReport, Msg, PROTOCOL_VERSION};
+use super::wire::{EV_JOIN_REQUEST, EV_JOIN_RESOLVED, FEATURE_GATEWAY, Hello, JoinRequest, LinkReport, Msg, PROTOCOL_VERSION};
 use crate::db::{Db, now_ms};
 
 pub use patchbay_mesh::ws::DEFAULT_PORT;
@@ -80,6 +80,8 @@ struct Inner {
 struct State {
     sessions: HashMap<String, Sess>,
     pending: HashMap<String, Pending>,
+    /// Join requests waiting on other members (joiner -> request). Any member may decide them.
+    foreign: HashMap<String, JoinRequest>,
     joining: Option<Joining>,
     links: HashMap<String, LinkReport>,
     /// Failed handshakes per source: (count, blocked until).
@@ -287,6 +289,7 @@ impl Mesh {
         st.sessions.clear();
         st.remotes.clear();
         st.pending.clear();
+        st.foreign.clear();
         st.circuits.clear();
         st.auth_failed.clear();
         st.listen_error = None;
@@ -355,15 +358,15 @@ impl Mesh {
         self.0.emit_status();
     }
 
-    pub fn approve(&self, node_id: &str) -> Result<()> {
-        self.0.approve(node_id)
+    /// Admit a node waiting to join. Any member may: the one the node is connected to signs and
+    /// admits it directly; any other signs and sends the admission to the one it waits on.
+    pub async fn approve(&self, node_id: &str) -> Result<()> {
+        self.0.approve(node_id).await
     }
 
-    pub fn reject(&self, node_id: &str) {
-        if let Some(p) = self.0.st.lock().unwrap().pending.remove(node_id) {
-            let _ = p.tx.send(Msg::Rejected { reason: "a member declined the request".into() });
-        }
-        self.0.emit_status();
+    /// Turn a waiting node away, from any member.
+    pub async fn reject(&self, node_id: &str) -> Result<()> {
+        self.0.reject(node_id).await
     }
 
     /// Remove a member: sign its removal, drop its connection and rotate the data key.
@@ -772,11 +775,21 @@ impl Inner {
                 })
             })
             .collect();
-        let pending: Vec<Value> = st
+        // Requests waiting here, then those waiting on other members; any member may decide both.
+        let host_name = |id: &str| mems.iter().find(|m| m.node_id == id).map(|m| m.name.clone());
+        let mut pending: Vec<Value> = st
             .pending
             .iter()
-            .map(|(id, p)| json!({ "nodeId": id, "name": p.name, "code": p.code, "role": p.role }))
+            .map(|(id, p)| json!({ "nodeId": id, "name": p.name, "code": p.code, "role": p.role, "host": self.me, "hostName": host_name(&self.me) }))
             .collect();
+        let mut elsewhere: Vec<Value> = st
+            .foreign
+            .values()
+            .map(|r| json!({ "nodeId": r.node_id, "name": r.name, "code": r.code, "role": r.role, "host": r.host, "hostName": host_name(&r.host) }))
+            .collect();
+        pending.sort_by_key(|p| p["nodeId"].as_str().map(str::to_owned));
+        elsewhere.sort_by_key(|p| p["nodeId"].as_str().map(str::to_owned));
+        pending.extend(elsewhere);
         let joining = st.joining.as_ref().map(|j| {
             json!({ "url": j.url, "code": j.code, "status": j.status, "error": j.error })
         });
@@ -1368,6 +1381,15 @@ impl Inner {
         let code = handshake::confirmation_code(&self.ident.noise_public, &sec.remote_static);
         let (tx, mut rx) = mpsc::unbounded_channel();
         let role = theirs.role.clone().filter(|r| r == ROLE_REMOTE);
+        let request = JoinRequest {
+            node_id: theirs.node_id.clone(),
+            name: theirs.name.clone(),
+            code: code.clone(),
+            sign_pub: theirs.sign_pub.clone(),
+            noise_pub: noise_pub.clone(),
+            role: role.clone(),
+            host: self.me.clone(),
+        };
         self.st.lock().unwrap().pending.insert(
             theirs.node_id.clone(),
             Pending {
@@ -1380,7 +1402,9 @@ impl Inner {
             },
         );
         self.emit_status();
-        self.ui("mesh://join-request", json!({ "nodeId": theirs.node_id, "name": theirs.name, "code": code, "role": role }));
+        // Every member and phone may decide it, not only this node.
+        self.announce(&request);
+        self.ui(EV_JOIN_REQUEST, json!(request));
         send(&mut sec, &link, &Msg::JoinPending { code })?;
         let deadline = tokio::time::sleep(Duration::from_secs(600));
         tokio::pin!(deadline);
@@ -1407,6 +1431,7 @@ impl Inner {
         };
         self.st.lock().unwrap().pending.remove(&theirs.node_id);
         self.emit_status();
+        self.resolve(&theirs.node_id);
         match outcome {
             Some(()) if role.is_some() => self.remote_session(sec, link, theirs.node_id, theirs.name, token).await,
             Some(()) => {
@@ -1417,14 +1442,170 @@ impl Inner {
         }
     }
 
-    fn approve(&self, node_id: &str) -> Result<()> {
+    /// Requests waiting on this node.
+    fn local_requests(&self) -> Vec<JoinRequest> {
+        let st = self.st.lock().unwrap();
+        st.pending
+            .iter()
+            .map(|(id, p)| JoinRequest {
+                node_id: id.clone(),
+                name: p.name.clone(),
+                code: p.code.clone(),
+                sign_pub: p.sign_pub.clone(),
+                noise_pub: p.noise_pub.clone(),
+                role: p.role.clone(),
+                host: self.me.clone(),
+            })
+            .collect()
+    }
+
+    /// Requests waiting here and on other members, for a phone that just connected.
+    fn all_requests(&self) -> Vec<JoinRequest> {
+        let mut all = self.local_requests();
+        all.extend(self.st.lock().unwrap().foreign.values().cloned());
+        all
+    }
+
+    fn to_phones(&self, m: Msg) {
+        for r in self.st.lock().unwrap().remotes.values() {
+            let _ = r.tx.send(m.clone());
+        }
+    }
+
+    /// Tell every member and phone that `req`, waiting here, can be decided anywhere.
+    fn announce(&self, req: &JoinRequest) {
+        let m = Msg::Event { name: EV_JOIN_REQUEST.into(), payload: json!(req) };
+        self.broadcast(m.clone());
+        self.to_phones(m);
+    }
+
+    /// The request waiting here is decided or gone.
+    fn resolve(&self, node_id: &str) {
+        let m = Msg::Event { name: EV_JOIN_RESOLVED.into(), payload: json!({ "nodeId": node_id }) };
+        self.broadcast(m.clone());
+        self.to_phones(m);
+    }
+
+    /// Another member says a node waits on it. Believed only from that member, for a node whose
+    /// code matches the keys it names, so the code an approver compares is the one it signs for.
+    fn foreign_request(&self, from: &str, payload: Value) {
+        let Ok(req) = serde_json::from_value::<JoinRequest>(payload.clone()) else { return };
+        let Some(mesh_id) = self.mesh_id() else { return };
+        let host = members::get(&self.db, from).ok().flatten().filter(|m| m.mesh_id == mesh_id && !m.is_removed());
+        let Some(host) = host else { return };
+        if req.host != from || req.node_id == self.me || req.node_id == from || !req.code_matches(&host.noise_pub) {
+            tracing::warn!("mesh: ignoring a join request from {} that doesn't add up", host.name);
+            return;
+        }
+        self.st.lock().unwrap().foreign.insert(req.node_id.clone(), req);
+        self.to_phones(Msg::Event { name: EV_JOIN_REQUEST.into(), payload: payload.clone() });
+        self.emit_status();
+        self.ui(EV_JOIN_REQUEST, payload);
+    }
+
+    /// The member a request waited on says it's decided.
+    fn foreign_resolved(&self, from: &str, payload: Value) {
+        let Some(id) = payload["nodeId"].as_str() else { return };
+        {
+            let mut st = self.st.lock().unwrap();
+            if st.foreign.get(id).is_none_or(|r| r.host != from) {
+                return;
+            }
+            st.foreign.remove(id);
+        }
+        self.to_phones(Msg::Event { name: EV_JOIN_RESOLVED.into(), payload: payload.clone() });
+        self.emit_status();
+        self.ui(EV_JOIN_RESOLVED, payload);
+    }
+
+    async fn approve(&self, node_id: &str) -> Result<()> {
         let mesh_id = self.mesh_id().ok_or_else(|| anyhow!("not in a mesh"))?;
-        let (name, sign_pub, noise_pub, role, tx) = {
-            let st = self.st.lock().unwrap();
-            let p = st.pending.get(node_id).ok_or_else(|| anyhow!("that request is gone"))?;
-            (p.name.clone(), p.sign_pub.clone(), p.noise_pub.clone(), p.role.clone(), p.tx.clone())
+        let local = self.st.lock().unwrap().pending.get(node_id).map(|p| JoinRequest {
+            node_id: node_id.to_owned(),
+            name: p.name.clone(),
+            code: p.code.clone(),
+            sign_pub: p.sign_pub.clone(),
+            noise_pub: p.noise_pub.clone(),
+            role: p.role.clone(),
+            host: self.me.clone(),
+        });
+        let req = match local {
+            Some(r) => r,
+            None => self.st.lock().unwrap().foreign.get(node_id).cloned().ok_or_else(|| anyhow!("that request is gone"))?,
         };
-        let rec = Member::admit(&self.me, &self.ident, &mesh_id, node_id, &name, &sign_pub, &noise_pub, role.as_deref());
+        let rec = Member::admit(
+            &self.me,
+            &self.ident,
+            &mesh_id,
+            node_id,
+            &req.name,
+            &req.sign_pub,
+            &req.noise_pub,
+            req.role.as_deref(),
+        );
+        self.admit_via(&req.host, rec).await
+    }
+
+    /// Send a signed admission to the member the node waits on, or take it here.
+    async fn admit_via(&self, host: &str, rec: Member) -> Result<()> {
+        if host == self.me {
+            return self.admit_record(rec);
+        }
+        let id = rec.node_id.clone();
+        self.rpc(host, "mesh.admit", json!({ "record": rec }), RPC_TIMEOUT).await?;
+        if self.st.lock().unwrap().foreign.remove(&id).is_some() {
+            self.emit_status();
+        }
+        Ok(())
+    }
+
+    async fn reject(&self, node_id: &str) -> Result<()> {
+        if self.reject_local(node_id) {
+            return Ok(());
+        }
+        let host = self.st.lock().unwrap().foreign.get(node_id).map(|r| r.host.clone());
+        let host = host.ok_or_else(|| anyhow!("that request is gone"))?;
+        self.reject_via(&host, node_id).await
+    }
+
+    async fn reject_via(&self, host: &str, node_id: &str) -> Result<()> {
+        if host == self.me {
+            return if self.reject_local(node_id) { Ok(()) } else { Err(anyhow!("that request is gone")) };
+        }
+        self.rpc(host, "mesh.reject", json!({ "nodeId": node_id }), RPC_TIMEOUT).await?;
+        if self.st.lock().unwrap().foreign.remove(node_id).is_some() {
+            self.emit_status();
+        }
+        Ok(())
+    }
+
+    /// Decline a node waiting here. False when none does.
+    fn reject_local(&self, node_id: &str) -> bool {
+        let Some(p) = self.st.lock().unwrap().pending.remove(node_id) else { return false };
+        let _ = p.tx.send(Msg::Rejected { reason: "a member declined the request".into() });
+        self.emit_status();
+        true
+    }
+
+    /// Admit the node waiting here with `rec`, signed by a member or by a phone. The record has
+    /// to be for this very request, so a signature can't be replayed for other keys.
+    fn admit_record(&self, rec: Member) -> Result<()> {
+        let mesh_id = self.mesh_id().ok_or_else(|| anyhow!("not in a mesh"))?;
+        let (matches, role, tx) = {
+            let st = self.st.lock().unwrap();
+            let p = st.pending.get(&rec.node_id).ok_or_else(|| anyhow!("that request is gone"))?;
+            let matches = rec.name == p.name && rec.sign_pub == p.sign_pub && rec.noise_pub == p.noise_pub && rec.role == p.role;
+            (matches, p.role.clone(), p.tx.clone())
+        };
+        if !matches || rec.mesh_id != mesh_id || rec.is_removed() || rec.approver == rec.node_id {
+            bail!("the admission doesn't match the request");
+        }
+        let approver = members::get(&self.db, &rec.approver)?
+            .filter(|m| m.mesh_id == mesh_id && !m.is_removed())
+            .ok_or_else(|| anyhow!("the approver isn't a member"))?;
+        if !rec.admission_valid(&approver.sign_pub) {
+            bail!("bad admission signature");
+        }
         members::upsert(&self.db, &rec)?;
         // A phone gets no data key: it holds no secrets and syncs nothing.
         let data_key = match role {
@@ -1495,7 +1676,10 @@ impl Inner {
         for p in self.own_stream_snapshots() {
             send(&mut sec, &link, &Msg::Event { name: "mesh://chat".into(), payload: p })?;
         }
-
+        // Nodes already waiting here may be decided there too.
+        for req in self.local_requests() {
+            send(&mut sec, &link, &Msg::Event { name: EV_JOIN_REQUEST.into(), payload: json!(req) })?;
+        }
         let mut peer_vv: Option<VersionVector> = None;
         let mut changed = self.changed.subscribe();
         let mut ping = tokio::time::interval(Duration::from_secs(5));
@@ -1549,11 +1733,21 @@ impl Inner {
         }
         .await;
 
-        let removed = {
+        let (removed, orphaned) = {
             let mut st = self.st.lock().unwrap();
             let mine = st.sessions.get(&node).is_some_and(|s| s.id == id);
+            let mut orphaned = Vec::new();
             if mine {
                 st.sessions.remove(&node);
+                // What waited on that member can't be decided through it now; it announces again
+                // when we reconnect.
+                st.foreign.retain(|k, r| {
+                    let keep = r.host != node;
+                    if !keep {
+                        orphaned.push(k.clone());
+                    }
+                    keep
+                });
                 for (ring, _, src) in st.rings.values_mut() {
                     if src.as_deref() == Some(node.as_str()) {
                         ring.mark_stale();
@@ -1564,8 +1758,11 @@ impl Inner {
                     s.lost_at.get_or_insert(now);
                 }
             }
-            mine
+            (mine, orphaned)
         };
+        for k in orphaned {
+            self.to_phones(Msg::Event { name: EV_JOIN_RESOLVED.into(), payload: json!({ "nodeId": k }) });
+        }
         if removed {
             tracing::info!("mesh: disconnected from {name}");
             self.emit_status();
@@ -1687,6 +1884,8 @@ impl Inner {
 
     fn handle(self: Arc<Self>, from: &str, m: Msg, reply: &mpsc::UnboundedSender<Msg>) {
         match m {
+            Msg::Event { name, payload } if name == EV_JOIN_REQUEST => self.foreign_request(from, payload),
+            Msg::Event { name, payload } if name == EV_JOIN_RESOLVED => self.foreign_resolved(from, payload),
             Msg::Event { name, payload } => {
                 if name == "mesh://chat" {
                     self.track_stream(&payload);
@@ -1809,6 +2008,19 @@ impl Inner {
                 let offset = params["offset"].as_u64().unwrap_or(0);
                 let path = crate::attachments::stored_path(&self.data_dir, sha, name);
                 read_chunk(path, offset).await
+            }
+            // Another member (or a phone, through its gateway) decides a node waiting here.
+            "mesh.admit" => {
+                let rec: Member = serde_json::from_value(params["record"].clone()).context("bad admission record")?;
+                let phone = members::get(&self.db, &rec.approver)?.is_some_and(|m| m.is_remote());
+                if rec.approver != from && !phone {
+                    bail!("the admission isn't signed by the member that sent it");
+                }
+                self.admit_record(rec).map(|_| Value::Null)
+            }
+            "mesh.reject" => {
+                let id = params["nodeId"].as_str().ok_or_else(|| anyhow!("missing nodeId"))?;
+                if self.reject_local(id) { Ok(Value::Null) } else { Err(anyhow!("that request is gone")) }
             }
             _ => {
                 let h = self.handler.read().unwrap().clone().ok_or_else(|| anyhow!("not ready"))?;
@@ -2078,6 +2290,10 @@ impl Inner {
         self.send_links();
         let ticket = self.issue_ticket(&node, sec.remote_static);
         send(&mut sec, &link, &ticket)?;
+        // Nodes waiting to join, for the phone to decide.
+        for req in self.all_requests() {
+            send(&mut sec, &link, &Msg::Event { name: EV_JOIN_REQUEST.into(), payload: json!(req) })?;
+        }
         let mut changed = self.changed.subscribe();
         let mut index_due: Option<tokio::time::Instant> = None;
         let mut last_seen = Instant::now();
@@ -2169,6 +2385,29 @@ impl Inner {
         Ok(())
     }
 
+    /// A phone decides a join request with its own signature. The record is the phone's own
+    /// admission of that node, so the gateway only passes it to the member the node waits on.
+    async fn phone_admits(&self, from: &str, params: &Value) -> Result<()> {
+        let rec: Member = serde_json::from_value(params["record"].clone()).context("bad admission record")?;
+        if rec.approver != from {
+            bail!("the admission isn't signed by this device");
+        }
+        let host = {
+            let st = self.st.lock().unwrap();
+            match st.foreign.get(&rec.node_id) {
+                Some(r) => r.host.clone(),
+                None if st.pending.contains_key(&rec.node_id) => self.me.clone(),
+                None => bail!("that request is gone"),
+            }
+        };
+        self.admit_via(&host, rec).await
+    }
+
+    async fn phone_rejects(&self, params: &Value) -> Result<()> {
+        let id = params["nodeId"].as_str().ok_or_else(|| anyhow!("missing nodeId"))?;
+        self.reject(id).await
+    }
+
     fn remote_rpc(self: Arc<Self>, from: &str, id: u64, method: String, params: Value, reply: mpsc::UnboundedSender<Msg>) {
         let from = from.to_owned();
         // Register the topics now, so events after this point follow the reply in order.
@@ -2187,6 +2426,8 @@ impl Inner {
                 }
                 "remote.members" => Ok(Mesh(self.clone()).remote_members()),
                 "remote.leave" => self.remote_left(&from, &params).map(|_| Value::Null),
+                "remote.admit" => self.phone_admits(&from, &params).await.map(|_| Value::Null),
+                "remote.reject" => self.phone_rejects(&params).await.map(|_| Value::Null),
                 "mesh.file" => self.clone().serve_rpc(from.clone(), method.clone(), params).await,
                 m if m.starts_with("remote.") => {
                     let h = self.handler.read().unwrap().clone();

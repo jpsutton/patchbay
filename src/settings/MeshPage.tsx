@@ -280,6 +280,9 @@ function Member() {
               {p.role === "remote"
                 ? `Approve only if ${p.name} shows the same code. It can read every chat and session and run commands through their agents, but gets no API keys.`
                 : `Approve only if ${p.name} shows the same code. It will get all chats, sessions and API keys.`}
+              {p.host && p.host !== mesh.nodeId && p.hostName && (
+                <span className="text-faint"> It is connected to {p.hostName}; approving here works too.</span>
+              )}
             </div>
           </div>
           <Code code={p.code} />

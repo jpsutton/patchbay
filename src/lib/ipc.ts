@@ -303,7 +303,8 @@ export interface MeshStatus {
     error: string | null;
   } | null;
   members: MeshMember[];
-  pending: { nodeId: string; name: string; code: string; role?: string | null }[];
+  /** Nodes waiting to join. Any member decides them, not only `host`, the one they are connected to. */
+  pending: { nodeId: string; name: string; code: string; role?: string | null; host?: string | null; hostName?: string | null }[];
   problem?: MeshProblem | null;
 }
 

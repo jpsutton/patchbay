@@ -778,6 +778,7 @@ const phone = {
   resumed: true,
   joining: null as { url: string; code: string | null; status: string; error: string | null } | null,
   members: [] as MeshStatus["members"],
+  pending: [] as MeshStatus["pending"],
 };
 // A copy each time, as the real backend's JSON would be.
 const phoneChanged = () => emit("remote://status", structuredClone(phone));
@@ -796,7 +797,13 @@ function phoneMesh() {
 
 export function install() {
   mockWindows("main");
-  if (phoneApp) phoneMesh();
+  if (phoneApp) {
+    phoneMesh();
+    // `?joinRequest=1`: a computer asks to join, waiting on studio. The phone may decide it.
+    if (new URLSearchParams(location.search).has("joinRequest")) {
+      phone.pending = [{ nodeId: "n-new", name: "travel-pc", code: "482 913", host: "n-studio", hostName: "studio" }];
+    }
+  }
   // Seed one provider + model so the UI starts usable.
   const p: Provider = { id: "p1", name: "Demo provider", kind: "openai_chat", baseUrl: "http://localhost:8765/v1", hasKey: true, authMode: "api_key" };
   db.providers.push(p);
@@ -1406,6 +1413,12 @@ export function install() {
         }
         case "mesh_cancel_join": mesh.joining = null; return null;
         case "mesh_approve": case "mesh_reject": {
+          // On the phone, the requests waiting on the computers it is connected to.
+          if (phoneApp) {
+            phone.pending = phone.pending.filter((x) => x.nodeId !== a.nodeId);
+            phoneChanged();
+            return null;
+          }
           const p = mesh.pending.find((x) => x.nodeId === a.nodeId);
           mesh.pending = mesh.pending.filter((x) => x.nodeId !== a.nodeId);
           if (p && cmd === "mesh_approve") {
@@ -1454,7 +1467,7 @@ export function install() {
             [waiting.id]: { status: "ready", busy: false, permissions: ["r-demo"], last: now() },
           };
         }
-        case "remote_kick": case "remote_set_foreground": case "remote_unwatch": case "remote_keep_alive": return null;
+        case "remote_kick": case "remote_set_foreground": case "remote_unwatch": case "remote_keep_alive": case "remote_take_join_action": return null;
         case "new_session_options":
         case "remote_new_session_options": {
           const agent = (id: AgentId, label: string, available: boolean) =>
