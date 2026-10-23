@@ -311,6 +311,13 @@ async fn web_search_status(state: &AppState) -> CmdResult<serde_json::Value> {
     Ok(serde_json::json!({ "configured": found.is_some(), "source": found.map(|(_, s)| s) }))
 }
 
+/// What Patchbay's agent finds in the user's Claude Code setup (and `cwd`'s project), for Settings.
+async fn claude_overview(state: &AppState, cwd: Option<String>) -> CmdResult<serde_json::Value> {
+    let prefs = prefs::load(&state.db);
+    let cwd = cwd.map(std::path::PathBuf::from);
+    Ok(tokio::task::spawn_blocking(move || code::native::claude_overview(&prefs, cwd.as_deref())).await.map_err(anyhow::Error::from)?)
+}
+
 async fn set_web_search_key(state: &AppState, key: String) -> CmdResult<()> {
     Ok(providers::set_web_search_key(&state.db, &key)?)
 }
@@ -744,12 +751,23 @@ async fn wire_log_save(state: &AppState) -> CmdResult<String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// Whether the session runs Claude Code on its own sign-in, which may be a Claude plan with
-/// usage limits (not on a Patchbay provider, which bills by the token).
+/// Whether the session may run on a Claude plan with usage limits: Claude Code on its own
+/// sign-in (not on a Patchbay provider, which bills by the token), or Patchbay's agent on a
+/// model whose provider uses the Claude login.
 fn on_claude_plan(state: &AppState, prefs: &prefs::Preferences, id: &str) -> bool {
-    let claude = code::agents::AgentKind::ClaudeCode.id();
-    !prefs.agent_providers.contains_key(claude)
-        && state.db.get_code_session(id).ok().flatten().is_some_and(|s| s.agent == claude)
+    use code::agents::AgentKind;
+    let Some(session) = state.db.get_code_session(id).ok().flatten() else {
+        return false;
+    };
+    match AgentKind::parse(&session.agent) {
+        Some(AgentKind::ClaudeCode) => !prefs.agent_providers.contains_key(AgentKind::ClaudeCode.id()),
+        Some(AgentKind::Patchbay) => session
+            .model_ref
+            .and_then(|r| state.db.get_model(&r).ok().flatten())
+            .and_then(|m| state.db.get_provider(&m.provider_id).ok().flatten())
+            .is_some_and(|(p, _)| p.auth_mode == db::AuthMode::ClaudeLogin),
+        _ => false,
+    }
 }
 
 /// Past the usage limit, cancel every running Claude Code turn on the plan. The agent stops

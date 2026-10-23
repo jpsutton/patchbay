@@ -804,6 +804,7 @@ export const useStore = create<Store>((set, get) => ({
       ...loaded,
       claudeConfig: { ...defaultPreferences.claudeConfig, ...loaded?.claudeConfig },
       usageLimit: { ...defaultPreferences.usageLimit, ...loaded?.usageLimit },
+      agentEngine: { ...defaultPreferences.agentEngine, ...loaded?.agentEngine },
     };
     set({ prefs });
     applyUiPrefs(prefs);

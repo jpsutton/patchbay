@@ -113,6 +113,7 @@ commands! {
     get_setting(key);
     set_setting(key, value);
     web_search_status();
+    claude_overview(cwd);
     set_web_search_key(key);
     clear_web_search_key();
     list_conversations();

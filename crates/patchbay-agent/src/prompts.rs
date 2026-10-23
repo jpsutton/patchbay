@@ -204,7 +204,9 @@ mod tests {
     #[test]
     fn tool_texts_are_faithful_and_cover_every_builtin() {
         // Every built-in tool, with everything on, has a minified description that keeps its code spans.
-        let registry = crate::tools::Registry::builtin(true, true);
+        let mut registry = crate::tools::Registry::builtin(true, true);
+        // Offered when the user has skills.
+        registry.push(std::sync::Arc::new(crate::tools::skill::Skill));
         let (mut full_total, mut min_total) = (0, 0);
         for spec in registry.specs(false, Prompts::new(false)) {
             let min = tools_min().get(&spec.name).unwrap_or_else(|| panic!("no minified description for {}", spec.name));

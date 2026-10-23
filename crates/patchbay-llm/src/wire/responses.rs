@@ -220,6 +220,7 @@ impl Parser for ResponsesParser {
             usage: self.usage,
             stop,
             model: self.model,
+            plan: None,
         })
     }
 }

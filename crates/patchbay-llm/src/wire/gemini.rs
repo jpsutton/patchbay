@@ -224,6 +224,7 @@ impl Parser for GeminiParser {
             usage: self.usage,
             stop,
             model: self.model,
+            plan: None,
         })
     }
 }

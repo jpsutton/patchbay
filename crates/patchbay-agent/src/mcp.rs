@@ -176,6 +176,9 @@ async fn connect_one(cfg: &Value) -> Result<McpServer, String> {
             for (k, v) in pairs(&cfg["env"]) {
                 cmd.env(k, v);
             }
+            if let Some(dir) = cfg["cwd"].as_str().filter(|d| std::path::Path::new(d).is_dir()) {
+                cmd.current_dir(dir);
+            }
             let mut child = cmd.spawn().map_err(|e| format!("cannot start {program}: {e}"))?;
             let (stdin, stdout) = (child.stdin.take().ok_or("no stdin")?, child.stdout.take().ok_or("no stdout")?);
             let (peer, mut incoming) = rpc::connect(stdout, stdin);

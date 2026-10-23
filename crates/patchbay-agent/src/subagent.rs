@@ -18,8 +18,6 @@ use crate::session::Session;
 use crate::tools::Registry;
 use crate::turn;
 
-/// Most model requests one subagent run may make.
-const MAX_STEPS: usize = 40;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -162,7 +160,7 @@ pub fn notes_part(notes: &[Note], p: Prompts) -> Option<Part> {
 /// its inbox (and the one that started this run, already in its history) are read as it goes.
 pub async fn run(parent: &Arc<Session>, agent: &Arc<SubAgent>, cancel: &CancellationToken) -> Result<String, String> {
     let child = &agent.child;
-    for _ in 0..MAX_STEPS {
+    for _ in 0..parent.host.settings().limits.subagent_max_steps.max(1) {
         let inbox: Vec<String> = std::mem::take(&mut *agent.inbox.lock().unwrap());
         if !inbox.is_empty() {
             child.state.lock().await.messages.push(Message::with_parts(
@@ -174,7 +172,7 @@ pub async fn run(parent: &Arc<Session>, agent: &Arc<SubAgent>, cancel: &Cancella
             let st = child.state.lock().await;
             (st.model_id.clone(), st.messages.clone())
         };
-        let mc = parent.host.model_client(&model_id).await?;
+        let mc = parent.model_client(&model_id).await?;
         let mut system = mc.system_prefix.clone();
         system.extend(agent.system.clone());
         let request = Request { system, messages, tools: agent.registry.specs(false, child.prompts()), ..Default::default() };
@@ -190,6 +188,8 @@ pub async fn run(parent: &Arc<Session>, agent: &Arc<SubAgent>, cancel: &Cancella
             t.cache_write += u.cache_write;
             t.output += u.output;
             t.reasoning += u.reasoning;
+            drop(t);
+            parent.add_cost(u.cost_usd);
         }
         let calls: Vec<_> = response.message.tool_calls().cloned().collect();
         let text = response.message.text();

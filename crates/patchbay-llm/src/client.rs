@@ -170,6 +170,7 @@ impl Client {
             return Err(e);
         }
 
+        let plan = PlanUsage::from_headers(|name| resp.headers().get(name).and_then(|v| v.to_str().ok()));
         let mut parser = wire::parser(cfg);
         let mut sse = Sse::default();
         let mut stream = resp.bytes_stream();
@@ -213,7 +214,8 @@ impl Client {
                 break;
             }
         }
-        let response = parser.finish()?;
+        let mut response = parser.finish()?;
+        response.plan = plan;
         for part in &response.message.parts {
             if let Part::ToolCall(c) = part {
                 on_event(Event::ToolCall(c.clone()));

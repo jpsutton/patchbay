@@ -20,7 +20,7 @@ struct TestHost {
 #[async_trait]
 impl Host for TestHost {
     fn models(&self) -> Vec<ModelInfo> {
-        vec![ModelInfo { id: "pb-mock".into(), name: "Mock".into() }]
+        vec![ModelInfo { id: "pb-mock".into(), name: "Mock".into(), effort: None }]
     }
 
     async fn model_client(&self, _: &str) -> Result<ModelClient, String> {
@@ -51,6 +51,8 @@ struct Acp {
     answer: &'static str,
     /// An option id to pick instead of allow/reject.
     pick: Option<&'static str>,
+    /// Steer "STEERED-IN" into this session when the next permission request arrives.
+    steer_on_ask: Option<String>,
 }
 
 impl Acp {
@@ -59,11 +61,12 @@ impl Acp {
     }
 
     fn start_with(format: WireFormat, data: PathBuf, window: Option<u64>, percent: Option<u8>) -> Acp {
+        claude_home();
         let (c_to_a, a_from_c) = tokio::io::duplex(1 << 20);
         let (a_to_c, c_from_a) = tokio::io::duplex(1 << 20);
         let host = Arc::new(TestHost { format, data, window, percent });
         tokio::spawn(patchbay_agent::serve(host, a_from_c, a_to_c));
-        Acp { to: c_to_a, from: BufReader::new(c_from_a).lines(), next: 1, updates: Vec::new(), asked: Vec::new(), answer: "allow", pick: None }
+        Acp { to: c_to_a, from: BufReader::new(c_from_a).lines(), next: 1, updates: Vec::new(), asked: Vec::new(), answer: "allow", pick: None, steer_on_ask: None }
     }
 
     async fn send(&mut self, v: Value) {
@@ -89,6 +92,14 @@ impl Acp {
                 Some("session/update") => self.updates.push(m["params"]["update"].clone()),
                 Some("session/request_permission") => {
                     self.asked.push(m["params"].clone());
+                    if let Some(sid) = self.steer_on_ask.take() {
+                        let id = self.next;
+                        self.next += 1;
+                        let p = json!({"sessionId": sid, "prompt": [{"type": "text", "text": "STEERED-IN"}]});
+                        self.send(json!({"jsonrpc": "2.0", "id": id, "method": "session/steering", "params": p})).await;
+                        // Let the agent take it before the turn moves on.
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
                     let option = self.pick.unwrap_or(if self.answer == "allow" { "allow" } else { "reject" });
                     self.send(json!({"jsonrpc": "2.0", "id": m["id"], "result": {"outcome": {"outcome": "selected", "optionId": option}}})).await;
                 }
@@ -456,7 +467,7 @@ async fn prompts_can_be_minified_per_session_and_the_choice_is_kept() {
     // A client that does not ask gets the host's setting (off here), and is told about the option.
     let s = acp.call("session/new", json!({"cwd": cwd, "mcpServers": []})).await;
     let sid = s["sessionId"].as_str().unwrap().to_owned();
-    let opt = &s["configOptions"][0];
+    let opt = option(&s, "minify_prompts");
     assert_eq!((opt["id"].as_str(), opt["currentValue"].as_str()), (Some("minify_prompts"), Some("off")));
     assert_eq!(s["models"]["currentModelId"], "pb-mock", "legacy model list stays");
 
@@ -464,7 +475,7 @@ async fn prompts_can_be_minified_per_session_and_the_choice_is_kept() {
     // so read the size the mock reports for the request instead.
     let before = request_size(&mut acp, &sid).await;
     let r = acp.call("session/set_config_option", json!({"sessionId": sid, "configId": "minify_prompts", "value": "on"})).await;
-    assert_eq!(r["configOptions"][0]["currentValue"], "on");
+    assert_eq!(option(&r, "minify_prompts")["currentValue"], "on");
     let after = request_size(&mut acp, &sid).await;
     println!("request: {before} -> {after} bytes ({}% smaller)", 100 - after * 100 / before);
     // The terse-reply instruction is part of the minified request, so it saves less than the texts alone.
@@ -480,9 +491,9 @@ async fn prompts_can_be_minified_per_session_and_the_choice_is_kept() {
     let mut again = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));
     again.call("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await;
     let loaded = again.call("session/load", json!({"sessionId": sid, "cwd": cwd, "mcpServers": []})).await;
-    assert_eq!(loaded["configOptions"][0]["currentValue"], "on");
+    assert_eq!(option(&loaded, "minify_prompts")["currentValue"], "on");
     let fresh = again.call("session/new", json!({"cwd": cwd, "mcpServers": [], "_meta": {"minifyPrompts": true}})).await;
-    assert_eq!(fresh["configOptions"][0]["currentValue"], "on");
+    assert_eq!(option(&fresh, "minify_prompts")["currentValue"], "on");
     let _ = std::fs::remove_dir_all(cwd);
 }
 
@@ -492,4 +503,120 @@ async fn request_size(acp: &mut Acp, sid: &str) -> usize {
     let text = acp.text_of("agent_message_chunk");
     let n = text.rsplit("request bytes: ").next().unwrap().split(|c: char| !c.is_ascii_digit()).next().unwrap();
     n.parse().unwrap_or_else(|_| panic!("no size in {text:?}"))
+}
+
+/// A config option from a `session/new`, `session/load` or `session/set_config_option` answer.
+fn option<'a>(v: &'a Value, id: &str) -> &'a Value {
+    v["configOptions"].as_array().and_then(|a| a.iter().find(|o| o["id"] == id)).unwrap_or_else(|| panic!("no option {id} in {v}"))
+}
+
+#[tokio::test]
+#[ignore]
+async fn thinking_effort_is_a_session_option_and_is_kept() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));
+    let sid = open(&mut acp, &cwd).await;
+    let r = acp.call("session/set_config_option", json!({"sessionId": sid, "configId": "effort", "value": "high"})).await;
+    let effort = option(&r, "effort");
+    assert_eq!((effort["category"].as_str(), effort["currentValue"].as_str()), (Some("thought_level"), Some("high")));
+    assert!(acp.call_err("session/set_config_option", json!({"sessionId": sid, "configId": "effort", "value": "huge"})).await.contains("unknown effort"));
+    prompt(&mut acp, &sid, "hello").await;
+
+    let mut again = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));
+    again.call("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await;
+    let loaded = again.call("session/load", json!({"sessionId": sid, "cwd": cwd, "mcpServers": []})).await;
+    assert_eq!(option(&loaded, "effort")["currentValue"], "high");
+    let r = again.call("session/set_config_option", json!({"sessionId": sid, "configId": "effort", "value": "default"})).await;
+    assert_eq!(option(&r, "effort")["currentValue"], "default");
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_message_steered_in_joins_the_running_turn() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::Anthropic, cwd.join("data"));
+    let init = acp.call("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await;
+    assert_eq!(init["_meta"]["steering"]["supported"], true);
+    let s = acp.call("session/new", json!({"cwd": cwd, "mcpServers": []})).await;
+    let sid = s["sessionId"].as_str().unwrap().to_owned();
+    // No turn runs: the message is handed back to be sent as a prompt.
+    let idle = acp.call("session/steering", json!({"sessionId": sid, "prompt": [{"type": "text", "text": "early"}]})).await;
+    assert_eq!(idle["outcome"], "promptRequired");
+    // While the turn waits on a question, steer a message in; the turn's next request carries it.
+    acp.pick = Some("opt-1");
+    acp.steer_on_ask = Some(sid.clone());
+    let r = prompt(&mut acp, &sid, "please !ask").await;
+    assert_eq!(r["stopReason"], "end_turn");
+    let store = std::fs::read_to_string(cwd.join("data/agent/sessions").join(format!("{sid}.jsonl"))).unwrap();
+    assert!(store.contains("STEERED-IN") && store.contains("while you were working"), "{store}");
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+/// A Claude Code setup of the tests' own, so they never load the real `~/.claude`: a command, a
+/// skill, a subagent, and hooks that only act when a marker file sits in the session's directory.
+fn claude_home() {
+    static HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        let home = std::env::temp_dir().join(format!("pb-e2e-claude-{}", std::process::id())).join(".claude");
+        let put = |rel: &str, text: &str| {
+            let p = home.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        };
+        put("commands/greet.md", "---\ndescription: Greet someone\nargument-hint: <name>\n---\nSay GREET-BODY to $ARGUMENTS");
+        put("skills/pdf/SKILL.md", "---\nname: pdf\ndescription: Work with PDF files\n---\nUse pdftotext.");
+        put("agents/scout.md", "---\nname: scout\ndescription: Looks around\ntools: Read, Grep\n---\nYou scout.");
+        put(
+            "settings.json",
+            &json!({"hooks": {
+                "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "grep -q hookme && echo HOOK-CONTEXT || true"}]}],
+                "PreToolUse": [{"matcher": "Write|Edit", "hooks": [{"type": "command", "command": "if [ -f .deny-edits ]; then echo NO-EDITS >&2; exit 2; fi"}]}],
+                "Stop": [{"hooks": [{"type": "command", "command": "if [ -f .stop-once ]; then rm .stop-once; echo KEEP-GOING >&2; exit 2; fi"}]}],
+            }})
+            .to_string(),
+        );
+        // Tests run in one process; this is set before any agent starts.
+        unsafe { std::env::set_var("PATCHBAY_CLAUDE_HOME", &home) };
+        home
+    });
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn loads_the_claude_code_setup() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));
+    let sid = open(&mut acp, &cwd).await;
+    let commands: Vec<String> = acp
+        .updates
+        .iter()
+        .filter(|u| u["sessionUpdate"] == "available_commands_update")
+        .flat_map(|u| u["availableCommands"].as_array().cloned().unwrap_or_default())
+        .filter_map(|c| c["name"].as_str().map(str::to_owned))
+        .collect();
+    assert!(["compact", "greet", "pdf"].iter().all(|c| commands.iter().any(|x| x == c)), "{commands:?}");
+
+    // A slash command expands beside what the user typed; a prompt hook adds context.
+    prompt(&mut acp, &sid, "/greet Bob hookme").await;
+    let store = || std::fs::read_to_string(cwd.join("data/agent/sessions").join(format!("{sid}.jsonl"))).unwrap();
+    assert!(store().contains("GREET-BODY to Bob hookme") && store().contains("HOOK-CONTEXT"), "{}", store());
+
+    // The skill tool and the user's subagent type are offered.
+    prompt(&mut acp, &sid, "!tools").await;
+    assert!(acp.text_of("agent_message_chunk").contains("Skill"), "{}", acp.text_of("agent_message_chunk"));
+
+    // A PreToolUse hook that exits 2 blocks the edit.
+    std::fs::write(cwd.join(".deny-edits"), "").unwrap();
+    prompt(&mut acp, &sid, "make it !edit").await;
+    assert!(!cwd.join("patchbay-test.txt").exists());
+    assert!(store().contains("NO-EDITS"), "{}", store());
+
+    // A Stop hook sends the model back once.
+    std::fs::write(cwd.join(".stop-once"), "").unwrap();
+    let r = prompt(&mut acp, &sid, "hello").await;
+    assert_eq!(r["stopReason"], "end_turn");
+    assert!(store().contains("KEEP-GOING") && !cwd.join(".stop-once").exists(), "{}", store());
+    let _ = std::fs::remove_dir_all(cwd);
 }

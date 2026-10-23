@@ -1,9 +1,11 @@
 //! The system prompt: a static, cacheable block and a dynamic one that follows it.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use patchbay_llm::SystemBlock;
 
+use crate::claude::Skill;
+use crate::host::ClaudeConfig;
 use crate::prompts::Prompts;
 use crate::session::Mode;
 
@@ -16,7 +18,14 @@ pub fn is_reminder(text: &str) -> bool {
     text.trim_start().starts_with("<system-reminder>")
 }
 
-pub fn system_blocks(cwd: &Path, model_name: &str, instructions: &str, mode: Mode, p: Prompts) -> Vec<SystemBlock> {
+/// What the system prompt adds from the user's Claude Code setup.
+#[derive(Default)]
+pub struct Extras<'a> {
+    pub claude: ClaudeConfig,
+    pub skills: &'a [Skill],
+}
+
+pub fn system_blocks(cwd: &Path, model_name: &str, instructions: &str, mode: Mode, p: Prompts, extras: &Extras) -> Vec<SystemBlock> {
     // Everything up to here is the same for every session, so the provider can cache it.
     let mut persona = p.system().trim().to_owned();
     if let Some(terse) = p.terse() {
@@ -34,9 +43,14 @@ pub fn system_blocks(cwd: &Path, model_name: &str, instructions: &str, mode: Mod
         dynamic.push_str("\n\n");
         dynamic.push_str(&p.msg("user_instructions", &[("text", instructions.trim())]));
     }
-    for (path, text) in project_instructions(cwd) {
+    for (path, text) in crate::claude::instructions(crate::claude::home().as_deref(), cwd, &extras.claude) {
         dynamic.push_str("\n\n");
         dynamic.push_str(&p.msg("project_instructions", &[("path", &path.display().to_string()), ("text", text.trim())]));
+    }
+    if !extras.skills.is_empty() {
+        let list: Vec<String> = extras.skills.iter().map(|s| format!("- {}: {}", s.name, s.description)).collect();
+        dynamic.push_str("\n\n");
+        dynamic.push_str(&p.msg("skills", &[("list", &list.join("\n"))]));
     }
     blocks.push(SystemBlock::new(dynamic));
     blocks
@@ -57,34 +71,6 @@ fn environment(cwd: &Path, model_name: &str, p: Prompts) -> String {
         .replace("{shell}", &shell)
         .replace("{date}", &today())
         .replace("{model}", model_name)
-}
-
-/// `AGENTS.md` or `CLAUDE.md` from the working directory up to the repository root, outermost first.
-pub fn project_instructions(cwd: &Path) -> Vec<(PathBuf, String)> {
-    const NAMES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
-    const MAX: usize = 40_000;
-    let mut found = Vec::new();
-    for dir in cwd.ancestors() {
-        if let Some((path, mut text)) = NAMES.iter().find_map(|n| {
-            let p = dir.join(n);
-            std::fs::read_to_string(&p).ok().map(|t| (p, t))
-        }) {
-            if text.len() > MAX {
-                let mut cut = MAX;
-                while !text.is_char_boundary(cut) {
-                    cut -= 1;
-                }
-                text.truncate(cut);
-                text.push_str("\n…[truncated]");
-            }
-            found.push((path, text));
-        }
-        if dir.join(".git").exists() {
-            break;
-        }
-    }
-    found.reverse();
-    found
 }
 
 /// Today's date (UTC) as `YYYY-MM-DD`.
@@ -124,7 +110,7 @@ mod tests {
 
     #[test]
     fn static_block_is_cached_and_dynamic_is_not() {
-        let b = system_blocks(Path::new("/tmp"), "m", " be terse ", Mode::Plan, Prompts::new(false));
+        let b = system_blocks(Path::new("/tmp"), "m", " be terse ", Mode::Plan, Prompts::new(false), &Extras::default());
         assert_eq!(b.len(), 2);
         assert_eq!(b[0].cache, patchbay_llm::Cache::Breakpoint);
         assert_eq!(b[1].cache, patchbay_llm::Cache::None);
@@ -134,8 +120,8 @@ mod tests {
 
     #[test]
     fn minified_blocks_are_shorter_and_keep_the_same_shape() {
-        let full = system_blocks(Path::new("/tmp"), "m", "be terse", Mode::Plan, Prompts::new(false));
-        let min = system_blocks(Path::new("/tmp"), "m", "be terse", Mode::Plan, Prompts::new(true));
+        let full = system_blocks(Path::new("/tmp"), "m", "be terse", Mode::Plan, Prompts::new(false), &Extras::default());
+        let min = system_blocks(Path::new("/tmp"), "m", "be terse", Mode::Plan, Prompts::new(true), &Extras::default());
         assert_eq!(full.len(), min.len());
         // The persona shrinks (its terse reply instruction is extra); the dynamic block shrinks.
         assert!(min[0].text.starts_with(Prompts::new(true).system().trim()));

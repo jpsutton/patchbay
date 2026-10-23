@@ -85,6 +85,27 @@ const fakeOptions = (csid: string): AcpConfigOption[] => {
     },
   ];
 };
+/** Patchbay's own agent's options: thinking effort (defaulting to the model's) and compact prompts. */
+const fakePatchbayOptions = (csid: string): AcpConfigOption[] => {
+  const v = fakeConfig[csid] ?? {};
+  const efforts = [["none", "Off"], ["minimal", "Minimal"], ["low", "Low"], ["medium", "Medium"], ["high", "High"], ["xhigh", "Extra high"], ["max", "Max"]];
+  return [
+    {
+      id: "effort", name: "Thinking", category: "thought_level", type: "select", currentValue: v.effort ?? "default",
+      description: "How hard the model reasons before it answers. Models without reasoning ignore it.",
+      options: [{ value: "default", name: "Model default (High)" }, ...efforts.map(([value, name]) => ({ value, name }))],
+    },
+    {
+      id: "minify_prompts", name: "Compact prompts", type: "select", currentValue: v.minify_prompts ?? "off",
+      description: "Send the agent's own prompts in a shortened form to save input tokens, and ask it to reply tersely, like caveman.",
+      options: [{ value: "off", name: "Off", description: "Full prompts" }, { value: "on", name: "On", description: "Terse prompts and terse replies" }],
+    },
+  ];
+};
+const fakeOptionsFor = (csid: string): AcpConfigOption[] => {
+  const agent = db.code.find((c) => c.id === csid)?.agent ?? "patchbay";
+  return agent === "patchbay" ? fakePatchbayOptions(csid) : agent === "grok" ? [] : fakeOptions(csid);
+};
 const DEMO_FILES = ["README.md", "Cargo.toml", "src/main.rs", "src/lib.rs", "src/code/acp.rs", "src/code/mcp.rs", "docs/guide.md", "package.json"];
 const id = () => crypto.randomUUID();
 const now = () => Date.now();
@@ -164,7 +185,7 @@ const fakeSignedIn = new Set<string>();
 const fakeLive = new Set<string>();
 const fakeLabel = (agent: string) => FAKE_AGENTS.find((x) => x.id === agent)?.label ?? agent;
 /** Agents that take a message mid-turn (the rest queue it behind the turn, as the backend does). */
-const FAKE_STEERING = new Set(["grok", "claude-code", "codex"]);
+const FAKE_STEERING = new Set(["patchbay", "grok", "claude-code", "codex"]);
 /** Sessions mid-turn, and the prompts queued behind each turn. */
 const fakeTurns = new Set<string>();
 const fakeQueues: Record<string, { promptId: string; text: string; mentions: string[] }[]> = {};
@@ -202,7 +223,7 @@ function fakeReady(csid: string, loaded = false) {
   codeEmit(csid, {
     type: "sessionReady", acpSessionId: "acp-" + csid, loaded,
     approvalGaps: grok ? [] : ["This agent edits files in this project without asking, in every mode."],
-    capabilities: { loadSession: true, promptCapabilities: { image: false, embeddedContext: true }, mcpCapabilities: { http: true, sse: true } },
+    capabilities: { loadSession: true, promptCapabilities: { image: agentId === "patchbay", embeddedContext: true }, mcpCapabilities: { http: true, sse: true } },
     agentInfo: { name: "fake-agent" },
     models: grok
       ? { currentModelId: "pb-m1", availableModels: db.models.map((m) => ({ modelId: "pb-" + m.id, name: m.displayName })) }
@@ -212,8 +233,8 @@ function fakeReady(csid: string, loaded = false) {
       : grok
       ? null
       : { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] },
-    configOptions: grok ? [] : fakeOptions(csid),
-    extensions: { statusLine: agentId === "grok", rewind: agentId === "grok", patchbayModels: grok, steering: FAKE_STEERING.has(agentId), forceSend: true },
+    configOptions: fakeOptionsFor(csid),
+    extensions: { statusLine: agentId === "grok", rewind: grok, patchbayModels: grok, steering: FAKE_STEERING.has(agentId), forceSend: true },
   });
   codeEmit(csid, {
     type: "update",
@@ -875,6 +896,33 @@ export function install() {
           db.settings.preferences = JSON.stringify(a.prefs);
           return null;
         }
+        case "claude_overview": {
+          const cfg = JSON.parse(db.settings.preferences ?? "{}").claudeConfig ?? {};
+          const off = (list: string[] | undefined, x: string) => (list ?? []).includes(x);
+          return {
+            home: "/home/me/.claude",
+            project: (a.cwd as string | null) ?? null,
+            instructions: ["/home/me/.claude/CLAUDE.md", `${a.cwd ?? "/home/me/src/patchbay"}/CLAUDE.md`],
+            plugins: [
+              { id: "caveman@caveman", name: "caveman", enabledInClaude: true, disabled: off(cfg.disabledPlugins, "caveman@caveman") },
+              { id: "lsp@tools", name: "lsp", enabledInClaude: false, disabled: off(cfg.disabledPlugins, "lsp@tools") },
+            ],
+            commands: [
+              { name: "review", description: "Review the current changes", source: "project" },
+              { name: "caveman:compress", description: "Compress a file caveman-style", source: "plugin caveman" },
+            ],
+            skills: [{ name: "pdf", description: "Work with PDF files", source: "user" }],
+            agents: [{ name: "cavecrew-builder", description: "Surgical 1-2 file edit", source: "plugin caveman" }],
+            mcpServers: [
+              { name: "github", source: "user", transport: "http", disabled: off(cfg.disabledMcpServers, "github") },
+              { name: "postgres", source: "project", transport: "stdio", disabled: off(cfg.disabledMcpServers, "postgres") },
+            ],
+            hooks: [
+              { event: "SessionStart", matcher: "", command: "node \"$CLAUDE_PLUGIN_ROOT/src/hooks/caveman-activate.js\"", source: "plugin caveman" },
+              { event: "PreToolUse", matcher: "Edit|Write", command: "./scripts/lint-staged.sh", source: "project" },
+            ],
+          };
+        }
         case "web_search_status": return { configured: !!db.settings["web_search.key"], source: db.settings["web_search.key"] ? "keychain" : null };
         case "set_web_search_key": db.settings["web_search.key"] = a.key as string; return null;
         case "clear_web_search_key": delete db.settings["web_search.key"]; return null;
@@ -1185,7 +1233,7 @@ export function install() {
         case "code_set_config_option": {
           const csid = a.id as string;
           fakeConfig[csid] = { ...fakeConfig[csid], [a.configId as string]: a.value as string };
-          codeEmit(csid, { type: "config", models: null, modes: null, configOptions: fakeOptions(csid) });
+          codeEmit(csid, { type: "config", models: null, modes: null, configOptions: fakeOptionsFor(csid) });
           return null;
         }
         case "list_agents": return FAKE_AGENTS;

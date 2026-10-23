@@ -303,6 +303,49 @@ pub struct Response {
     pub usage: Option<Usage>,
     pub stop: StopReason,
     pub model: Option<String>,
+    /// Claude subscription usage, from the response headers of a Claude login.
+    pub plan: Option<PlanUsage>,
+}
+
+/// One Claude subscription window: the fraction used (0 to 1) and when it resets (unix seconds).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlanWindow {
+    pub utilization: f64,
+    pub resets_at: i64,
+}
+
+/// Claude subscription limits, from Anthropic's `anthropic-ratelimit-unified-*` response headers
+/// (sent to Claude logins, not to API keys).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PlanUsage {
+    pub five_hour: Option<PlanWindow>,
+    pub seven_day: Option<PlanWindow>,
+    /// The plan's limits are used up and requests bill extra usage.
+    pub using_overage: bool,
+    /// When the binding limit resets (unix seconds).
+    pub resets_at: Option<i64>,
+}
+
+impl PlanUsage {
+    /// Read the headers through `get`; `None` when there are none.
+    pub fn from_headers<'a>(get: impl Fn(&str) -> Option<&'a str>) -> Option<PlanUsage> {
+        const P: &str = "anthropic-ratelimit-unified-";
+        let h = |name: &str| get(&format!("{P}{name}")).map(str::trim);
+        let window = |w: &str| {
+            Some(PlanWindow {
+                utilization: h(&format!("{w}-utilization"))?.parse().ok()?,
+                resets_at: h(&format!("{w}-reset"))?.parse().ok()?,
+            })
+        };
+        let u = PlanUsage {
+            five_hour: window("5h"),
+            seven_day: window("7d"),
+            // Past the plan ("rejected"), a request that still goes through runs on extra usage.
+            using_overage: h("status").is_some_and(|s| s == "rejected") && h("overage-status").is_some_and(|s| s.starts_with("allowed")),
+            resets_at: h("reset").and_then(|r| r.parse().ok()),
+        };
+        (u.five_hour.is_some() || u.seven_day.is_some() || u.resets_at.is_some()).then_some(u)
+    }
 }
 
 /// Progress while a reply streams.
@@ -344,3 +387,31 @@ impl Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_usage_comes_from_the_unified_headers() {
+        let headers = [
+            ("anthropic-ratelimit-unified-status", "allowed"),
+            ("anthropic-ratelimit-unified-5h-utilization", "0.07"),
+            ("anthropic-ratelimit-unified-5h-reset", "1774933200"),
+            ("anthropic-ratelimit-unified-7d-utilization", "0.53"),
+            ("anthropic-ratelimit-unified-7d-reset", "1775400000"),
+        ];
+        let get = |n: &str| headers.iter().find(|(k, _)| *k == n).map(|(_, v)| *v);
+        let u = PlanUsage::from_headers(get).unwrap();
+        assert_eq!(u.five_hour, Some(PlanWindow { utilization: 0.07, resets_at: 1774933200 }));
+        assert_eq!(u.seven_day.unwrap().utilization, 0.53);
+        assert!(!u.using_overage);
+
+        let over = [("anthropic-ratelimit-unified-status", "rejected"), ("anthropic-ratelimit-unified-overage-status", "allowed"), ("anthropic-ratelimit-unified-reset", "1774933200")];
+        let u = PlanUsage::from_headers(|n| over.iter().find(|(k, _)| *k == n).map(|(_, v)| *v)).unwrap();
+        assert!(u.using_overage);
+        assert_eq!(u.resets_at, Some(1774933200));
+
+        assert_eq!(PlanUsage::from_headers(|_| None), None);
+    }
+}

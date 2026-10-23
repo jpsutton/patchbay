@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
+use patchbay_llm::Effort;
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
@@ -19,9 +20,41 @@ type Sessions = Arc<Mutex<HashMap<String, Arc<Session>>>>;
 
 /// The ACP config option that turns minified prompts on and off.
 const MINIFY_OPTION: &str = "minify_prompts";
+/// The ACP config option that sets the session's reasoning effort.
+const EFFORT_OPTION: &str = "effort";
 
-fn config_options(s: &Session) -> Value {
+const EFFORTS: [(Effort, &str, &str); 7] = [
+    (Effort::None, "Off", "No extended thinking"),
+    (Effort::Minimal, "Minimal", "Barely any thinking"),
+    (Effort::Low, "Low", "Quick answers"),
+    (Effort::Medium, "Medium", "Balanced"),
+    (Effort::High, "High", "Thinks longer on hard problems"),
+    (Effort::Xhigh, "Extra high", "Thinks longer still"),
+    (Effort::Max, "Max", "As much thinking as the model allows"),
+];
+
+fn effort_name(e: Effort) -> &'static str {
+    EFFORTS.iter().find(|(x, ..)| *x == e).map_or("", |(_, n, _)| n)
+}
+
+/// The session's options. `model_default` is the effort the current model is set up with.
+fn config_options(s: &Session, model_default: Option<Effort>) -> Value {
+    let default_name = match model_default {
+        Some(e) => format!("Model default ({})", effort_name(e)),
+        None => "Model default".to_owned(),
+    };
+    let mut efforts = vec![json!({"value": "default", "name": default_name, "description": "The effort set for this model in Settings"})];
+    efforts.extend(EFFORTS.iter().map(|(e, name, desc)| json!({"value": e.as_str(), "name": name, "description": desc})));
+    let effort = *s.effort.lock().unwrap();
     json!([{
+        "id": EFFORT_OPTION,
+        "name": "Thinking",
+        "description": "How hard the model reasons before it answers. Models without reasoning ignore it.",
+        "category": "thought_level",
+        "type": "select",
+        "currentValue": effort.map_or("default", Effort::as_str),
+        "options": efforts,
+    }, {
         "id": MINIFY_OPTION,
         "name": "Compact prompts",
         "description": "Send the agent's own prompts in a shortened form to save input tokens, and ask it to reply tersely, like caveman.",
@@ -32,6 +65,18 @@ fn config_options(s: &Session) -> Value {
             {"value": "on", "name": "On", "description": "Terse prompts and terse replies"},
         ],
     }])
+}
+
+impl Agent {
+    /// The effort `model_id` is set up with.
+    fn model_effort(&self, model_id: &str) -> Option<Effort> {
+        self.host.models().into_iter().find(|m| m.id == model_id).and_then(|m| m.effort)
+    }
+
+    async fn options_of(&self, s: &Session) -> Value {
+        let model = s.state.lock().await.model_id.clone();
+        config_options(s, self.model_effort(&model))
+    }
 }
 
 struct Agent {
@@ -106,6 +151,7 @@ impl Agent {
                 },
                 "agentInfo": {"name": "patchbay", "title": "Patchbay", "version": env!("CARGO_PKG_VERSION")},
                 "authMethods": [],
+                "_meta": {"steering": {"supported": true}},
                 }))
             }
             "authenticate" => Ok(json!({})),
@@ -124,6 +170,8 @@ impl Agent {
                     st.mode
                 };
                 s.save_meta(id, mode);
+                // The "model default" effort follows the model.
+                s.update(json!({"sessionUpdate": "config_option_update", "configOptions": self.options_of(&s).await}));
                 Ok(json!({}))
             }
             "session/set_mode" => {
@@ -148,16 +196,24 @@ impl Agent {
                             other => return Err(RpcError::invalid_params(format!("{other:?} is not on or off"))),
                         };
                         *s.minify.lock().unwrap() = Some(on);
-                        let (model, mode) = {
-                            let st = s.state.lock().await;
-                            (st.model_id.clone(), st.mode)
-                        };
-                        s.save_meta(&model, mode);
-                        Ok(json!({"configOptions": config_options(&s)}))
                     }
-                    other => Err(RpcError::invalid_params(format!("unknown config option {other}"))),
+                    EFFORT_OPTION => {
+                        let effort = match param_str(&params, "value")? {
+                            "default" => None,
+                            v => Some(Effort::parse(v).ok_or_else(|| RpcError::invalid_params(format!("unknown effort {v:?}")))?),
+                        };
+                        *s.effort.lock().unwrap() = effort;
+                    }
+                    other => return Err(RpcError::invalid_params(format!("unknown config option {other}"))),
                 }
+                let (model, mode) = {
+                    let st = s.state.lock().await;
+                    (st.model_id.clone(), st.mode)
+                };
+                s.save_meta(&model, mode);
+                Ok(json!({"configOptions": self.options_of(&s).await}))
             }
+            "session/steering" => self.steer(&params),
             "patchbay/rewind/points" => {
                 let s = self.need_session(&params)?;
                 let points: Vec<Value> = s
@@ -220,21 +276,44 @@ impl Agent {
         }
     }
 
-    fn announce_commands(&self, s: &Session) {
-        s.update(json!({
-            "sessionUpdate": "available_commands_update",
-            "availableCommands": [{
-                "name": "compact",
-                "description": "Summarize the conversation to free up context",
-                "input": {"hint": "what the summary should focus on"},
-            }],
-        }));
+    /// `session/steering`: a message for the running turn, read before its next model request.
+    fn steer(&self, params: &Value) -> Result<Value, RpcError> {
+        let s = self.need_session(params)?;
+        let parts = turn::blocks_to_parts(&params["prompt"]);
+        if parts.is_empty() {
+            return Err(RpcError::invalid_params("the message is empty"));
+        }
+        let mut inbox = s.steer.lock().unwrap();
+        if !inbox.open {
+            // No turn will read it: the client sends it as a prompt of its own.
+            return Ok(json!({"outcome": "promptRequired"}));
+        }
+        inbox.queued.push(parts);
+        drop(inbox);
+        s.steered.notify_one();
+        Ok(json!({"outcome": "injected"}))
+    }
+
+    /// Load the session's Claude Code setup, run its SessionStart hooks (`source`: startup or
+    /// resume) and announce its slash commands.
+    async fn start_claude(&self, s: &Session, source: &str) {
+        s.reload_claude();
+        let setup = s.claude();
+        if setup.has_hooks("SessionStart") {
+            let mode = s.state.lock().await.mode;
+            let mut input = s.hook_input(mode);
+            input["source"] = json!(source);
+            let r = crate::claude::run_hooks(&setup.hooks, "SessionStart", None, input, &s.cwd).await;
+            s.hook_notes(&r.notes);
+            s.start_context.lock().unwrap().extend(r.context);
+        }
+        s.announce_commands();
     }
 
     async fn session_info(&self, s: &Session) -> Value {
         let st = s.state.lock().await;
         json!({
-            "configOptions": config_options(s),
+            "configOptions": config_options(s, self.model_effort(&st.model_id)),
             "models": {
                 "currentModelId": st.model_id,
                 "availableModels": self.host.models().iter().map(|m| json!({"modelId": m.id, "name": m.name})).collect::<Vec<_>>(),
@@ -249,11 +328,19 @@ impl Agent {
         })
     }
 
+    /// Connect the MCP servers the client passed and the ones in the user's Claude Code setup
+    /// (the client's win on a name clash). Call after `start_claude`.
     async fn attach_mcp(&self, s: &Session, params: &Value) {
-        if !params["mcpServers"].as_array().is_some_and(|a| !a.is_empty()) {
+        let mut servers: Vec<Value> = params["mcpServers"].as_array().cloned().unwrap_or_default();
+        for e in &s.claude().mcp {
+            if !servers.iter().any(|v| v["name"] == e.name.as_str()) {
+                servers.push(e.config.clone());
+            }
+        }
+        if servers.is_empty() {
             return;
         }
-        let set = McpSet::connect(&params["mcpServers"]).await;
+        let set = McpSet::connect(&Value::Array(servers)).await;
         for p in &set.problems {
             s.text_chunk("agent_thought_chunk", &format!("MCP server unavailable: {p}\n"));
         }
@@ -274,11 +361,11 @@ impl Agent {
         }
         s.save_meta(&model, Mode::Default);
         s.keep_open.store(self.subagents_cap.load(Ordering::SeqCst), Ordering::SeqCst);
+        self.start_claude(&s, "startup").await;
         self.attach_mcp(&s, params).await;
         self.sessions.lock().unwrap().insert(id.clone(), s.clone());
         let mut info = self.session_info(&s).await;
         info["sessionId"] = json!(id);
-        self.announce_commands(&s);
         Ok(info)
     }
 
@@ -307,12 +394,13 @@ impl Agent {
         s.keep_open.store(self.subagents_cap.load(Ordering::SeqCst), Ordering::SeqCst);
         // The session's own choice is remembered; a caller may set it again on load.
         *s.minify.lock().unwrap() = params["_meta"]["minifyPrompts"].as_bool().or(restored.minify);
+        *s.effort.lock().unwrap() = restored.effort;
         *s.prompts.lock().unwrap() = session::prompts_of(&restored.messages);
         s.state.lock().await.messages = restored.messages;
         s.replay(&entries);
+        self.start_claude(&s, "resume").await;
         self.attach_mcp(&s, params).await;
         self.sessions.lock().unwrap().insert(id, s.clone());
-        self.announce_commands(&s);
         Ok(self.session_info(&s).await)
     }
 
@@ -323,7 +411,17 @@ impl Agent {
         }
         let token = CancellationToken::new();
         *s.cancel.lock().unwrap() = Some(token.clone());
+        s.steer.lock().unwrap().open = true;
         let result = turn::run_turn(s.clone(), &params["prompt"], token).await;
+        // A message steered in after the turn's last step (it stopped early, failed or was
+        // cancelled) still goes into the history, so the next turn sees what the user saw sent.
+        let left = s.take_steered(true);
+        s.steer.lock().unwrap().open = false;
+        if !left.is_empty() {
+            let msg = patchbay_llm::Message::with_parts(patchbay_llm::Role::User, left);
+            s.store.append(&crate::store::Entry::Msg { m: msg.clone() });
+            s.state.lock().await.messages.push(msg);
+        }
         *s.cancel.lock().unwrap() = None;
         s.busy.store(false, Ordering::SeqCst);
         match result {

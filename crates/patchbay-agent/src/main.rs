@@ -33,7 +33,7 @@ struct FileHost {
 #[async_trait]
 impl Host for FileHost {
     fn models(&self) -> Vec<ModelInfo> {
-        self.models.iter().map(|m| ModelInfo { id: m.id.clone(), name: m.name.clone().unwrap_or_else(|| m.id.clone()) }).collect()
+        self.models.iter().map(|m| ModelInfo { id: m.id.clone(), name: m.name.clone().unwrap_or_else(|| m.id.clone()), effort: None }).collect()
     }
 
     async fn model_client(&self, model_id: &str) -> Result<ModelClient, String> {

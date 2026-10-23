@@ -68,11 +68,25 @@ fn spawn_background(parent: Arc<Session>, agent: Arc<SubAgent>) {
     });
 }
 
-pub struct Task;
+/// Starts subagents. `custom` holds the user's own subagent types (`.claude/agents`), by name
+/// and description.
+#[derive(Default)]
+pub struct Task {
+    pub custom: Vec<(String, String)>,
+}
 
 #[async_trait]
 impl Tool for Task {
     fn spec(&self) -> ToolSpec {
+        let mut types = vec!["explore".to_owned(), "general-purpose".to_owned(), "fork".to_owned()];
+        types.extend(self.custom.iter().map(|(n, _)| n.clone()));
+        let mut type_doc = "Defaults to general-purpose".to_owned();
+        if !self.custom.is_empty() {
+            type_doc.push_str(". The user's own subagents, each with its own instructions and tools:");
+            for (n, d) in &self.custom {
+                type_doc.push_str(&format!("\n- {n}: {d}"));
+            }
+        }
         ToolSpec {
             name: "Task".into(),
             description: "Start a subagent for a self-contained job. Types: `explore` (read-only: Read, Glob, \
@@ -91,7 +105,7 @@ do with one Grep or Read."
                 "properties": {
                     "description": {"type": "string", "description": "A short label for the job (3-5 words)"},
                     "prompt": {"type": "string", "description": "The full task for the subagent"},
-                    "subagent_type": {"type": "string", "enum": ["explore", "general-purpose", "fork"], "description": "Defaults to general-purpose"},
+                    "subagent_type": {"type": "string", "enum": types, "description": type_doc},
                     "name": {"type": "string", "description": "Makes the subagent addressable by SendMessage (letters, digits, - and _)"},
                     "run_in_background": {"type": "boolean", "description": "Return at once; the report comes as a notification"},
                     "isolation": {"type": "string", "enum": ["worktree"], "description": "Run in a separate git worktree"}
@@ -127,6 +141,12 @@ do with one Grep or Read."
         let mode = parent.state.lock().await.mode;
         // In plan mode nothing may change, so only searching subagents start.
         let kind = if mode == Mode::Plan { Kind::Explore } else { kind_of(&input) };
+        let setup = parent.claude();
+        // One of the user's own subagent types: a general subagent with its instructions and tools.
+        let custom = (kind == Kind::General)
+            .then(|| str_arg(&input, "subagent_type"))
+            .flatten()
+            .and_then(|t| setup.agents.iter().find(|a| a.name == t).cloned());
         let name = match str_arg(&input, "name").filter(|n| !n.is_empty()) {
             Some(n) if !valid_name(n) => return ToolOutput::error("name may use letters, digits, - and _ (up to 40)"),
             Some(n) if parent.agents.name_taken(n) => return ToolOutput::error(format!("a subagent named {n} already exists; pick another name or SendMessage it")),
@@ -155,7 +175,18 @@ do with one Grep or Read."
                 registry.push(t);
             }
         }
-        registry.retain(|n| if kind == Kind::Explore { READ_ONLY.contains(&n) } else { !WITHHELD.contains(&n) });
+        if !setup.skills.is_empty() {
+            registry.push(Arc::new(super::skill::Skill));
+        }
+        let allowed = custom.as_ref().and_then(|c| c.tools.clone());
+        registry.retain(|n| {
+            if kind == Kind::Explore {
+                READ_ONLY.contains(&n) || n == "Skill"
+            } else {
+                !WITHHELD.contains(&n) && allowed.as_ref().is_none_or(|a| a.iter().any(|x| x == n))
+            }
+        });
+        let extras = prompt::Extras { claude: settings.claude.clone(), skills: &setup.skills };
 
         let model_id = parent.state.lock().await.model_id.clone();
         let model_name = parent.host.models().into_iter().find(|m| m.id == model_id).map(|m| m.name).unwrap_or(model_id);
@@ -165,16 +196,16 @@ do with one Grep or Read."
                 let mut h = parent.state.lock().await.messages.clone();
                 // The last message is the one holding this very call, which has no result yet.
                 h.pop();
-                (prompt::system_blocks(&cwd, &model_name, &settings.instructions, mode, p), h)
+                (prompt::system_blocks(&cwd, &model_name, &settings.instructions, mode, p, &extras), h)
             }
             _ => {
-                let mut persona = p.subagent().trim().to_owned();
+                let mut persona = custom.as_ref().map_or_else(|| p.subagent().trim().to_owned(), |c| c.prompt.clone());
                 if let Some(terse) = p.terse() {
                     persona.push_str("\n\n");
                     persona.push_str(terse.trim());
                 }
                 let mut s = vec![SystemBlock::cached(persona)];
-                s.extend(prompt::system_blocks(&cwd, &model_name, "", mode, p).pop());
+                s.extend(prompt::system_blocks(&cwd, &model_name, "", mode, p, &extras).pop());
                 (s, Vec::new())
             }
         };
@@ -186,6 +217,14 @@ do with one Grep or Read."
         history.push(first);
         let child_mode = if kind == Kind::Explore { Mode::Plan } else { Mode::Default };
         let child = parent.child(cwd, format!("{id}:"), history, child_mode).await;
+        // A custom subagent's model, when the host has one by that id or name (`sonnet` matches
+        // "Claude Sonnet 4.5"); otherwise it runs on the main agent's.
+        if let Some(want) = custom.as_ref().and_then(|c| c.model.as_deref()).map(str::to_lowercase) {
+            let models = parent.host.models();
+            if let Some(m) = models.iter().find(|m| m.id.to_lowercase() == want).or_else(|| models.iter().find(|m| m.name.to_lowercase().contains(&want))) {
+                child.state.lock().await.model_id = m.id.clone();
+            }
+        }
         let agent = Arc::new(SubAgent {
             id: id.clone(),
             name: name.clone(),

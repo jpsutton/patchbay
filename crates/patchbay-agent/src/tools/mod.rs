@@ -16,6 +16,7 @@ pub mod misc;
 pub mod notebook;
 pub mod search;
 pub mod shell;
+pub mod skill;
 pub mod task;
 pub mod web;
 
@@ -116,7 +117,7 @@ impl Registry {
             Arc::new(misc::TodoWrite),
             Arc::new(misc::ExitPlanMode),
             Arc::new(ask::AskUserQuestion),
-            Arc::new(task::Task),
+            Arc::new(task::Task::default()),
             Arc::new(task::SendMessage),
             Arc::new(task::TaskStop),
         ];

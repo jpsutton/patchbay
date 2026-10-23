@@ -1,9 +1,11 @@
-//! Claude subscription limits (the 5-hour and weekly windows) as Claude Code reports them, and
+//! Claude subscription limits (the 5-hour and weekly windows) as Claude Code and Patchbay's agent report them, and
 //! the guard that stops its turns before they run past the plan into extra usage.
 //!
 //! claude-agent-acp forwards the SDK's `rate_limit_event` as a `usage_update` carrying
 //! `_meta["_claude/rateLimit"]`. The SDK sends one only when the numbers change, and the adapter
 //! drops one that comes before the turn's first reply, so a crossing can show up a step late.
+//! Patchbay's own agent, on a Claude login, reads the same numbers from Anthropic's
+//! `anthropic-ratelimit-unified-*` response headers and reports them in the same shape.
 
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -96,9 +98,9 @@ impl PlanLimits {
 impl Hit {
     pub fn message(&self, limit: u8, now: i64) -> String {
         let used = if self.what == "extra usage" {
-            "Claude Code is past your plan's limits and using extra usage".to_owned()
+            "Your Claude plan is past its limits and using extra usage".to_owned()
         } else {
-            format!("Claude Code has used {}% of your plan's {} limit", self.percent, self.what)
+            format!("You have used {}% of your Claude plan's {} limit", self.percent, self.what)
         };
         format!(
             "{used}, so Patchbay stops its turns at {limit}%. The limit resets in {}. Change this under Settings › Coding agents.",
@@ -122,7 +124,7 @@ pub fn now() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-/// The account's latest limits, shared by every Claude Code session on this node.
+/// The account's latest limits, shared by every session on a Claude plan on this node.
 #[derive(Default)]
 pub struct PlanGuard {
     latest: Mutex<Option<PlanLimits>>,
@@ -238,7 +240,7 @@ mod tests {
         let hit = Hit { what: "5-hour", percent: 96, resets_at: 1000 + 72 * 60 };
         assert_eq!(
             hit.message(95, 1000),
-            "Claude Code has used 96% of your plan's 5-hour limit, so Patchbay stops its turns at 95%. The limit resets in 1h 12m. Change this under Settings › Coding agents."
+            "You have used 96% of your Claude plan's 5-hour limit, so Patchbay stops its turns at 95%. The limit resets in 1h 12m. Change this under Settings › Coding agents."
         );
         assert_eq!(fmt_wait(3 * 86400 + 7200), "3d 2h");
         assert_eq!(fmt_wait(10), "1m");

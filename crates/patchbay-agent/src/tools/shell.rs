@@ -18,7 +18,6 @@ use tokio_util::sync::CancellationToken;
 use super::*;
 use crate::session::Session;
 
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
 const MODEL_OUTPUT_CHARS: usize = 30_000;
 const BUFFER_CAP: usize = 2 * 1024 * 1024;
@@ -257,7 +256,7 @@ Do not sleep in a loop to wait: read the output instead."
         if bool_arg(&input, "run_in_background") {
             return start_background(session, command, &dir);
         }
-        let timeout_ms = u64_arg(&input, "timeout").unwrap_or(DEFAULT_TIMEOUT_MS).clamp(1, MAX_TIMEOUT_MS);
+        let timeout_ms = u64_arg(&input, "timeout").unwrap_or(ctx.session.host.settings().limits.shell_timeout_ms).clamp(1, MAX_TIMEOUT_MS);
         let cwd_file = std::env::temp_dir().join(format!("pb-cwd-{}", uuid::Uuid::new_v4()));
         let stream_ctx = (ctx.session.clone(), ctx.call_id.clone());
         let on_chunk: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |t: &str| {

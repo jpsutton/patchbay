@@ -1,5 +1,14 @@
-import { useEffect, useState } from "react";
-import { AGENT_LABELS, api, errorText, type AgentId, type AgentInfo } from "../lib/ipc";
+import { useEffect, useState, type ReactNode } from "react";
+import {
+  AGENT_LABELS,
+  api,
+  errorText,
+  type AgentEngine,
+  type AgentId,
+  type AgentInfo,
+  type ClaudeItem,
+  type ClaudeOverview,
+} from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { PermissionRulesList } from "./PermissionRules";
 import { Choice, Deferred, LongText, Row, Toggle } from "./PreferencesPage";
@@ -105,18 +114,20 @@ function ProviderChoice({ agent, label }: { agent: AgentId; label: string }) {
   );
 }
 
-/** Claude Code on a Claude plan: stop its turns before they run into extra usage. */
-function UsageLimit() {
+/** Turns on a Claude plan: stop them before they run into extra usage. */
+function UsageLimit({ agent }: { agent: string }) {
   const limit = useStore((s) => s.prefs.usageLimit);
   const update = useStore((s) => s.updatePrefs);
   return (
     <>
       <Row
         label="Stop at plan limit"
-        hint="Cancel running turns and hold new prompts when your Claude plan's 5-hour or weekly usage reaches the limit, or extra usage starts. Lifts when the window resets."
+        hint={`Cancel running turns and hold new prompts when your Claude plan's 5-hour or weekly usage reaches the limit, or extra usage starts. Lifts when the window resets.${
+          agent === "patchbay" ? " Applies to sessions on a model whose provider uses your Claude login. Shared with Claude Code." : ""
+        }`}
       >
         <Toggle
-          label="Stop Claude Code at plan limit"
+          label="Stop at plan limit"
           checked={limit.enabled}
           onChange={(enabled) => update({ usageLimit: { ...limit, enabled } })}
         />
@@ -230,32 +241,281 @@ function GrokSettings() {
           onChange={(backgroundSummaries) => update({ backgroundSummaries })}
         />
       </Row>
+      <ClaudeSetup label="Grok Build" />
+    </>
+  );
+}
+
+/** The categories of the Claude Code setup, in the order Settings lists them. */
+const CLAUDE_PARTS = [
+  ["instructions", "Instructions", "CLAUDE.md files (user, project, CLAUDE.local.md) and .claude/rules, added to the agent's instructions. AGENTS.md is always read."],
+  ["skills", "Skills and slash commands", "Skills from skills/ (the agent loads one when a task matches it, or you run it as /name) and commands from commands/."],
+  ["agents", "Subagents", "Agent definitions from agents/, offered as subagent types with their own instructions and tools."],
+  ["mcpServers", "MCP servers", "Servers from ~/.claude.json and the project's .mcp.json, in addition to the ones set in Patchbay."],
+  ["hooks", "Hooks", "Commands from Claude's settings that run before and after tools, on each prompt, and when a turn or session starts or stops."],
+  ["plugins", "Plugins", "Installed Claude Code plugins, including the skills, commands, agents, hooks and MCP servers they bundle."],
+] as const;
+
+function Source({ s }: { s: string }) {
+  return <span className="rounded bg-panel-2 px-1.5 py-px text-[11px] text-muted">{s}</span>;
+}
+
+/** Names found for a category, folded when there are many. */
+function Found({ items, off }: { items: ClaudeItem[]; off: boolean }) {
+  const [all, setAll] = useState(false);
+  if (items.length === 0) return <p className="pb-2 text-xs text-faint">None found.</p>;
+  const shown = all ? items : items.slice(0, 6);
+  return (
+    <ul className={`flex flex-col gap-1 pb-2 text-xs ${off ? "opacity-50" : ""}`}>
+      {shown.map((i) => (
+        <li key={`${i.source}:${i.name}`} className="flex min-w-0 items-baseline gap-2" title={i.description}>
+          <span className="shrink-0 font-mono">{i.name}</span>
+          <Source s={i.source} />
+          <span className="truncate text-muted">{i.description}</span>
+        </li>
+      ))}
+      {items.length > shown.length && (
+        <li>
+          <button className="text-accent-ink underline underline-offset-2" onClick={() => setAll(true)}>
+            {items.length - shown.length} more
+          </button>
+        </li>
+      )}
+    </ul>
+  );
+}
+
+/** One item with a switch of its own (a plugin, an MCP server). */
+function ItemSwitch({
+  label,
+  detail,
+  on,
+  off,
+  onChange,
+}: {
+  label: string;
+  detail: ReactNode;
+  on: boolean;
+  off: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <div className={`flex items-center justify-between gap-4 py-1 pl-3 text-xs ${off ? "opacity-50" : ""}`}>
+      <span className="flex min-w-0 items-baseline gap-2">
+        <span className="font-mono">{label}</span>
+        {detail}
+      </span>
+      <Toggle label={label} checked={on && !off} onChange={(v) => !off && onChange(v)} />
+    </div>
+  );
+}
+
+/**
+ * What an agent loads from the user's Claude Code setup. Patchbay's own agent and Grok Build
+ * share the category switches; Patchbay's agent also lists what it finds, with switches for each
+ * plugin and MCP server.
+ */
+function ClaudeSetup({ label }: { label: string }) {
+  const prefs = useStore((s) => s.prefs);
+  const update = useStore((s) => s.updatePrefs);
+  const sessions = useStore((s) => s.codeSessions);
+  const grok = label === "Grok Build";
+  const cc = prefs.claudeConfig;
+  // Projects to show the setup of: recent Code sessions' folders, newest first.
+  const projects = [...new Set([...sessions].sort((a, b) => b.updatedAt - a.updatedAt).map((s) => s.cwd))];
+  const [project, setProject] = useState<string>(projects[0] ?? "");
+  const [overview, setOverview] = useState<ClaudeOverview | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (grok) return;
+    api.claudeOverview(project || null).then(
+      (o) => {
+        setOverview(o);
+        setError(null);
+      },
+      (e) => setError(errorText(e)),
+    );
+  }, [grok, project, cc.disabledPlugins, cc.disabledMcpServers]);
+
+  const setList = (key: "disabledPlugins" | "disabledMcpServers", name: string, on: boolean) => {
+    const rest = cc[key].filter((x) => x !== name);
+    return update({ claudeConfig: { ...cc, [key]: on ? rest : [...rest, name] } });
+  };
+
+  const details = (key: (typeof CLAUDE_PARTS)[number][0]) => {
+    if (grok || !overview) return null;
+    const off = !cc[key];
+    switch (key) {
+      case "instructions":
+        return overview.instructions.length === 0 ? (
+          <p className="pb-2 text-xs text-faint">None found.</p>
+        ) : (
+          <ul className={`pb-2 text-xs ${off ? "opacity-50" : ""}`}>
+            {overview.instructions.map((p) => (
+              <li key={p} className="truncate font-mono text-muted">
+                {p}
+              </li>
+            ))}
+          </ul>
+        );
+      case "skills":
+        return <Found items={[...overview.skills, ...overview.commands.map((c) => ({ ...c, name: `/${c.name}` }))]} off={off} />;
+      case "agents":
+        return <Found items={overview.agents} off={off} />;
+      case "mcpServers":
+        return overview.mcpServers.length === 0 ? (
+          <p className="pb-2 text-xs text-faint">None found.</p>
+        ) : (
+          <div className="pb-2">
+            {overview.mcpServers.map((m) => (
+              <ItemSwitch
+                key={m.name}
+                label={m.name}
+                detail={
+                  <>
+                    <Source s={m.source} />
+                    <span className="text-muted">{m.transport === "sse" ? "SSE (not supported)" : m.transport}</span>
+                  </>
+                }
+                on={!m.disabled}
+                off={off}
+                onChange={(v) => setList("disabledMcpServers", m.name, v)}
+              />
+            ))}
+          </div>
+        );
+      case "hooks":
+        return overview.hooks.length === 0 ? (
+          <p className="pb-2 text-xs text-faint">None found.</p>
+        ) : (
+          <ul className={`flex flex-col gap-1.5 pb-2 text-xs ${off ? "opacity-50" : ""}`}>
+            {overview.hooks.map((h, i) => (
+              <li key={i} className="min-w-0">
+                <div className="flex items-baseline gap-2">
+                  <span>
+                    {h.event}
+                    {h.matcher && h.matcher !== "*" ? ` · ${h.matcher}` : ""}
+                  </span>
+                  <Source s={h.source} />
+                </div>
+                <div className="truncate font-mono text-muted" title={h.command}>
+                  {h.command}
+                </div>
+              </li>
+            ))}
+          </ul>
+        );
+      case "plugins":
+        return overview.plugins.length === 0 ? (
+          <p className="pb-2 text-xs text-faint">None installed.</p>
+        ) : (
+          <div className="pb-2">
+            {overview.plugins.map((p) => (
+              <ItemSwitch
+                key={p.id}
+                label={p.name}
+                detail={!p.enabledInClaude && <span className="text-muted">off in Claude Code</span>}
+                on={p.enabledInClaude && !p.disabled}
+                off={off || !p.enabledInClaude}
+                onChange={(v) => setList("disabledPlugins", p.id, v)}
+              />
+            ))}
+          </div>
+        );
+    }
+  };
+
+  return (
+    <>
       <div className="pt-4">
         <div className="text-sm">From your Claude Code setup</div>
         <div className="mt-0.5 text-xs text-muted">
-          What Grok Build loads from <span className="font-mono">~/.claude</span> and each project's{" "}
+          What {label} loads from <span className="font-mono">~/.claude</span> and each project's{" "}
           <span className="font-mono">.claude/</span> folder, alongside its own configuration.
+          {grok ? "" : " The switches for each part are shared with Grok Build; the ones for single plugins and servers are Patchbay's own."}
         </div>
       </div>
-      {(
-        [
-          ["skills", "Skills and slash commands", "Skills from .claude/skills and commands from .claude/commands."],
-          ["plugins", "Plugins", "Installed Claude Code plugins, including the skills, agents, hooks and MCP servers they bundle. Only builds of Grok Build that honour GROK_CLAUDE_PLUGINS_ENABLED can turn this off."],
-          ["instructions", "Instructions", "CLAUDE.md files and .claude/rules, added to the agent's instructions."],
-          ["agents", "Subagents", "Agent definitions from .claude/agents."],
-          ["mcpServers", "MCP servers", "Servers from Claude's MCP configuration, in addition to the ones set in Patchbay."],
-          ["hooks", "Hooks", "Hooks from Claude's settings. These run commands on your machine during sessions."],
-        ] as const
-      ).map(([key, label, hint]) => (
-        <Row key={key} label={label} hint={hint}>
-          <Toggle
-            label={`Claude Code ${label}`}
-            checked={prefs.claudeConfig[key]}
-            onChange={(v) => update({ claudeConfig: { ...prefs.claudeConfig, [key]: v } })}
-          />
+      {!grok && (
+        <Row label="Show the setup of" hint="A project adds its own .claude/ folder, CLAUDE.md, .mcp.json and settings.">
+          <select className={`${input} w-56`} value={project} onChange={(e) => setProject(e.target.value)}>
+            <option value="">Your user setup only</option>
+            {projects.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
         </Row>
+      )}
+      {error && (
+        <p className="py-2 text-xs text-danger" role="alert">
+          {error}
+        </p>
+      )}
+      {CLAUDE_PARTS.map(([key, name, hint]) => (
+        <div key={key} className="border-b border-border last:border-b-0">
+          <div className="flex items-start justify-between gap-6 py-3">
+            <div className="min-w-0">
+              <div className="text-sm">{name}</div>
+              <div className="mt-0.5 text-xs text-muted">
+                {key === "plugins" && grok
+                  ? `${hint} Only builds of Grok Build that honour GROK_CLAUDE_PLUGINS_ENABLED can turn this off.`
+                  : key === "hooks"
+                    ? <><span className="text-danger">Hooks run commands on your machine</span> during sessions. {hint}</>
+                    : hint}
+              </div>
+            </div>
+            <div className="shrink-0">
+              <Toggle
+                label={`Claude Code ${name}`}
+                checked={cc[key]}
+                onChange={(v) => update({ claudeConfig: { ...cc, [key]: v } })}
+              />
+            </div>
+          </div>
+          {details(key)}
+        </div>
       ))}
       <p className="pt-2 text-xs text-muted">Idle sessions restart to pick up changes; busy ones restart when their turn ends.</p>
+    </>
+  );
+}
+
+/** Limits of Patchbay's own agent. Blank keeps the default; changes apply from the next request. */
+function EngineSettings() {
+  const engine = useStore((s) => s.prefs.agentEngine);
+  const update = useStore((s) => s.updatePrefs);
+  const field = (key: keyof AgentEngine, label: string, hint: string, def: number, max: number) => (
+    <Row key={key} label={label} hint={`${hint} Blank = ${def}.`}>
+      <Deferred
+        value={engine[key] == null ? "" : String(engine[key])}
+        placeholder={String(def)}
+        mono
+        width="w-24"
+        onCommit={(v) => {
+          const t = v.trim();
+          if (t && !/^\d+$/.test(t)) return Promise.resolve("Enter a whole number");
+          const n = t ? Number(t) : null;
+          if (n != null && (n < (key === "requestRetries" ? 0 : 1) || n > max)) return Promise.resolve(`Between ${key === "requestRetries" ? 0 : 1} and ${max}`);
+          return update({ agentEngine: { ...engine, [key]: n } });
+        }}
+      />
+    </Row>
+  );
+  return (
+    <>
+      <div className="pt-4">
+        <div className="text-sm">Engine</div>
+        <div className="mt-0.5 text-xs text-muted">
+          How far the agent goes on its own. Model settings (temperature, max output, reasoning effort, context window)
+          are per model under Models; each session can change its thinking effort in the composer.
+        </div>
+      </div>
+      {field("maxSteps", "Steps per prompt", "Model requests one prompt may make before the turn stops.", 100, 10000)}
+      {field("subagentMaxSteps", "Steps per subagent", "Model requests one subagent run may make.", 40, 10000)}
+      {field("requestRetries", "Request retries", "Retries of a model request that fails before any output.", 2, 10)}
+      {field("idleTimeoutSecs", "Stream timeout (s)", "Give up on a reply that sends nothing for this long.", 180, 3600)}
+      {field("shellTimeoutSecs", "Shell timeout (s)", "Commands stop after this long unless the agent asks for more (up to 600).", 120, 600)}
     </>
   );
 }
@@ -368,8 +628,10 @@ export function AgentsPage({ list, onOpen }: { list: AgentList; onOpen: (id: Age
 export function AgentPage({ id, list }: { id: AgentId; list: AgentList }) {
   const prefs = useStore((s) => s.prefs);
   const update = useStore((s) => s.updatePrefs);
+  const providers = useStore((s) => s.providers);
   useEffect(list.want, []);
   const a = list.agents?.find((x) => x.id === id);
+  const onClaudeLogin = providers.some((p) => p.authMode === "claude_login");
 
   const setPath = async (path: string) => {
     const agentPaths = { ...prefs.agentPaths };
@@ -423,7 +685,9 @@ export function AgentPage({ id, list }: { id: AgentId; list: AgentList }) {
         </div>
       </div>
       {a.takesProviders && <ProviderChoice agent={a.id} label={a.label} />}
-      {a.id === "claude-code" && !prefs.agentProviders[a.id] && <UsageLimit />}
+      {((a.id === "claude-code" && !prefs.agentProviders[a.id]) || (a.id === "patchbay" && onClaudeLogin)) && (
+        <UsageLimit agent={a.id} />
+      )}
       {(a.id !== "grok" && a.id !== "patchbay") || prefs.agentPaths[a.id] ? (
         <Row label="Executable" hint="Absolute path. Blank looks it up on PATH.">
           <Deferred
@@ -435,6 +699,8 @@ export function AgentPage({ id, list }: { id: AgentId; list: AgentList }) {
         </Row>
       ) : null}
       {a.usesPatchbayModels && <PatchbayModelSettings />}
+      {a.id === "patchbay" && <ClaudeSetup label="Patchbay" />}
+      {a.id === "patchbay" && <EngineSettings />}
       {a.id === "grok" && <GrokSettings />}
     </div>
   );

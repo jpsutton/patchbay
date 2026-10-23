@@ -716,11 +716,11 @@ async fn usage_limit_stops_claude_turns() {
     assert_eq!(notices(), 1);
     let ev = a.events.lock().unwrap().iter().rev().find(|(_, p)| p["event"]["type"] == "notice").cloned().unwrap();
     let text = ev.1["event"]["message"].as_str().unwrap().to_owned();
-    assert!(text.starts_with("Stopped. Claude Code has used 96% of your plan's 5-hour limit"), "{text}");
+    assert!(text.starts_with("Stopped. You have used 96% of your Claude plan's 5-hour limit"), "{text}");
 
     emit(&a, &claude.id, CodeEvent::PromptDone { stop_reason: json!("cancelled") });
     let err = prompt(claude.id.clone()).await.unwrap_err();
-    assert!(err.0.starts_with("Not sent. Claude Code has used 97%"), "{}", err.0);
+    assert!(err.0.starts_with("Not sent. You have used 97%"), "{}", err.0);
 
     // Turning the guard off lets prompts through again.
     let mut prefs = prefs::load(&a.state.db);

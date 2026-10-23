@@ -6,12 +6,12 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use patchbay_llm::{Message, Part, Role};
+use patchbay_llm::{Effort, Message, Part, Role};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use crate::host::Host;
+use crate::host::{Host, ModelClient};
 use crate::prompts::Prompts;
 use crate::mcp::McpSet;
 use crate::rpc::Peer;
@@ -116,6 +116,28 @@ pub struct Session {
     pub keep_open: AtomicBool,
     /// This session's own choice about minified prompts; `None` follows the host's setting.
     pub minify: Mutex<Option<bool>>,
+    /// This session's own reasoning effort; `None` follows the model's setting.
+    pub effort: Mutex<Option<Effort>>,
+    /// Messages the user sent into the running turn (`session/steering`).
+    pub steer: Mutex<SteerInbox>,
+    /// Woken when a message is steered in, for a turn that waits on background subagents.
+    pub steered: tokio::sync::Notify,
+    /// What the endpoint reported this session's requests cost so far, in USD (`None`: it
+    /// reports no cost, and the host prices the tokens itself).
+    pub cost_usd: Mutex<Option<f64>>,
+    /// What this session loads from the user's Claude Code setup; reloaded with each prompt.
+    pub claude: Mutex<Arc<crate::claude::Setup>>,
+    /// Context the SessionStart hooks gave, for the first prompt.
+    pub start_context: Mutex<Vec<String>>,
+}
+
+/// Messages steered into a running turn, waiting for the next step.
+#[derive(Default)]
+pub struct SteerInbox {
+    /// A turn is running and will still read the inbox. Cleared, under the same lock, by the
+    /// last look a turn takes before it ends, so no message is accepted and then dropped.
+    pub open: bool,
+    pub queued: Vec<Vec<Part>>,
 }
 
 pub fn stamp_of(path: &Path) -> Option<Stamp> {
@@ -160,12 +182,106 @@ impl Session {
             card_prefix: String::new(),
             keep_open: AtomicBool::new(false),
             minify: Mutex::new(None),
+            effort: Mutex::new(None),
+            steer: Mutex::default(),
+            steered: tokio::sync::Notify::new(),
+            cost_usd: Mutex::new(None),
+            claude: Mutex::default(),
+            start_context: Mutex::default(),
         })
     }
 
     /// Whether prompts go out minified: the session's own choice, else the host's setting.
     pub fn minifying(&self) -> bool {
         (*self.minify.lock().unwrap()).unwrap_or_else(|| self.host.settings().minify_prompts)
+    }
+
+    /// `model_id` ready to call, with this session's own overrides applied.
+    pub async fn model_client(&self, model_id: &str) -> Result<ModelClient, String> {
+        let mut mc = self.host.model_client(model_id).await?;
+        if let Some(e) = *self.effort.lock().unwrap() {
+            mc.client.config.effort = Some(e);
+        }
+        Ok(mc)
+    }
+
+    /// Take the messages steered in so far, as parts for the next user message: each behind a
+    /// note that says it arrived mid-turn. Empty when none came. `close`: the turn ends unless
+    /// something came, so stop taking more.
+    pub fn take_steered(&self, close: bool) -> Vec<Part> {
+        let mut inbox = self.steer.lock().unwrap();
+        let queued = std::mem::take(&mut inbox.queued);
+        if close && queued.is_empty() {
+            inbox.open = false;
+        }
+        drop(inbox);
+        let note = self.prompts().msg("steered", &[]);
+        queued
+            .into_iter()
+            .flat_map(|parts| std::iter::once(Part::Text(crate::prompt::reminder(&note))).chain(parts))
+            .collect()
+    }
+
+    /// The Claude Code setup this session uses.
+    pub fn claude(&self) -> Arc<crate::claude::Setup> {
+        self.claude.lock().unwrap().clone()
+    }
+
+    /// Read the Claude Code setup again (it may have changed on disk or in Settings). Returns
+    /// whether the slash commands changed.
+    pub fn reload_claude(&self) -> bool {
+        let cfg = self.host.settings().claude;
+        let setup = Arc::new(crate::claude::Setup::load(&cfg, &self.cwd));
+        let mut cur = self.claude.lock().unwrap();
+        let changed = cur.commands != setup.commands || cur.skills != setup.skills;
+        *cur = setup;
+        changed
+    }
+
+    /// Tell the client the slash commands: `/compact`, the user's commands and skills.
+    pub fn announce_commands(&self) {
+        let setup = self.claude();
+        let mut list = vec![json!({
+            "name": "compact",
+            "description": "Summarize the conversation to free up context",
+            "input": {"hint": "what the summary should focus on"},
+        })];
+        for c in &setup.commands {
+            let mut v = json!({"name": c.name, "description": c.description});
+            if let Some(h) = &c.argument_hint {
+                v["input"] = json!({"hint": h});
+            }
+            list.push(v);
+        }
+        for s in &setup.skills {
+            list.push(json!({"name": s.name, "description": s.description}));
+        }
+        self.update(json!({"sessionUpdate": "available_commands_update", "availableCommands": list}));
+    }
+
+    /// Fields every hook gets on stdin.
+    pub fn hook_input(&self, mode: Mode) -> Value {
+        json!({
+            "session_id": self.id,
+            "transcript_path": "",
+            "permission_mode": if mode == Mode::Plan { "plan" } else { "default" },
+        })
+    }
+
+    /// Show hook notes (failures, `systemMessage`s) to the user.
+    pub fn hook_notes(&self, notes: &[String]) {
+        for n in notes {
+            self.text_chunk("agent_thought_chunk", &format!("{n}\n"));
+        }
+    }
+
+    /// Add a reported cost to the session's total; the total so far.
+    pub fn add_cost(&self, cost: Option<f64>) -> Option<f64> {
+        let mut total = self.cost_usd.lock().unwrap();
+        if let Some(c) = cost {
+            *total = Some(total.unwrap_or(0.0) + c);
+        }
+        *total
     }
 
     /// The prompt texts to use, in the form this session wants.
@@ -205,6 +321,12 @@ impl Session {
             keep_open: AtomicBool::new(false),
             // A subagent speaks the way its parent does, whatever the setting becomes later.
             minify: Mutex::new(Some(self.minifying())),
+            effort: Mutex::new(*self.effort.lock().unwrap()),
+            steer: Mutex::default(),
+            steered: tokio::sync::Notify::new(),
+            cost_usd: Mutex::new(None),
+            claude: Mutex::new(self.claude()),
+            start_context: Mutex::default(),
         })
     }
 
@@ -223,6 +345,7 @@ impl Session {
             model: model.to_owned(),
             mode: mode.id().to_owned(),
             minify: *self.minify.lock().unwrap(),
+            effort: *self.effort.lock().unwrap(),
         });
     }
 
@@ -273,6 +396,7 @@ impl Session {
 /// The state a stored session ends in.
 pub struct Restored {
     pub minify: Option<bool>,
+    pub effort: Option<Effort>,
     pub cwd: Option<String>,
     pub model: Option<String>,
     pub mode: Option<Mode>,
@@ -302,11 +426,12 @@ pub fn prompts_of(messages: &[Message]) -> Vec<PromptRec> {
 }
 
 pub fn restore(entries: &[Entry]) -> Restored {
-    let mut r = Restored { minify: None, cwd: None, model: None, mode: None, messages: Vec::new() };
+    let mut r = Restored { minify: None, effort: None, cwd: None, model: None, mode: None, messages: Vec::new() };
     for e in &effective(entries) {
         match e {
-            Entry::Meta { cwd, model, mode, minify } => {
+            Entry::Meta { cwd, model, mode, minify, effort } => {
                 r.minify = *minify;
+                r.effort = *effort;
                 r.cwd = Some(cwd.clone());
                 r.model = Some(model.clone());
                 r.mode = Mode::parse(mode);
@@ -328,7 +453,7 @@ mod tests {
     #[test]
     fn compaction_replaces_history_on_restore() {
         let entries = vec![
-            Entry::Meta { cwd: "/p".into(), model: "m".into(), mode: "plan".into(), minify: Some(true) },
+            Entry::Meta { cwd: "/p".into(), model: "m".into(), mode: "plan".into(), minify: Some(true), effort: Some(Effort::High) },
             Entry::Msg { m: Message::user("one") },
             Entry::Msg { m: Message::assistant("two") },
             Entry::Compacted { summary: Message::user("summary") },
@@ -339,5 +464,6 @@ mod tests {
         assert_eq!(r.messages[0].text(), "summary");
         assert_eq!(r.mode, Some(Mode::Plan));
         assert_eq!(r.minify, Some(true));
+        assert_eq!(r.effort, Some(Effort::High));
     }
 }

@@ -19,6 +19,7 @@ mod subagent;
 mod tools;
 mod turn;
 
+pub mod claude;
 pub use agent::serve;
 pub use store::sessions_dir;
-pub use host::{Host, ModelClient, ModelInfo, Settings};
+pub use host::{ClaudeConfig, Host, Limits, ModelClient, ModelInfo, Settings};

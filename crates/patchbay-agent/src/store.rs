@@ -19,6 +19,9 @@ pub enum Entry {
         /// The session's own choice about minified prompts; `None` follows the host's setting.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         minify: Option<bool>,
+        /// The session's own reasoning effort; `None` follows the model's setting.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<patchbay_llm::Effort>,
     },
     Msg { m: Message },
     /// The final `tool_call` update of a call, so a reload shows the same card.
@@ -118,7 +121,7 @@ mod tests {
         let msg = |t: &str| Entry::Msg { m: Message::user(t) };
         let tool = || Entry::Tool { call: serde_json::json!({"toolCallId": "t"}) };
         let entries = vec![
-            Entry::Meta { cwd: "/p".into(), model: "m".into(), mode: "default".into(), minify: None },
+            Entry::Meta { cwd: "/p".into(), model: "m".into(), mode: "default".into(), minify: None, effort: None },
             msg("one"),
             tool(),
             msg("two"),
@@ -140,7 +143,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pb-store-{}", uuid::Uuid::new_v4()));
         let s = Store::new(&dir, "abc");
         assert!(!s.exists());
-        s.append(&Entry::Meta { cwd: "/p".into(), model: "m".into(), mode: "default".into(), minify: None });
+        s.append(&Entry::Meta { cwd: "/p".into(), model: "m".into(), mode: "default".into(), minify: None, effort: None });
         s.append(&Entry::Msg { m: Message::user("hi") });
         let again = Store::new(&dir, "abc");
         let entries = again.load();

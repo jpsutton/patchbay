@@ -317,6 +317,7 @@ impl Parser for AnthropicParser {
             usage: self.saw_usage.then_some(self.usage),
             stop,
             model: self.model,
+            plan: None,
         })
     }
 }

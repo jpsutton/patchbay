@@ -1,4 +1,32 @@
 {
+  "skills": {
+    "full": "# Skills\n\nThese skills are installed. When a task matches one's description, load it with the Skill tool before you start, then follow it.\n\n{list}",
+    "min": "# Skills\n\nInstalled skills. Task matches description: load with Skill tool first, then follow.\n\n{list}"
+  },
+  "slash_command": {
+    "full": "The user ran the /{name} command. Its instructions follow; carry them out.\n\n{text}",
+    "min": "User ran /{name}. Instructions follow; carry out.\n\n{text}"
+  },
+  "hook_context": {
+    "full": "A hook added this context:\n{text}",
+    "min": "Hook context:\n{text}"
+  },
+  "hook_blocked_tool": {
+    "full": "A hook blocked this call: {reason}",
+    "min": "Hook blocked call: {reason}"
+  },
+  "hook_feedback": {
+    "full": "A hook reviewed the result: {reason}",
+    "min": "Hook on result: {reason}"
+  },
+  "hook_stop": {
+    "full": "A Stop hook asked you to keep going: {reason}",
+    "min": "Stop hook says keep going: {reason}"
+  },
+  "steered": {
+    "full": "The user sent the message below while you were working. Take it into account from here on; it may change what you should do next.",
+    "min": "User sent message below mid-work. Account for it from here; may change next steps."
+  },
   "file_changed": {
     "full": "{path} changed since you read it (the user or a tool edited it). Read it again before you edit it.",
     "min": "{path} changed since read (user or tool edited). Re-read before edit."

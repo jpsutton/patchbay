@@ -6,6 +6,7 @@ use patchbay_llm::{Event, Message, Part, Request, Role, StopReason, ToolCall, To
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
+use crate::claude;
 use crate::compact;
 use crate::prompt;
 use crate::session::{Mode, PromptRec, Session, Totals, stamp_of};
@@ -13,8 +14,6 @@ use crate::subagent::notes_part;
 use crate::store::Entry;
 use crate::tools::{Registry, Tool, ToolCtx, ToolOutput, clip_middle};
 
-/// Most model requests one prompt may make.
-const MAX_STEPS: usize = 100;
 /// Longest tool result text kept in the history.
 const MAX_RESULT_CHARS: usize = 100_000;
 /// Longest tool result text shown on the card.
@@ -144,7 +143,7 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
     }
     if let Some(focus) = compact_command(&parts) {
         let model_id = session.state.lock().await.model_id.clone();
-        let mc = session.host.model_client(&model_id).await?;
+        let mc = session.model_client(&model_id).await?;
         return match compact::compact(&session, &mc, Some(&focus), &cancel).await {
             Ok(()) => Ok(TurnResult { stop_reason: "end_turn", usage: Totals::default() }),
             Err(e) if e == "cancelled" => Ok(TurnResult { stop_reason: "cancelled", usage: Totals::default() }),
@@ -153,6 +152,34 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
                 Ok(TurnResult { stop_reason: "end_turn", usage: Totals::default() })
             }
         };
+    }
+    if session.reload_claude() {
+        session.announce_commands();
+    }
+    let setup = session.claude();
+    let mode_now = session.state.lock().await.mode;
+    let typed: String = parts.iter().find_map(|p| if let Part::Text(t) = p { Some(t.clone()) } else { None }).unwrap_or_default();
+    let mut context: Vec<String> = std::mem::take(&mut *session.start_context.lock().unwrap());
+    if setup.has_hooks("UserPromptSubmit") {
+        let mut input = session.hook_input(mode_now);
+        input["prompt"] = json!(typed);
+        let r = claude::run_hooks(&setup.hooks, "UserPromptSubmit", None, input, &session.cwd).await;
+        session.hook_notes(&r.notes);
+        if let Some(reason) = r.block.or(r.stop) {
+            session.text_chunk("agent_message_chunk", &format!("A hook blocked this prompt: {reason}"));
+            return Ok(TurnResult { stop_reason: "end_turn", usage: Totals::default() });
+        }
+        context.extend(r.context);
+    }
+    let p = session.prompts();
+    // A slash command or skill the user ran: the text they typed stays as it is (and shows on
+    // reload); its instructions go beside it.
+    if let Some(expanded) = setup.expand_slash(&typed) {
+        let name = typed.trim_start().trim_start_matches('/').split_whitespace().next().unwrap_or("");
+        parts.push(Part::Text(prompt::reminder(&p.msg("slash_command", &[("name", name), ("text", &expanded)]))));
+    }
+    for c in context {
+        parts.push(Part::Text(prompt::reminder(&p.msg("hook_context", &[("text", &c)]))));
     }
     let model_name = {
         let id = session.state.lock().await.model_id.clone();
@@ -182,7 +209,10 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
     }
 
     let mut totals = Totals::default();
-    'steps: for step in 0..MAX_STEPS {
+    // Times a Stop hook kept this turn going; capped so a hook can't loop forever.
+    let mut stop_rounds = 0;
+    let max_steps = session.host.settings().limits.max_steps.max(1);
+    'steps: for step in 0..max_steps {
         if cancel.is_cancelled() {
             return Ok(TurnResult { stop_reason: "cancelled", usage: totals });
         }
@@ -191,7 +221,7 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
             (st.model_id.clone(), st.mode)
         };
         let settings = session.host.settings();
-        let mc = session.host.model_client(&model_id).await?;
+        let mc = session.model_client(&model_id).await?;
         let percent = mc
             .auto_compact_percent
             .or((settings.auto_compact_percent > 0).then_some(settings.auto_compact_percent))
@@ -211,9 +241,18 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
         for t in mcp.tools() {
             registry.push(t);
         }
+        if !setup.skills.is_empty() {
+            registry.push(Arc::new(crate::tools::skill::Skill));
+        }
+        if !setup.agents.is_empty() {
+            let custom = setup.agents.iter().map(|a| (a.name.clone(), a.description.clone())).collect();
+            registry.retain(|n| n != "Task");
+            registry.push(Arc::new(crate::tools::task::Task { custom }));
+        }
         let mut system = mc.system_prefix.clone();
         let model_name = session.host.models().into_iter().find(|m| m.id == model_id).map(|m| m.name).unwrap_or(model_id.clone());
-        system.extend(prompt::system_blocks(&session.cwd, &model_name, &settings.instructions, mode, session.prompts()));
+        let extras = prompt::Extras { claude: settings.claude.clone(), skills: &setup.skills };
+        system.extend(prompt::system_blocks(&session.cwd, &model_name, &settings.instructions, mode, session.prompts(), &extras));
         let request = Request {
             system,
             messages,
@@ -258,12 +297,21 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
             totals.output += u.output;
             totals.reasoning += u.reasoning;
             session.state.lock().await.context_tokens = u.input + u.output;
-            session.update(json!({
+            let mut update = json!({
                 "sessionUpdate": "usage_update",
                 "used": u.input + u.output,
                 "size": mc.context_window.unwrap_or(0),
                 "_meta": {"autoCompactPercent": mc.auto_compact_percent.or((settings.auto_compact_percent > 0).then_some(settings.auto_compact_percent))},
-            }));
+            });
+            // Only an endpoint that reports cost (OpenRouter, say) has one; otherwise the host
+            // prices the tokens from the model's settings.
+            if let Some(cost) = session.add_cost(u.cost_usd) {
+                update["cost"] = json!({"amount": cost, "currency": "USD"});
+            }
+            if let Some(plan) = &response.plan {
+                update["_meta"]["_claude/rateLimit"] = plan_meta(plan);
+            }
+            session.update(update);
         }
         let calls: Vec<ToolCall> = response.message.tool_calls().cloned().collect();
         if !response.message.parts.is_empty() {
@@ -277,12 +325,13 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
                 _ => "end_turn",
             };
             if stop_reason == "end_turn" {
-                // Background subagents: read what has come in, and keep the prompt open for the rest.
+                // Background subagents and messages steered in: read what has come in, and keep
+                // the prompt open for the rest.
                 loop {
-                    if let Some(part) = notes_part(&session.agents.drain_notes(), session.prompts()) {
-                        let msg = Message::with_parts(Role::User, vec![part]);
-                        session.store.append(&Entry::Msg { m: msg.clone() });
-                        session.state.lock().await.messages.push(msg);
+                    let mut next: Vec<Part> = notes_part(&session.agents.drain_notes(), session.prompts()).into_iter().collect();
+                    next.extend(session.take_steered(false));
+                    if !next.is_empty() {
+                        push_user(&session, next).await;
                         continue 'steps;
                     }
                     if session.agents.pending() > 0 && session.keep_open.load(std::sync::atomic::Ordering::SeqCst) {
@@ -292,8 +341,28 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
                                 return Ok(TurnResult { stop_reason: "cancelled", usage: totals });
                             }
                             _ = session.agents.wait() => {}
+                            _ = session.steered.notified() => {}
                         }
                         continue;
+                    }
+                    // Stop hooks may send the model back to work, a few times at most.
+                    if setup.has_hooks("Stop") && stop_rounds < 3 {
+                        let mut input = session.hook_input(mode);
+                        input["stop_hook_active"] = json!(stop_rounds > 0);
+                        let r = claude::run_hooks(&setup.hooks, "Stop", None, input, &session.cwd).await;
+                        session.hook_notes(&r.notes);
+                        if let Some(reason) = r.block {
+                            stop_rounds += 1;
+                            let note = session.prompts().msg("hook_stop", &[("reason", &reason)]);
+                            push_user(&session, vec![Part::Text(prompt::reminder(&note))]).await;
+                            continue 'steps;
+                        }
+                    }
+                    // The last look: from here on a steered message is handed back as a prompt.
+                    let last = session.take_steered(true);
+                    if !last.is_empty() {
+                        push_user(&session, last).await;
+                        continue 'steps;
                     }
                     break;
                 }
@@ -307,17 +376,34 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
             parts.push(r);
         }
         parts.extend(notes_part(&session.agents.drain_notes(), session.prompts()));
-        let msg = Message::with_parts(Role::User, parts);
-        session.store.append(&Entry::Msg { m: msg.clone() });
-        session.state.lock().await.messages.push(msg);
+        parts.extend(session.take_steered(false));
+        push_user(&session, parts).await;
         if cancel.is_cancelled() {
             return Ok(TurnResult { stop_reason: "cancelled", usage: totals });
         }
-        if step + 1 == MAX_STEPS {
+        if step + 1 == max_steps {
             return Ok(TurnResult { stop_reason: "max_turn_requests", usage: totals });
         }
     }
     Ok(TurnResult { stop_reason: "max_turn_requests", usage: totals })
+}
+
+/// Claude subscription usage in the shape claude-agent-acp reports it (`_claude/rateLimit`), so
+/// the host's plan-limit guard reads both agents alike.
+fn plan_meta(plan: &patchbay_llm::PlanUsage) -> Value {
+    let window = |w: Option<patchbay_llm::PlanWindow>| w.map(|w| json!({"utilization": w.utilization, "resetsAt": w.resets_at}));
+    json!({
+        "unifiedWindows": {"five_hour": window(plan.five_hour), "seven_day": window(plan.seven_day)},
+        "isUsingOverage": plan.using_overage,
+        "resetsAt": plan.resets_at,
+    })
+}
+
+/// Add a user-role message to the history.
+async fn push_user(session: &Session, parts: Vec<Part>) {
+    let msg = Message::with_parts(Role::User, parts);
+    session.store.append(&Entry::Msg { m: msg.clone() });
+    session.state.lock().await.messages.push(msg);
 }
 
 /// Everything the card and the permission request show about a call.
@@ -469,7 +555,27 @@ async fn run_call(
     if mode == Mode::Plan && !tool.allowed_in_plan() {
         return fail(&session, session.prompts().msg("not_in_plan_mode", &[("name", &call.name)]));
     }
-    if tool.needs_permission(&call.arguments, &session) {
+    let setup = session.claude();
+    // PreToolUse hooks may block the call, or decide the permission question themselves.
+    let mut decided: Option<String> = None;
+    if setup.has_hooks("PreToolUse") {
+        let mut input = session.hook_input(mode);
+        input["tool_name"] = json!(call.name);
+        input["tool_input"] = call.arguments.clone();
+        let r = claude::run_hooks(&setup.hooks, "PreToolUse", Some(&call.name), input, &session.cwd).await;
+        session.hook_notes(&r.notes);
+        let denied = if r.permission.as_deref() == Some("deny") { r.permission_reason.clone().or(Some("denied".into())) } else { None };
+        if let Some(reason) = r.block.or(r.stop).or(denied) {
+            return fail(&session, session.prompts().msg("hook_blocked_tool", &[("reason", &reason)]));
+        }
+        decided = r.permission;
+    }
+    let must_ask = match decided.as_deref() {
+        Some("allow") => false,
+        Some("ask") => true,
+        _ => tool.needs_permission(&call.arguments, &session),
+    };
+    if must_ask {
         match ask(&session, &card, &tool, &call, &cancel).await {
             Verdict::Allow => {}
             Verdict::Reject => {
@@ -489,6 +595,22 @@ async fn run_call(
     let content = if out.ui.is_empty() { text_content(&text) } else { out.ui.clone() };
     let raw = if out.raw.is_null() { json!(card_text(&text)) } else { out.raw.clone() };
     finish(&session, &card, if out.is_error { "failed" } else { "completed" }, content, raw, out.meta.clone());
+    let mut out = out;
+    if setup.has_hooks("PostToolUse") && !cancel.is_cancelled() {
+        let mut input = session.hook_input(mode);
+        input["tool_name"] = json!(call.name);
+        input["tool_input"] = call.arguments.clone();
+        input["tool_response"] = json!({"output": clip_middle(&text, MAX_CARD_CHARS), "is_error": out.is_error});
+        let r = claude::run_hooks(&setup.hooks, "PostToolUse", Some(&call.name), input, &session.cwd).await;
+        session.hook_notes(&r.notes);
+        let p = session.prompts();
+        if let Some(reason) = r.block.or(r.stop) {
+            out.content.push(Part::Text(p.msg("hook_feedback", &[("reason", &reason)])));
+        }
+        for c in r.context {
+            out.content.push(Part::Text(p.msg("hook_context", &[("text", &c)])));
+        }
+    }
     let content = out
         .content
         .into_iter()
