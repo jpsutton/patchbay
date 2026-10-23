@@ -246,8 +246,8 @@ fn phone() -> Phone {
     Phone { client, events }
 }
 
-/// A phone that leaves keeps its keys, and the computers keep its record. Joining again must
-/// still raise a request to approve, not hand it the session of an already admitted phone.
+/// A phone that leaves tells its gateway, so the computers drop it from their lists. It keeps
+/// its keys: joining again must raise a request to approve, not resume its old session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn phone_rejoins_after_leaving() {
     let a = node("alpha6");
@@ -263,7 +263,8 @@ async fn phone_rejoins_after_leaving() {
     until("phone online", 10, || p.client.status()["phase"] == "online").await;
 
     p.client.leave();
-    assert!(!members::get(&a.state.db, &pid).unwrap().unwrap().is_removed());
+    until("A learns the phone left", 10, || members::get(&a.state.db, &pid).unwrap().unwrap().has_left()).await;
+    assert!(!a.state.mesh.status()["members"].as_array().unwrap().iter().any(|m| m["nodeId"] == pid));
     p.client.join(&url, PASS, "pocket").unwrap();
     until("phone's second join request", 10, requested).await;
     a.state.mesh.approve(&pid).unwrap();

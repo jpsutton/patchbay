@@ -38,6 +38,11 @@ impl Member {
         self.removed_at.is_some()
     }
 
+    /// It removed itself: the member chose to leave.
+    pub fn has_left(&self) -> bool {
+        self.is_removed() && self.removed_by.as_deref() == Some(self.node_id.as_str())
+    }
+
     pub fn is_remote(&self) -> bool {
         self.role.as_deref() == Some(ROLE_REMOTE)
     }

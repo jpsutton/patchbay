@@ -247,8 +247,11 @@ impl RemoteClient {
         self.0.emit_status();
     }
 
-    /// Forget the mesh. Members still list this device until one of them removes it.
+    /// Forget the mesh. When a gateway is connected, tell it first with a signed removal of this
+    /// device, so the members drop it from their lists; offline, they list it until one of them
+    /// removes it.
     pub fn leave(&self) {
+        self.0.announce_leaving();
         self.0.forget();
     }
 
@@ -430,6 +433,27 @@ impl Inner {
             "pending": [],
             "running": true,
         })
+    }
+
+    /// Send the gateway this device's signed removal, then close the connection once it has had a
+    /// moment to go out.
+    fn announce_leaving(&self) {
+        let (Some(ident), Some(rt)) = (self.ident.get(), self.rt.get()) else { return };
+        let mut rec = {
+            let s = self.saved.lock().unwrap();
+            match s.members.iter().find(|m| m.node_id == s.node_id && !m.is_removed()) {
+                Some(m) => m.clone(),
+                None => return,
+            }
+        };
+        let Some(c) = self.st.lock().unwrap().conn.take() else { return };
+        rec.mark_removed(&rec.node_id.clone(), ident);
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let _ = c.tx.send(Msg::Rpc { id, method: "remote.leave".into(), params: json!({ "record": rec }) });
+        rt.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            c.kill.cancel();
+        });
     }
 
     fn forget(&self) {
