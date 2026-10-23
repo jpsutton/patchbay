@@ -329,6 +329,8 @@ pub fn convert(path: &Path) -> Result<Converted> {
     if transcript.len() > TRANSCRIPT_CAP {
         transcript = transcript_json(&entries, &calls, true);
     }
+    // Claude Desktop records folders with a trailing slash; the sidebar groups by exact path.
+    let cwd = Path::new(&cwd).components().collect::<PathBuf>().to_string_lossy().into_owned();
     Ok(Converted { cwd, title, created_ms: created, updated_ms: updated, transcript, turns })
 }
 
@@ -515,6 +517,10 @@ mod tests {
         let c = convert(&path).unwrap();
         assert_eq!(c.title, "Fix it");
         assert_eq!(c.cwd, "/work/proj");
+        let slashed = fixture().replace("\"/work/proj\"", "\"/work/proj/\"");
+        std::fs::write(&path, slashed).unwrap();
+        assert_eq!(convert(&path).unwrap().cwd, "/work/proj", "trailing slash dropped");
+        std::fs::write(&path, fixture()).unwrap();
         let v: Value = serde_json::from_str(&c.transcript).unwrap();
         let kinds: Vec<&str> = v["earlier"]["entries"].as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect();
         assert_eq!(kinds, ["user", "thought", "agent", "tool", "tool", "agent", "harness", "cancelled", "info"]);
