@@ -48,7 +48,19 @@ The desktop build of the app (`cargo run` in `src-tauri/`, after `pnpm build:rem
 
 ## Trying it end to end in an emulator
 
-A gateway with something to drive: `scripts/mock-llm.py` as the model, and a test node that serves phones on port 41890 (passphrase `correct horse battery`), with a Code session on the Patchbay agent and a chat, approving every phone that asks to join:
+`scripts/android-e2e.sh` does the whole thing from a clean machine and checks the result:
+
+```bash
+scripts/android-e2e.sh setup   # once: JDK 21, command-line tools, SDK, an AVD named patchbay-e2e, the Rust target
+scripts/android-e2e.sh up      # build, start, join, check; --fresh starts over, --headless hides the window
+scripts/android-e2e.sh down    # stop the node and the mock model (--emulator stops the emulator too)
+```
+
+`doctor` lists what is missing without changing anything, and `status` shows what runs. `up` builds the debug APK and `patchbayd` (the desktop app's core, headless, with its web UI) from the same checkout, so phone and computer are always the same version; `status` compares the two builds. It starts `scripts/mock-llm.py` as the model (no key), makes a mesh that listens on `127.0.0.1` only, with one chat and one Code session, boots the emulator, installs the APK, joins as `e2e-emulator` through `10.0.2.2`, approves that one phone, and confirms over the app's web view that Chats, Code and the computer's name show what the node holds. It exits nonzero if anything is missing. The desktop UI of the same node is at the address `status` prints. Steps also run alone: `build`, `emulator`, `node`, `install`, `join`, `verify`, `shot`, `logs`.
+
+Versions come from `remote/docker/Dockerfile`, so this and the container build do not drift. The emulator image is API 36 Google APIs (`arm64-v8a` on Apple silicon, `x86_64` elsewhere). It uses its own AVD and data under `~/.cache/patchbay-android-e2e`, never an emulator you made yourself. The drivers need Node 22+; `mock-llm.py` runs under `pipenv`. It has been run on macOS (Apple silicon) only. It stands `patchbayd` in for the desktop window. The Code session uses the built-in Patchbay agent, so no other agent has to be installed; the script checks that the phone lists the session but does not run a turn in it, so the `!edit` permission below is still tried by hand.
+
+By hand, a gateway with something to drive: `scripts/mock-llm.py` as the model, and a test node that serves phones on port 41890 (passphrase `correct horse battery`), with a Code session on the Patchbay agent and a chat, approving every phone that asks to join:
 
 ```bash
 scripts/mock-llm.py
