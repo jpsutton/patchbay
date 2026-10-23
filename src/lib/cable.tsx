@@ -1,8 +1,10 @@
+import { Dot } from "../components/Dot";
+
 /**
  * Each model gets a "cable" color, shown as a hollow ring wherever that model appears (sidebar,
  * replies, pickers). Filled dots stay reserved for session state, so the two never look alike.
  */
-const RINGS = ["border-cable-1", "border-cable-2", "border-cable-3", "border-cable-4", "border-cable-5"] as const;
+const RINGS = ["text-cable-1", "text-cable-2", "text-cable-3", "text-cable-4", "text-cable-5"] as const;
 
 /** Stable across runs: a small string hash of the model's id. */
 export function cableIndex(id: string | null | undefined): number {
@@ -14,9 +16,6 @@ export function cableIndex(id: string | null | undefined): number {
 
 export function ModelRing({ id, className = "" }: { id: string | null | undefined; className?: string }) {
   return (
-    <span
-      aria-hidden="true"
-      className={`inline-block h-2 w-2 shrink-0 rounded-full border-2 ${id ? RINGS[cableIndex(id)] : "border-faint"} ${className}`}
-    />
+    <Dot hollow={2} className={`${id ? RINGS[cableIndex(id)] : "text-faint"} ${className}`} />
   );
 }

@@ -6,7 +6,7 @@ Status: built into the app. Replaces Grok Build as the default agent and as Patc
 
 - Nothing in the release build comes from outside the repository: no vendored agent, no sidecar binary, no patch set to carry.
 - Provider-agnostic. The user's own providers and models, over the four wire formats that cover almost every host: OpenAI Chat Completions (and the many servers that imitate it), OpenAI Responses, Anthropic Messages and Google Gemini.
-- Stay one agent among several. Patchbay still drives Claude Code, OpenCode, Cursor CLI, Kilo Code, Codex, Gemini CLI and an installed Grok Build over ACP, and the UI branches on capabilities, never on identity (`harness-agnostic-code-tab`).
+- Stay one agent among several. Patchbay still drives Claude Code, OpenCode, Cursor CLI, Kilo Code, Codex and an installed Grok Build over ACP, and the UI branches on capabilities, never on identity (`harness-agnostic-code-tab`).
 
 ## Two crates
 

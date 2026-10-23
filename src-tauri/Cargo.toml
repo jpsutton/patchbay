@@ -1,6 +1,6 @@
 [package]
 name = "patchbay"
-version = "0.12.0"
+version = "0.12.1"
 edition = "2024"
 license = "Apache-2.0"
 description = "Provider-agnostic desktop LLM client"
@@ -35,6 +35,7 @@ desktop = [
     "dep:gtk",
     "dep:gdkwayland-sys",
     "dep:tray-icon",
+    "dep:ashpd",
 ]
 # Builds patchbayd. A marker so `tauri build` (which enables only `desktop`, see
 # tauri.conf.json) leaves the daemon out of the app's bundles.
@@ -107,6 +108,9 @@ gdkwayland-sys = { version = "0.18", features = ["v3_24"], optional = true }
 # Enabling `ksni` on the same tray-icon Tauri links switches it to the StatusNotifierItem
 # backend, which does, so a left click can show and hide the window.
 tray-icon = { version = "0.25", default-features = false, features = ["ksni"], optional = true }
+# The quick-entry shortcut on Wayland sessions, through the GlobalShortcuts portal (same 0.11
+# the dialog plugin already links).
+ashpd = { version = "0.11", default-features = false, features = ["tokio"], optional = true }
 
 [profile.dev.package."*"]
 opt-level = 1

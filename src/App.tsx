@@ -31,6 +31,7 @@ import { useDragRegion, useRoundedWindow } from "./components/WindowControls";
 import { installUpdate, useUpdate, useUpdateChecks } from "./lib/update";
 import { AlertToast, MeshChip, MeshPopover, MeshRailButton } from "./components/MeshStatus";
 import { PlanUsageBlade, PlanUsageButton } from "./components/PlanUsage";
+import { Dot } from "./components/Dot";
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
@@ -411,7 +412,7 @@ function ModeToggle({ vertical }: { vertical?: boolean }) {
           >
             <Icon />
             {dot && (
-              <span className="signal-pulse absolute right-1.5 top-1 h-[7px] w-[7px] rounded-full bg-accent ring-2 ring-bg" />
+              <Dot size={7} ring="bg" className="signal-pulse absolute right-1.5 top-1 text-accent" />
             )}
           </button>
         );

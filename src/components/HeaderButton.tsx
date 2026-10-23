@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { Dot } from "./Dot";
 
 /** Icon button for a view's header bar; `active` marks a toggled-open panel. */
 export function HeaderButton({
@@ -41,7 +42,7 @@ export function HeaderButton({
           {badge > 99 ? "99+" : badge}
         </span>
       ) : dot ? (
-        <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-fg/70" />
+        <Dot size={6} className="absolute right-1 top-1 text-fg/70" />
       ) : null}
     </button>
   );

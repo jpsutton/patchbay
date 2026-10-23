@@ -1739,7 +1739,7 @@ fn terminal_auth_command(
 }
 
 /// `_meta` values to try, in order, for ACP `authenticate`. A key goes in `_meta["api-key"]`,
-/// which agents read in two shapes: Gemini CLI a string, codex-acp `{ "apiKey": … }`. Neither
+/// which agents read in two shapes: a string, or codex-acp `{ "apiKey": … }`. Neither
 /// rejects the other's shape outright; each falls back to its environment and fails there.
 fn auth_metas(api_key: Option<&str>) -> Vec<Option<Value>> {
     match api_key.map(str::trim).filter(|k| !k.is_empty()) {
@@ -2135,10 +2135,10 @@ mod tests {
 
     #[test]
     fn auth_choices_keep_methods_patchbay_can_run() {
-        // Methods as Gemini CLI and codex-acp advertise them, plus kinds Patchbay can't run.
+        // Methods as codex-acp and others advertise them, plus kinds Patchbay can't run.
         let init = json!({ "authMethods": [
             { "id": "oauth-personal", "name": "Log in with Google", "description": "Log in with your Google account" },
-            { "id": "gemini-api-key", "name": "Gemini API key", "_meta": { "api-key": { "provider": "google" } } },
+            { "id": "provider-api-key", "name": "Provider API key", "_meta": { "api-key": { "provider": "google" } } },
             { "id": "gateway", "name": "AI API Gateway", "_meta": { "gateway": { "protocol": "google" } } },
             { "type": "env_var", "id": "env", "name": "Env", "vars": [{ "name": "X_KEY" }] },
             // Claude's adapter: ACP's terminal type, and the older `_meta` convention alone.
@@ -2158,7 +2158,7 @@ mod tests {
             auth_choices(&init),
             [
                 choice("oauth-personal", "Log in with Google", Some("Log in with your Google account"), false, false),
-                choice("gemini-api-key", "Gemini API key", None, true, false),
+                choice("provider-api-key", "Provider API key", None, true, false),
                 choice("claude-ai-login", "Claude Subscription", None, false, true),
                 choice("claude-login", "Log in with Claude", None, false, true),
             ]

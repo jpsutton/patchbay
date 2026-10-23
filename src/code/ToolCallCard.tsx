@@ -7,6 +7,7 @@ import { hunkStarts } from "./hunkStarts";
 import { Markdown } from "../components/Markdown";
 import { CopyButton } from "../components/CopyButton";
 import { AgentImage } from "../components/AgentImage";
+import { Dot } from "../components/Dot";
 import {
   ArrowRightIcon,
   BrainIcon,
@@ -28,7 +29,7 @@ function StatusMark({ status, background }: { status: string; background?: boole
   if (background) {
     return (
       <span className="flex items-center gap-1.5 text-[12px] text-live" title="The command runs on in the background">
-        <span className="signal-pulse h-1.5 w-1.5 rounded-full bg-live" />
+        <Dot size={6} className="signal-pulse text-live" />
         background
       </span>
     );
@@ -49,7 +50,7 @@ function StatusMark({ status, background }: { status: string; background?: boole
     case "in_progress":
       return (
         <span className="flex items-center gap-1.5 text-[12px] text-live">
-          <span className="signal-pulse h-1.5 w-1.5 rounded-full bg-live" />
+          <Dot size={6} className="signal-pulse text-live" />
           running
         </span>
       );
@@ -389,7 +390,7 @@ export function PermissionCard({
       className="flex flex-col gap-3 rounded-xl border border-accent/45 bg-accent/[0.06] p-3.5"
     >
       <div className="flex items-center gap-2">
-        <span className="signal-pulse h-2 w-2 rounded-full bg-accent" />
+        <Dot className="signal-pulse text-accent" />
         <span className="text-xs font-medium text-accent-ink">
           {cmd ? "Wants to run a command" : "Permission required"}
         </span>

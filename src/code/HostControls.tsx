@@ -4,6 +4,7 @@ import { memberName, memberOnline, remoteHost, useStore } from "../lib/store";
 import { input } from "../settings/ProviderPage";
 import { MonitorIcon } from "../components/icons";
 import { isRemoteApp } from "../lib/platform";
+import { Dot } from "../components/Dot";
 
 /** "on <computer>" next to a session hosted elsewhere in the mesh. */
 export function HostBadge({ session }: { session: CodeSession }) {
@@ -19,7 +20,7 @@ export function HostBadge({ session }: { session: CodeSession }) {
     >
       <MonitorIcon size={13} />
       {name}
-      <span className={`h-1.5 w-1.5 rounded-full ${online ? "bg-ok" : "bg-faint"}`} aria-label={online ? "online" : "offline"} />
+      <Dot size={6} className={online ? "text-ok" : "text-faint"} aria-label={online ? "online" : "offline"} />
     </span>
   );
 }

@@ -13,6 +13,7 @@ import { NewSessionSheet } from "./NewSession";
 import { ChatNodePicker } from "./ChatNodePicker";
 import { fmtShort } from "../lib/format";
 import { ChatIcon, ChevronLeftIcon, CodeIcon, MonitorIcon, PlusIcon, SettingsIcon, StarIcon, XIcon } from "../components/icons";
+import { Dot } from "../components/Dot";
 
 /** The phone backend's own state (see crates/patchbay-mesh/src/client.rs, `status`). */
 export interface RemoteStatus {
@@ -477,7 +478,7 @@ function ConnectionPill({ status }: { status: RemoteStatus }) {
       onClick={() => remote.kick()}
       title={status.error ?? undefined}
     >
-      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${online ? "bg-ok" : "signal-pulse bg-accent"}`} />
+      <Dot size={6} className={online ? "text-ok" : "signal-pulse text-accent"} />
       <span className="truncate">{online ? `via ${status.gatewayName}` : "Reconnecting…"}</span>
     </button>
   );
@@ -486,7 +487,7 @@ function ConnectionPill({ status }: { status: RemoteStatus }) {
 function ConnectionBar({ status }: { status: RemoteStatus }) {
   return (
     <div className="flex items-center gap-2 border-t border-line bg-panel px-4 py-2 pb-[calc(env(safe-area-inset-bottom)+8px)] text-[13px] text-muted">
-      <span className="signal-pulse h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
+      <Dot size={6} className="signal-pulse text-accent" />
       <span className="min-w-0 flex-1 truncate">Reconnecting… {status.error ? `(${status.error})` : ""}</span>
       <button className="shrink-0 rounded-md px-2 py-1 text-fg active:bg-panel-2" onClick={() => remote.kick()}>
         Retry
@@ -554,7 +555,7 @@ function Home({
       title={c.title}
       sub={fmtShort(c.updatedAt)}
       leading={c.pinned ? <StarIcon size={13} /> : null}
-      trailing={streams[c.id]?.running ? <span className="signal-pulse h-2 w-2 rounded-full bg-live" aria-label="Replying" /> : null}
+      trailing={streams[c.id]?.running ? <Dot className="signal-pulse text-live" role="img" aria-label="Replying" /> : null}
       onClick={() =>
         restoreThen(
           c.archivedAt != null,
@@ -712,7 +713,7 @@ function SessionState({ live, online }: { live?: Live; online: boolean }) {
   if (live?.busy)
     return (
       <span className="flex items-center gap-1.5 text-[12px] text-live">
-        <span className="signal-pulse h-1.5 w-1.5 rounded-full bg-live" />
+        <Dot size={6} className="signal-pulse text-live" />
         Working
       </span>
     );
@@ -883,9 +884,7 @@ function SettingsSheet({ status, onClose }: { status: RemoteStatus; onClose: () 
         <div className="mt-2 flex flex-col">
           {computers.map((m) => (
             <div key={m.nodeId} className="flex items-center gap-3 py-2.5">
-              <span
-                className={`h-2 w-2 shrink-0 rounded-full ${m.state === "direct" ? "bg-ok" : m.state === "relay" ? "bg-live" : "bg-faint/50"}`}
-              />
+              <Dot className={m.state === "direct" ? "text-ok" : m.state === "relay" ? "text-live" : "text-faint/50"} />
               <span className="min-w-0 flex-1 truncate text-[15px]">{m.name}</span>
               <span className="text-[12.5px] text-muted">
                 {m.nodeId === status.gateway ? "gateway" : m.state === "relay" ? "online" : "offline"}

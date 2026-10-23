@@ -1,5 +1,5 @@
 //! Live checks against the third-party coding agents installed on this machine (Claude Code,
-//! OpenCode, Cursor CLI, Kilo Code, Codex, Gemini CLI, Antigravity). They use the agents' own
+//! OpenCode, Cursor CLI, Kilo Code, Codex, Antigravity). They use the agents' own
 //! sign-ins, so they are ignored by default and skip agents that aren't installed.
 //!
 //! Handshake only (start, models, switch model, resume):
@@ -292,12 +292,6 @@ fn agents_live_kilo() {
 #[ignore]
 fn agents_live_codex() {
     live(AgentKind::Codex);
-}
-
-#[test]
-#[ignore]
-fn agents_live_gemini() {
-    live(AgentKind::Gemini);
 }
 
 #[test]

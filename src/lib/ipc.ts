@@ -339,7 +339,7 @@ export interface CodeAttach {
   point?: EventPoint | null;
 }
 
-export type AgentId = "patchbay" | "grok" | "claude-code" | "opencode" | "cursor" | "kilo" | "codex" | "gemini" | "antigravity";
+export type AgentId = "patchbay" | "grok" | "claude-code" | "opencode" | "cursor" | "kilo" | "codex" | "antigravity";
 
 /** One coding agent backend, as the Agents settings page lists it. */
 export interface AgentInfo {
@@ -366,7 +366,6 @@ export const AGENT_LABELS: Record<AgentId, string> = {
   cursor: "Cursor CLI",
   kilo: "Kilo Code",
   codex: "Codex",
-  gemini: "Gemini CLI",
   antigravity: "Antigravity",
 };
 
