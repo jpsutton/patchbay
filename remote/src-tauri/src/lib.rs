@@ -734,7 +734,20 @@ async fn code_attach(r: Shared<'_>, id: String) -> CmdResult<Value> {
     if res["covered"] == false && !tail.is_empty() {
         events.push(json!({ "type": "notice", "message": "Earlier output from this turn isn't available here" }));
     }
-    events.extend(tail.iter().map(|e| e[1]["event"].clone()));
+    // The host's snapshot already lists each open question. The turn's tail carries that same
+    // event, and applying both showed two cards.
+    let open_questions: HashSet<String> = events
+        .iter()
+        .filter(|e| e["type"] == "question")
+        .filter_map(|e| e["requestId"].as_str().map(str::to_owned))
+        .collect();
+    events.extend(tail.iter().filter_map(|e| {
+        let ev = &e[1]["event"];
+        if ev["type"] == "question" && ev["requestId"].as_str().is_some_and(|id| open_questions.contains(id)) {
+            return None;
+        }
+        Some(ev.clone())
+    }));
     Ok(json!({
         "running": attach["running"].as_bool().unwrap_or(false),
         "busy": attach["busy"].as_bool().unwrap_or(false),

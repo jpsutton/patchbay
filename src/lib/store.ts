@@ -641,6 +641,9 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
       next = { ...s, permissions: s.permissions.filter((p) => p.requestId !== e.requestId) };
       break;
     case "question":
+      // Opening a session on a phone replays the open question from the host and again from
+      // the turn's events. The second copy is the same card.
+      if (s.questions.some((q) => q.requestId === e.requestId)) return s;
       next = { ...s, questions: [...s.questions, { requestId: e.requestId, form: e.form }] };
       notifyCode(id, "has a question for you");
       break;
