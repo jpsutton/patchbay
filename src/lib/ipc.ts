@@ -505,6 +505,19 @@ export type AcpToolCallContent =
   | { type: "diff"; path: string; oldText: string | null; newText: string }
   | { type: "terminal"; terminalId: string };
 
+export interface ClaudeSession {
+  id: string;
+  cwd: string;
+  cwdExists: boolean;
+  title: string;
+  preview: string;
+  /** Unix ms. */
+  modified: number;
+  size: number;
+  /** The Code session an earlier import made. */
+  imported: string | null;
+}
+
 export interface AcpToolCall {
   toolCallId: string;
   title?: string;
@@ -798,6 +811,11 @@ export const api = {
   /** With `host`, the session runs on that computer, in its folder `cwd`. */
   createCodeSession: (cwd: string, modelRef: string | null, agent?: AgentId, host?: string | null) =>
     invoke<CodeSession>("create_code_session", { cwd, modelRef, agent: agent ?? null, host: host ?? null }),
+  /** Claude Code's sessions on this computer. */
+  listClaudeSessions: () => invoke<ClaudeSession[]>("list_claude_sessions"),
+  /** Make Code sessions from Claude Code's, continued by `agent` (default: the preferred one). */
+  importClaudeSessions: (ids: string[], agent?: AgentId | null) =>
+    invoke<CodeSession[]>("import_claude_sessions", { ids, agent: agent ?? null }),
   /** With `host`, the agents installed on that computer. */
   listAgents: (host?: string | null) => invoke<AgentInfo[]>("list_agents", { host: host ?? null }),
   updateCodeSession: (

@@ -234,7 +234,18 @@ function Dialog() {
         )}
 
         {err && <div className="px-5 pt-2 text-xs text-danger">{err}</div>}
-        <div className="flex justify-end gap-2 px-5 py-3">
+        <div className="flex items-center justify-end gap-2 px-5 py-3">
+          {!host && !browse && !isWeb() && (
+            <button
+              className="mr-auto h-[34px] rounded-lg px-2 text-xs text-accent-ink hover:bg-panel-2"
+              onClick={() => {
+                close();
+                useStore.getState().setImportClaudeOpen(true);
+              }}
+            >
+              Import from Claude Code…
+            </button>
+          )}
           <button className="h-[34px] rounded-lg px-3.5 text-xs text-muted hover:bg-panel-2 hover:text-fg" onClick={close}>
             Cancel
           </button>
