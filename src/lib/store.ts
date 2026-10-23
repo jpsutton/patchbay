@@ -306,6 +306,7 @@ interface Store {
   shortcutsOpen: boolean;
   /** The New session dialog (Code). */
   newSessionOpen: boolean;
+  importClaudeOpen: boolean;
   /** Sidebar title filter. */
   sidebarQuery: string;
   providers: Provider[];
@@ -337,6 +338,7 @@ interface Store {
   setSidebarCollapsed: (c: boolean) => void;
   setShortcutsOpen: (o: boolean) => void;
   setNewSessionOpen: (o: boolean) => void;
+  setImportClaudeOpen: (o: boolean) => void;
   setSidebarQuery: (q: string) => void;
   setToast: (t: string | null) => void;
   setAlert: (a: Alert | null) => void;
@@ -782,6 +784,7 @@ export const useStore = create<Store>((set, get) => ({
   sidebarCollapsed: loadSidebarCollapsed(),
   shortcutsOpen: false,
   newSessionOpen: false,
+  importClaudeOpen: false,
   sidebarQuery: "",
   providers: [],
   models: [],
@@ -857,6 +860,7 @@ export const useStore = create<Store>((set, get) => ({
   },
   setShortcutsOpen: (shortcutsOpen) => set({ shortcutsOpen }),
   setNewSessionOpen: (newSessionOpen) => set({ newSessionOpen }),
+  setImportClaudeOpen: (importClaudeOpen) => set({ importClaudeOpen }),
   setSidebarQuery: (sidebarQuery) => set({ sidebarQuery }),
   setToast: (toast) => set({ toast }),
   setAlert: (alert) => set({ alert }),

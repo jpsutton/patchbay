@@ -111,8 +111,10 @@ export function CodeSidebar() {
     for (const s of hits) {
       if (s.pinned) continue;
       const host = remoteHost(s, mesh);
-      const key = host ? `${host}:${s.cwd}` : s.cwd;
-      const g = by.get(key) ?? { cwd: s.cwd, host, list: [] };
+      // `/a/b` and `/a/b/` are one folder.
+      const dir = s.cwd.length > 1 ? s.cwd.replace(/[\\/]+$/, "") || s.cwd : s.cwd;
+      const key = host ? `${host}:${dir}` : dir;
+      const g = by.get(key) ?? { cwd: dir, host, list: [] };
       g.list.push(s);
       by.set(key, g);
     }
