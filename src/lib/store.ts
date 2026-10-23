@@ -94,6 +94,10 @@ export interface CodeState {
   usage: UsageView | null;
   commands: AcpCommand[];
   capabilities: AgentCapabilities | null;
+  /** The agent's own id for this session, from its last `sessionReady` (the saved one can lag). */
+  acpSessionId: string | null;
+  /** Who the agent says it is (name, version), from `initialize`. */
+  agentInfo: { name?: string; title?: string; version?: string } | null;
   /** Session config options besides model and mode (e.g. reasoning effort). */
   configOptions: AcpConfigOption[];
   /** Non-standard extensions the agent understands; gates rewind and the like. */
@@ -146,6 +150,8 @@ const emptyCode = (): CodeState => ({
   usage: null,
   commands: [],
   capabilities: null,
+  acpSessionId: null,
+  agentInfo: null,
   configOptions: [],
   extensions: { statusLine: false, rewind: false },
   approvalGaps: [],
@@ -306,6 +312,8 @@ interface Store {
   shortcutsOpen: boolean;
   /** The New session dialog (Code). */
   newSessionOpen: boolean;
+  /** The Code session whose details dialog is open (see `code/SessionInfoDialog.tsx`). */
+  sessionInfoId: string | null;
   /** Sidebar title filter. */
   sidebarQuery: string;
   providers: Provider[];
@@ -337,6 +345,7 @@ interface Store {
   setSidebarCollapsed: (c: boolean) => void;
   setShortcutsOpen: (o: boolean) => void;
   setNewSessionOpen: (o: boolean) => void;
+  setSessionInfoId: (id: string | null) => void;
   setSidebarQuery: (q: string) => void;
   setToast: (t: string | null) => void;
   setAlert: (a: Alert | null) => void;
@@ -562,6 +571,8 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
         models: e.models ?? null,
         modes: e.modes ?? null,
         capabilities: e.capabilities ?? null,
+        acpSessionId: e.acpSessionId ?? null,
+        agentInfo: e.agentInfo ?? null,
         configOptions: e.configOptions ?? [],
         extensions: e.extensions ?? { statusLine: false, rewind: false },
         approvalGaps: e.approvalGaps ?? [],
@@ -782,6 +793,7 @@ export const useStore = create<Store>((set, get) => ({
   sidebarCollapsed: loadSidebarCollapsed(),
   shortcutsOpen: false,
   newSessionOpen: false,
+  sessionInfoId: null,
   sidebarQuery: "",
   providers: [],
   models: [],
@@ -857,6 +869,7 @@ export const useStore = create<Store>((set, get) => ({
   },
   setShortcutsOpen: (shortcutsOpen) => set({ shortcutsOpen }),
   setNewSessionOpen: (newSessionOpen) => set({ newSessionOpen }),
+  setSessionInfoId: (sessionInfoId) => set({ sessionInfoId }),
   setSidebarQuery: (sidebarQuery) => set({ sidebarQuery }),
   setToast: (toast) => set({ toast }),
   setAlert: (alert) => set({ alert }),

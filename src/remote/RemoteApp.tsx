@@ -7,6 +7,7 @@ import { codeEventArrived, memberName, memberOnline, useStore } from "../lib/sto
 import { ChatView } from "../chat/ChatView";
 import { CodeView } from "../code/CodeView";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { SessionInfoDialog } from "../code/SessionInfoDialog";
 import { ActionSheet, useHold, type ItemAction } from "../components/ItemMenu";
 import { chatActions, promptRename, sessionActions } from "../lib/itemActions";
 import { NewSessionSheet } from "./NewSession";
@@ -459,6 +460,7 @@ function Main({
         />
       )}
       <ConfirmDialog />
+      <SessionInfoDialog />
       {toast && (
         <div className="pointer-events-none fixed inset-x-4 bottom-[calc(env(safe-area-inset-bottom)+16px)] z-50 flex justify-center">
           <div className="pointer-events-auto max-w-md rounded-xl border border-border bg-raised px-4 py-2.5 text-[14px] shadow-float">
