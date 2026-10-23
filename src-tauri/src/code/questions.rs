@@ -442,4 +442,30 @@ mod tests {
         ]);
         assert!(from_permission(&json!({ "title": "Run tests" }), &shell).is_none());
     }
+    /// The request Patchbay's own agent sends for `AskUserQuestion` (crates/patchbay-agent, tools/ask.rs).
+    #[test]
+    fn native_agent_question_becomes_a_card() {
+        let tool = json!({
+            "toolCallId": "t1",
+            "title": "Which approach?",
+            "kind": "other",
+            "status": "pending",
+            "content": [{ "type": "content", "content": { "type": "text", "text": "- A: fast\n- B: safe" } }]
+        });
+        let options = json!([
+            { "optionId": "opt-0", "name": "A", "kind": "allow_once" },
+            { "optionId": "opt-1", "name": "B", "kind": "allow_once" },
+            { "optionId": "__ask_question_skip__", "name": "Skip", "kind": "reject_once" }
+        ]);
+        let form = from_permission(&tool, &options).expect("a card");
+        let q = &form.questions[0];
+        assert_eq!(q.prompt, "Which approach?");
+        assert_eq!(q.options.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(), ["opt-0", "opt-1"]);
+        assert!(q.skippable);
+
+        let picked = [Answered { id: "choice".into(), picks: vec!["opt-1".into()], note: String::new() }];
+        assert_eq!(permission_option(&form, &picked).as_deref(), Some("opt-1"));
+        // Left blank, the card answers with the skip option, which the agent reads as skipped.
+        assert_eq!(permission_option(&form, &[]).as_deref(), Some("__ask_question_skip__"));
+    }
 }
