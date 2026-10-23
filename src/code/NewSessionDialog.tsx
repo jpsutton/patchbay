@@ -4,6 +4,7 @@ import { api, errorText, type AgentId, type DirListing, type NewSessionOptions }
 import { memberOnline, remoteHost, useStore } from "../lib/store";
 import { isWeb } from "../lib/platform";
 import { ChevronLeftIcon, ChevronRightIcon, FolderPlusIcon, MonitorIcon, XIcon } from "../components/icons";
+import { Dot } from "../components/Dot";
 
 /** `~/…` for paths in the home folder. */
 function tilde(path: string, home: string | null): string {
@@ -218,9 +219,7 @@ function Dialog() {
                 <div role="radiogroup" aria-label="Folder">
                   {folders.map((f) => (
                     <button key={f} role="radio" aria-checked={folder === f} className={rowCls} onClick={() => setFolder(f)}>
-                      <span
-                        className={`h-3 w-3 shrink-0 rounded-full border ${folder === f ? "border-accent bg-accent" : "border-border"}`}
-                      />
+                      {folder === f ? <Dot size={12} className="text-accent" /> : <Dot size={12} hollow={1} className="text-border" />}
                       <span className="min-w-0 flex-1 truncate font-mono text-[12.5px]">{tilde(f, home)}</span>
                     </button>
                   ))}

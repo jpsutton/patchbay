@@ -2,6 +2,7 @@ import { useState } from "react";
 import { api, errorText, type AuthChoice } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { TerminalPane } from "../terminal/TerminalPane";
+import { Dot } from "../components/Dot";
 
 /**
  * The agent wants a sign-in: before it starts a session, or (`again`) mid-session, after it
@@ -62,7 +63,7 @@ export function SignInCard({
       className="flex flex-col gap-3 rounded-xl border border-accent/45 bg-accent/[0.06] p-3.5"
     >
       <div className="flex items-center gap-2">
-        <span className="signal-pulse h-2 w-2 rounded-full bg-accent" />
+        <Dot className="signal-pulse text-accent" />
         <span className="text-xs font-medium text-accent-ink">
           {again ? "Sign in to continue" : "Sign in to start the agent"}
         </span>
@@ -97,7 +98,7 @@ export function SignInCard({
         </div>
       ) : pending ? (
         <div className="flex flex-wrap items-center gap-3 text-sm">
-          <span className="signal-pulse h-1.5 w-1.5 shrink-0 rounded-full bg-live" />
+          <Dot size={6} className="signal-pulse text-live" />
           <span className="min-w-0 flex-1">
             Signing in ({pending.name})…{" "}
             <span className="text-muted">If a browser window opened, finish signing in there.</span>

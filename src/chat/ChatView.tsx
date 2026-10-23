@@ -29,6 +29,7 @@ import { EffortPicker } from "../components/EffortPicker";
 import { SystemPromptPanel } from "./SystemPromptPanel";
 import { notifyInBackground } from "../lib/notify";
 import { isRemoteApp } from "../lib/platform";
+import { Dot } from "../components/Dot";
 
 function BranchNav({ m, onSwitch }: { m: Message; onSwitch: (id: string) => void }) {
   const n = m.siblingIds.length;
@@ -194,7 +195,7 @@ function MessageRow({
         </div>
       ) : live ? (
         <div className="flex h-6 items-center gap-1" aria-label="Waiting for the reply">
-          <span className="signal-pulse h-1.5 w-1.5 rounded-full bg-accent" />
+          <Dot size={6} className="signal-pulse text-accent" />
         </div>
       ) : null}
       {m.error && (

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { errorText, type AgentId, type AgentInfo, type CodeSession, type MeshMember } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { ChevronLeftIcon, ChevronRightIcon, MonitorIcon, XIcon } from "../components/icons";
+import { Dot } from "../components/Dot";
 
 /** What a computer offers for a new session (gateway.rs, `new_session_options_local`). */
 interface Options {
@@ -179,7 +180,7 @@ export function NewSessionSheet({
               <MonitorIcon size={15} />
             </span>
             <span className="min-w-0 flex-1 truncate">{m.name}</span>
-            {host === m.nodeId && <span className="h-2 w-2 shrink-0 rounded-full bg-accent" aria-label="Selected" />}
+            {host === m.nodeId && <Dot className="text-accent" role="img" aria-label="Selected" />}
           </button>
         ))}
 
@@ -210,7 +211,7 @@ export function NewSessionSheet({
             {folders.map((f) => (
               <button key={f} className={rowCls} aria-pressed={folder === f} onClick={() => setFolder(f)}>
                 <span className="min-w-0 flex-1 truncate font-mono text-[13.5px]">{tilde(f, home)}</span>
-                {folder === f && <span className="h-2 w-2 shrink-0 rounded-full bg-accent" aria-label="Selected" />}
+                {folder === f && <Dot className="text-accent" role="img" aria-label="Selected" />}
               </button>
             ))}
             <button className={`${rowCls} text-accent-ink`} onClick={() => open(null)}>

@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { ContextMenu, type ItemAction } from "./ItemMenu";
 import type { Activity } from "../lib/activity";
+import { Dot } from "./Dot";
 import {
   ArchiveIcon,
   ChatIcon,
@@ -209,11 +210,11 @@ function ItemIcon({
           ? "agent stopped"
           : null;
   // The status light: amber = needs you, blue = working, green = agent ready. None when stopped.
-  const light = attention ? "bg-accent signal-pulse" : busy ? "bg-live" : status === "running" ? "bg-ok" : null;
+  const light = attention ? "text-accent signal-pulse" : busy ? "text-live" : status === "running" ? "text-ok" : null;
   return (
     <span className={`relative flex shrink-0 ${color}`} title={state ? `${label} · ${state}` : label}>
       <Icon size={16} />
-      {light && <span className={`absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full ring-2 ring-panel ${light}`} />}
+      {light && <Dot ring="panel" className={`absolute -bottom-0.5 -right-0.5 ${light}`} />}
     </span>
   );
 }
