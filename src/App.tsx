@@ -755,13 +755,16 @@ export default function App() {
               </button>
             </div>
           )}
-          <div className={`flex items-center gap-1 p-2 ${update ? "" : "border-t border-line"}`}>
+          <div className={`@container/footer flex items-center gap-1 p-2 ${update ? "" : "border-t border-line"}`}>
+            {/* Its own container, so the label drops out when the items beside it leave too little room. */}
             <button
-              className="flex h-9 flex-1 items-center gap-2.5 rounded-lg px-2.5 text-left text-[14px] text-muted hover:bg-panel-2 hover:text-fg"
+              className="@container flex h-9 min-w-9 flex-1 items-center gap-2.5 rounded-lg px-2.5 text-left text-[14px] text-muted hover:bg-panel-2 hover:text-fg"
+              title="Settings"
+              aria-label="Settings"
               onClick={() => setSettingsOpen(true)}
             >
-              <SettingsIcon size={17} />
-              Settings
+              <SettingsIcon size={17} className="shrink-0" />
+              <span className="@max-[80px]:hidden">Settings</span>
             </button>
             <PlanUsageButton />
             <MeshChip />
