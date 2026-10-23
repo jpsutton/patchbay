@@ -1,0 +1,228 @@
+{
+  "repo": {
+    "name": {
+      "en-US": "Patchbay"
+    },
+    "description": {
+      "en-US": "Patchbay Remote, the phone app for a Patchbay mesh. Built and signed by the release workflow of https://github.com/jpsutton/patchbay."
+    },
+    "icon": {
+      "en-US": {
+        "name": "/icons/icon.png",
+        "sha256": "f5bb5590cba561e9b33a6848271def11b6274e237e22c2b29283e9af320b7fdb",
+        "size": 837
+      }
+    },
+    "address": "https://jpsutton.github.io/patchbay/fdroid/repo",
+    "timestamp": 1792732440000,
+    "categories": {
+      "Development": {
+        "name": {
+          "en-US": "Development"
+        }
+      },
+      "Internet": {
+        "name": {
+          "en-US": "Internet"
+        }
+      }
+    }
+  },
+  "packages": {
+    "dev.patchbay.remote": {
+      "metadata": {
+        "added": 1792643191000,
+        "categories": [
+          "Development",
+          "Internet"
+        ],
+        "changelog": "https://github.com/jpsutton/patchbay/releases",
+        "issueTracker": "https://github.com/jpsutton/patchbay/issues",
+        "lastUpdated": 1792732436000,
+        "license": "Apache-2.0",
+        "sourceCode": "https://github.com/jpsutton/patchbay",
+        "webSite": "https://github.com/jpsutton/patchbay",
+        "name": {
+          "en-US": "Patchbay Remote"
+        },
+        "summary": {
+          "en-US": "Drive your Patchbay computers' chats and coding agents from your phone"
+        },
+        "description": {
+          "en-US": "Patchbay Remote joins your Patchbay mesh as a phone. It shows the chats and Code\nsessions of your computers, live, and lets you send messages, answer an agent's\npermission requests and stop a turn.\n\nThe phone does no work of its own and keeps no copy of your data or API keys. It\nconnects to whichever of your computers it can reach: on your home network, or\nthrough ZeroTier, Tailscale or a VPN. No cloud service sits in between.\n\nYou need Patchbay on at least one computer, and the mesh passphrase. A computer\napproves the phone before it can connect."
+        },
+        "preferredSigner": "94c52e273f2d3612fcdaef74523fc6046ca08ac034346cd931eb286791e687f5"
+      },
+      "versions": {
+        "bb042ba225e362e851853d16764e2aafd3f7ba3ce32ba5bf59d3c8f55350c65a": {
+          "added": 1792732436000,
+          "file": {
+            "name": "/patchbay-remote-0.12.1-arm64.apk",
+            "sha256": "bb042ba225e362e851853d16764e2aafd3f7ba3ce32ba5bf59d3c8f55350c65a",
+            "size": 23948349
+          },
+          "manifest": {
+            "nativecode": [
+              "arm64-v8a"
+            ],
+            "versionName": "0.12.1",
+            "versionCode": 12001,
+            "usesSdk": {
+              "minSdkVersion": 26,
+              "targetSdkVersion": 37
+            },
+            "signer": {
+              "sha256": [
+                "94c52e273f2d3612fcdaef74523fc6046ca08ac034346cd931eb286791e687f5"
+              ]
+            },
+            "usesPermission": [
+              {
+                "name": "android.permission.INTERNET"
+              },
+              {
+                "name": "android.permission.RECEIVE_BOOT_COMPLETED"
+              },
+              {
+                "name": "android.permission.WAKE_LOCK"
+              },
+              {
+                "name": "android.permission.POST_NOTIFICATIONS"
+              },
+              {
+                "name": "android.permission.FOREGROUND_SERVICE"
+              },
+              {
+                "name": "android.permission.FOREGROUND_SERVICE_DATA_SYNC"
+              },
+              {
+                "name": "android.permission.ACCESS_LOCAL_NETWORK"
+              },
+              {
+                "name": "android.permission.USE_BIOMETRIC"
+              },
+              {
+                "name": "android.permission.USE_FINGERPRINT"
+              },
+              {
+                "name": "dev.patchbay.remote.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+              }
+            ]
+          }
+        },
+        "6bfe16c257c9c612f45e5dec726212f3e15d6b1f14bbedcecbdd98d627bc3f1a": {
+          "added": 1792722918000,
+          "file": {
+            "name": "/patchbay-remote-0.12.0-arm64.apk",
+            "sha256": "6bfe16c257c9c612f45e5dec726212f3e15d6b1f14bbedcecbdd98d627bc3f1a",
+            "size": 23956541
+          },
+          "manifest": {
+            "nativecode": [
+              "arm64-v8a"
+            ],
+            "versionName": "0.12.0",
+            "versionCode": 12000,
+            "usesSdk": {
+              "minSdkVersion": 26,
+              "targetSdkVersion": 37
+            },
+            "signer": {
+              "sha256": [
+                "94c52e273f2d3612fcdaef74523fc6046ca08ac034346cd931eb286791e687f5"
+              ]
+            },
+            "usesPermission": [
+              {
+                "name": "android.permission.INTERNET"
+              },
+              {
+                "name": "android.permission.RECEIVE_BOOT_COMPLETED"
+              },
+              {
+                "name": "android.permission.WAKE_LOCK"
+              },
+              {
+                "name": "android.permission.POST_NOTIFICATIONS"
+              },
+              {
+                "name": "android.permission.FOREGROUND_SERVICE"
+              },
+              {
+                "name": "android.permission.FOREGROUND_SERVICE_DATA_SYNC"
+              },
+              {
+                "name": "android.permission.ACCESS_LOCAL_NETWORK"
+              },
+              {
+                "name": "android.permission.USE_BIOMETRIC"
+              },
+              {
+                "name": "android.permission.USE_FINGERPRINT"
+              },
+              {
+                "name": "dev.patchbay.remote.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+              }
+            ]
+          }
+        },
+        "05402d35228014d015c187b5dd4208c4ec481ada78a7f30f21d21125cf900a1e": {
+          "added": 1792697870000,
+          "file": {
+            "name": "/patchbay-remote-0.11.0-arm64.apk",
+            "sha256": "05402d35228014d015c187b5dd4208c4ec481ada78a7f30f21d21125cf900a1e",
+            "size": 23624765
+          },
+          "manifest": {
+            "nativecode": [
+              "arm64-v8a"
+            ],
+            "versionName": "0.11.0",
+            "versionCode": 11000,
+            "usesSdk": {
+              "minSdkVersion": 26,
+              "targetSdkVersion": 37
+            },
+            "signer": {
+              "sha256": [
+                "94c52e273f2d3612fcdaef74523fc6046ca08ac034346cd931eb286791e687f5"
+              ]
+            },
+            "usesPermission": [
+              {
+                "name": "android.permission.INTERNET"
+              },
+              {
+                "name": "android.permission.RECEIVE_BOOT_COMPLETED"
+              },
+              {
+                "name": "android.permission.WAKE_LOCK"
+              },
+              {
+                "name": "android.permission.POST_NOTIFICATIONS"
+              },
+              {
+                "name": "android.permission.FOREGROUND_SERVICE"
+              },
+              {
+                "name": "android.permission.FOREGROUND_SERVICE_DATA_SYNC"
+              },
+              {
+                "name": "android.permission.ACCESS_LOCAL_NETWORK"
+              },
+              {
+                "name": "android.permission.USE_BIOMETRIC"
+              },
+              {
+                "name": "android.permission.USE_FINGERPRINT"
+              },
+              {
+                "name": "dev.patchbay.remote.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}
