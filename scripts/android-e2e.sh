@@ -32,6 +32,9 @@
 # Environment: PATCHBAY_E2E_AVD (patchbay-e2e), PATCHBAY_E2E_WEB_PORT (4431), PATCHBAY_E2E_MESH_PORT (41895),
 # PATCHBAY_E2E_MOCK_PORT (8766), PATCHBAY_E2E_PYTHON (an interpreter to use instead of pipenv).
 set -euo pipefail
+# Run from a git hook (the local CI gate runs this at pre-push), git exports GIT_DIR and friends. Left
+# set, the git commands below that make the sample project would act on the hook's repository instead.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_PREFIX GIT_ALTERNATE_OBJECT_DIRECTORIES
 
 cd "$(dirname "$0")/.."
 top=$(pwd -P)
