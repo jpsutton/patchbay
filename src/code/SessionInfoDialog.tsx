@@ -63,7 +63,7 @@ export function SessionInfoDialog() {
         className="flex max-h-[min(85vh,720px)] w-[min(560px,94vw)] flex-col rounded-2xl border border-border bg-raised shadow-float"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center gap-2 px-5 pb-2 pt-4">
+        <div className="flex items-center gap-2 px-4 pb-2 pt-4 sm:px-5">
           <div id="session-info-title" className="min-w-0 flex-1 truncate text-sm font-semibold">
             Session info
           </div>
@@ -79,7 +79,7 @@ export function SessionInfoDialog() {
             <XIcon size={15} />
           </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-5">
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-5 sm:px-5">
           {sections.map((sec) => (
             <section key={sec.title} className="mt-3">
               <h2 className="pb-1 font-mono text-[11px] uppercase tracking-[0.06em] text-faint">{sec.title}</h2>
@@ -87,11 +87,12 @@ export function SessionInfoDialog() {
                 {sec.rows.map((r) => (
                   <div
                     key={r.label}
-                    className="flex items-start gap-2 border-t border-line py-1.5 first:border-t-0 sm:grid sm:grid-cols-[9.5rem_1fr_auto]"
+                    // Narrow screens stack the label over the value, so a UUID fits on one line.
+                    className="grid grid-cols-[1fr_auto] items-start gap-x-2 gap-y-0.5 border-t border-line py-1.5 first:border-t-0 sm:grid-cols-[9.5rem_1fr_auto]"
                   >
-                    <dt className="w-32 shrink-0 text-[12px] text-muted sm:w-auto">{r.label}</dt>
+                    <dt className="col-span-2 text-[12px] text-muted sm:col-span-1">{r.label}</dt>
                     <dd
-                      className={`min-w-0 flex-1 select-text text-[13px] ${r.mono ? "break-all font-mono text-[12px]" : "break-words"}`}
+                      className={`min-w-0 select-text text-[13px] ${r.mono ? "break-all font-mono text-[11px] sm:text-[12px]" : "break-words"}`}
                     >
                       {r.value}
                     </dd>
