@@ -86,7 +86,7 @@ export function PlanUsageButton() {
           {rows.map((r) => (
             <span key={r.label} className="flex items-center gap-[5px] text-[10.5px] leading-none">
               <span className="w-3 text-faint @max-[300px]/footer:hidden">{r.label}</span>
-              <span className="h-1 w-[30px] overflow-hidden rounded-full bg-border">
+              <span className="h-1 w-[30px] overflow-hidden rounded-full bg-border @max-[260px]/footer:w-5">
                 <span className={`block h-full rounded-full ${barClass(tone(r.pct, limit))}`} style={{ width: `${Math.min(100, r.pct)}%` }} />
               </span>
               <span className="w-[4ch] text-right text-fg tabular-nums">{r.pct}%</span>
