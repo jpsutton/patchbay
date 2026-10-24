@@ -220,6 +220,11 @@ pub enum AgentCmd {
         force: bool,
         reply: Option<oneshot::Sender<Result<Delivery>>>,
     },
+    /// An inter-agent message: queue behind a running turn instead of steering it.
+    AgentMessage {
+        msg: UserMessage,
+        reply: Option<oneshot::Sender<Result<Delivery>>>,
+    },
     /// Drop a queued prompt.
     Unqueue { prompt_id: String },
     /// Send a queued prompt now: cancel the running turn and send it next.
@@ -1474,6 +1479,14 @@ async fn run(
                             answer(reply, Ok(enqueue(&turns, &mut queue, Rank::Normal, msg)));
                         }
                     }
+                    AgentCmd::AgentMessage { msg, reply } => {
+                        let r = if running {
+                            Ok(enqueue(&turns, &mut queue, Rank::Normal, msg))
+                        } else {
+                            start_turn(&turns, msg).inspect(|_| running = true)
+                        };
+                        answer(reply, r);
+                    }
                     AgentCmd::Unqueue { prompt_id } => {
                         if let Some(i) = queue.iter().position(|(_, m)| m.id == prompt_id) {
                             queue.remove(i);
@@ -1663,6 +1676,7 @@ fn refuse_until_signed_in(cmd: AgentCmd) {
             let _ = reply.send(Err(anyhow!("a sign-in is already in progress")));
         }
         AgentCmd::Prompt { reply, .. } => answer(reply, Err(anyhow!("the agent isn't signed in yet"))),
+        AgentCmd::AgentMessage { reply, .. } => answer(reply, Err(anyhow!("the agent isn't signed in yet"))),
         AgentCmd::Unqueue { .. } | AgentCmd::SendNow { .. } | AgentCmd::Cancel | AgentCmd::Shutdown => {}
     }
 }

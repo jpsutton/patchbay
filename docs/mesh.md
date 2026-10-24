@@ -49,6 +49,8 @@ Code sessions in the sidebar include those running on other computers. The sessi
 
 Opening such a session connects you to its agent without interrupting it. Prompts, permission answers, model and mode changes and the Stop button all go to the computer running it. Every computer watching the session sees the same transcript, live, including prompts sent from other computers. A permission request appears on all of them, and the first answer counts.
 
+Code agents can also discover other unarchived Code sessions and message one by name across the mesh. Patchbay starts an idle recipient or queues the message behind its current turn. A recipient can reply by messaging the sender's session. All admitted mesh members share the existing full-trust control boundary.
+
 The terminal panel opens a shell on the computer that runs the session, wherever you are.
 
 ## Moving a session

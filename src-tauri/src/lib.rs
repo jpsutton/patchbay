@@ -16,6 +16,7 @@ mod prefs;
 mod providers;
 mod terminal;
 mod usage;
+pub mod agent_messaging;
 #[cfg(feature = "web")]
 pub mod web;
 #[cfg(test)]
@@ -51,6 +52,8 @@ pub struct AppState {
     code: Arc<CodeManager>,
     terminals: Arc<TerminalManager>,
     mesh: Mesh,
+    /// Local authenticated bridge used by the Patchbay-owned agent messaging MCP server.
+    agent_message_bridge: Arc<std::sync::OnceLock<agent_messaging::AgentMessagingBridge>>,
     /// Sends an event to this node's window.
     emit: mesh::node::UiSink,
     /// Sessions whose checkpoint is being fetched right now.
@@ -73,7 +76,12 @@ pub trait DesktopHooks: Send + Sync {
 }
 
 impl AppState {
-    fn new(db: Arc<Db>, data_dir: PathBuf, mesh: Mesh, emit: mesh::node::UiSink) -> Self {
+    fn new(
+        db: Arc<Db>,
+        data_dir: PathBuf,
+        mesh: Mesh,
+        emit: mesh::node::UiSink,
+    ) -> Self {
         let state = AppState {
             db,
             data_dir,
@@ -81,6 +89,7 @@ impl AppState {
             code: Arc::default(),
             terminals: Arc::default(),
             mesh: mesh.clone(),
+            agent_message_bridge: Arc::default(),
             emit: emit.clone(),
             pulling: Arc::default(),
             live: Arc::default(),
@@ -895,8 +904,13 @@ async fn code_start_local(state: &AppState, id: String) -> anyhow::Result<()> {
     }
     let sink = code_sink(state);
     let (code, db, dir) = (state.code.clone(), state.db.clone(), state.data_dir.clone());
+    let message_server = state
+        .agent_message_bridge
+        .get()
+        .map(|bridge| bridge.server_definition(&id))
+        .transpose()?;
     // `start` may block briefly while a previous agent for this session shuts down.
-    tokio::task::spawn_blocking(move || code.start(sink, db, &dir, &id)).await??;
+    tokio::task::spawn_blocking(move || code.start(sink, db, &dir, &id, message_server)).await??;
     Ok(())
 }
 
@@ -963,7 +977,8 @@ async fn code_prompt_local(
     origin: String,
     prompt_id: Option<String>,
     force: bool,
-) -> anyhow::Result<()> {
+    queue_only: bool,
+) -> anyhow::Result<code::acp::Delivery> {
     ensure_local_host(state, &id)?;
     let prefs = prefs::load(&state.db);
     if on_claude_plan(state, &prefs, &id)
@@ -1021,11 +1036,153 @@ async fn code_prompt_local(
         origin,
         attachments: serde_json::to_value(&atts)?,
     };
-    state.code.prompt(&id, msg, force).await?;
+    let delivery = if queue_only {
+        state.code.agent_message(&id, msg).await?
+    } else {
+        state.code.prompt(&id, msg, force).await?
+    };
     if note.is_some() {
         state.db.with_conn(|c| c.execute("DELETE FROM settings WHERE key = ?1", [&note_key]))?;
     }
-    Ok(())
+    Ok(delivery)
+}
+
+/// Send an agent-originated message to the named Code session, routing to its host over the mesh.
+pub(crate) fn list_agent_sessions(state: &AppState, source_session_id: &str) -> anyhow::Result<serde_json::Value> {
+    let source = state
+        .db
+        .get_code_session(source_session_id)?
+        .ok_or_else(|| anyhow::anyhow!("source Code session was not found"))?;
+    if source.host_node.as_deref() != Some(state.mesh.node_id()) || !state.code.is_running(source_session_id) {
+        anyhow::bail!("the sending agent session is no longer running on this mesh member");
+    }
+    let sessions: Vec<serde_json::Value> = state
+        .db
+        .list_code_sessions()?
+        .into_iter()
+        .filter(|session| session.archived_at.is_none())
+        .map(|session| {
+            let host = session.host_node.unwrap_or_default();
+            serde_json::json!({
+                "sessionId": session.id,
+                "title": session.title,
+                "agent": session.agent,
+                "hostNode": host,
+                "hostName": state.mesh.member_name(&host),
+                "online": host == state.mesh.node_id() || state.mesh.connected(&host),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!(sessions))
+}
+
+pub(crate) async fn send_agent_message(
+    state: &AppState,
+    from_node: &str,
+    source_session_id: &str,
+    target_session_id: &str,
+    message: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let message = message.trim();
+    if message.is_empty() {
+        anyhow::bail!("message cannot be empty");
+    }
+    if message.len() > 16 * 1024 {
+        anyhow::bail!("message is longer than 16 KiB");
+    }
+    if source_session_id == target_session_id {
+        anyhow::bail!("a session cannot message itself");
+    }
+    let source = state
+        .db
+        .get_code_session(source_session_id)?
+        .ok_or_else(|| anyhow::anyhow!("source Code session was not found"))?;
+    if source.host_node.as_deref() != Some(from_node) || source.archived_at.is_some() {
+        anyhow::bail!("source session is not hosted by the sending mesh member");
+    }
+    let target = state
+        .db
+        .get_code_session(target_session_id)?
+        .ok_or_else(|| anyhow::anyhow!("target Code session was not found"))?;
+    if target.archived_at.is_some() {
+        anyhow::bail!("target Code session is archived");
+    }
+    let host = target
+        .host_node
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("target session has no host"))?;
+    if host != state.mesh.node_id() {
+        return Ok(state
+            .mesh
+            .rpc(
+                host,
+                "code.agent_message",
+                serde_json::json!({
+                    "sourceSessionId": source_session_id,
+                    "targetSessionId": target_session_id,
+                    "message": message,
+                }),
+            )
+            .await?);
+    }
+    deliver_agent_message_local(state, from_node, source_session_id, target_session_id, message).await
+}
+
+async fn deliver_agent_message_local(
+    state: &AppState,
+    from_node: &str,
+    source_session_id: &str,
+    target_session_id: &str,
+    message: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let source = state
+        .db
+        .get_code_session(source_session_id)?
+        .ok_or_else(|| anyhow::anyhow!("source Code session was not found"))?;
+    if source.host_node.as_deref() != Some(from_node) || source.archived_at.is_some() {
+        anyhow::bail!("source session is not hosted by the sending mesh member");
+    }
+    let target = state
+        .db
+        .get_code_session(target_session_id)?
+        .ok_or_else(|| anyhow::anyhow!("target Code session was not found"))?;
+    if target.archived_at.is_some() {
+        anyhow::bail!("target Code session is archived");
+    }
+    if target.host_node.as_deref() != Some(state.mesh.node_id()) {
+        anyhow::bail!("target session is no longer hosted here");
+    }
+    if state.code.is_moving(target_session_id) {
+        anyhow::bail!("target session is being moved to another computer");
+    }
+    // An idle session may have no live agent process; start it so the queued message can run.
+    if !state.code.is_running(target_session_id) {
+        code_start_local(state, target_session_id.to_owned()).await?;
+    }
+    let source_node = state.mesh.member_name(from_node);
+    let text = format!(
+        "Patchbay agent message from Code session '{}' ({}) on {} ({}):\n\n{}\n\nTo reply, use the Patchbay send_agent_message tool and target session {}.",
+        source.title, source_session_id, source_node, from_node, message, source_session_id
+    );
+    let prompt_id = new_id();
+    let delivery = code_prompt_local(
+        state,
+        target_session_id.to_owned(),
+        text,
+        Vec::new(),
+        Vec::new(),
+        format!("agent:{from_node}:{source_session_id}"),
+        Some(prompt_id.clone()),
+        false,
+        true,
+    )
+    .await?;
+    Ok(serde_json::json!({
+        "targetSessionId": target_session_id,
+        "targetTitle": target.title,
+        "delivery": delivery,
+        "messageId": prompt_id,
+    }))
 }
 
 async fn code_unqueue(state: &AppState, id: String, prompt_id: String) -> CmdResult<()> {
@@ -1095,7 +1252,8 @@ async fn code_prompt(
         return Ok(());
     }
     let me = state.mesh.node_id().to_owned();
-    Ok(code_prompt_local(state, id, text, attachment_ids, mentions, me, prompt_id, force).await?)
+    code_prompt_local(state, id, text, attachment_ids, mentions, me, prompt_id, force, false).await?;
+    Ok(())
 }
 
 async fn code_cancel(state: &AppState, id: String) -> CmdResult<()> {
@@ -1496,7 +1654,19 @@ impl mesh::RpcHandler for MeshRpc {
                 let origin = p["origin"].as_str().map(str::to_owned).unwrap_or(from);
                 let prompt_id = p["promptId"].as_str().map(str::to_owned);
                 let force = p["force"].as_bool().unwrap_or(false);
-                code_prompt_local(state, id()?, text, atts, mentions, origin, prompt_id, force).await.map(|_| Value::Null)
+                code_prompt_local(state, id()?, text, atts, mentions, origin, prompt_id, force, false)
+                    .await
+                    .map(|_| Value::Null)
+            }
+            "code.agent_message" => {
+                send_agent_message(
+                    state,
+                    &from,
+                    param(&p, "sourceSessionId")?,
+                    param(&p, "targetSessionId")?,
+                    param(&p, "message")?,
+                )
+                .await
             }
             "code.cancel" => {
                 ensure_local_host(state, &id()?)?;
@@ -2047,6 +2217,9 @@ pub fn open_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow::Result
     let keys = Arc::new(mesh::keys::OsKeyStore::new(&data_dir));
     let mesh = Mesh::new(db.clone(), data_dir.clone(), keys)?;
     let state = AppState::new(db, data_dir, mesh.clone(), emit);
+    let (agent_messaging, message_listener) = agent_messaging::AgentMessagingBridge::bind()?;
+    let _ = state.agent_message_bridge.set(agent_messaging.clone());
+    agent_messaging.serve(message_listener, state.clone());
     if mesh.is_member() {
         api::spawn(async move { mesh.start() });
     }

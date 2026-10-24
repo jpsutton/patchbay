@@ -71,7 +71,7 @@ impl Run {
             })
         };
         self.manager
-            .start(sink, self.db.clone(), &self.data_dir, &self.session_id)
+            .start(sink, self.db.clone(), &self.data_dir, &self.session_id, None)
             .unwrap();
     }
 
