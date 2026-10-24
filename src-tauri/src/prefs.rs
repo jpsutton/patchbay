@@ -35,6 +35,22 @@ pub struct Preferences {
     /// One extra model call after the first reply to name the conversation, and after a Code
     /// session's first and third turns when its agent doesn't name it (`code::titles`).
     pub generate_titles: bool,
+    /// auto | system | builtin | server. Stored on this device; preferences are not synced.
+    pub read_aloud_engine: String,
+    /// Voice id for the engine in use. Empty means that engine's default.
+    pub read_aloud_voice: String,
+    /// slower | normal | faster
+    pub read_aloud_rate: String,
+    /// Speak each new finished reply while its chat or session is on screen.
+    pub read_aloud_listen: bool,
+    /// OpenAI-compatible `POST /v1/audio/speech` base URL, used when no provider is chosen.
+    pub read_aloud_server_url: String,
+    /// Speech model name (`tts-1`, a local server's model, …). Empty means `tts-1`.
+    pub read_aloud_server_model: String,
+    /// Voice name the speech server expects (`alloy`, …). Empty means `alloy`.
+    pub read_aloud_server_voice: String,
+    /// An `openai_chat` provider whose key and base URL to use. Empty means the URL above, with no key.
+    pub read_aloud_server_provider_id: String,
 
     // ---- Code agents ----
     /// Agent for new Code sessions: an `AgentKind` id (patchbay, grok, claude-code, opencode, cursor, kilo).
@@ -155,6 +171,14 @@ impl Default for Preferences {
             default_system_prompt: String::new(),
             expand_reasoning: false,
             generate_titles: true,
+            read_aloud_engine: "auto".into(),
+            read_aloud_voice: String::new(),
+            read_aloud_rate: "normal".into(),
+            read_aloud_listen: false,
+            read_aloud_server_url: String::new(),
+            read_aloud_server_model: String::new(),
+            read_aloud_server_voice: String::new(),
+            read_aloud_server_provider_id: String::new(),
             default_agent: "patchbay".into(),
             agent_paths: Default::default(),
             agent_providers: Default::default(),
@@ -171,6 +195,14 @@ impl Default for Preferences {
             terminal_font_size: 13,
             terminal_local_echo: "auto".into(),
         }
+    }
+}
+
+fn short_setting(field: &str, v: &str, max: usize) -> std::result::Result<(), String> {
+    if v.chars().count() > max || v.chars().any(|c| c.is_control()) {
+        Err(format!("{field} is too long or has unsupported characters"))
+    } else {
+        Ok(())
     }
 }
 
@@ -195,6 +227,18 @@ impl Preferences {
             &self.permission_mode,
             &["default", "auto", "always-approve"],
         )?;
+        one_of("read aloud engine", &self.read_aloud_engine, &["auto", "system", "builtin", "server"])?;
+        one_of("read aloud speed", &self.read_aloud_rate, &["slower", "normal", "faster"])?;
+        short_setting("read aloud voice", &self.read_aloud_voice, 80)?;
+        short_setting("speech model", &self.read_aloud_server_model, 80)?;
+        short_setting("speech server voice", &self.read_aloud_server_voice, 80)?;
+        short_setting("speech provider", &self.read_aloud_server_provider_id, 80)?;
+        let url = self.read_aloud_server_url.trim();
+        if !url.is_empty() {
+            if url.len() > 500 || !(url.starts_with("https://") || url.starts_with("http://")) {
+                return Err("speech server URL must be an http or https URL".into());
+            }
+        }
         if crate::code::agents::AgentKind::parse(&self.default_agent).is_none() {
             return Err(format!("unknown coding agent {}", self.default_agent));
         }
@@ -239,6 +283,8 @@ mod tests {
         let p: Preferences = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
         assert_eq!(p.theme, "dark");
         assert_eq!(p.terminal_font_size, 13);
+        assert_eq!(p.read_aloud_engine, "auto");
+        assert!(!p.read_aloud_listen);
         assert!(p.background_summaries);
         assert!(p.generate_titles);
         assert!(p.claude_config.skills && p.claude_config.hooks);
@@ -260,5 +306,7 @@ mod tests {
         assert!(bad(|p| p.usage_limit.percent = 0));
         assert!(bad(|p| p.usage_limit.percent = 101));
         assert!(bad(|p| p.terminal_shell = "/no/such/shell".into()));
+        assert!(bad(|p| p.read_aloud_engine = "whisper".into()));
+        assert!(bad(|p| p.read_aloud_server_url = "file:///tmp/voice".into()));
     }
 }

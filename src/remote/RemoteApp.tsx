@@ -15,6 +15,7 @@ import { ChatNodePicker } from "./ChatNodePicker";
 import { ArchivedRow, CodeSessionList, type Live } from "./CodeSessionList";
 import { fmtShort } from "../lib/format";
 import { Dot } from "../components/Dot";
+import { ReadAloudSettings } from "../settings/ReadAloudSettings";
 import { ChatIcon, ChevronLeftIcon, CodeIcon, ListIcon, PlusIcon, SettingsIcon, StarIcon, XIcon } from "../components/icons";
 
 /** The phone backend's own state (see crates/patchbay-mesh/src/client.rs, `status`). */
@@ -875,6 +876,10 @@ function SettingsSheet({
             on={groupProjects}
             onChange={onGroupProjects}
           />
+        </div>
+        <div className="mt-6 font-mono text-[11px] uppercase tracking-[0.06em] text-faint">Reading</div>
+        <div className="mt-2 rounded-xl border border-line bg-panel px-4">
+          <ReadAloudSettings />
         </div>
         <div className="mt-6 font-mono text-[11px] uppercase tracking-[0.06em] text-faint">Computers</div>
         <div className="mt-2 flex flex-col">

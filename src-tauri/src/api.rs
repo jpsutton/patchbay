@@ -110,6 +110,7 @@ commands! {
     delete_model(id);
     get_preferences();
     set_preferences(prefs);
+    synthesize_speech(provider_id, base_url, model, voice, text);
     get_setting(key);
     set_setting(key, value);
     web_search_status();

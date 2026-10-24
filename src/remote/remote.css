@@ -14,7 +14,7 @@ body {
   }
 }
 
-/* The copy, edit and time row is revealed on hover on the desktop. A phone has no hover. */
+/* The copy, read aloud, edit and time row is revealed on hover on the desktop. A phone has no hover. */
 .action-row {
   opacity: 1;
 }
