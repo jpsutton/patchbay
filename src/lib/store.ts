@@ -44,8 +44,8 @@ export type Mode = "chat" | "code";
 
 export type Entry =
   /** `promptId`: names the prompt in its `userPrompt` events, so each shows once. */
-  | { kind: "user"; text: string; attachments?: Attachment[]; promptId?: string }
-  | { kind: "agent"; text: string }
+  | { kind: "user"; text: string; attachments?: Attachment[]; promptId?: string; at?: number }
+  | { kind: "agent"; text: string; at?: number }
   /** An image the agent sent in its reply (an ACP image block). */
   | { kind: "image"; data: string; mimeType: string; from?: "user" }
   | { kind: "thought"; text: string }
@@ -417,12 +417,13 @@ export function rawText(raw: unknown): string {
   return json.length > MAX_RAW ? `${json.slice(0, MAX_RAW)}\n…[${json.length - MAX_RAW} more characters]` : json;
 }
 
-function appendText(entries: Entry[], kind: "agent" | "thought" | "user", text: string): Entry[] {
+function appendText(entries: Entry[], kind: "agent" | "thought" | "user", text: string, at?: number): Entry[] {
   if (!text) return entries;
   const last = entries[entries.length - 1];
   if (last && last.kind === kind) {
     return [...entries.slice(0, -1), { ...last, text: last.text + text }];
   }
+  if ((kind === "agent" || kind === "user") && at) return [...entries, { kind, text, at }];
   return [...entries, { kind, text } as Entry];
 }
 
@@ -487,7 +488,7 @@ function reduceUpdate(s: CodeState, u: AcpUpdate, agent: AgentId | undefined): C
       if (c?.type === "image" && c.data && c.mimeType) {
         return stamp({ ...s, entries: [...s.entries, { kind: "image", data: c.data, mimeType: c.mimeType }] });
       }
-      return stamp({ ...s, entries: appendText(s.entries, "agent", textOf(c)) });
+      return stamp({ ...s, entries: appendText(s.entries, "agent", textOf(c), s.status === "ready" ? Date.now() : undefined) });
     }
     case "agent_thought_chunk":
       return stamp({
@@ -671,7 +672,11 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
       if (!e.promptId) {
         // An older host. The window that sent it already shows it, unless this is a catch-up.
         if (e.origin === useStore.getState().mesh?.nodeId && !e.replay) return s;
-        next = { ...s, busy: true, entries: [...s.entries, { kind: "user", text: e.text, attachments }] };
+        next = {
+          ...s,
+          busy: true,
+          entries: [...s.entries, { kind: "user", text: e.text, attachments, ...(e.replay || s.status !== "ready" ? {} : { at: Date.now() }) }],
+        };
         break;
       }
       // Keyed by prompt id: the sending window may already show it, and a catch-up repeats it.
@@ -689,7 +694,9 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
         next = {
           ...s,
           busy: e.delivery === "steered" ? s.busy : true,
-          entries: shown ? s.entries : [...s.entries, { kind: "user", text: e.text, attachments, promptId: pid }],
+          entries: shown
+            ? s.entries
+            : [...s.entries, { kind: "user", text: e.text, attachments, promptId: pid, ...(e.replay || s.status !== "ready" ? {} : { at: Date.now() }) }],
           queued,
         };
       }
@@ -920,7 +927,8 @@ export const useStore = create<Store>((set, get) => ({
     flushCodeEvents(id);
     set((st) => {
       const s = st.code[id] ?? emptyCode();
-      return { code: { ...st.code, [id]: { ...s, entries: [...s.entries, e] } } };
+      const entry = (e.kind === "user" || e.kind === "agent") && e.at == null ? { ...e, at: Date.now() } : e;
+      return { code: { ...st.code, [id]: { ...s, entries: [...s.entries, entry] } } };
     });
   },
   setCodeBusy: (id, busy) => {

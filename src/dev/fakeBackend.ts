@@ -1224,6 +1224,7 @@ export function install() {
         case "get_code_transcript": return db.transcripts[a.id as string] ?? null;
         case "save_code_transcript": db.transcripts[a.id as string] = a.json as string; return null;
         case "list_project_files": await sleep(80); return DEMO_FILES;
+        case "code_session_image": return "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
         case "list_mcp_servers": return db.mcp.map((m) => ({ ...m, config: { ...m.config, env: m.config.env.map((kv) => (kv.secret ? { ...kv, value: "", stored: !!kv.value } : kv)) } }));
         case "save_mcp_server": {
           const i = a.input as Omit<McpServer, "id"> & { id?: string };

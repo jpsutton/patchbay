@@ -49,6 +49,59 @@ function useImageUrl(data: string, mimeType: string): string | null {
   return url;
 }
 
+
+const loaded = new Map<string, Promise<string>>();
+
+function loadSessionImage(sessionId: string, src: string): Promise<string> {
+  const key = `${sessionId}\u0000${src}`;
+  const hit = loaded.get(key);
+  if (hit) return hit;
+  const pending = api.codeSessionImage(sessionId, src);
+  loaded.set(key, pending);
+  pending.catch(() => loaded.delete(key));
+  return pending;
+}
+
+/**
+ * A picture the reply linked by a path on the computer running the session. The phone cannot open
+ * that path, so the computer sends the bytes. One fetch per path, even while the reply is still growing.
+ */
+export function SessionImage({ sessionId, src, alt }: { sessionId: string; src: string; alt?: string }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let live = true;
+    setFailed(false);
+    setUrl(null);
+    loadSessionImage(sessionId, src).then(
+      (dataUrl) => {
+        if (live) setUrl(dataUrl);
+      },
+      () => {
+        if (live) setFailed(true);
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [sessionId, src]);
+  if (failed) return <p className="my-2 text-[14px] text-muted">{alt || "Image"}</p>;
+  if (!url) {
+    return (
+      <div className="my-3 flex h-36 max-w-full items-center justify-center rounded-lg border border-line bg-panel px-3 text-center text-[13px] text-faint">
+        {alt || "Image"}
+      </div>
+    );
+  }
+  const parsed = /^data:([^;,]+);base64,([\s\S]+)$/.exec(url);
+  if (!parsed) return <p className="my-2 text-[14px] text-muted">{alt || "Image"}</p>;
+  return (
+    <div className="my-3">
+      <AgentImage data={parsed[2]} mimeType={parsed[1]} alt={alt} />
+    </div>
+  );
+}
+
 /** An image an agent produced (an ACP image block), shown inline; a click opens it full size. */
 export function AgentImage({ data, mimeType, alt }: { data: string; mimeType: string; alt?: string }) {
   const [open, setOpen] = useState(false);

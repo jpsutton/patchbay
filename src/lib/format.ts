@@ -6,6 +6,20 @@ function startOfDay(ts: number): number {
   return d.getTime();
 }
 
+/** "just now", "12 minutes ago", "3 hours ago", "yesterday", then a calendar time. */
+export function fmtAgo(ts: number, now = Date.now()): string {
+  const sec = Math.max(0, Math.round((now - ts) / 1000));
+  if (sec < 45) return "just now";
+  const min = Math.round(sec / 60);
+  if (min < 60) return min === 1 ? "1 minute ago" : `${min} minutes ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return hr === 1 ? "1 hour ago" : `${hr} hours ago`;
+  const day = Math.round(hr / 24);
+  if (day === 1) return "yesterday";
+  if (day < 7) return `${day} days ago`;
+  return fmtTime(ts, now);
+}
+
 /** "3:42 PM" today, "Oct 3, 3:42 PM" this year, with the year otherwise. */
 export function fmtTime(ts: number, now = Date.now()): string {
   const d = new Date(ts);

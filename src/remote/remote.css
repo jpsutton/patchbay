@@ -13,3 +13,13 @@ body {
     min-width: 36px;
   }
 }
+
+/* The copy, edit and time row is revealed on hover on the desktop. A phone has no hover. */
+.action-row {
+  opacity: 1;
+}
+
+/* The attachment's remove button is the same: hover-only on the desktop. */
+.chip-remove {
+  display: flex;
+}

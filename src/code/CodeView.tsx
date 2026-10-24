@@ -27,6 +27,7 @@ import {
 } from "../lib/store";
 import { HostBadge, MoveDialog, OfflineHostBanner } from "./HostControls";
 import { Composer } from "../components/Composer";
+import { MessageTime } from "../components/MessageTime";
 import { Markdown } from "../components/Markdown";
 import { FileLinkContext } from "../components/FileLink";
 import { EditMessage } from "../components/EditMessage";
@@ -41,7 +42,7 @@ import { todoPlanOf } from "../lib/todoPlan";
 import { CopyButton, copyText } from "../components/CopyButton";
 import { ExportMenu } from "../components/ExportMenu";
 import { codeToJson, codeToMarkdown, saveExport } from "../lib/export";
-import { useViewAction } from "../lib/shortcuts";
+import { useViewAction, ViewActive } from "../lib/shortcuts";
 import { HeaderButton } from "../components/HeaderButton";
 import { useDragRegion, WindowControls } from "../components/WindowControls";
 import { isRemoteApp } from "../lib/platform";
@@ -405,11 +406,14 @@ function UserEntry({
   editing,
   setEditing,
   onEdit,
+  onReuse,
 }: {
   e: Extract<Entry, { kind: "user" }>;
   editing: boolean;
   setEditing: (on: boolean) => void;
   onEdit?: (text: string, atts: Attachment[]) => Promise<boolean>;
+  /** Phone, when this agent cannot rewind: put the prompt back in the composer. */
+  onReuse?: () => void;
 }) {
   if (editing && onEdit) {
     return (
@@ -450,30 +454,43 @@ function UserEntry({
           {e.text}
         </div>
       )}
-      <div className="flex gap-0.5 text-muted opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-        {onEdit && (
+      <div className="action-row flex gap-0.5 text-muted opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+        {(onEdit || onReuse) && (
           <button
-            className="flex h-7 w-7 items-center justify-center rounded-md hover:bg-panel-2 hover:text-fg"
-            onClick={() => setEditing(true)}
-            title="Edit"
+            className={`flex h-7 items-center justify-center rounded-md hover:bg-panel-2 hover:text-fg ${isRemoteApp() ? "gap-1 px-1.5 text-xs" : "w-7"}`}
+            onClick={() => (onEdit ? setEditing(true) : onReuse?.())}
+            title={onEdit ? "Edit and resend" : "Edit and send again"}
             aria-label="Edit message"
           >
             <PencilIcon size={14} />
+            {isRemoteApp() && "Edit"}
           </button>
         )}
         {e.text && <CopyButton text={e.text} icon={<CopyIcon size={14} />} />}
+        {isRemoteApp() && e.at != null && <MessageTime at={e.at} />}
       </div>
     </div>
   );
 }
 
-function AgentEntry({ text }: { text: string }) {
+function AgentEntry({
+  text,
+  at,
+  sessionId,
+}: {
+  text: string;
+  at?: number;
+  sessionId: string;
+}) {
   return (
     <div className="group">
-      <Markdown text={text} />
-      <div className="mt-1 flex gap-0.5 text-muted opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-        <CopyButton text={text} label="Copy Markdown" icon={<CopyIcon size={14} />} />
-      </div>
+      <Markdown text={text} sessionId={sessionId} />
+      {text.trim() && (
+        <div className="action-row mt-1 flex gap-0.5 text-muted opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+          <CopyButton text={text} label="Copy Markdown" icon={<CopyIcon size={14} />} />
+          {isRemoteApp() && at != null && <MessageTime at={at} />}
+        </div>
+      )}
     </div>
   );
 }
@@ -495,6 +512,9 @@ const EntryView = memo(function EntryView({
   canEdit,
   onEditing,
   onEdit,
+  canReuse,
+  onReuse,
+  sessionId,
 }: {
   e: Entry;
   /** The entry's index, passed back to `onEditing` and `onEdit`. */
@@ -507,6 +527,10 @@ const EntryView = memo(function EntryView({
   canEdit: boolean;
   onEditing?: (i: number | null) => void;
   onEdit?: (i: number, text: string, atts: Attachment[]) => Promise<boolean>;
+  /** Phone, when this agent cannot rewind: put this prompt back in the composer. */
+  canReuse?: boolean;
+  onReuse?: (i: number) => void;
+  sessionId: string;
 }) {
   switch (e.kind) {
     case "user":
@@ -516,10 +540,11 @@ const EntryView = memo(function EntryView({
           editing={editing}
           setEditing={(on) => onEditing?.(on ? i : null)}
           onEdit={canEdit && onEdit ? (t, a) => onEdit(i, t, a) : undefined}
+          onReuse={canReuse && onReuse ? () => onReuse(i) : undefined}
         />
       );
     case "agent":
-      return <AgentEntry text={e.text} />;
+      return <AgentEntry text={e.text} at={e.at} sessionId={sessionId} />;
     case "image":
       return e.from === "user" ? (
         <div className="flex justify-end">
@@ -808,6 +833,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const [showChanges, setShowChanges] = useState(false);
   const [termMounted, setTermMounted] = useState<Record<string, boolean>>({});
   const [editingIdx, setEditingIdx] = useState<number | null>(null);
+  /** Fills the composer after Stop when this agent cannot rewind. */
+  const [composerSeed, setComposerSeed] = useState<{ id: number; text: string; replace?: boolean } | null>(null);
   const [moving, setMoving] = useState<"move" | "takeOver" | null>(null);
   /** Forces a re-render when the post-foreground idle window expires. */
   const [, setIdleTick] = useState(0);
@@ -863,6 +890,14 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     (i: number, text: string, atts: Attachment[]) => editRef.current?.(i, text, atts) ?? Promise.resolve(false),
     [],
   );
+  // Phone, agent without rewind: put an earlier prompt back in the composer to edit and resend.
+  const onReuse = useCallback(
+    (i: number) => {
+      const en = activeId ? useStore.getState().code[activeId]?.entries[i] : undefined;
+      if (en?.kind === "user" && en.text) setComposerSeed({ id: Date.now(), text: en.text, replace: true });
+    },
+    [activeId],
+  );
 
   // The header's badge needs the count even with the panel shut, so this always runs; the key
   // keeps it from redoing the work when only text or non-diff tool output changed.
@@ -876,11 +911,61 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     changesCache.current = { key, value };
     return value;
   }, [state?.entries, state?.toolCalls, session?.cwd]);
+  const changeStats = useMemo(
+    () =>
+      changes
+        .flatMap((c) => c.parts)
+        .reduce(
+          (a, p) => {
+            const st = diffStats(p.oldText, p.newText);
+            return { add: a.add + st.add, del: a.del + st.del };
+          },
+          { add: 0, del: 0 },
+        ),
+    [changes],
+  );
+
+  const viewActive = useContext(ViewActive);
+  /** Session whose last prompt should open for editing once Stop finishes. Phone only. */
+  const amendAfterStop = useRef<string | null>(null);
+  // Broader than prompt-RPC `busy`: Claude (and similar) keep streaming after PromptDone.
+  const working = state ? codeWorking(state) : false;
+
+  useEffect(() => {
+    const pending = amendAfterStop.current;
+    if (!pending) return;
+    if (pending !== activeId || !viewActive) {
+      amendAfterStop.current = null;
+      return;
+    }
+    if (!remote || working || !activeId) return;
+    const cur = useStore.getState().code[activeId];
+    if (!cur) return;
+    let last = -1;
+    for (let i = cur.entries.length - 1; i >= 0; i--) {
+      if (cur.entries[i].kind === "user") {
+        last = i;
+        break;
+      }
+    }
+    if (last < 0) return;
+    amendAfterStop.current = null;
+    if (cur.extensions.rewind) {
+      setEditingIdx(last);
+      setTimeout(() => document.querySelector("[data-amend]")?.scrollIntoView({ block: "center" }), 30);
+      return;
+    }
+    const entry = cur.entries[last];
+    if (entry.kind === "user" && entry.text) setComposerSeed({ id: Date.now(), text: entry.text });
+  }, [remote, working, activeId, viewActive]);
 
   useViewAction((a) => {
     if (!activeId) return;
     const cur = useStore.getState().code[activeId];
-    if (a === "stop" && cur?.busy) api.codeCancel(activeId);
+    if (a === "stop" && cur?.busy) {
+      if (isRemoteApp()) amendAfterStop.current = activeId;
+      api.codeCancel(activeId);
+    }
     if (a === "copy-last") {
       const last = [...(cur?.entries ?? [])].reverse().find((x) => x.kind === "agent");
       if (last && last.kind === "agent") {
@@ -931,8 +1016,6 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   // The offline banner offers the way forward instead of a restart that can't work.
   const hostOffline = !!host && !memberOnline(mesh, host);
   const ready = status === "ready";
-  // Broader than prompt-RPC `s.busy`: Claude (and similar) keep streaming after PromptDone.
-  const working = s ? codeWorking(s) : false;
   // Cancel the running turn to send now. Not on the phone yet: its app doesn't pass it on.
   const forceSend = !!s?.extensions.forceSend && !isRemoteApp();
   // Commands the agent backgrounded: its turn is over, but they still run (and it resumes when
@@ -1046,7 +1129,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     for (const r of earlierRuns) {
       rows.push(
         runRow(r, "e", true, (e, i) => (
-          <EntryView key={i} e={e} i={i} tc={e.kind === "tool" ? calls[e.id] : undefined} cwd={session.cwd} editing={false} canEdit={false} />
+          <EntryView key={i} e={e} i={i} tc={e.kind === "tool" ? calls[e.id] : undefined} cwd={session.cwd} editing={false} canEdit={false} sessionId={session.id} />
         )),
       );
     }
@@ -1068,7 +1151,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     for (const r of historyRuns) {
       rows.push(
         runRow(r, "h", ready, (e, i) => (
-          <EntryView key={i} e={e} i={i} tc={e.kind === "tool" ? calls[e.id] : undefined} cwd={session.cwd} editing={false} canEdit={false} />
+          <EntryView key={i} e={e} i={i} tc={e.kind === "tool" ? calls[e.id] : undefined} cwd={session.cwd} editing={false} canEdit={false} sessionId={session.id} />
         )),
       );
     }
@@ -1076,6 +1159,9 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   }
   if (s && (ready || !s.history)) {
     const canEdit = ready && !working && !!s.extensions.rewind;
+    // Only the last prompt can be put back in the composer, and only when the agent can't rewind.
+    const lastUser = s.entries.findLastIndex((x) => x.kind === "user");
+    const canReuse = remote && ready && !working && !s.extensions.rewind;
     for (const r of entryRuns) {
       rows.push(
         runRow(r, "", false, (e, i) => (
@@ -1091,6 +1177,9 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             canEdit={canEdit && e.kind === "user"}
             onEditing={setEditingIdx}
             onEdit={onEdit}
+            canReuse={canReuse && i === lastUser && e.kind === "user" && !!e.text}
+            onReuse={onReuse}
+            sessionId={session.id}
           />
         )),
       );
@@ -1430,6 +1519,19 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
               </ul>
             )}
             {s?.plan && s.plan.length > 0 && <PlanPanel key={session.id} plan={s.plan} />}
+            {remote && changes.length > 0 && (
+              <button
+                type="button"
+                className="mb-2 inline-flex h-9 items-center gap-2 rounded-full border border-line px-3 text-[13px] active:bg-panel-2"
+                onClick={() => setShowChanges(true)}
+                aria-label={`Diff, ${changeStats.add} lines added, ${changeStats.del} lines removed`}
+              >
+                <span className="font-medium">Diff</span>
+                <span className="font-mono text-[12px]">
+                  <span className="text-ok">+{changeStats.add}</span> <span className="text-danger">−{changeStats.del}</span>
+                </span>
+              </button>
+            )}
             <Composer
               draftKey={`code:${session.id}`}
               busy={working}
@@ -1452,7 +1554,11 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                   if (s.entries[i].kind === "user") return setEditingIdx(i);
                 }
               }}
-              onStop={() => api.codeCancel(session.id)}
+              seed={composerSeed}
+              onStop={() => {
+                if (s?.busy && remote) amendAfterStop.current = session.id;
+                api.codeCancel(session.id);
+              }}
               onSend={send}
               onForceSend={forceSend ? (t, a, m) => send(t, a, m, true) : undefined}
               placeholder={
@@ -1553,10 +1659,15 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             />
           </div>
         </div>
-        {showChanges && (
+        {showChanges && !remote && (
           <aside className="w-[42%] min-w-80 shrink-0 border-l border-line bg-panel/50">
             <ChangesPanel changes={changes} cwd={session.cwd} onClose={() => setShowChanges(false)} />
           </aside>
+        )}
+        {showChanges && remote && (
+          <div className="fixed inset-0 z-40 flex flex-col bg-bg pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
+            <ChangesPanel changes={changes} cwd={session.cwd} onClose={() => setShowChanges(false)} />
+          </div>
         )}
       </div>
 

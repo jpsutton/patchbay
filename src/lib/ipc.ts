@@ -834,6 +834,8 @@ export const api = {
   saveCodeTranscript: (id: string, json: string) => invoke<void>("save_code_transcript", { id, json }),
   /** With `sessionId`, lists files on the node hosting that session. */
   listProjectFiles: (cwd: string, sessionId?: string) => invoke<string[]>("list_project_files", { cwd, sessionId }),
+  /** A picture the reply linked, read on the computer that holds the session. A data URL. */
+  codeSessionImage: (id: string, path: string) => invoke<string>("code_session_image", { id, path }),
 
   listMcpServers: () => invoke<McpServer[]>("list_mcp_servers"),
   saveMcpServer: (input: { id?: string; name: string; enabled: boolean; config: McpConfig }) =>
