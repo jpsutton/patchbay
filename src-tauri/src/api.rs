@@ -193,6 +193,15 @@ commands! {
     usage_report(days);
     list_dirs(path, host);
     new_session_options(host);
+    host_info(host);
+}
+
+/// The Patchbay version and operating system of this computer, or with `host` of that computer.
+async fn host_info(state: &AppState, host: Option<String>) -> CmdResult<Value> {
+    match host.filter(|h| h != state.mesh.node_id()) {
+        Some(h) => Ok(gateway::on_host(state, &serde_json::json!({ "host": h }), "host.info").await?),
+        None => Ok(gateway::host_info_local()),
+    }
 }
 
 /// Folders under `path` (default: home), for choosing a project folder without a native dialog;

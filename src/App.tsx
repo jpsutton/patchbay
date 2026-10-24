@@ -18,6 +18,7 @@ import { NewSessionDialog } from "./code/NewSessionDialog";
 import { Settings } from "./settings/Settings";
 import { CodeSidebar } from "./code/CodeSidebar";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { SessionInfoDialog } from "./code/SessionInfoDialog";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { CommandPalette } from "./components/CommandPalette";
 import { ArchivedToggle, SectionLabel, SidebarItem } from "./components/SidebarItem";
@@ -787,6 +788,7 @@ export default function App() {
       </main>
       {settingsOpen && <Settings />}
       <ConfirmDialog />
+      <SessionInfoDialog />
       <ShortcutsDialog />
       <NewSessionDialog />
       <CommandPalette />

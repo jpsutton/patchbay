@@ -694,6 +694,15 @@ export interface DirListing {
   truncated: boolean;
 }
 
+/** Which Patchbay build a computer runs (gateway.rs, `host_info_local`). */
+export interface HostInfo {
+  version: string;
+  /** Rust's `std::env::consts::OS`: "macos", "linux", "windows". */
+  os: string;
+  /** Rust's `std::env::consts::ARCH`: "aarch64", "x86_64". */
+  arch: string;
+}
+
 /** What a computer offers for a new Code session (gateway.rs, `new_session_options_local`). */
 export interface NewSessionOptions {
   agents: AgentInfo[];
@@ -920,6 +929,8 @@ export const api = {
   /** Folders under `path` (default: home) on this computer, for choosing one without a native dialog. */
   /** With `host`, the folders on that computer. */
   listDirs: (path: string | null, host?: string | null) => invoke<DirListing>("list_dirs", { path, host: host ?? null }),
+  /** The Patchbay version and OS of this computer, or with `host` of that one. */
+  hostInfo: (host?: string | null) => invoke<HostInfo | null>("host_info", { host: host ?? null }),
   /** With `host`, what that computer offers. */
   newSessionOptions: (host?: string | null) => invoke<NewSessionOptions>("new_session_options", { host: host ?? null }),
 };

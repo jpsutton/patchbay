@@ -447,6 +447,12 @@ async fn phone_starts_a_session_on_another_computer() {
     assert!(opts["agents"].as_array().unwrap().iter().any(|x| x["id"] == "patchbay"));
     assert_eq!(opts["defaultAgent"], "patchbay");
 
+    // Which build B runs, for the session info dialog.
+    let info = p.client.rpc("remote.host_info", json!({ "host": bn })).await.unwrap();
+    assert_eq!(info["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(info["os"], std::env::consts::OS);
+    assert_eq!(info["arch"], std::env::consts::ARCH);
+
     // Browsing stays inside the home folder, and lists only visible folders.
     let home = p.client.rpc("remote.list_dirs", json!({ "host": bn })).await.unwrap();
     assert_eq!(home["path"], home["home"]);
