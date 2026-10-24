@@ -125,6 +125,17 @@ On the host, every agent event goes to the local window and to every member as a
 
 A window that opens a session already running, here or elsewhere, calls `code_attach` instead of restarting the agent. The host keeps each running session's last `sessionReady`, open permission requests and latest usage, and replays them. The window shows the synced transcript cache until live events extend it.
 
+### Agent-to-agent messages
+
+Patchbay gives each running Code agent a built-in MCP tool to discover unarchived Code sessions
+and message one by session id. The source node routes `code.agent_message` to the target session's
+host, using the same direct or relayed mesh connection as other remote-control RPCs. The target
+host checks that the claimed source session belongs to the authenticated sending member, starts
+the target agent if it is idle, and queues the message behind a running turn without steering it.
+The message appears as an attributed prompt; a reply is a separate message back to the source
+session. Any admitted member can use the tool, consistent with the mesh's existing full-trust
+remote-control model.
+
 The terminal panel of a remote session opens its shell on the host (`term.open` and friends). The host keys it by requester, streams output back to that node only (`mesh://term`), and the requester queues keystrokes so they arrive in order.
 
 ### Fencing

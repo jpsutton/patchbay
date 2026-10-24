@@ -70,6 +70,17 @@ export function CommandPalette() {
       { key: "a-mcp", section: "Actions", label: "MCP servers", run: () => st.openSettingsAt("mcp") },
       { key: "a-prompts", section: "Actions", label: "Saved prompts", run: () => st.openSettingsAt("prompts") },
       { key: "a-keys", section: "Actions", label: "Keyboard shortcuts", detail: keyLabel("Mod+/"), run: () => st.setShortcutsOpen(true) },
+      {
+        key: "a-info",
+        section: "Actions",
+        label: "Code session info (IDs, agent, model)",
+        // Read at run time: this list isn't rebuilt when the open session changes.
+        run: () => {
+          const now = useStore.getState();
+          if (now.activeCodeSessionId) now.setSessionInfoId(now.activeCodeSessionId);
+          else now.setToast("Open a Code session first.");
+        },
+      },
     ].filter((a) => matchesQuery(q, a.label));
     const chats: Item[] = conversations
       .filter((c) => matchesQuery(q, c.title))

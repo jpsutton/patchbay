@@ -846,6 +846,8 @@ export function install() {
     (window as unknown as Record<string, unknown>).__fakeMissing = ["HKLM\\Software\\nulamp"];
   }
   seed("/home/demo/Projects/nulamp", "Release to staging", 5000, "pr");
+  // A second folder on the phone's laptop, so project drag has two rows to swap.
+  if (phoneApp) seed("/home/demo/Projects/patchbay", "Gatekeeper quarantine", 2000, "edit");
   seed("/home/demo/Projects/omnimark", "Interactive document controls", 3000, "branch", meshDemo ? "n-studio" : ME);
   seed("/home/demo/Work/omnimark", "Session overview", 9000, null, meshDemo ? "n-old" : ME);
   if (longTurns > 0) {
@@ -857,7 +859,9 @@ export function install() {
     harnessSessionId = db.code[db.code.length - 1].id;
   }
   if (meshDemo) {
-    meshMember();
+    // The phone already built its mesh in phoneMesh(). Rebuilding it here would
+    // name the laptop with the phone's name, so its sessions show up under the phone.
+    if (!phoneApp) meshMember();
     mesh.pending = [{ nodeId: "n-new", name: "travel-pc", code: "482 913" }];
     setTimeout(fakeRemoteStream, 2500);
   }
@@ -1235,6 +1239,7 @@ export function install() {
         case "get_code_transcript": return db.transcripts[a.id as string] ?? null;
         case "save_code_transcript": db.transcripts[a.id as string] = a.json as string; return null;
         case "list_project_files": await sleep(80); return DEMO_FILES;
+        case "code_session_image": return "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
         case "list_mcp_servers": return db.mcp.map((m) => ({ ...m, config: { ...m.config, env: m.config.env.map((kv) => (kv.secret ? { ...kv, value: "", stored: !!kv.value } : kv)) } }));
         case "save_mcp_server": {
           const i = a.input as Omit<McpServer, "id"> & { id?: string };
@@ -1309,6 +1314,7 @@ export function install() {
           return null;
         }
         case "list_agents": return FAKE_AGENTS;
+        case "host_info": return { version: "0.11.0", os: "macos", arch: "aarch64" };
         case "code_set_agent": {
           const s = db.code.find((x) => x.id === a.id)!;
           const saved = db.transcripts[s.id];

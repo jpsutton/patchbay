@@ -10,6 +10,7 @@ import { ModelPicker } from "../components/ModelPicker";
 import { ExportMenu } from "../components/ExportMenu";
 import { chatToJson, chatToMarkdown, saveExport } from "../lib/export";
 import { fmtDateTime, fmtTime } from "../lib/format";
+import { MessageTime } from "../components/MessageTime";
 import { useViewAction, ViewActive } from "../lib/shortcuts";
 import { HeaderButton } from "../components/HeaderButton";
 import { useDragRegion, WindowControls } from "../components/WindowControls";
@@ -154,20 +155,21 @@ function MessageRow({
           </div>
         )}
         <div
-          className={`flex items-center gap-0.5 text-muted transition-opacity group-hover:opacity-100 focus-within:opacity-100 ${
+          className={`action-row flex items-center gap-0.5 text-muted transition-opacity group-hover:opacity-100 focus-within:opacity-100 ${
             m.siblingIds.length > 1 ? "" : "opacity-0"
           }`}
         >
           <BranchNav m={m} onSwitch={onSwitch} />
-          <span className="mr-1">{time}</span>
+          <span className="mr-1">{isRemoteApp() ? <MessageTime at={m.createdAt} /> : time}</span>
           {onEdit && (
             <button
-              className="flex h-7 w-7 items-center justify-center rounded-md hover:bg-panel-2 hover:text-fg"
+              className={`flex h-7 items-center justify-center rounded-md hover:bg-panel-2 hover:text-fg ${isRemoteApp() ? "gap-1 px-1.5 text-xs" : "w-7"}`}
               onClick={() => setEditing(true)}
-              title="Edit"
+              title="Edit and resend"
               aria-label="Edit message"
             >
               <PencilIcon size={14} />
+              {isRemoteApp() && "Edit"}
             </button>
           )}
           {m.content && <CopyButton text={m.content} icon={<CopyIcon size={14} />} />}
@@ -237,15 +239,26 @@ function MessageRow({
             </button>
           )}
           <BranchNav m={m} onSwitch={onSwitch} />
+          {isRemoteApp() && <MessageTime at={m.createdAt} />}
           <span className="flex-1" />
-          <span className="meta flex gap-2 text-faint">
-            {fmtTime(m.createdAt)}
-            {m.usage && (
-              <span title={`${m.usage.input.toLocaleString()} input tokens, ${m.usage.output.toLocaleString()} output tokens`}>
-                · {fmtTokens(m.usage.input)} in · {fmtTokens(m.usage.output)} out
-              </span>
-            )}
-          </span>
+          {!isRemoteApp() && (
+            <span className="meta flex gap-2 text-faint">
+              {fmtTime(m.createdAt)}
+              {m.usage && (
+                <span title={`${m.usage.input.toLocaleString()} input tokens, ${m.usage.output.toLocaleString()} output tokens`}>
+                  · {fmtTokens(m.usage.input)} in · {fmtTokens(m.usage.output)} out
+                </span>
+              )}
+            </span>
+          )}
+          {isRemoteApp() && m.usage && (
+            <span
+              className="meta text-faint"
+              title={`${m.usage.input.toLocaleString()} input tokens, ${m.usage.output.toLocaleString()} output tokens`}
+            >
+              {fmtTokens(m.usage.input)} in · {fmtTokens(m.usage.output)} out
+            </span>
+          )}
         </div>
       )}
     </div>
@@ -464,6 +477,9 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
     );
   }, [activeId, running, viewActive, listenOn, setToast]);
 
+  /** Conversation whose last message should open for editing once Stop finishes. Phone only. */
+  const amendAfterStop = useRef<string | null>(null);
+
   useViewAction((a) => {
     if (a === "stop") {
       if (speakingNow()) {
@@ -472,6 +488,7 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
       }
       if (running && activeId) {
         skipListen.current = true;
+        if (isRemoteApp()) amendAfterStop.current = activeId;
         api.cancelChat(activeId);
       }
     }
@@ -482,6 +499,20 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
       }
     }
   });
+
+  useEffect(() => {
+    if (!amendAfterStop.current) return;
+    if (amendAfterStop.current !== activeId || !viewActive) {
+      amendAfterStop.current = null;
+      return;
+    }
+    if (running) return;
+    const last = [...messages].reverse().find((m) => m.role === "user");
+    if (!last) return;
+    amendAfterStop.current = null;
+    setEditingId(last.id);
+    setTimeout(() => document.querySelector("[data-amend]")?.scrollIntoView({ block: "center" }), 30);
+  }, [running, messages, activeId, viewActive]);
 
   const editLast = () => {
     if (running) return;
@@ -591,6 +622,7 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
           onEditLast={editLast}
           onStop={() => {
             if (running && activeId) skipListen.current = true;
+            if (running && activeId && isRemoteApp()) amendAfterStop.current = activeId;
             if (activeId) api.cancelChat(activeId);
           }}
           onSend={(t, a) => send(t, a)}

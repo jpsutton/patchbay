@@ -51,6 +51,18 @@ export const MenuIcon = icon(
   </>,
 );
 
+/** A session list: three rows with bullets. */
+export const ListIcon = icon(
+  <>
+    <path d="M8 6h13" />
+    <path d="M8 12h13" />
+    <path d="M8 18h13" />
+    <path d="M3 6h.01" />
+    <path d="M3 12h.01" />
+    <path d="M3 18h.01" />
+  </>,
+);
+
 export const PanelLeftIcon = icon(
   <>
     <rect x="3" y="3" width="18" height="18" rx="2" />
@@ -356,6 +368,14 @@ export const CopyIcon = icon(
   <>
     <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
     <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+  </>,
+);
+
+export const InfoIcon = icon(
+  <>
+    <circle cx="12" cy="12" r="10" />
+    <path d="M12 16v-4" />
+    <path d="M12 8h.01" />
   </>,
 );
 

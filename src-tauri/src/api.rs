@@ -160,6 +160,7 @@ commands! {
     wire_log_clear();
     wire_log_save();
     code_permission_respond(request_id, option_id, id);
+    code_session_image(id, path);
     code_move(id, target, cwd);
     code_take_over(id, cwd);
     code_checkpoints();
@@ -194,6 +195,15 @@ commands! {
     usage_report(days);
     list_dirs(path, host);
     new_session_options(host);
+    host_info(host);
+}
+
+/// The Patchbay version and operating system of this computer, or with `host` of that computer.
+async fn host_info(state: &AppState, host: Option<String>) -> CmdResult<Value> {
+    match host.filter(|h| h != state.mesh.node_id()) {
+        Some(h) => Ok(gateway::on_host(state, &serde_json::json!({ "host": h }), "host.info").await?),
+        None => Ok(gateway::host_info_local()),
+    }
 }
 
 /// Folders under `path` (default: home), for choosing a project folder without a native dialog;
