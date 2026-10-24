@@ -340,7 +340,23 @@ class Handler(BaseHTTPRequestHandler):
                                           "content": [], "stop_reason": None, "stop_sequence": None,
                                           "usage": {"input_tokens": 42, "output_tokens": 0}}})
         ev("content_block_start", {"index": 0, "content_block": {"type": "text", "text": ""}})
-        if plan[0] == "text":
+        whole = json.dumps(body)
+        if "!cutcall" in text and not after_tool:
+            # The output token limit lands mid tool call: its input JSON never closes.
+            ev("content_block_stop", {"index": 0})
+            ev("content_block_start", {"index": 1, "content_block": {"type": "tool_use", "id": f"toolu_cut_{int(time.time()*1000)}", "name": "Write", "input": {}}})
+            ev("content_block_delta", {"index": 1, "delta": {"type": "input_json_delta", "partial_json": '{"file_path": "cut-off.txt"'}})
+            ev("content_block_stop", {"index": 1})
+            plan, stop = None, "max_tokens"
+        elif "!cutalways" in whole or "!cutreply" in text:
+            # The limit lands mid-sentence. `!cutreply` does it once (the continue nudge that
+            # follows is a new trailing message); `!cutalways` does it on every request.
+            ev("content_block_delta", {"index": 0, "delta": {"type": "text_delta", "text": "Partway through a long"}})
+            ev("content_block_stop", {"index": 0})
+            plan, stop = None, "max_tokens"
+        if plan is None:
+            pass
+        elif plan[0] == "text":
             for piece in re.findall(r"\S+\s*|\s+", plan[1]):
                 ev("content_block_delta", {"index": 0, "delta": {"type": "text_delta", "text": piece}})
                 time.sleep(0.01)

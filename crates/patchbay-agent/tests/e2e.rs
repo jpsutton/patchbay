@@ -310,6 +310,47 @@ async fn tells_the_model_about_files_changed_behind_its_back() {
 
 #[tokio::test]
 #[ignore]
+async fn a_tool_call_cut_off_by_the_output_limit_does_not_run() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::Anthropic, cwd.join("data"));
+    let sid = open(&mut acp, &cwd).await;
+    let r = prompt(&mut acp, &sid, "write it !cutcall").await;
+    // The model hears why the call failed and the turn carries on.
+    assert_eq!(r["stopReason"], "end_turn");
+    assert!(acp.asked.is_empty(), "a cut-off call must not ask for permission");
+    assert!(!cwd.join("cut-off.txt").exists());
+    let failed = acp.updates.iter().find(|u| u["sessionUpdate"] == "tool_call_update" && u["status"] == "failed").expect("failed card");
+    assert!(failed["rawOutput"].as_str().unwrap().contains("output token limit"), "{failed}");
+    assert!(acp.text_of("agent_message_chunk").contains("Tool finished"), "{}", acp.text_of("agent_message_chunk"));
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_reply_cut_off_by_the_output_limit_is_continued_a_few_times() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::Anthropic, cwd.join("data"));
+    let sid = open(&mut acp, &cwd).await;
+
+    // Cut off once: the agent asks for the rest and the turn ends normally.
+    let r = prompt(&mut acp, &sid, "explain !cutreply").await;
+    assert_eq!(r["stopReason"], "end_turn");
+    assert!(acp.text_of("agent_thought_chunk").contains("continuing (1/3)"));
+    assert!(acp.text_of("agent_message_chunk").contains("Echo:"), "{}", acp.text_of("agent_message_chunk"));
+    let store = std::fs::read_to_string(cwd.join("data/agent/sessions").join(format!("{sid}.jsonl"))).unwrap();
+    assert!(store.contains("reached the output token limit and was cut off"), "{store}");
+
+    // Cut off every time: it gives up after three tries and says why.
+    acp.updates.clear();
+    let r = prompt(&mut acp, &sid, "explain !cutalways").await;
+    assert_eq!(r["stopReason"], "max_tokens");
+    let thoughts = acp.text_of("agent_thought_chunk");
+    assert!(thoughts.contains("continuing (3/3)") && !thoughts.contains("(4/3)"), "{thoughts}");
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
 async fn asks_the_user_a_question() {
     let cwd = workdir();
     let mut acp = Acp::start(WireFormat::Responses, cwd.join("data"));
