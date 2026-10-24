@@ -45,11 +45,14 @@ const labelCls = "px-4 pb-1.5 pt-5 font-mono text-[11px] uppercase tracking-[0.0
 export function NewSessionSheet({
   members,
   gateway,
+  initial,
   onClose,
   onCreated,
 }: {
   members: MeshMember[];
   gateway: string | null;
+  /** Open already pointed at this computer and folder. */
+  initial?: { host: string; cwd: string } | null;
   onClose: () => void;
   onCreated: (id: string) => void;
 }) {
@@ -57,7 +60,9 @@ export function NewSessionSheet({
   const computers = members.filter(
     (m) => m.role !== "remote" && (m.nodeId === gateway || m.state === "direct" || m.state === "relay"),
   );
-  const [host, setHost] = useState<string | null>(gateway ?? computers[0]?.nodeId ?? null);
+  const initialHost = initial?.host ?? null;
+  const initialCwd = initial?.cwd ?? null;
+  const [host, setHost] = useState<string | null>(initialHost ?? gateway ?? computers[0]?.nodeId ?? null);
   const [opts, setOpts] = useState<Options | null>(null);
   const [agent, setAgent] = useState<AgentId | null>(null);
   const [folder, setFolder] = useState<string | null>(null);
@@ -78,14 +83,14 @@ export function NewSessionSheet({
         setOpts(o);
         const usable = o.agents.filter((a) => a.available);
         setAgent(usable.some((a) => a.id === o.defaultAgent) ? o.defaultAgent : (usable[0]?.id ?? null));
-        setFolder(o.recent[0] ?? null);
+        setFolder(initialCwd && host === initialHost ? initialCwd : (o.recent[0] ?? null));
       },
       (e) => live && setErr(errorText(e)),
     );
     return () => {
       live = false;
     };
-  }, [host]);
+  }, [host, initialHost, initialCwd]);
 
   const open = async (path: string | null) => {
     if (!host) return;

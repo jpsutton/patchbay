@@ -51,6 +51,18 @@ export const MenuIcon = icon(
   </>,
 );
 
+/** A session list: three rows with bullets. */
+export const ListIcon = icon(
+  <>
+    <path d="M8 6h13" />
+    <path d="M8 12h13" />
+    <path d="M8 18h13" />
+    <path d="M3 6h.01" />
+    <path d="M3 12h.01" />
+    <path d="M3 18h.01" />
+  </>,
+);
+
 export const PanelLeftIcon = icon(
   <>
     <rect x="3" y="3" width="18" height="18" rx="2" />
