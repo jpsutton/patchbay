@@ -647,12 +647,17 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
     case "permissionResolved":
       next = { ...s, permissions: s.permissions.filter((p) => p.requestId !== e.requestId) };
       break;
-    case "promptDone":
+    case "promptDone": {
+      const note =
+        e.stopReason === "cancelled"
+          ? "Cancelled"
+          : e.stopReason === "max_tokens"
+            ? "Stopped: the reply hit the output token limit. Raise Max output tokens in the model's settings, or ask the agent to continue."
+            : null;
       next = {
         ...s,
         busy: false,
-        entries:
-          e.stopReason === "cancelled" ? [...s.entries, { kind: "info", text: "Cancelled" }] : s.entries,
+        entries: note ? [...s.entries, { kind: "info", text: note }] : s.entries,
       };
       saveTranscript(id, next);
       {
@@ -661,6 +666,7 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
       }
       if (e.stopReason !== "cancelled") notifyCode(id, "finished");
       break;
+    }
     case "error":
       next = { ...s, entries: [...s.entries, { kind: "error", text: e.message }] };
       break;

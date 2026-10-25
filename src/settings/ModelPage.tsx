@@ -273,7 +273,7 @@ export function ModelPage({
       </Section>
 
       <Section title="Generation" hint="Leave blank to use the provider's default.">
-        <Field label="Max output tokens" hint={provider?.kind === "anthropic" ? "Chat defaults to 8192" : undefined}>
+        <Field label="Max output tokens" hint={provider?.kind === "anthropic" ? "Chat defaults to 8192, or 32000 and up for current Claude models" : undefined}>
           {text("maxOutputTokens", "provider default")}
         </Field>
         <Field label="Temperature" hint="0 – 2">
