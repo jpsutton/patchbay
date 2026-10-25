@@ -3,7 +3,7 @@ import { Choice, Deferred, Row } from "./PreferencesPage";
 import { Toggle } from "../components/Toggle";
 import { input } from "./ProviderPage";
 import { primeAudio, speakText, systemVoices, type SpeechVoice } from "../lib/speech";
-import { isRemoteApp } from "../lib/platform";
+import { isAndroidApp, isRemoteApp } from "../lib/platform";
 import { useStore } from "../lib/store";
 
 /**
@@ -16,6 +16,7 @@ export function ReadAloudSettings() {
   const models = useStore((s) => s.models);
   const update = useStore((s) => s.updatePrefs);
   const setToast = useStore((s) => s.setToast);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
   const [voices, setVoices] = useState<SpeechVoice[] | null>(null);
   const set = async <K extends keyof typeof prefs>(k: K, v: (typeof prefs)[K]) => {
     const err = await update({ [k]: v });
@@ -24,8 +25,14 @@ export function ReadAloudSettings() {
 
   useEffect(() => {
     let gone = false;
+    setVoiceError(null);
     systemVoices().then((v) => {
       if (!gone) setVoices(v);
+    }).catch((error) => {
+      if (!gone) {
+        setVoices([]);
+        setVoiceError(String(error));
+      }
     });
     return () => {
       gone = true;
@@ -40,7 +47,9 @@ export function ReadAloudSettings() {
       <Row
         label="Reading voice"
         hint={
-          isRemoteApp()
+          isAndroidApp()
+            ? "Automatic uses Android’s text-to-speech engine. Manage its default voice and downloaded voice data in Android Settings. Network voices may send text to the engine’s provider."
+            : isRemoteApp()
             ? "Speaks a reply when you press Read aloud. Automatic uses this phone's voice when it has one, and a built-in voice otherwise."
             : "Speaks a reply when you press Read aloud. Automatic uses this computer's voice where it has one, and a built-in voice otherwise. Linux uses the built-in voice unless you pick another engine."
         }
@@ -56,6 +65,7 @@ export function ReadAloudSettings() {
           ]}
         />
       </Row>
+      {voiceError && <p role="alert" className="py-2 text-xs text-muted">{voiceError}</p>}
       {prefs.readAloudEngine !== "server" && voices && voices.length > 1 && (
         <Row label="Voice" hint="Voices installed on this device.">
           <select

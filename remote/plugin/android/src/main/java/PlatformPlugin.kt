@@ -14,6 +14,7 @@ import app.tauri.annotation.Permission
 import app.tauri.annotation.PermissionCallback
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
+import app.tauri.plugin.JSArray
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import java.security.KeyStore
@@ -25,6 +26,13 @@ import javax.crypto.spec.GCMParameterSpec
 @InvokeArg
 class DataArgs {
     lateinit var data: String
+}
+
+@InvokeArg
+class SpeechArgs {
+    lateinit var text: String
+    var voice: String = ""
+    var rate: String = "normal"
 }
 
 @InvokeArg
@@ -43,6 +51,43 @@ private const val LOCAL_NETWORK_SDK = 37
 /** Keystore sealing, the keep-alive service and the local network permission, called from the app's Rust code. */
 @TauriPlugin(permissions = [Permission(strings = [ACCESS_LOCAL_NETWORK], alias = "localNetwork")])
 class PlatformPlugin(private val activity: Activity) : Plugin(activity) {
+    private val speech = AndroidSpeech(activity.applicationContext)
+
+    @Command
+    fun listSpeechVoices(invoke: Invoke) {
+        speech.voices { result ->
+            result.fold(
+                onSuccess = { voices ->
+                    val list = JSArray()
+                    voices.forEach { list.put(JSObject().put("id", it.id).put("name", it.name)) }
+                    invoke.resolve(JSObject().put("voices", list))
+                },
+                onFailure = { invoke.reject(it.message ?: "Could not load Android voices") }
+            )
+        }
+    }
+
+    @Command
+    fun speak(invoke: Invoke) {
+        val args = invoke.parseArgs(SpeechArgs::class.java)
+        speech.speak(args.text, args.voice, args.rate) { result ->
+            result.fold(
+                onSuccess = { invoke.resolve() },
+                onFailure = { invoke.reject(it.message ?: "Android speech failed") }
+            )
+        }
+    }
+
+    @Command
+    fun stopSpeech(invoke: Invoke) {
+        speech.stop { invoke.resolve() }
+    }
+
+    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+    override fun onDestroy() {
+        speech.destroy()
+    }
+
 
     /** An AES key that never leaves the Keystore, created on first use. */
     private fun key(): SecretKey {

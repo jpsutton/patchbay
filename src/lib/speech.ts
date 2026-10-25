@@ -1,7 +1,7 @@
 /**
  * One Read aloud queue for every surface.
  *
- * Automatic picks a voice that exists here: the Mac's `say`, the browser or Android
+ * Automatic picks a voice that exists here: the Mac's `say`, Android’s native TTS, the browser’s
  * `speechSynthesis` when it lists voices, and the built-in voice on Linux (Ubuntu's
  * WebKit build has speech synthesis turned off) and anywhere else with no system voice.
  * A speech server is explicit. Its clip is fetched where the API key lives and played
@@ -9,7 +9,7 @@
  */
 
 import { api, type Preferences, type SpeechAudio } from "./ipc";
-import { isDesktopApp, isRemoteApp } from "./platform";
+import { isAndroidApp, isDesktopApp, isRemoteApp } from "./platform";
 import { isMac } from "./shortcuts";
 import { useStore } from "./store";
 import { SAMPLE_RATE, renderSpeech, type SpeechRate } from "./builtinVoice";
@@ -63,6 +63,7 @@ function context(): AudioContext {
 }
 
 export async function systemVoices(): Promise<SpeechVoice[]> {
+  if (isAndroidApp()) return loadNativeVoices();
   // The Mac app speaks with `say`. Its WebKit voice list is a different engine.
   if (isDesktopApp() && isMac) {
     const native = await loadNativeVoices();
@@ -90,12 +91,15 @@ function webVoices(): Promise<SpeechVoice[]> {
 }
 
 async function loadNativeVoices(): Promise<SpeechVoice[]> {
-  if (nativeVoices) return nativeVoices;
-  if (!isDesktopApp()) return [];
+  if (nativeVoices && !isAndroidApp()) return nativeVoices;
+  if (!isDesktopApp() && !isAndroidApp()) return [];
   try {
     const list = await api.listNativeVoices();
+    if (isAndroidApp() && list.length === 0) throw new Error("No Android voices are installed. Download voice data in Android text-to-speech settings.");
     nativeVoices = list.map((v) => ({ id: v.id, name: v.name, source: "native" as const }));
-  } catch {
+  } catch (error) {
+    // Android must report engine/data failures instead of silently becoming robotic.
+    if (isAndroidApp()) throw error;
     nativeVoices = [];
   }
   return nativeVoices;
@@ -125,7 +129,7 @@ export function stopSpeech() {
     URL.revokeObjectURL(audioUrl);
     audioUrl = null;
   }
-  if (isDesktopApp()) void api.stopNative().catch(() => {});
+  if (isDesktopApp() || isAndroidApp()) void api.stopNative().catch(() => {});
 }
 
 /** Pieces of speech, in order. Each engine pulls the next one when it needs it. */
@@ -187,7 +191,7 @@ function speechFeed(markdown: string, prefs: Preferences, max: number, token: nu
 
 /** Resolve the voice and get the reply's feed going. The returned function plays it. */
 async function prepareSpeech(markdown: string, prefs: Preferences, token: number): Promise<(() => Promise<void>) | null> {
-  const voices = await systemVoices();
+  const voices = prefs.readAloudEngine === "builtin" || prefs.readAloudEngine === "server" ? [] : await systemVoices();
   if (token !== generation) return null;
   const engine = resolvedEngine(prefs, voices);
   if (engine === "server") {
@@ -279,7 +283,7 @@ function playSamples(samples: Float32Array, token: number): Promise<void> {
 
 async function speakSystem(feed: Feed, prefs: Preferences, voices: SpeechVoice[], token: number) {
   const native = voices.some((v) => v.source === "native");
-  if (native && isDesktopApp()) {
+  if (native && (isDesktopApp() || isAndroidApp())) {
     for await (const chunk of feed) {
       if (token !== generation) return;
       await api.speakNative(chunk, prefs.readAloudVoice, prefs.readAloudRate);
@@ -294,7 +298,7 @@ async function speakSystem(feed: Feed, prefs: Preferences, voices: SpeechVoice[]
     return;
   }
   if (prefs.readAloudEngine === "system") {
-    throw new Error("No system voice on this computer. Choose Built-in in Settings.");
+    throw new Error("No system voice on this device. Check its text-to-speech settings.");
   }
   await speakBuiltin(feed, prefs.readAloudRate, token);
 }
