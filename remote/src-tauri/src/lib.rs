@@ -710,6 +710,14 @@ async fn list_agents(r: Shared<'_>, host: Option<String>) -> CmdResult<Value> {
     Ok(options["agents"].clone())
 }
 
+/// The Patchbay version and OS of `host`, the computer running a session. An older host doesn't
+/// answer, and the caller leaves the row out.
+#[tauri::command]
+async fn host_info(r: Shared<'_>, host: Option<String>) -> CmdResult<Value> {
+    let Some(host) = host else { return Ok(Value::Null) };
+    Ok(r.client.rpc("remote.host_info", json!({ "host": host })).await?)
+}
+
 #[tauri::command]
 async fn get_code_transcript(r: Shared<'_>, id: String) -> CmdResult<Value> {
     Ok(r.client.rpc("remote.transcript", json!({ "id": id })).await?)
@@ -844,6 +852,11 @@ async fn code_permission_respond(
 #[tauri::command]
 async fn code_usage(r: Shared<'_>, id: String) -> CmdResult<Value> {
     Ok(r.client.rpc("remote.usage", json!({ "id": id })).await?)
+}
+
+#[tauri::command]
+async fn code_session_image(r: Shared<'_>, id: String, path: String) -> CmdResult<Value> {
+    r.code("code.image", json!({ "id": id, "path": path })).await
 }
 
 #[tauri::command]
@@ -990,6 +1003,7 @@ pub fn run() {
             update_code_session,
             code_auto_title,
             list_agents,
+            host_info,
             get_code_transcript,
             save_code_transcript,
             code_checkpoints,
@@ -1009,6 +1023,7 @@ pub fn run() {
             code_permission_respond,
             code_usage,
             list_project_files,
+            code_session_image,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Patchbay Remote");

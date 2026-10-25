@@ -47,9 +47,10 @@ curl -fL --progress-bar -o "$work/$dmg" "$base/$dmg"
 mkdir "$mnt"
 # The .dmg carries the Apache-2.0 license as a license agreement, which hdiutil pages
 # through less and then asks to accept on stdin. Under curl | bash that stdin is the
-# rest of this script, so answer it here and skip the pager.
-PAGER="cat" hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mnt" "$work/$dmg" \
-  <<<y >/dev/null
+# rest of this script, so answer it here and skip the pager. No -quiet: it closes stdout,
+# so printing the agreement fails and the attach exits 1 with nothing on stderr.
+PAGER="cat" hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$work/$dmg" \
+  <<<y >/dev/null || die "could not mount $dmg"
 [[ -d $mnt/Patchbay.app ]] || die "Patchbay.app not found in $dmg"
 
 if pgrep -xq Patchbay; then

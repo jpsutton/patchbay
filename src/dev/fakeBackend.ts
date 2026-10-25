@@ -48,6 +48,16 @@ const fakeAgent = (id: AgentId, label: string, program: string | null, extra: Pa
 /** Sessions whose fake agent was started (code_start) and still runs. */
 const fakeRunning = new Set<string>();
 
+/** Sent when a chat message contains "wide table": many columns of prose, to check table layout. */
+const WIDE_TABLE = [
+  "Findings:",
+  "",
+  "| # | Check | Verdict | Fix on main | Catch |",
+  "| --- | --- | --- | --- | --- |",
+  "| 1 | Backups geo-redundant | Code, destructive | `modules/app-postgres/main.tf:22` hardcodes `false`. Add a variable and set it per caller. | ForceNew, so the server is recreated. Needs dump/restore and a manual Entra role re-map. Combine with #2. |",
+  "| 2 | DBs in cluster region | Code, blocked | `*_postgres_location` in `prod.tfvars:33,42,79,100` | Rebuild. The tfvars comment says eastus is restricted for this subscription. No sign of a lifted restriction. Needs a support ticket. |",
+].join("\n");
+
 const FAKE_AGENTS: AgentInfo[] = [
   fakeAgent("patchbay", "Patchbay", "/opt/patchbay", { source: "builtin" }),
   fakeAgent("grok", "Grok Build", "/usr/local/bin/grok", { source: "path" }),
@@ -423,7 +433,7 @@ async function fakeChat(a: Record<string, unknown>, regenerate?: string) {
     send<ChatEvent>(ch, { type: "error", message: asst.error });
     return;
   }
-  const reply = [
+  const reply = text.includes("wide table") ? WIDE_TABLE : [
     `**Echo:** ${text || "(no text)"}`,
     "",
     `- attachments: ${atts.map((x) => `${x.name} (${x.kind})`).join(", ") || "none"}`,
@@ -852,6 +862,8 @@ export function install() {
     (window as unknown as Record<string, unknown>).__fakeMissing = ["HKLM\\Software\\nulamp"];
   }
   seed("/home/demo/Projects/nulamp", "Release to staging", 5000, "pr");
+  // A second folder on the phone's laptop, so project drag has two rows to swap.
+  if (phoneApp) seed("/home/demo/Projects/patchbay", "Gatekeeper quarantine", 2000, "edit");
   seed("/home/demo/Projects/omnimark", "Interactive document controls", 3000, "branch", meshDemo ? "n-studio" : ME);
   seed("/home/demo/Work/omnimark", "Session overview", 9000, null, meshDemo ? "n-old" : ME);
   if (longTurns > 0) {
@@ -863,7 +875,9 @@ export function install() {
     harnessSessionId = db.code[db.code.length - 1].id;
   }
   if (meshDemo) {
-    meshMember();
+    // The phone already built its mesh in phoneMesh(). Rebuilding it here would
+    // name the laptop with the phone's name, so its sessions show up under the phone.
+    if (!phoneApp) meshMember();
     mesh.pending = [{ nodeId: "n-new", name: "travel-pc", code: "482 913" }];
     setTimeout(fakeRemoteStream, 2500);
   }
@@ -935,13 +949,28 @@ export function install() {
         case "delete_model": db.models = db.models.filter((m) => m.id !== a.id); return null;
         case "get_preferences": return JSON.parse(db.settings.preferences ?? "{}");
         case "set_preferences": {
-          const p = a.prefs as { terminalShell?: string; autoCompactPercent?: number | null; usageLimit?: { percent: number } };
+          const p = a.prefs as {
+            terminalShell?: string;
+            autoCompactPercent?: number | null;
+            usageLimit?: { percent: number };
+            readAloudEngine?: string;
+            readAloudRate?: string;
+            readAloudServerUrl?: string;
+          };
           if (p.terminalShell && !p.terminalShell.startsWith("/")) throw `terminal shell ${p.terminalShell} does not exist`;
           if (p.autoCompactPercent != null && (p.autoCompactPercent < 10 || p.autoCompactPercent > 99)) throw "auto-compact threshold must be between 10 and 99%";
           if (p.usageLimit && (p.usageLimit.percent < 1 || p.usageLimit.percent > 100)) throw "usage limit must be between 1 and 100%";
+          if (p.readAloudEngine && !["auto", "system", "builtin", "server"].includes(p.readAloudEngine)) throw "read aloud engine must be one of auto, system, builtin, server";
+          if (p.readAloudRate && !["slower", "normal", "faster"].includes(p.readAloudRate)) throw "read aloud speed must be one of slower, normal, faster";
+          const speechUrl = p.readAloudServerUrl?.trim() ?? "";
+          if (speechUrl && !speechUrl.startsWith("http://") && !speechUrl.startsWith("https://")) throw "speech server URL must be an http or https URL";
           db.settings.preferences = JSON.stringify(a.prefs);
           return null;
         }
+        case "list_native_voices": return [];
+        case "speak_native": return null;
+        case "stop_native": return null;
+        case "synthesize_speech": throw "pnpm dev has no speech server. Use System or Built-in, or run the app.";
         case "claude_overview": {
           const cfg = JSON.parse(db.settings.preferences ?? "{}").claudeConfig ?? {};
           const off = (list: string[] | undefined, x: string) => (list ?? []).includes(x);
@@ -1264,6 +1293,7 @@ export function install() {
         case "get_code_transcript": return db.transcripts[a.id as string] ?? null;
         case "save_code_transcript": db.transcripts[a.id as string] = a.json as string; return null;
         case "list_project_files": await sleep(80); return DEMO_FILES;
+        case "code_session_image": return "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
         case "list_mcp_servers": return db.mcp.map((m) => ({ ...m, config: { ...m.config, env: m.config.env.map((kv) => (kv.secret ? { ...kv, value: "", stored: !!kv.value } : kv)) } }));
         case "save_mcp_server": {
           const i = a.input as Omit<McpServer, "id"> & { id?: string };
@@ -1338,6 +1368,7 @@ export function install() {
           return null;
         }
         case "list_agents": return FAKE_AGENTS;
+        case "host_info": return { version: "0.11.0", os: "macos", arch: "aarch64" };
         case "code_set_agent": {
           const s = db.code.find((x) => x.id === a.id)!;
           const saved = db.transcripts[s.id];
@@ -1364,14 +1395,15 @@ export function install() {
         case "code_rewind": await sleep(150); return null;
         case "code_usage": return { totals: { ...fakeUsage }, contextTokens: null, contextWindow: 128000, autoCompactPercent: 85 };
         case "plan_limits": {
-          // `?plan=none` before any report; `?plan=over` past the limit and on extra usage.
+          // `?plan=none` before any report; `?plan=over` past the limit and on extra usage; `?plan=slow` a light burn.
           const plan = new URLSearchParams(location.search).get("plan");
           if (plan === "none") return null;
           const now = Math.floor(Date.now() / 1000);
           const over = plan === "over";
+          const slow = plan === "slow";
           return {
-            fiveHour: { utilization: over ? 1 : 0.82, resetsAt: now + 72 * 60 },
-            sevenDay: { utilization: over ? 0.96 : 0.41, resetsAt: now + 3 * 86400 + 7200 },
+            fiveHour: { utilization: over ? 1 : slow ? 0.12 : 0.82, resetsAt: now + 72 * 60 },
+            sevenDay: { utilization: over ? 0.96 : slow ? 0.1 : 0.41, resetsAt: now + 3 * 86400 + 7200 },
             overageUntil: over ? now + 72 * 60 : null,
             observedAt: now - 240,
           };

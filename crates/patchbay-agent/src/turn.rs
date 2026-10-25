@@ -18,6 +18,20 @@ use crate::tools::{Registry, Tool, ToolCtx, ToolOutput, clip_middle};
 const MAX_RESULT_CHARS: usize = 100_000;
 /// Longest tool result text shown on the card.
 const MAX_CARD_CHARS: usize = 20_000;
+/// Replies in a row cut off by the output token limit that a turn picks up again before it stops.
+pub(crate) const MAX_CUT_OFF_CONTINUES: usize = 3;
+
+/// The call a reply was still writing when it hit the output token limit. Its arguments never
+/// finished: they are cut-off JSON (kept as a string) or nothing at all. Running it would only
+/// fail on missing fields, and the model would not learn why.
+pub(crate) fn cut_off_call(calls: &[ToolCall], stop: &StopReason) -> Option<usize> {
+    if *stop != StopReason::MaxTokens {
+        return None;
+    }
+    let last = calls.len().checked_sub(1)?;
+    let complete = calls[last].arguments.as_object().is_some_and(|o| !o.is_empty());
+    (!complete).then_some(last)
+}
 
 pub struct TurnResult {
     pub stop_reason: &'static str,
@@ -211,6 +225,8 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
     let mut totals = Totals::default();
     // Times a Stop hook kept this turn going; capped so a hook can't loop forever.
     let mut stop_rounds = 0;
+    // Replies in a row cut off by the output token limit.
+    let mut cut_offs = 0;
     let max_steps = session.host.settings().limits.max_steps.max(1);
     'steps: for step in 0..max_steps {
         if cancel.is_cancelled() {
@@ -313,12 +329,26 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
             }
             session.update(update);
         }
+        let cut = response.stop == StopReason::MaxTokens;
+        cut_offs = if cut { cut_offs + 1 } else { 0 };
         let calls: Vec<ToolCall> = response.message.tool_calls().cloned().collect();
+        let cut_off = cut_off_call(&calls, &response.stop);
         if !response.message.parts.is_empty() {
             session.store.append(&Entry::Msg { m: response.message.clone() });
             session.state.lock().await.messages.push(response.message);
         }
         if calls.is_empty() {
+            // The reply ran out of room mid-thought or mid-sentence: ask for the rest, a few times
+            // at most.
+            if cut && cut_offs <= MAX_CUT_OFF_CONTINUES {
+                session.text_chunk(
+                    "agent_thought_chunk",
+                    &format!("\nHit the output token limit; continuing ({cut_offs}/{MAX_CUT_OFF_CONTINUES})\n"),
+                );
+                let note = session.prompts().msg("cut_off_reply", &[]);
+                push_user(&session, vec![Part::Text(prompt::reminder(&note))]).await;
+                continue 'steps;
+            }
             let stop_reason = match response.stop {
                 StopReason::MaxTokens => "max_tokens",
                 StopReason::Refusal => "refusal",
@@ -370,7 +400,7 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
             return Ok(TurnResult { stop_reason, usage: totals });
         }
 
-        let results = execute(&session, &registry, calls, &cancel, "").await;
+        let results = execute(&session, &registry, calls, cut_off, &cancel, "").await;
         let mut parts: Vec<Part> = results.into_iter().map(Part::ToolResult).collect();
         if let Some(r) = reminders(&session, &model_name).await {
             parts.push(r);
@@ -426,11 +456,13 @@ fn card(tool: Option<&Arc<dyn Tool>>, call: &ToolCall, session: &Session) -> Val
     })
 }
 
-/// Run a step's tool calls. `title_prefix` marks calls a subagent makes.
+/// Run a step's tool calls. `cut_off` is the call the output token limit cut short (see
+/// [`cut_off_call`]); it fails without running. `title_prefix` marks calls a subagent makes.
 pub(crate) async fn execute(
     session: &Arc<Session>,
     registry: &Registry,
     calls: Vec<ToolCall>,
+    cut_off: Option<usize>,
     cancel: &CancellationToken,
     title_prefix: &str,
 ) -> Vec<ToolResult> {
@@ -467,7 +499,7 @@ pub(crate) async fn execute(
             }
         }
         let batch = futures::future::join_all((i..j).map(|k| {
-            run_call(session.clone(), tools[k].clone(), calls[k].clone(), cards[k].clone(), mode, cancel.clone())
+            run_call(session.clone(), tools[k].clone(), calls[k].clone(), cards[k].clone(), cut_off == Some(k), mode, cancel.clone())
         }))
         .await;
         results.extend(batch);
@@ -542,6 +574,7 @@ async fn run_call(
     tool: Option<Arc<dyn Tool>>,
     call: ToolCall,
     card: Value,
+    cut_off: bool,
     mode: Mode,
     cancel: CancellationToken,
 ) -> ToolResult {
@@ -549,6 +582,9 @@ async fn run_call(
         finish(session, &card, "failed", text_content(&text), json!(text), None);
         ToolResult::text(&call, text, true)
     };
+    if cut_off {
+        return fail(&session, session.prompts().msg("cut_off_call", &[("name", &call.name)]));
+    }
     let Some(tool) = tool else {
         return fail(&session, session.prompts().msg("unknown_tool", &[("name", &call.name)]));
     };
@@ -625,6 +661,20 @@ async fn run_call(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_call_the_limit_cut_short_is_held_back() {
+        let call = |args: Value| ToolCall { id: "c".into(), name: "Write".into(), arguments: args, signature: None };
+        let whole = call(json!({"file_path": "a", "content": "b"}));
+        let half = call(json!(r#"{"file_path": "a""#));
+        let none = call(json!({}));
+        assert_eq!(cut_off_call(&[whole.clone(), half.clone()], &StopReason::MaxTokens), Some(1));
+        assert_eq!(cut_off_call(&[none], &StopReason::MaxTokens), Some(0));
+        // Finished JSON is a finished call, even when the reply was cut off after it.
+        assert_eq!(cut_off_call(&[half.clone(), whole.clone()], &StopReason::MaxTokens), None);
+        assert_eq!(cut_off_call(&[half], &StopReason::ToolUse), None);
+        assert_eq!(cut_off_call(&[], &StopReason::MaxTokens), None);
+    }
 
     #[test]
     fn prompt_blocks_become_parts() {

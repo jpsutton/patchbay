@@ -35,7 +35,7 @@ export function EditMessage({
 
   const canSend = draft.trim().length > 0 || atts.length > 0;
   return (
-    <div className="w-full max-w-[85%] self-end rounded-2xl border border-accent bg-raised p-3 shadow-raised">
+    <div data-amend="" className="w-full max-w-[85%] self-end rounded-2xl border border-accent bg-raised p-3 shadow-raised">
       {atts.length > 0 && (
         <div className="mb-2 flex flex-wrap gap-2">
           {atts.map((a) => (

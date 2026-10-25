@@ -119,6 +119,7 @@ impl CodeManager {
         db: Arc<Db>,
         data_dir: &Path,
         code_session_id: &str,
+        message_server: Option<serde_json::Value>,
     ) -> Result<()> {
         // Let a previous agent for this session flush and exit first, so the new one loads
         // its final state and the old "exited" event can't land after the new "ready".
@@ -208,10 +209,17 @@ impl CodeManager {
             mcp: {
                 let db = db.clone();
                 Box::new(move |init| {
-                    mcp::acp_servers(&db, mcp::McpSupport::from_init(init)).unwrap_or_else(|e| {
+                    let (mut servers, skipped) = mcp::acp_servers(&db, mcp::McpSupport::from_init(init)).unwrap_or_else(|e| {
                         tracing::warn!("MCP servers: {e:#}");
                         (Vec::new(), Vec::new())
-                    })
+                    });
+                    if !skipped.is_empty() {
+                        tracing::warn!("MCP servers skipped for unsupported transports: {}", skipped.join(", "));
+                    }
+                    if let Some(server) = message_server {
+                        servers.insert(0, server);
+                    }
+                    (servers, Vec::new())
                 })
             },
         });
@@ -243,6 +251,13 @@ impl CodeManager {
     pub async fn prompt(&self, code_session_id: &str, msg: acp::UserMessage, force: bool) -> Result<acp::Delivery> {
         let (reply, rx) = oneshot::channel();
         self.send(code_session_id, AgentCmd::Prompt { msg, force, reply: Some(reply) })?;
+        rx.await.map_err(|_| anyhow!("agent stopped"))?
+    }
+
+    /// Deliver an agent-originated message as a fresh or queued turn, never as mid-turn steering.
+    pub async fn agent_message(&self, code_session_id: &str, msg: acp::UserMessage) -> Result<acp::Delivery> {
+        let (reply, rx) = oneshot::channel();
+        self.send(code_session_id, AgentCmd::AgentMessage { msg, reply: Some(reply) })?;
         rx.await.map_err(|_| anyhow!("agent stopped"))?
     }
 

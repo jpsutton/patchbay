@@ -63,6 +63,14 @@
     "full": "The tool call was cancelled before it ran.",
     "min": "Tool call cancelled before run."
   },
+  "cut_off_call": {
+    "full": "Your reply reached the output token limit while you were still writing this {name} call, so its arguments were cut off and it did not run. Make the call again with less output at once: for a large file, Write a short first part, then add the rest with Edit calls.",
+    "min": "Reply hit output token limit mid-{name} call; arguments cut off, not run. Retry with less output per call: large file = short Write first, then Edit calls for rest."
+  },
+  "cut_off_reply": {
+    "full": "Your last reply reached the output token limit and was cut off. Carry on from where it stopped. Keep each reply shorter, thinking included: do not draft whole files in your thinking, and write large files in parts.",
+    "min": "Last reply hit output token limit, cut off. Continue where stopped. Keep replies shorter, thinking included: no drafting whole files in thinking; write large files in parts."
+  },
   "unknown_tool": {
     "full": "Unknown tool: {name}",
     "min": "Unknown tool: {name}"

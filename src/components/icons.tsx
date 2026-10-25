@@ -51,6 +51,18 @@ export const MenuIcon = icon(
   </>,
 );
 
+/** A session list: three rows with bullets. */
+export const ListIcon = icon(
+  <>
+    <path d="M8 6h13" />
+    <path d="M8 12h13" />
+    <path d="M8 18h13" />
+    <path d="M3 6h.01" />
+    <path d="M3 12h.01" />
+    <path d="M3 18h.01" />
+  </>,
+);
+
 export const PanelLeftIcon = icon(
   <>
     <rect x="3" y="3" width="18" height="18" rx="2" />
@@ -311,6 +323,19 @@ export const TerminalIcon = icon(
   </>,
 );
 
+export const WidthIcon = icon(
+  <>
+    <path d="m18 8 4 4-4 4" />
+    <path d="M2 12h20" />
+    <path d="m6 8-4 4 4 4" />
+  </>,
+  <>
+    <path d="m14 5 4 4-4 4" />
+    <path d="M0 9h18" />
+    <path d="m4 5-4 4 4 4" />
+  </>,
+);
+
 export const RestartIcon = icon(
   <>
     <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
@@ -356,6 +381,14 @@ export const CopyIcon = icon(
   <>
     <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
     <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+  </>,
+);
+
+export const InfoIcon = icon(
+  <>
+    <circle cx="12" cy="12" r="10" />
+    <path d="M12 16v-4" />
+    <path d="M12 8h.01" />
   </>,
 );
 
@@ -457,6 +490,16 @@ export const MonitorIcon = icon(
     <path d="M12 17v4" />
   </>,
 );
+
+export const SpeakerIcon = icon(
+  <>
+    <path d="M11 5 6 9H2v6h4l5 4V5z" />
+    <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+    <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+  </>,
+);
+
+export const StopIcon = icon(<rect x="6" y="6" width="12" height="12" rx="1" fill="currentColor" stroke="none" />);
 
 export const MonitorUpIcon = icon(
   <>

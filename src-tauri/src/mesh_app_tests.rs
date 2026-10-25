@@ -447,6 +447,12 @@ async fn phone_starts_a_session_on_another_computer() {
     assert!(opts["agents"].as_array().unwrap().iter().any(|x| x["id"] == "patchbay"));
     assert_eq!(opts["defaultAgent"], "patchbay");
 
+    // Which build B runs, for the session info dialog.
+    let info = p.client.rpc("remote.host_info", json!({ "host": bn })).await.unwrap();
+    assert_eq!(info["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(info["os"], std::env::consts::OS);
+    assert_eq!(info["arch"], std::env::consts::ARCH);
+
     // Browsing stays inside the home folder, and lists only visible folders.
     let home = p.client.rpc("remote.list_dirs", json!({ "host": bn })).await.unwrap();
     assert_eq!(home["path"], home["home"]);
@@ -789,4 +795,48 @@ async fn phone_decides_join_requests_waiting_on_any_computer() {
     p.client.reject(&did).await.unwrap();
     until("delta is turned away", 10, || d.state.mesh.status()["joining"]["status"] == "rejected").await;
     assert!(!d.state.mesh.is_member());
+}
+
+/// Next `AgentMessage` for a stand-in agent: answers it as delivered and returns its message.
+async fn take_agent_message(rx: &mut tokio::sync::mpsc::UnboundedReceiver<code::acp::AgentCmd>) -> code::acp::UserMessage {
+    match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("message arrives").expect("agent open") {
+        code::acp::AgentCmd::AgentMessage { msg, reply } => {
+            reply.unwrap().send(Ok(code::acp::Delivery::Sent)).unwrap();
+            msg
+        }
+        _ => panic!("expected an agent message"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agents_message_each_other_across_the_mesh() {
+    let (a, b) = (node("alpha-msg"), node("bravo-msg"));
+    link(&a, &b).await;
+    let (an, bn) = (a.state.mesh.node_id().to_owned(), b.state.mesh.node_id().to_owned());
+    let (pa, pb) = (a.dir.join("proj"), b.dir.join("proj"));
+    repo(&pa);
+    repo(&pb);
+    let sa = a.state.db.create_code_session(&pa.to_string_lossy(), None, "grok", "default").unwrap();
+    let sb = b.state.db.create_code_session(&pb.to_string_lossy(), None, "grok", "default").unwrap();
+    until("sessions replicate", 10, || {
+        a.state.db.get_code_session(&sb.id).unwrap().is_some() && b.state.db.get_code_session(&sa.id).unwrap().is_some()
+    })
+    .await;
+    let mut rx_a = a.state.code.attach_test_agent(&sa.id);
+    let mut rx_b = b.state.code.attach_test_agent(&sb.id);
+
+    // A -> B, through the mesh to B's host.
+    let (r, got) = tokio::join!(send_agent_message(&a.state, &an, &sa.id, &sb.id, "ping"), take_agent_message(&mut rx_b));
+    assert_eq!(r.unwrap()["delivery"], "sent");
+    assert!(got.text.contains("ping") && got.text.contains(&sa.id), "{}", got.text);
+    assert_eq!(got.origin, format!("agent:{an}:{}", sa.id));
+
+    // B -> A: the reply path.
+    let (r, got) = tokio::join!(send_agent_message(&b.state, &bn, &sb.id, &sa.id, "pong"), take_agent_message(&mut rx_a));
+    r.unwrap();
+    assert!(got.text.contains("pong") && got.text.contains(&sb.id), "{}", got.text);
+
+    // Guards: no self-messages, and a node can't send as a session it doesn't host.
+    assert!(send_agent_message(&a.state, &an, &sa.id, &sa.id, "x").await.is_err());
+    assert!(send_agent_message(&a.state, &an, &sb.id, &sa.id, "x").await.is_err());
 }
