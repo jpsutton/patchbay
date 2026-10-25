@@ -41,6 +41,7 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.17")
     // 1.12 brings ServiceCompat.startForeground with a service type (Android 14's requirement).
     implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("com.fasterxml.jackson.core:jackson-databind:2.15.3")
     implementation(project(":tauri-android"))
 }

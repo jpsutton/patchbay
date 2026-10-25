@@ -61,7 +61,7 @@ Checked artifact: `app-universal-debug.apk`, version 0.13.1 (13001), SHA-256
 
 ## Automated checks
 
-**Final result: 144 tests passed; zero failed, errored or skipped.** Twelve cases ran at
+**Initial implementation result: 144 tests passed; zero failed, errored or skipped.** Twelve cases ran at
 all twelve integer API levels from 26 through 37. The XML result was checked both for its
 aggregate counters and for exactly twelve cases per API; an empty or partial run does not
 meet this result. This matrix covers the native controller in simulated frameworks.
@@ -141,3 +141,27 @@ artifacts remain local and are not part of the source commit.
 - Background, locked-screen, Bluetooth and vendor battery-management behavior are outside
   this foreground TTS validation. Future Android versions, OEM variants and 16 KB-page devices
   have not been certified by this check.
+
+
+## Resume refresh and CI follow-up
+
+The review follow-up adds four controller cases on each API in the existing matrix:
+refresh while idle, refresh during playback, refresh during initialization, and refresh after
+shutdown. All 192 controller cases pass with zero failures, errors or skips. Disabling the
+refresh implementation makes 36 of the 48 refresh cases fail; restoring it makes the complete
+192-case suite pass again. This establishes that the new cases detect the missing refresh.
+
+The platform plugin uses Tauri’s activity resume callback to invalidate the native engine and
+cached default voice. An idle engine is released immediately. Active playback and pending
+initialization finish first; the next request reconnects to Android’s current default engine.
+This preserves the explicit voice preference and existing cancellation behavior.
+
+The frontend speech routing check, typecheck, mobile build and actionlint pass locally.
+Pull-request checks now run the frontend speech regression and a dedicated Android speech
+job that builds the native bridge/debug APK and runs controller tests plus lint. Hosted CI
+execution remains pending until the workflow is dispatched or a PR is opened.
+
+Physical-phone acceptance remains pending. The handoff APK and receipt belong under the
+local `artifacts/native-tts-followup/` directory; the receipt records the built source revision,
+APK checksum and observed emulator results. Neither the APK nor audio recordings are committed.
+No PR should be opened before the user accepts the phone playback check.

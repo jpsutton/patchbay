@@ -6,6 +6,7 @@ import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import app.tauri.PermissionState
 import app.tauri.annotation.Command
@@ -52,6 +53,10 @@ private const val LOCAL_NETWORK_SDK = 37
 @TauriPlugin(permissions = [Permission(strings = [ACCESS_LOCAL_NETWORK], alias = "localNetwork")])
 class PlatformPlugin(private val activity: Activity) : Plugin(activity) {
     private val speech = AndroidSpeech(activity.applicationContext)
+
+    override fun onResume(activity: AppCompatActivity) {
+        speech.refresh()
+    }
 
     @Command
     fun listSpeechVoices(invoke: Invoke) {

@@ -24,6 +24,7 @@ internal class AndroidSpeech(private val context: Context) {
     private val deadlines = mutableMapOf<String, Runnable>()
     private var initGeneration = 0
     private var initDeadline: Runnable? = null
+    private var refreshPending = false
 
     fun voices(reply: (Result<List<ReadingVoice>>) -> Unit) = main.post {
         withEngine({ tts ->
@@ -71,6 +72,20 @@ internal class AndroidSpeech(private val context: Context) {
         // onStop is not guaranteed for utterances still waiting for initialization.
         utterances.keys.toList().forEach { finish(it) }
         done()
+    }
+
+    /** Reconnect after Android Settings changes, without cutting off the current passage. */
+    fun refresh() = main.post {
+        if (!destroyed) {
+            refreshPending = true
+            refreshIfIdle()
+        }
+    }
+
+    private fun refreshIfIdle() {
+        if (!refreshPending || utterances.isNotEmpty() || waiting.isNotEmpty()) return
+        refreshPending = false
+        releaseEngine()
     }
 
     fun destroy() = main.post {
@@ -128,9 +143,10 @@ internal class AndroidSpeech(private val context: Context) {
         val jobs = waiting.toList()
         waiting.clear()
         jobs.forEach { it.first(tts) }
+        refreshIfIdle()
     }
 
-    private fun failInitialization(message: String) {
+    private fun releaseEngine() {
         initGeneration += 1
         initDeadline?.let { main.removeCallbacks(it) }
         initDeadline = null
@@ -138,6 +154,10 @@ internal class AndroidSpeech(private val context: Context) {
         engine?.shutdown()
         engine = null
         defaultVoice = null
+    }
+
+    private fun failInitialization(message: String) {
+        releaseEngine()
         val jobs = waiting.toList()
         waiting.clear()
         jobs.forEach { it.second(message) }
@@ -147,5 +167,6 @@ internal class AndroidSpeech(private val context: Context) {
         deadlines.remove(id)?.let { main.removeCallbacks(it) }
         val reply = utterances.remove(id) ?: return
         reply(if (error == null) Result.success(Unit) else Result.failure(IllegalStateException(error)))
+        refreshIfIdle()
     }
 }

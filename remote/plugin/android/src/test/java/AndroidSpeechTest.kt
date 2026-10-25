@@ -172,4 +172,60 @@ class AndroidSpeechTest {
         assertTrue(answer!!.isSuccess)
     }
 
+
+    @Test fun refreshReopensTheEngineAndUsesItsNewDefaultVoice() {
+        speech.voices {}; idle(); initialize()
+        val old = shadow()
+        speech.refresh(); idle()
+        assertTrue(old.isShutdown)
+        var finished = false
+        speech.speak("New Android default", "", "normal") { finished = it.isSuccess }; idle()
+        assertNotSame(old, shadow())
+        engine().voice = alternate
+        shadow().onInitListener.onInit(TextToSpeech.SUCCESS); idle()
+        assertEquals(alternate, engine().voice)
+        shadow().utteranceProgressListener.onDone(shadow().utterance); idle()
+        assertTrue(finished)
+    }
+    @Test fun refreshWaitsForPlaybackThenReopensBeforeTheNextPassage() {
+        var replies = 0
+        speech.speak("Keep playing", "", "normal") { replies++ }; idle(); initialize()
+        val old = shadow()
+        speech.refresh(); idle()
+        assertFalse(old.isShutdown)
+        assertEquals(0, replies)
+        old.utteranceProgressListener.onDone(old.utterance); idle()
+        assertEquals(1, replies)
+        assertTrue(old.isShutdown)
+        speech.speak("Next passage", "", "normal") {}; idle()
+        assertNotSame(old, shadow())
+        initialize()
+        assertEquals("Next passage", shadow().spoken)
+    }
+    @Test fun refreshDuringInitializationKeepsThePendingRequest() {
+        var answer: Result<List<ReadingVoice>>? = null
+        speech.voices { answer = it }; idle()
+        val old = shadow()
+        speech.refresh(); idle()
+        assertFalse(old.isShutdown)
+        assertNull(answer)
+        initialize()
+        assertTrue(answer!!.isSuccess)
+        assertTrue(old.isShutdown)
+        speech.voices {}; idle()
+        assertNotSame(old, shadow())
+        initialize()
+    }
+    @Test fun refreshAfterDestroyDoesNotReopenTheEngine() {
+        speech.voices {}; idle(); initialize()
+        val old = shadow()
+        speech.destroy(); idle()
+        speech.refresh(); idle()
+        var answer: Result<List<ReadingVoice>>? = null
+        speech.voices { answer = it }; idle()
+        assertTrue(answer!!.isFailure)
+        assertSame(old, shadow())
+        assertTrue(old.isShutdown)
+    }
+
 }

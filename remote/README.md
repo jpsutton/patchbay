@@ -66,6 +66,8 @@ The installed Android app uses Android’s native text-to-speech engine for Auto
 System. Select voices and speed under Settings → Chat → Reading voice. Android’s system
 text-to-speech settings control the default engine and downloaded voice data. Engine errors
 are shown; Built-in is an explicit alternative. Network voices are labelled in the voice menu.
+Returning to Patchbay refreshes Android’s engine and default voice without restarting the app.
+If speech is playing, the refresh waits for the current passage to finish.
 
 Frontend routing and queue regression check:
 
@@ -80,6 +82,17 @@ initialization, voice, completion, cancellation, failure and lifecycle tests:
 cd remote/src-tauri/gen/android
 ./gradlew :tauri-plugin-remote-platform:testDebugUnitTest
 ```
+
+Both speech suites run in the pull-request checks: the frontend job runs the routing test,
+and the Android speech job builds a debug APK and runs the controller tests and lint.
+
+Before accepting the updated APK on a physical phone:
+
+1. Test **Automatic** with **Default** voice, then a selected voice at all three speeds.
+2. Read a long reply and press **Stop**. Start a different reply and confirm the old one stays stopped.
+3. Change Android’s default TTS engine or language, return to Patchbay, and test **Default**
+   again without restarting Patchbay. An explicitly selected voice still takes precedence.
+4. Report the phone model, Android version, chosen engine/voice and whether playback sounds natural.
 
 A physical phone playback check is still needed to judge voice quality.
 See [Android native TTS coverage](../docs/validation/android-native-tts.md) for version boundaries,
