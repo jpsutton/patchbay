@@ -668,6 +668,8 @@ export interface Preferences {
   readAloudServerVoice: string;
   /** An OpenAI-compatible provider whose key and URL to use. */
   readAloudServerProviderId: string;
+  /** Model ref that rewrites a reply for the ear before it is spoken. Empty means off. */
+  readAloudRewriteModel: string;
 }
 
 export const defaultPreferences: Preferences = {
@@ -713,6 +715,7 @@ export const defaultPreferences: Preferences = {
   readAloudServerModel: "",
   readAloudServerVoice: "",
   readAloudServerProviderId: "",
+  readAloudRewriteModel: "",
 };
 
 export interface SpeechAudio {
@@ -796,6 +799,7 @@ export const api = {
     voice: string;
     text: string;
   }) => invoke<SpeechAudio>("synthesize_speech", input),
+  rewriteForSpeech: (modelRef: string, text: string) => invoke<string>("rewrite_for_speech", { modelRef, text }),
   getSetting: (key: string) => invoke<string | null>("get_setting", { key }),
   setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),
 

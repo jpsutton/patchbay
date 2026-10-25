@@ -51,6 +51,9 @@ pub struct Preferences {
     pub read_aloud_server_voice: String,
     /// An `openai_chat` provider whose key and base URL to use. Empty means the URL above, with no key.
     pub read_aloud_server_provider_id: String,
+    /// Model ref that rewrites each reply for the ear before it is spoken (file names, code and
+    /// numbers read naturally). Empty means off: the reply is cleaned up with local rules only.
+    pub read_aloud_rewrite_model: String,
 
     // ---- Code agents ----
     /// Agent for new Code sessions: an `AgentKind` id (patchbay, grok, claude-code, opencode, cursor, kilo).
@@ -179,6 +182,7 @@ impl Default for Preferences {
             read_aloud_server_model: String::new(),
             read_aloud_server_voice: String::new(),
             read_aloud_server_provider_id: String::new(),
+            read_aloud_rewrite_model: String::new(),
             default_agent: "patchbay".into(),
             agent_paths: Default::default(),
             agent_providers: Default::default(),
@@ -233,6 +237,7 @@ impl Preferences {
         short_setting("speech model", &self.read_aloud_server_model, 80)?;
         short_setting("speech server voice", &self.read_aloud_server_voice, 80)?;
         short_setting("speech provider", &self.read_aloud_server_provider_id, 80)?;
+        short_setting("speech rewrite model", &self.read_aloud_rewrite_model, 80)?;
         let url = self.read_aloud_server_url.trim();
         if !url.is_empty() {
             if url.len() > 500 || !(url.starts_with("https://") || url.starts_with("http://")) {

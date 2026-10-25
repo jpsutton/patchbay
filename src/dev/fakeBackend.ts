@@ -970,6 +970,7 @@ export function install() {
         case "list_native_voices": return [];
         case "speak_native": return null;
         case "stop_native": return null;
+        case "rewrite_for_speech": throw "pnpm dev has no model to rewrite speech. Run the app.";
         case "synthesize_speech": throw "pnpm dev has no speech server. Use System or Built-in, or run the app.";
         case "claude_overview": {
           const cfg = JSON.parse(db.settings.preferences ?? "{}").claudeConfig ?? {};

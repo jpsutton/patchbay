@@ -111,6 +111,7 @@ commands! {
     get_preferences();
     set_preferences(prefs);
     synthesize_speech(provider_id, base_url, model, voice, text);
+    rewrite_for_speech(model_ref, text);
     get_setting(key);
     set_setting(key, value);
     web_search_status();
