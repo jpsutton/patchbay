@@ -6,6 +6,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { createPortal } from "react-dom";
 
 /** One thing to do with a chat or Code session. */
 export interface ItemAction {
@@ -67,7 +68,9 @@ export function ContextMenu({
     };
   }, [actions, focus, onClose]);
 
-  return (
+  // Portaled to <body>: a scrolled sidebar has a `mask-image` (.fade-top), which makes it the
+  // containing block for `position: fixed` and clips the menu to the sidebar.
+  return createPortal(
     <div
       ref={ref}
       role="menu"
@@ -98,7 +101,8 @@ export function ContextMenu({
           {a.label}
         </button>
       ))}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
