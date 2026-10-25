@@ -49,6 +49,51 @@ const windowPct = (w: PlanWindow | null, now: number) => {
   return current ? Math.round(current.utilization * 100) : 0;
 };
 
+const WINDOW_SECS = { fiveHour: 5 * 3600, sevenDay: 7 * 86400 };
+
+/**
+ * How fast a window is being used, relative to an even spend: 1 uses exactly the whole window by its reset, 2 uses it
+ * up halfway through. Null when the window is new (too little elapsed to say) or has reset.
+ */
+function burnPace(w: PlanWindow | null, span: number, now: number) {
+  const current = live(w, now);
+  if (!current) return null;
+  const elapsed = (span - (current.resetsAt - now)) / span;
+  return elapsed < 0.03 ? null : current.utilization / Math.min(1, elapsed);
+}
+
+/** The faster of the two windows' paces. */
+const worstPace = (l: PlanLimits | null, now: number) => {
+  const paces = [burnPace(l?.fiveHour ?? null, WINDOW_SECS.fiveHour, now), burnPace(l?.sevenDay ?? null, WINDOW_SECS.sevenDay, now)].filter(
+    (p): p is number => p != null,
+  );
+  return paces.length ? Math.max(...paces) : null;
+};
+
+/** The gauge icon with its needle at the burn pace: left at none, upright at an even spend, right at double or more. */
+function BurnGauge({ pace, className }: { pace: number; className?: string }) {
+  const angle = (Math.min(2, pace) / 2) * 240 - 120;
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={16}
+      height={16}
+      viewBox="2 2 20 20"
+      overflow="visible"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className={className}
+    >
+      <path d="M3.34 19a10 10 0 1 1 17.32 0" />
+      <path d="M12 14V8" transform={`rotate(${angle} 12 14)`} />
+    </svg>
+  );
+}
+
 const barClass = (t: ReturnType<typeof tone>) => (t === "danger" ? "bg-danger" : t === "warn" ? "bg-warn" : "bg-ok");
 
 /** The sidebar footer's toggle for the Claude plan usage blade: one mini bar per window. */
@@ -67,8 +112,12 @@ export function PlanUsageButton() {
   // Overage with no window reported still deserves a number.
   const pct = rows.length ? null : peak(limits, now);
   const t = pct == null ? null : tone(pct, limit);
+  const pace = worstPace(limits, now);
+  const paceTone = pace == null ? null : tone(Math.round(pace * 100), limit);
   const title = rows.length
-    ? `Claude plan usage: ${rows.map((r) => `${r.label === "5h" ? "5-hour" : "weekly"} ${r.pct}%`).join(", ")}`
+    ? `Claude plan usage: ${rows.map((r) => `${r.label === "5h" ? "5-hour" : "weekly"} ${r.pct}%`).join(", ")}${
+        pace == null ? "" : `. Burning at ${pace.toFixed(1)}x an even pace`
+      }`
     : "Claude plan usage";
   return (
     <button
@@ -80,7 +129,14 @@ export function PlanUsageButton() {
       aria-expanded={open}
       onClick={() => setOpen(!open)}
     >
-      <GaugeIcon size={16} className={overage ? "text-danger" : undefined} />
+      {pace != null ? (
+        <BurnGauge
+          pace={pace}
+          className={overage || paceTone === "danger" ? "text-danger" : paceTone === "warn" ? "text-warn" : undefined}
+        />
+      ) : (
+        <GaugeIcon size={16} className={overage ? "text-danger" : undefined} />
+      )}
       {rows.length > 0 && (
         <span className="flex flex-col gap-[3px]" aria-hidden="true">
           {rows.map((r) => (
