@@ -272,6 +272,12 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
         >
           <Toggle label="Generate conversation titles" checked={prefs.generateTitles} onChange={(v) => set("generateTitles", v)} />
         </Row>
+        <Row
+          label="Web search"
+          hint="Let the model search the web. Anthropic, OpenAI (Responses API) and Gemini models use their provider's own search, billed by the provider. Other models use Brave Search, which needs a key under Settings → Coding agents → Patchbay. Models decide when to search."
+        >
+          <Toggle label="Web search" checked={prefs.chatWebSearch} onChange={(v) => set("chatWebSearch", v)} />
+        </Row>
         <ReadAloudSettings />
         <div className="pt-3">
           <div className="text-sm">Default system prompt</div>

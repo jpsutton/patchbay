@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Result, anyhow};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
-use patchbay_llm::{Client, Event, Message as LlmMessage, Part, Request, Role, SystemBlock};
+use patchbay_llm::{Client, Event, Message as LlmMessage, Part, Request, Role, SystemBlock, ToolChoice, ToolResult};
 
 use crate::attachments;
 use crate::db::{Db, Message};
@@ -137,6 +137,13 @@ fn derive_title(text: &str, attachment_names: &[String]) -> String {
     t
 }
 
+/// Searches one reply may run through Patchbay's own search tool (providers with a search of their
+/// own set their limit themselves).
+const MAX_SEARCH_ROUNDS: usize = 5;
+
+const SEARCH_HINT: &str = "You can search the web for current information. After answering from search \
+results, end with a \"Sources:\" list of Markdown links to the pages you used.";
+
 /// What a chat turn adds to the message tree.
 pub enum Turn {
     /// A new user message. `parent`: `None` = after the active leaf, `Some(None)` = a new root
@@ -243,6 +250,18 @@ pub async fn send(
         tokio::task::spawn_blocking(move || build_history(&data_dir, &db, &cid, &leaf, sp.as_deref(), native_pdf))
             .await??
     };
+    // The provider's own search where it has one, else Patchbay's Brave search tool.
+    let search = crate::prefs::load(&db).chat_web_search;
+    let brave_key = (search && !providers::native_web_search(&resolved))
+        .then(|| providers::web_search_key(&db).map(|(k, _)| k))
+        .flatten();
+    if search && (brave_key.is_some() || providers::native_web_search(&resolved)) {
+        request.system.push(SystemBlock::new(SEARCH_HINT));
+        request.web_search = brave_key.is_none();
+        if brave_key.is_some() {
+            request.tools = vec![patchbay_agent::web_search_spec()];
+        }
+    }
     providers::prepare_request(&resolved, &mut request);
 
     let token = CancellationToken::new();
@@ -258,43 +277,89 @@ pub async fn send(
     let mut error: Option<String> = None;
     let mut usage: Option<Tokens> = None;
     let mut cancelled = false;
-    let result = client
-        .complete(&request, &token, |ev| match ev {
-            Event::Text(text) => {
-                content.push_str(&text);
-                let _ = channel.send(ChatEvent::Text { text });
-            }
-            Event::Reasoning(text) => {
-                reasoning.push_str(&text);
-                let _ = channel.send(ChatEvent::Reasoning { text });
-            }
-            Event::Retrying { attempt, max, reason } => {
-                let _ = channel.send(ChatEvent::Status {
-                    message: format!("Retrying ({attempt}/{max}): {reason}"),
+    for round in 0..=MAX_SEARCH_ROUNDS {
+        if round == MAX_SEARCH_ROUNDS {
+            // Out of searches: the model has to answer with what it has.
+            request.tool_choice = ToolChoice::None;
+        }
+        // Text before and after a search belongs in separate paragraphs.
+        let mut separate = !content.is_empty();
+        let result = client
+            .complete(&request, &token, |ev| match ev {
+                Event::Text(text) => {
+                    if std::mem::take(&mut separate) {
+                        content.push_str("\n\n");
+                        let _ = channel.send(ChatEvent::Text { text: "\n\n".into() });
+                    }
+                    content.push_str(&text);
+                    let _ = channel.send(ChatEvent::Text { text });
+                }
+                Event::Reasoning(text) => {
+                    reasoning.push_str(&text);
+                    let _ = channel.send(ChatEvent::Reasoning { text });
+                }
+                Event::Search(query) => {
+                    let _ = channel.send(ChatEvent::Status { message: format!("Searching the web: {query}") });
+                }
+                Event::Retrying { attempt, max, reason } => {
+                    let _ = channel.send(ChatEvent::Status {
+                        message: format!("Retrying ({attempt}/{max}): {reason}"),
+                    });
+                }
+                Event::ToolCall(_) => {}
+            })
+            .await;
+        match result {
+            Ok(response) => {
+                let used = response.usage.as_ref().map(Tokens::from_llm);
+                usage = match (usage, used) {
+                    (Some(a), Some(b)) => Some(a.add(&b)),
+                    (a, b) => a.or(b),
+                };
+                let calls: Vec<_> = response.message.tool_calls().cloned().collect();
+                if let (Some(key), false, true) = (&brave_key, calls.is_empty(), round < MAX_SEARCH_ROUNDS) {
+                    let mut results = Vec::new();
+                    for call in &calls {
+                        let query = call.arguments["query"].as_str().unwrap_or_default();
+                        let _ = channel.send(ChatEvent::Status { message: format!("Searching the web: {query}") });
+                        let out = if call.name == "WebSearch" {
+                            patchbay_agent::brave_search(key, &call.arguments, &token, false).await
+                        } else {
+                            Err(format!("unknown tool {}", call.name))
+                        };
+                        let (text, is_error) = match out {
+                            Ok(t) => (t, false),
+                            Err(e) => (e, true),
+                        };
+                        results.push(Part::ToolResult(ToolResult::text(call, text, is_error)));
+                    }
+                    if token.is_cancelled() {
+                        cancelled = true;
+                        let _ = channel.send(ChatEvent::Done { stop_reason: Some("cancelled".into()), usage: None });
+                        break;
+                    }
+                    request.messages.push(response.message);
+                    request.messages.push(LlmMessage::with_parts(Role::User, results));
+                    continue;
+                }
+                if content.is_empty() {
+                    content = response.message.text();
+                    if !content.is_empty() {
+                        let _ = channel.send(ChatEvent::Text { text: content.clone() });
+                    }
+                }
+                let _ = channel.send(ChatEvent::Done {
+                    stop_reason: Some(response.stop.label().to_owned()),
+                    usage,
                 });
             }
-            Event::ToolCall(_) => {}
-        })
-        .await;
-    match result {
-        Ok(response) => {
-            if content.is_empty() {
-                content = response.message.text();
-                if !content.is_empty() {
-                    let _ = channel.send(ChatEvent::Text { text: content.clone() });
-                }
+            Err(e) if e.cancelled => {
+                cancelled = true;
+                let _ = channel.send(ChatEvent::Done { stop_reason: Some("cancelled".into()), usage: None });
             }
-            usage = response.usage.as_ref().map(Tokens::from_llm);
-            let _ = channel.send(ChatEvent::Done {
-                stop_reason: Some(response.stop.label().to_owned()),
-                usage,
-            });
+            Err(e) => error = Some(e.to_string()),
         }
-        Err(e) if e.cancelled => {
-            cancelled = true;
-            let _ = channel.send(ChatEvent::Done { stop_reason: Some("cancelled".into()), usage: None });
-        }
-        Err(e) => error = Some(e.to_string()),
+        break;
     }
     manager.running.lock().unwrap().remove(&conversation_id);
 

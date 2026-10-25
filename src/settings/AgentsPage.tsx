@@ -176,7 +176,7 @@ function PatchbayModelSettings() {
         label="Web search (Brave)"
         hint={
           search?.configured
-            ? `A Brave Search API key is set (${search.source === "env" ? "from BRAVE_API_KEY" : search.source === "database" ? "stored in the database: no keychain" : "in the keychain"}). The agent can search the web.`
+            ? `A Brave Search API key is set (${search.source === "env" ? "from BRAVE_API_KEY" : search.source === "database" ? "stored in the database: no keychain" : "in the keychain"}). The agent can search the web, and so can Chat models without a search of their own (see Preferences → Chat).`
             : "Paste a Brave Search API key to let the agent search the web. It is stored in the OS keychain."
         }
       >

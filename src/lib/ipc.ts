@@ -636,6 +636,8 @@ export interface Preferences {
   defaultSystemPrompt: string;
   expandReasoning: boolean;
   generateTitles: boolean;
+  /** Let the model search the web in chat: the provider's own search, else Brave Search when a key is set. */
+  chatWebSearch: boolean;
   defaultAgent: AgentId;
   /** Executable overrides: agent id -> path. */
   agentPaths: Partial<Record<AgentId, string>>;
@@ -683,6 +685,7 @@ export const defaultPreferences: Preferences = {
   defaultSystemPrompt: "",
   expandReasoning: false,
   generateTitles: true,
+  chatWebSearch: false,
   defaultAgent: "patchbay",
   agentPaths: {},
   agentProviders: {},

@@ -35,6 +35,9 @@ pub struct Preferences {
     /// One extra model call after the first reply to name the conversation, and after a Code
     /// session's first and third turns when its agent doesn't name it (`code::titles`).
     pub generate_titles: bool,
+    /// Let the model search the web in chat: through the provider's own search where it has one,
+    /// else through Brave Search when a key is set. Off by default; searches can cost money.
+    pub chat_web_search: bool,
     /// auto | system | builtin | server. Stored on this device; preferences are not synced.
     pub read_aloud_engine: String,
     /// Voice id for the engine in use. Empty means that engine's default.
@@ -174,6 +177,7 @@ impl Default for Preferences {
             default_system_prompt: String::new(),
             expand_reasoning: false,
             generate_titles: true,
+            chat_web_search: false,
             read_aloud_engine: "auto".into(),
             read_aloud_voice: String::new(),
             read_aloud_rate: "normal".into(),
