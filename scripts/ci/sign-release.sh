@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
-# CI (release): sign release assets and build a signed pacman repo.
+# CI (release): sign release assets.
 #   sign-release.sh <dir>
 # Needs PATCHBAY_GPG_KEY (armored private key; the release workflow passes the
 # repo secret). For every file in <dir>: a detached .sig. Also SHA256SUMS
-# (+ .sig), and patchbay.db/.files so Arch users can add
-#   [patchbay]
-#   Server = https://github.com/jpsutton/patchbay/releases/latest/download
-# Runs in an archlinux container (repo-add).
+# (+ .sig). jpsutton/arch-repo checks the Arch packages' .sig before adding them
+# to the jpsutton pacman repository. Runs in an archlinux container.
 set -euo pipefail
 dir=${1:?asset dir}
 : "${PATCHBAY_GPG_KEY:?PATCHBAY_GPG_KEY is not set}"
 
-pacman -Sy --noconfirm --needed gnupg pacman-contrib >/dev/null
+pacman -Sy --noconfirm --needed gnupg >/dev/null
 export GNUPGHOME
 GNUPGHOME=$(mktemp -d)
 trap 'gpgconf --kill all; rm -rf "$GNUPGHOME"' EXIT
@@ -20,17 +18,7 @@ fpr=$(gpg --batch --with-colons --list-secret-keys | awk -F: '/^fpr/ {print $10;
 echo "signing with $fpr"
 
 cd "$dir"
-rm -f ./*.sig patchbay.db* patchbay.files* SHA256SUMS*
-
-shopt -s nullglob
-pkgs=(./*.pkg.tar.zst)
-if ((${#pkgs[@]})); then
-  repo-add --sign --key "$fpr" patchbay.db.tar.zst "${pkgs[@]}"
-  # Release assets can't be symlinks.
-  for link in patchbay.db patchbay.db.sig patchbay.files patchbay.files.sig; do
-    [[ -L $link ]] && cp --remove-destination "$(readlink -f "$link")" "$link"
-  done
-fi
+rm -f ./*.sig SHA256SUMS*
 
 for file in ./*; do
   [[ -f $file && $file != *.sig ]] || continue

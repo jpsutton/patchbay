@@ -60,7 +60,7 @@ Download Patchbay from the [Releases page](https://github.com/jpsutton/patchbay/
 
 | Platform | Packages |
 | --- | --- |
-| Linux | `.deb` (Ubuntu 24.04 or newer, Debian 13), `.rpm` (Fedora, openSUSE), AppImage, and an Arch Linux package repository. Needs glibc 2.39 or newer. |
+| Linux | `.deb` (Ubuntu 24.04 or newer, Debian 13), `.rpm` (Fedora, openSUSE), AppImage, and Arch Linux packages in the jpsutton pacman repository. Needs glibc 2.39 or newer. |
 | Windows | Installer (`.exe`) and `.msi` |
 | macOS | `.dmg` (Apple silicon) |
 | Android | Patchbay Remote, the phone app: `.apk` (arm64, Android 8.0 or newer) and an F-Droid repository |
@@ -85,25 +85,32 @@ If you download the `.dmg` in a browser instead, macOS says Apple could not veri
 xattr -dr com.apple.quarantine /Applications/Patchbay.app
 ```
 
-For a computer without a display, `patchbayd` runs Patchbay headless and serves the same UI to a browser. It comes in the same formats (`.deb`, `.rpm`, the Arch repository, plus archives for any Linux, Windows and macOS), with systemd units on Linux. See [docs/headless.md](docs/headless.md).
+For a computer without a display, `patchbayd` runs Patchbay headless and serves the same UI to a browser. It comes in the same formats (`.deb`, `.rpm`, the Arch packages, plus archives for any Linux, Windows and macOS), with systemd units on Linux. See [docs/headless.md](docs/headless.md).
 
 ### Arch Linux
 
-Add the signed package repository to `/etc/pacman.conf`:
+Patchbay and `patchbayd` are in the signed [jpsutton pacman repository](https://github.com/jpsutton/arch-repo). Its setup script adds the repository to `/etc/pacman.conf`, trusts its key after checking the fingerprint, and removes the old `[patchbay]` repository, which no longer gets updates:
+
+```bash
+curl -fsSLO https://jpsutton.github.io/arch-repo/setup.sh
+bash setup.sh --install patchbay
+```
+
+To set it up by hand, add this to `/etc/pacman.conf` (and remove an old `[patchbay]` section):
 
 ```ini
-[patchbay]
-Server = https://github.com/jpsutton/patchbay/releases/latest/download
+[jpsutton]
+Server = https://jpsutton.github.io/arch-repo/$arch
 ```
 
-Then trust the release key and install:
+Then trust the repository key and install:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jpsutton/patchbay/staging/packaging/patchbay-signing-key.asc | sudo pacman-key --add -
+curl -fsSL https://jpsutton.github.io/arch-repo/jpsutton-signing-key.asc | sudo pacman-key --add -
 ```
 
 ```bash
-sudo pacman-key --lsign-key 0D3A064DDF8B635FD85894E9B3A7618B4B88E5D7
+sudo pacman-key --lsign-key 8476350364502FEDD331B66BEDB90079E3C73E41
 ```
 
 ```bash
