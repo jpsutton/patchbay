@@ -8,6 +8,7 @@ import { EditMessage } from "../components/EditMessage";
 import { fmtTokens, UsageBar } from "../components/UsageBar";
 import { ModelPicker } from "../components/ModelPicker";
 import { ExportMenu } from "../components/ExportMenu";
+import { WidthMenu } from "../components/WidthMenu";
 import { chatToJson, chatToMarkdown, saveExport } from "../lib/export";
 import { fmtDateTime, fmtTime } from "../lib/format";
 import { MessageTime } from "../components/MessageTime";
@@ -558,6 +559,7 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
         >
           <ScrollTextIcon />
         </HeaderButton>
+        {!isRemoteApp() && <WidthMenu />}
         {!isRemoteApp() && (
           <ExportMenu
             disabled={!conv || messages.length === 0}
@@ -578,7 +580,7 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
           onScroll={sticky.onScroll}
         >
           <div
-            className={`mx-auto flex max-w-3xl flex-col gap-7 px-6 py-8 ${empty ? "h-full justify-end pb-8" : ""}`}
+            className={`mx-auto flex max-w-[var(--chat-width)] flex-col gap-7 px-6 py-8 ${empty ? "h-full justify-end pb-8" : ""}`}
           >
             {empty && (
               <div className="flex flex-col items-center gap-2.5 text-center">
@@ -615,7 +617,7 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
         </div>
         <JumpToBottom show={!sticky.atBottom} onClick={sticky.toBottom} />
       </div>
-      <div className="mx-auto w-full max-w-3xl px-6 pb-3 pt-2">
+      <div className="mx-auto w-full max-w-[var(--chat-width)] px-6 pb-3 pt-2">
         <Composer
           draftKey={`chat:${activeId ?? "new"}`}
           busy={running}

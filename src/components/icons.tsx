@@ -323,6 +323,19 @@ export const TerminalIcon = icon(
   </>,
 );
 
+export const WidthIcon = icon(
+  <>
+    <path d="m18 8 4 4-4 4" />
+    <path d="M2 12h20" />
+    <path d="m6 8-4 4 4 4" />
+  </>,
+  <>
+    <path d="m14 5 4 4-4 4" />
+    <path d="M0 9h18" />
+    <path d="m4 5-4 4 4 4" />
+  </>,
+);
+
 export const RestartIcon = icon(
   <>
     <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />

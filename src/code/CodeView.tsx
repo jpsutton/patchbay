@@ -42,6 +42,7 @@ import { todoPlanOf } from "../lib/todoPlan";
 import { CopyButton, copyText } from "../components/CopyButton";
 import { ListenButton, ReadAloudButton, useSpeakingId, useStopSpeechWhenHidden } from "../components/ReadAloudButton";
 import { ExportMenu } from "../components/ExportMenu";
+import { WidthMenu } from "../components/WidthMenu";
 import { codeToJson, codeToMarkdown, saveExport } from "../lib/export";
 import { useViewAction, ViewActive } from "../lib/shortcuts";
 import { speakingNow, speakText, stopSpeech } from "../lib/speech";
@@ -1415,6 +1416,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
           </>
         )}
         <div className="mx-1 h-5 w-px bg-line" />
+        {!remote && <WidthMenu />}
         {!remote && (
           <ExportMenu
             disabled={!s || s.entries.length === 0}
@@ -1472,7 +1474,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
               className={`relative h-full overflow-y-auto [overflow-anchor:none] ${sticky.atTop ? "" : "fade-top"}`}
               onScroll={sticky.onScroll}
             >
-              <div className="mx-auto flex max-w-3xl flex-col gap-4 px-6 py-6">
+              <div className="mx-auto flex max-w-[var(--chat-width)] flex-col gap-4 px-6 py-6">
                 <OfflineHostBanner session={session} onTakeOver={() => setMoving("takeOver")} />
                 {waiting && (s?.entries.length ?? 0) === 0 && (
                   <div className="flex items-center justify-center gap-2 text-xs text-muted">
@@ -1535,7 +1537,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             </div>
             <JumpToBottom show={!sticky.atBottom} onClick={sticky.toBottom} />
           </div>
-          <div className="mx-auto w-full max-w-3xl px-6 pb-3 pt-2">
+          <div className="mx-auto w-full max-w-[var(--chat-width)] px-6 pb-3 pt-2">
             {(s?.queued.length ?? 0) > 0 && (
               <ul className="mb-2 flex flex-col gap-1" aria-label="Queued messages">
                 {s!.queued.map((q) => (

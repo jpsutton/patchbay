@@ -48,6 +48,16 @@ const fakeAgent = (id: AgentId, label: string, program: string | null, extra: Pa
 /** Sessions whose fake agent was started (code_start) and still runs. */
 const fakeRunning = new Set<string>();
 
+/** Sent when a chat message contains "wide table": many columns of prose, to check table layout. */
+const WIDE_TABLE = [
+  "Findings:",
+  "",
+  "| # | Check | Verdict | Fix on main | Catch |",
+  "| --- | --- | --- | --- | --- |",
+  "| 1 | Backups geo-redundant | Code, destructive | `modules/app-postgres/main.tf:22` hardcodes `false`. Add a variable and set it per caller. | ForceNew, so the server is recreated. Needs dump/restore and a manual Entra role re-map. Combine with #2. |",
+  "| 2 | DBs in cluster region | Code, blocked | `*_postgres_location` in `prod.tfvars:33,42,79,100` | Rebuild. The tfvars comment says eastus is restricted for this subscription. No sign of a lifted restriction. Needs a support ticket. |",
+].join("\n");
+
 const FAKE_AGENTS: AgentInfo[] = [
   fakeAgent("patchbay", "Patchbay", "/opt/patchbay", { source: "builtin" }),
   fakeAgent("grok", "Grok Build", "/usr/local/bin/grok", { source: "path" }),
@@ -423,7 +433,7 @@ async function fakeChat(a: Record<string, unknown>, regenerate?: string) {
     send<ChatEvent>(ch, { type: "error", message: asst.error });
     return;
   }
-  const reply = [
+  const reply = text.includes("wide table") ? WIDE_TABLE : [
     `**Echo:** ${text || "(no text)"}`,
     "",
     `- attachments: ${atts.map((x) => `${x.name} (${x.kind})`).join(", ") || "none"}`,
