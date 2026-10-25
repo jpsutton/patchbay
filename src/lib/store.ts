@@ -312,6 +312,7 @@ interface Store {
   shortcutsOpen: boolean;
   /** The New session dialog (Code). */
   newSessionOpen: boolean;
+  importClaudeOpen: boolean;
   /** The Code session whose details dialog is open (see `code/SessionInfoDialog.tsx`). */
   sessionInfoId: string | null;
   /** Sidebar title filter. */
@@ -345,6 +346,7 @@ interface Store {
   setSidebarCollapsed: (c: boolean) => void;
   setShortcutsOpen: (o: boolean) => void;
   setNewSessionOpen: (o: boolean) => void;
+  setImportClaudeOpen: (o: boolean) => void;
   setSessionInfoId: (id: string | null) => void;
   setSidebarQuery: (q: string) => void;
   setToast: (t: string | null) => void;
@@ -806,6 +808,7 @@ export const useStore = create<Store>((set, get) => ({
   sidebarCollapsed: loadSidebarCollapsed(),
   shortcutsOpen: false,
   newSessionOpen: false,
+  importClaudeOpen: false,
   sessionInfoId: null,
   sidebarQuery: "",
   providers: [],
@@ -882,6 +885,7 @@ export const useStore = create<Store>((set, get) => ({
   },
   setShortcutsOpen: (shortcutsOpen) => set({ shortcutsOpen }),
   setNewSessionOpen: (newSessionOpen) => set({ newSessionOpen }),
+  setImportClaudeOpen: (importClaudeOpen) => set({ importClaudeOpen }),
   setSessionInfoId: (sessionInfoId) => set({ sessionInfoId }),
   setSidebarQuery: (sidebarQuery) => set({ sidebarQuery }),
   setToast: (toast) => set({ toast }),

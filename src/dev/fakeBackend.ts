@@ -832,6 +832,12 @@ function phoneMesh() {
   phone.members = mesh.members;
 }
 
+const CLAUDE_SESSIONS = [
+  { id: "c1", cwd: "/home/demo/projects/demo-app", cwdExists: true, title: "Fix login redirect", preview: "The login redirect loops when the session cookie expires. Can you fix it?", modified: Date.now() - 3_600_000, size: 412_000, imported: null },
+  { id: "c2", cwd: "/home/demo/projects/demo-app", cwdExists: true, title: "Add dark mode", preview: "Add a dark mode toggle to settings", modified: Date.now() - 86_400_000 * 3, size: 1_800_000, imported: null },
+  { id: "c3", cwd: "/home/demo/projects/old-worktree", cwdExists: false, title: "Refactor parser", preview: "Split the parser into a lexer and a parser", modified: Date.now() - 86_400_000 * 20, size: 90_000, imported: null },
+];
+
 export function install() {
   mockWindows("main");
   if (phoneApp) {
@@ -1095,6 +1101,44 @@ export function install() {
         }
 
         case "list_code_sessions": return [...db.code].sort((x, y) => y.updatedAt - x.updatedAt);
+        case "list_claude_sessions":
+          return CLAUDE_SESSIONS.map((c) => ({ ...c, imported: db.settings[`import.claude.${c.id}`] ?? null }));
+        case "import_claude_sessions": {
+          const made: CodeSession[] = [];
+          for (const cid of a.ids as string[]) {
+            const c = CLAUDE_SESSIONS.find((x) => x.id === cid);
+            if (!c) continue;
+            const prior = db.code.find((x) => x.id === db.settings[`import.claude.${cid}`]);
+            if (prior) {
+              made.push(prior);
+              continue;
+            }
+            const s: CodeSession = {
+              id: id(), cwd: c.cwd, acpSessionId: null, title: c.title, modelRef: null, pinned: false,
+              createdAt: c.modified - 3_600_000, updatedAt: c.modified, activity: null, agent: (a.agent as AgentId | null) ?? "patchbay",
+              agentModel: null, hostNode: ME, epoch: 0, permissionMode: "default", titleManual: true,
+            };
+            db.code.push(s);
+            db.settings[`import.claude.${cid}`] = s.id;
+            db.transcripts[s.id] = JSON.stringify({
+              v: 1,
+              earlier: {
+                entries: [
+                  { kind: "user", text: c.preview },
+                  { kind: "agent", text: "Looking at it now." },
+                  { kind: "tool", id: "t1" },
+                  { kind: "agent", text: "Fixed." },
+                  { kind: "info", text: "Imported from Claude Code. The agent gets this conversation as context with your first message." },
+                ],
+                toolCalls: { t1: { toolCallId: "t1", title: "Edit src/app.ts", kind: "edit", status: "completed" } },
+              },
+              entries: [],
+              toolCalls: {},
+            });
+            made.push(s);
+          }
+          return made;
+        }
         case "create_code_session": {
           const prefs = JSON.parse(db.settings.preferences ?? "{}") as { defaultAgent?: AgentId; permissionMode?: CodeSession["permissionMode"] };
           const s: CodeSession = {

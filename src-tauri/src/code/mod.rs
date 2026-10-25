@@ -6,6 +6,7 @@ pub mod agent_providers;
 pub mod agent_state;
 pub mod agents;
 pub mod grok_config;
+pub mod import_claude;
 pub mod mcp;
 pub mod native;
 pub mod permissions;

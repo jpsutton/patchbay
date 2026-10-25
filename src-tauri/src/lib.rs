@@ -576,6 +576,59 @@ async fn create_code_session(
     Err(CmdError(format!("the session started on {}, but hasn't reached this computer yet", state.mesh.member_name(&host))))
 }
 
+/// Claude Code's sessions on this computer, marking those already imported.
+async fn list_claude_sessions(state: &AppState) -> CmdResult<Vec<code::import_claude::ClaudeSessionInfo>> {
+    let dir = code::import_claude::projects_dir()?;
+    let mut found = tokio::task::spawn_blocking(move || code::import_claude::list(&dir)).await?;
+    for f in &mut found {
+        f.imported = state
+            .db
+            .get_setting(&format!("import.claude.{}", f.id))?
+            .filter(|id| state.db.get_code_session(id).ok().flatten().is_some());
+    }
+    Ok(found)
+}
+
+/// Make a Code session from each of Claude Code's sessions `ids`, with `agent` (default: the
+/// preferred one) to continue them. A session imported before opens again instead of copying.
+async fn import_claude_sessions(state: &AppState, ids: Vec<String>, agent: Option<String>) -> CmdResult<Vec<CodeSession>> {
+    let projects = code::import_claude::projects_dir()?;
+    let found = {
+        let p = projects.clone();
+        tokio::task::spawn_blocking(move || code::import_claude::list(&p)).await?
+    };
+    let mut made = Vec::new();
+    for id in ids {
+        let key = format!("import.claude.{id}");
+        if let Some(existing) = state.db.get_setting(&key)?.and_then(|sid| state.db.get_code_session(&sid).ok().flatten()) {
+            made.push(existing);
+            continue;
+        }
+        let path = found
+            .iter()
+            .find(|f| f.id == id)
+            .and_then(|f| projects.read_dir().ok()?.flatten().map(|d| d.path().join(format!("{}.jsonl", f.id))).find(|p| p.is_file()))
+            .ok_or_else(|| CmdError(format!("Claude Code session {id} not found")))?;
+        let conv = tokio::task::spawn_blocking(move || code::import_claude::convert(&path)).await??;
+        // The original folder may be gone (a deleted worktree): use the nearest one that exists.
+        let mut cwd = std::path::PathBuf::from(&conv.cwd);
+        while !cwd.is_dir() && cwd.pop() {}
+        let cwd = if cwd.as_os_str().is_empty() || !cwd.is_dir() {
+            code::agents::home_dir().ok_or_else(|| CmdError("no folder to open the session in".into()))?
+        } else {
+            cwd
+        };
+        let s = create_code_session_local(state, &cwd.to_string_lossy(), None, agent.clone())?;
+        state.db.set_code_session_title(&s.id, &chat::clip(&conv.title, 80), true)?;
+        state.db.set_code_session_times(&s.id, conv.created_ms.max(1), conv.updated_ms.max(conv.created_ms).max(1))?;
+        state.db.set_code_transcript(&s.id, &conv.transcript)?;
+        state.db.set_setting(&format!("mesh.handoff.{}", s.id), &handoff::import_prompt(Some(&conv.transcript), "Claude Code"))?;
+        state.db.set_setting(&key, &s.id)?;
+        made.push(state.db.get_code_session(&s.id)?.unwrap_or(s));
+    }
+    Ok(made)
+}
+
 /// A new Code session hosted here, in `cwd` on this computer.
 fn create_code_session_local(
     state: &AppState,

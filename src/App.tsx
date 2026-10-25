@@ -15,6 +15,7 @@ import { initZoom, zoomIn, zoomOut, zoomReset } from "./lib/zoom";
 import { ChatView } from "./chat/ChatView";
 import { CodeView, newSessionIn } from "./code/CodeView";
 import { NewSessionDialog } from "./code/NewSessionDialog";
+import { ImportClaudeDialog } from "./code/ImportClaudeDialog";
 import { Settings } from "./settings/Settings";
 import { CodeSidebar } from "./code/CodeSidebar";
 import { ConfirmDialog } from "./components/ConfirmDialog";
@@ -791,6 +792,7 @@ export default function App() {
       <SessionInfoDialog />
       <ShortcutsDialog />
       <NewSessionDialog />
+      <ImportClaudeDialog />
       <CommandPalette />
       <div className="fixed bottom-4 right-4 z-50 flex flex-col items-end gap-2">
         {toast && (
