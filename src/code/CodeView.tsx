@@ -45,8 +45,8 @@ import { ExportMenu } from "../components/ExportMenu";
 import { WidthMenu } from "../components/WidthMenu";
 import { codeToJson, codeToMarkdown, saveExport } from "../lib/export";
 import { useViewAction, ViewActive } from "../lib/shortcuts";
-import { speakingNow, speakText, stopSpeech } from "../lib/speech";
-import { proseSinceLastUser } from "../lib/spokenText";
+import { enqueueSpeech, speakingNow, stopSpeech } from "../lib/speech";
+import { liveCursorNow, takeLiveProse, type LiveCursor } from "../lib/spokenText";
 import { HeaderButton } from "../components/HeaderButton";
 import { useDragRegion, WindowControls } from "../components/WindowControls";
 import { isRemoteApp } from "../lib/platform";
@@ -925,25 +925,40 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const viewActive = useContext(ViewActive);
   const listenOn = useStore((s) => s.prefs.readAloudListen);
   const skipListen = useRef(false);
-  const busy = !!state?.busy;
   useStopSpeechWhenHidden();
-  const turnRef = useRef({ id: activeId, busy });
+  // Live reading: each agent message is spoken as it finishes, in order, for the length of a
+  // turn. `live` is where reading has got to in the session on screen.
+  const live = useRef<{ id: string; cursor: LiveCursor } | null>(null);
+  const listenEntries = state?.entries;
+  const listenWorking = state ? codeWorking(state) : false;
 
   useEffect(() => {
-    const prev = turnRef.current;
-    turnRef.current = { id: activeId, busy };
-    if (prev.id !== activeId || !prev.busy || busy) return;
-    if (!viewActive || !listenOn) return;
-    if (skipListen.current) {
-      skipListen.current = false;
+    if (!listenOn || !viewActive || !activeId || !listenEntries) {
+      live.current = null;
       return;
     }
-    const entries = activeId ? useStore.getState().code[activeId]?.entries : undefined;
-    if (!entries) return;
-    const text = proseSinceLastUser(entries);
-    if (!text.trim()) return;
-    speakText(text, `listen:${activeId}`).catch((e) => setToast(e instanceof Error ? e.message : "Could not read this aloud"));
-  }, [activeId, busy, viewActive, listenOn, setToast]);
+    if (live.current?.id !== activeId) {
+      // Join a turn already under way at the message being written; read nothing from history.
+      if (!listenWorking) {
+        live.current = null;
+        return;
+      }
+      live.current = { id: activeId, cursor: liveCursorNow(listenEntries) };
+    }
+    const cur = live.current;
+    const { texts, cursor } = takeLiveProse(listenEntries, cur.cursor, !listenWorking);
+    cur.cursor = cursor;
+    // Stop was pressed: keep the cursor moving but say nothing more from this turn.
+    if (skipListen.current) {
+      if (!listenWorking) skipListen.current = false;
+      return;
+    }
+    texts.forEach((text, n) =>
+      enqueueSpeech(text, `listen:${activeId}:${cursor.next}:${n}`).catch((e) =>
+        setToast(e instanceof Error ? e.message : "Could not read this aloud"),
+      ),
+    );
+  }, [activeId, listenEntries, listenWorking, viewActive, listenOn, setToast]);
 
   const changes = useMemo(() => {
     if (!state || !session) return [];
@@ -1007,6 +1022,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     if (a === "stop") {
       if (speakingNow()) {
         stopSpeech();
+        // Stopping the voice mid-turn mutes the rest of that turn too.
+        if (cur?.busy) skipListen.current = true;
         return;
       }
       if (cur?.busy) {

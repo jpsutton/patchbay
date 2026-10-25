@@ -1,8 +1,8 @@
 # Publish on merge into release, without rebuilding: the pull request from
 # staging already ran the full build (build.yml), so this takes that run's
-# artifacts, signs every one (PATCHBAY_GPG_KEY), builds a signed pacman repo,
-# tags the release v<version> and creates a GitHub Release with the packages,
-# signatures and SHA256SUMS. The phone app's APK is signed with its own key
+# artifacts, signs every one (PATCHBAY_GPG_KEY), tags the release v<version> and
+# creates a GitHub Release with the packages, signatures and SHA256SUMS. The
+# jpsutton pacman repository (jpsutton/arch-repo) then picks up the Arch packages. The phone app's APK is signed with its own key
 # (PATCHBAY_APK_KEYSTORE) and published to the F-Droid repository on GitHub Pages
 # (PATCHBAY_FDROID_KEYSTORE); without those secrets the release goes out without it.
 # latest.json, the in-app updater's feed, is signed with the updater key
@@ -172,6 +172,19 @@ jobs:
           gh release create "v${{ steps.build.outputs.version }}" -R "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" --title "Patchbay ${{ steps.build.outputs.version }}" \
             --generate-notes "${assets[@]}"
+
+      # jpsutton/arch-repo checks for new releases hourly; this makes it publish now.
+      # Best effort: needs a token that can write to that repository.
+      - name: Update the pacman repository
+        env:
+          ARCH_REPO_DISPATCH_TOKEN: ${{ secrets.ARCH_REPO_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$ARCH_REPO_DISPATCH_TOKEN" ]; then
+            echo "::notice::ARCH_REPO_DISPATCH_TOKEN is not set; jpsutton/arch-repo picks up the release within the hour"
+            exit 0
+          fi
+          GH_TOKEN=$ARCH_REPO_DISPATCH_TOKEN gh api repos/jpsutton/arch-repo/dispatches -f event_type=package-released \
+            || echo "::warning::could not notify jpsutton/arch-repo; it picks up the release within the hour"
 
       # The self-hosted F-Droid repository on GitHub Pages (gh-pages branch, /fdroid).
       - name: F-Droid repository
