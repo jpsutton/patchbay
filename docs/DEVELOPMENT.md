@@ -112,7 +112,7 @@ scripts/            mock-llm.py, mock-mcp.py, ci/, package-daemon.sh
 - `release` only takes pull requests from `staging`. Merge them with **Create a merge commit**.
 - Pull requests into either branch run `checks.yml`: static checks (`scripts/ci/check.sh`, actionlint), the frontend build, the third-party notices check, the Rust unit tests and the end-to-end tests of the LLM client and the agent against the mock model.
 - Pull requests into `release` also run `build.yml`, which builds every package: `.deb`, `.rpm` and AppImage, an Arch package, and best-effort Windows (NSIS, MSI) and macOS (DMG) builds. Run it by hand with workflow_dispatch to test the build on any branch.
-- Merging into `release` runs `release.yml`. It reuses the pull request's build artifacts, signs each one with the release key, builds a signed pacman repository, tags `v<version>` and creates the GitHub Release. Windows and macOS packages ship only if they built.
+- Merging into `release` runs `release.yml`. It reuses the pull request's build artifacts, signs each one with the release key, tags `v<version>` and creates the GitHub Release. The [jpsutton pacman repository](https://github.com/jpsutton/arch-repo) then picks up the Arch packages: within the hour, or at once when the `ARCH_REPO_DISPATCH_TOKEN` secret lets the release notify it. Windows and macOS packages ship only if they built.
 - Every release needs a new version. `scripts/ci/version.sh` checks that `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json` and the PKGBUILD agree.
 
 The signing key's public half is `packaging/patchbay-signing-key.asc`. Its private half is the `PATCHBAY_GPG_KEY` repository secret.

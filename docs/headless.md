@@ -10,7 +10,7 @@ Download it from the [Releases page](https://github.com/jpsutton/patchbay/releas
 | --- | --- |
 | Debian, Ubuntu | `patchbayd_<version>_amd64.deb` (Ubuntu 24.04 or newer, Debian 13) |
 | Fedora, openSUSE | `patchbayd-<version>-1.x86_64.rpm` |
-| Arch Linux | `patchbayd` in the Patchbay package repository (set it up as in the main README, then `sudo pacman -Sy patchbayd`) |
+| Arch Linux | `patchbayd` in the jpsutton pacman repository (set it up as in the main README, then `sudo pacman -Sy patchbayd`) |
 | Any Linux | `patchbayd-<version>-linux-x86_64.tar.gz` (glibc 2.39 or newer) |
 | Windows | `patchbayd-<version>-windows-x86_64.zip` |
 | macOS | `patchbayd-<version>-macos-aarch64.tar.gz` (Apple silicon) |
