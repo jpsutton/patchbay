@@ -24,6 +24,14 @@ assert(chunks.length === 1 && chunks[0].includes("Three?"), `short sentences sta
 assert(speechChunks("One. Two.", 4)[0] === "One.", "a sentence ends a full piece");
 assert(speechChunks("x".repeat(700), 320).every((c) => c.length <= 320), "long run is split");
 
+const long = Array.from({ length: 40 }, (_, i) => `This is sentence number ${i} of a long reply.`).join(" ");
+const ramp = speechChunks(long, 1500);
+assert(ramp[0].length <= 160, `first piece is short, got ${ramp[0].length}`);
+assert(ramp.length > 2 && ramp[1].length > ramp[0].length, "later pieces grow");
+assert(ramp.every((c) => c.length <= 1500), "no piece passes max");
+assert(ramp.join(" ") === long, "no words lost or reordered");
+assert(speechChunks("One. Two.", 320, 4)[0] === "One.", "first piece honors its own size");
+
 const prose = proseSinceLastUser([
   { kind: "user", text: "first" },
   { kind: "agent", text: "old" },

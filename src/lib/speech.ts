@@ -8,7 +8,7 @@
  * on this screen.
  */
 
-import { api, type Preferences } from "./ipc";
+import { api, type Preferences, type SpeechAudio } from "./ipc";
 import { isDesktopApp, isRemoteApp } from "./platform";
 import { isMac } from "./shortcuts";
 import { useStore } from "./store";
@@ -234,17 +234,24 @@ function speakWeb(text: string, prefs: Preferences): Promise<void> {
 
 async function speakServer(text: string, prefs: Preferences, token: number) {
   if (isRemoteApp()) throw new Error("the phone speaks with its own voice. A speech server is configured on a computer.");
-  for (const chunk of speechChunks(text, 1500)) {
-    if (token !== generation) return;
-    const clip = await api.synthesizeSpeech({
+  const fetchClip = (chunk: string) =>
+    api.synthesizeSpeech({
       providerId: prefs.readAloudServerProviderId,
       baseUrl: prefs.readAloudServerUrl,
       model: prefs.readAloudServerModel,
       voice: prefs.readAloudServerVoice,
       text: chunk,
     });
-    if (!clip?.audioBase64) throw new Error("the speech server returned no audio");
+  const chunks = speechChunks(text, 1500);
+  let pending: Promise<SpeechAudio> | null = chunks.length > 0 ? fetchClip(chunks[0]) : null;
+  for (let i = 0; i < chunks.length; i++) {
     if (token !== generation) return;
+    const clip = await pending;
+    if (token !== generation) return;
+    if (!clip?.audioBase64) throw new Error("the speech server returned no audio");
+    // Ask for the next piece now, so it is made while this one plays.
+    pending = i + 1 < chunks.length ? fetchClip(chunks[i + 1]) : null;
+    pending?.catch(() => {});
     await playClip(clip.audioBase64, clip.mime || "audio/mpeg", token);
   }
 }
