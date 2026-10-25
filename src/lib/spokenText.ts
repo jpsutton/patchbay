@@ -42,8 +42,16 @@ function fence(lang: string, body: string): string {
   return ` Code: ${lines.join(", ")}. `;
 }
 
-/** Sentence-sized pieces so Stop lands between them. */
-export function speechChunks(text: string, max = 320): string[] {
+/** Characters in the first piece, so speech starts quickly however long the reply is. */
+const FIRST_CHUNK = 160;
+
+/**
+ * Sentence-sized pieces so Stop lands between them. Pieces grow: the first holds about
+ * `first` characters and each later one is twice as long as the one before, up to `max`.
+ * A short first piece means audio starts early. A longer later piece means fewer joins, and
+ * the next piece can be made while the current one plays.
+ */
+export function speechChunks(text: string, max = 320, first = FIRST_CHUNK): string[] {
   const sentences: string[] = [];
   let cur = "";
   for (const ch of text) {
@@ -58,7 +66,10 @@ export function speechChunks(text: string, max = 320): string[] {
   if (tail) sentences.push(tail);
 
   const out: string[] = [];
-  let buf = "";
+  let limit = Math.min(max, Math.max(1, first));
+  const grow = () => {
+    limit = Math.min(max, limit * 2);
+  };
   const push = (piece: string) => {
     if (piece.length <= max) {
       out.push(piece);
@@ -66,10 +77,12 @@ export function speechChunks(text: string, max = 320): string[] {
     }
     for (let i = 0; i < piece.length; i += max) out.push(piece.slice(i, i + max));
   };
+  let buf = "";
   for (const sentence of sentences) {
     const next = buf ? `${buf} ${sentence}` : sentence;
-    if (next.length > max && buf) {
+    if (next.length > limit && buf) {
       push(buf);
+      grow();
       buf = sentence;
     } else {
       buf = next;
