@@ -203,6 +203,9 @@ html.rounded-window #root {
   transition: opacity 150ms ease;
 }
 
+/* Width of the conversation column; the header's width control sets it (see lib/chatWidth.ts). */
+:root { --chat-width: 768px; }
+
 .prose-chat {
   line-height: 1.65;
   overflow-wrap: anywhere;
@@ -243,7 +246,11 @@ html.rounded-window #root {
   border-radius: 12px;
   font-size: 0.93em;
 }
-.prose-chat th, .prose-chat td { padding: 0.45em 0.9em; text-align: left; }
+/* `anywhere` (set on .prose-chat) shrinks a cell's min-content width to one letter, so a narrow
+   column would stack its text a character per line. `break-word` still wraps a long unbroken token
+   but keeps whole words intact, so a wide table scrolls sideways instead of squeezing. */
+.prose-chat th, .prose-chat td { padding: 0.45em 0.9em; text-align: left; overflow-wrap: break-word; }
+.prose-chat th { white-space: nowrap; }
 .prose-chat td { border-top: 1px solid var(--color-line); }
 .prose-chat th { background: var(--color-panel); color: var(--color-muted); font-weight: 500; }
 .prose-chat hr { border: 0; border-top: 1px solid var(--color-border); margin: 1.2em 0; }

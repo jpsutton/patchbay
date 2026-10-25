@@ -110,6 +110,7 @@ commands! {
     delete_model(id);
     get_preferences();
     set_preferences(prefs);
+    synthesize_speech(provider_id, base_url, model, voice, text);
     get_setting(key);
     set_setting(key, value);
     web_search_status();
@@ -133,6 +134,8 @@ commands! {
     list_code_sessions();
     create_code_session(cwd, model_ref, agent, host);
     list_agents(host);
+    list_claude_sessions();
+    import_claude_sessions(ids, agent);
     update_code_session(id, title, model_ref, pinned, activity, archived);
     delete_code_session(id);
     code_auto_title(id);
@@ -159,6 +162,7 @@ commands! {
     wire_log_clear();
     wire_log_save();
     code_permission_respond(request_id, option_id, id);
+    code_session_image(id, path);
     code_move(id, target, cwd);
     code_take_over(id, cwd);
     code_checkpoints();
@@ -193,6 +197,15 @@ commands! {
     usage_report(days);
     list_dirs(path, host);
     new_session_options(host);
+    host_info(host);
+}
+
+/// The Patchbay version and operating system of this computer, or with `host` of that computer.
+async fn host_info(state: &AppState, host: Option<String>) -> CmdResult<Value> {
+    match host.filter(|h| h != state.mesh.node_id()) {
+        Some(h) => Ok(gateway::on_host(state, &serde_json::json!({ "host": h }), "host.info").await?),
+        None => Ok(gateway::host_info_local()),
+    }
 }
 
 /// Folders under `path` (default: home), for choosing a project folder without a native dialog;

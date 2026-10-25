@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { api, errorText, estimateCost, type Attachment, type ChatEvent, type Message } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { AttachmentChip, Composer } from "../components/Composer";
@@ -8,9 +8,11 @@ import { EditMessage } from "../components/EditMessage";
 import { fmtTokens, UsageBar } from "../components/UsageBar";
 import { ModelPicker } from "../components/ModelPicker";
 import { ExportMenu } from "../components/ExportMenu";
+import { WidthMenu } from "../components/WidthMenu";
 import { chatToJson, chatToMarkdown, saveExport } from "../lib/export";
 import { fmtDateTime, fmtTime } from "../lib/format";
-import { useViewAction } from "../lib/shortcuts";
+import { MessageTime } from "../components/MessageTime";
+import { useViewAction, ViewActive } from "../lib/shortcuts";
 import { HeaderButton } from "../components/HeaderButton";
 import { useDragRegion, WindowControls } from "../components/WindowControls";
 import {
@@ -25,6 +27,8 @@ import {
 import { ModelRing } from "../lib/cable";
 import { JumpToBottom, ScrollFade, useStickyScroll } from "../lib/useStickyScroll";
 import { CopyButton, copyText } from "../components/CopyButton";
+import { ListenButton, ReadAloudButton, useSpeakingId, useStopSpeechWhenHidden } from "../components/ReadAloudButton";
+import { speakingNow, stopSpeech, speakText } from "../lib/speech";
 import { EffortPicker } from "../components/EffortPicker";
 import { SystemPromptPanel } from "./SystemPromptPanel";
 import { notifyInBackground } from "../lib/notify";
@@ -109,6 +113,7 @@ function MessageRow({
   const models = useStore((s) => s.models);
   const providers = useStore((s) => s.providers);
   const body = useRef<HTMLDivElement>(null);
+  const reading = useSpeakingId() === m.id;
   const time = (
     <span className="meta text-faint" title={fmtDateTime(m.createdAt)}>
       {fmtTime(m.createdAt)}
@@ -151,20 +156,21 @@ function MessageRow({
           </div>
         )}
         <div
-          className={`flex items-center gap-0.5 text-muted transition-opacity group-hover:opacity-100 focus-within:opacity-100 ${
+          className={`action-row flex items-center gap-0.5 text-muted transition-opacity group-hover:opacity-100 focus-within:opacity-100 ${
             m.siblingIds.length > 1 ? "" : "opacity-0"
           }`}
         >
           <BranchNav m={m} onSwitch={onSwitch} />
-          <span className="mr-1">{time}</span>
+          <span className="mr-1">{isRemoteApp() ? <MessageTime at={m.createdAt} /> : time}</span>
           {onEdit && (
             <button
-              className="flex h-7 w-7 items-center justify-center rounded-md hover:bg-panel-2 hover:text-fg"
+              className={`flex h-7 items-center justify-center rounded-md hover:bg-panel-2 hover:text-fg ${isRemoteApp() ? "gap-1 px-1.5 text-xs" : "w-7"}`}
               onClick={() => setEditing(true)}
-              title="Edit"
+              title="Edit and resend"
               aria-label="Edit message"
             >
               <PencilIcon size={14} />
+              {isRemoteApp() && "Edit"}
             </button>
           )}
           {m.content && <CopyButton text={m.content} icon={<CopyIcon size={14} />} />}
@@ -210,10 +216,11 @@ function MessageRow({
       )}
       {!live && (
         <div
-          className={`mt-2 flex items-center gap-0.5 text-muted transition-opacity group-hover:opacity-100 focus-within:opacity-100 ${
-            m.siblingIds.length > 1 ? "" : "opacity-0"
+          className={`action-row mt-2 flex items-center gap-0.5 text-muted transition-opacity group-hover:opacity-100 focus-within:opacity-100 ${
+            m.siblingIds.length > 1 || reading ? "" : "opacity-0"
           }`}
         >
+          {m.content && <ReadAloudButton id={m.id} text={m.content} />}
           {m.content && <CopyButton text={m.content} label="Copy Markdown" icon={<CopyIcon size={14} />} />}
           {m.content && (
             <CopyButton
@@ -233,15 +240,26 @@ function MessageRow({
             </button>
           )}
           <BranchNav m={m} onSwitch={onSwitch} />
+          {isRemoteApp() && <MessageTime at={m.createdAt} />}
           <span className="flex-1" />
-          <span className="meta flex gap-2 text-faint">
-            {fmtTime(m.createdAt)}
-            {m.usage && (
-              <span title={`${m.usage.input.toLocaleString()} input tokens, ${m.usage.output.toLocaleString()} output tokens`}>
-                · {fmtTokens(m.usage.input)} in · {fmtTokens(m.usage.output)} out
-              </span>
-            )}
-          </span>
+          {!isRemoteApp() && (
+            <span className="meta flex gap-2 text-faint">
+              {fmtTime(m.createdAt)}
+              {m.usage && (
+                <span title={`${m.usage.input.toLocaleString()} input tokens, ${m.usage.output.toLocaleString()} output tokens`}>
+                  · {fmtTokens(m.usage.input)} in · {fmtTokens(m.usage.output)} out
+                </span>
+              )}
+            </span>
+          )}
+          {isRemoteApp() && m.usage && (
+            <span
+              className="meta text-faint"
+              title={`${m.usage.input.toLocaleString()} input tokens, ${m.usage.output.toLocaleString()} output tokens`}
+            >
+              {fmtTokens(m.usage.input)} in · {fmtTokens(m.usage.output)} out
+            </span>
+          )}
         </div>
       )}
     </div>
@@ -438,9 +456,43 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
   const running = !!stream?.running;
   // An empty chat centers the composer under the greeting instead of pinning it to the bottom.
   const empty = messages.length === 0 && !running;
+  const viewActive = useContext(ViewActive);
+  const listenOn = useStore((s) => s.prefs.readAloudListen);
+  const skipListen = useRef(false);
+  useStopSpeechWhenHidden();
+  const turnRef = useRef({ id: activeId, running });
+
+  useEffect(() => {
+    const prev = turnRef.current;
+    turnRef.current = { id: activeId, running };
+    if (prev.id !== activeId || !prev.running || running) return;
+    if (!viewActive || !listenOn) return;
+    if (skipListen.current) {
+      skipListen.current = false;
+      return;
+    }
+    const cur = activeId ? useStore.getState().chatStreams[activeId] : undefined;
+    if (!cur || cur.error || !cur.text.trim()) return;
+    speakText(cur.text, cur.assistantId ?? `listen:${activeId}`).catch((e) =>
+      setToast(e instanceof Error ? e.message : "Could not read this aloud"),
+    );
+  }, [activeId, running, viewActive, listenOn, setToast]);
+
+  /** Conversation whose last message should open for editing once Stop finishes. Phone only. */
+  const amendAfterStop = useRef<string | null>(null);
 
   useViewAction((a) => {
-    if (a === "stop" && running && activeId) api.cancelChat(activeId);
+    if (a === "stop") {
+      if (speakingNow()) {
+        stopSpeech();
+        return;
+      }
+      if (running && activeId) {
+        skipListen.current = true;
+        if (isRemoteApp()) amendAfterStop.current = activeId;
+        api.cancelChat(activeId);
+      }
+    }
     if (a === "copy-last") {
       const last = [...messages].reverse().find((m) => m.role === "assistant" && m.content);
       if (last) {
@@ -448,6 +500,20 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
       }
     }
   });
+
+  useEffect(() => {
+    if (!amendAfterStop.current) return;
+    if (amendAfterStop.current !== activeId || !viewActive) {
+      amendAfterStop.current = null;
+      return;
+    }
+    if (running) return;
+    const last = [...messages].reverse().find((m) => m.role === "user");
+    if (!last) return;
+    amendAfterStop.current = null;
+    setEditingId(last.id);
+    setTimeout(() => document.querySelector("[data-amend]")?.scrollIntoView({ block: "center" }), 30);
+  }, [running, messages, activeId, viewActive]);
 
   const editLast = () => {
     if (running) return;
@@ -493,6 +559,7 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
         >
           <ScrollTextIcon />
         </HeaderButton>
+        {!isRemoteApp() && <WidthMenu />}
         {!isRemoteApp() && (
           <ExportMenu
             disabled={!conv || messages.length === 0}
@@ -513,7 +580,7 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
           onScroll={sticky.onScroll}
         >
           <div
-            className={`mx-auto flex max-w-3xl flex-col gap-7 px-6 py-8 ${empty ? "h-full justify-end pb-8" : ""}`}
+            className={`mx-auto flex max-w-[var(--chat-width)] flex-col gap-7 px-6 py-8 ${empty ? "h-full justify-end pb-8" : ""}`}
           >
             {empty && (
               <div className="flex flex-col items-center gap-2.5 text-center">
@@ -550,12 +617,16 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
         </div>
         <JumpToBottom show={!sticky.atBottom} onClick={sticky.toBottom} />
       </div>
-      <div className="mx-auto w-full max-w-3xl px-6 pb-3 pt-2">
+      <div className="mx-auto w-full max-w-[var(--chat-width)] px-6 pb-3 pt-2">
         <Composer
           draftKey={`chat:${activeId ?? "new"}`}
           busy={running}
           onEditLast={editLast}
-          onStop={() => activeId && api.cancelChat(activeId)}
+          onStop={() => {
+            if (running && activeId) skipListen.current = true;
+            if (running && activeId && isRemoteApp()) amendAfterStop.current = activeId;
+            if (activeId) api.cancelChat(activeId);
+          }}
           onSend={(t, a) => send(t, a)}
           placeholder={model ? `Message ${model.displayName}` : "Add a model in Settings to start"}
           warnNoVision={model ? !model.vision : false}
@@ -576,6 +647,7 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
                 modelDefault={model?.params.reasoningEffort ?? null}
                 onChange={(v) => setChatEffort(activeId ?? "new", v)}
               />
+              <ListenButton />
               {controls}
             </>
           }

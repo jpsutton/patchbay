@@ -15,3 +15,8 @@ export function isRemoteApp(): boolean {
 export function isWeb(): boolean {
   return typeof window !== "undefined" && (window as { __PATCHBAY_WEB__?: boolean }).__PATCHBAY_WEB__ === true;
 }
+
+/** The desktop app, as opposed to a browser on patchbayd, the phone, or `pnpm dev`. */
+export function isDesktopApp(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window && !isWeb() && !isRemoteApp();
+}

@@ -48,6 +48,16 @@ const fakeAgent = (id: AgentId, label: string, program: string | null, extra: Pa
 /** Sessions whose fake agent was started (code_start) and still runs. */
 const fakeRunning = new Set<string>();
 
+/** Sent when a chat message contains "wide table": many columns of prose, to check table layout. */
+const WIDE_TABLE = [
+  "Findings:",
+  "",
+  "| # | Check | Verdict | Fix on main | Catch |",
+  "| --- | --- | --- | --- | --- |",
+  "| 1 | Backups geo-redundant | Code, destructive | `modules/app-postgres/main.tf:22` hardcodes `false`. Add a variable and set it per caller. | ForceNew, so the server is recreated. Needs dump/restore and a manual Entra role re-map. Combine with #2. |",
+  "| 2 | DBs in cluster region | Code, blocked | `*_postgres_location` in `prod.tfvars:33,42,79,100` | Rebuild. The tfvars comment says eastus is restricted for this subscription. No sign of a lifted restriction. Needs a support ticket. |",
+].join("\n");
+
 const FAKE_AGENTS: AgentInfo[] = [
   fakeAgent("patchbay", "Patchbay", "/opt/patchbay", { source: "builtin" }),
   fakeAgent("grok", "Grok Build", "/usr/local/bin/grok", { source: "path" }),
@@ -348,6 +358,39 @@ function fakeHarnessReplay(csid: string) {
   user("[Request interrupted by user for tool use]");
 }
 
+/**
+ * `?readme=1`: "Windows installer testing" loads the transcript shown in the README's screenshot
+ * (`docs/images/code-tab-*.png`). Capture it at 1440×1010 with a device scale of 2.
+ */
+const readmeDemo = new URLSearchParams(location.search).has("readme");
+let readmeSessionId: string | null = null;
+
+function fakeReadmeReplay(csid: string) {
+  const s = db.code.find((c) => c.id === csid)!;
+  const up = (update: Record<string, unknown>) => codeEmit(csid, { type: "update", update } as CodeEnvelope["event"]);
+  const say = (sessionUpdate: string, text: string) => up({ sessionUpdate, content: { type: "text", text } });
+  const nsi = `${s.cwd}/packaging/windows/nulamp.nsi`;
+  const head = 'Name "nulamp"\nOutFile "${OUTFILE}"\nInstallDir "$PROGRAMFILES64\\nulamp"\n';
+  const tail = "RequestExecutionLevel admin\n";
+  say("user_message_chunk", "Upgrading with the Windows installer always resets the install folder to the default. Can you fix that and make sure the installer still builds?");
+  say("agent_thought_chunk", "The installer probably never reads back the folder it saved. Check the NSIS script.");
+  up({ sessionUpdate: "tool_call", toolCallId: "rm-search", title: "Search `InstallDir`", kind: "search", status: "completed", rawInput: { pattern: "InstallDir", path: s.cwd } });
+  up({ sessionUpdate: "tool_call", toolCallId: "rm-read", title: "Read `packaging/windows/nulamp.nsi`", kind: "read", status: "completed", rawInput: { path: nsi }, content: [{ type: "content", content: { type: "text", text: head + tail } }] });
+  say("agent_message_chunk", "Found it. The installer saves the folder to `HKLM\\Software\\nulamp` but never reads it back, so every upgrade falls back to the default. NSIS has `InstallDirRegKey` for exactly this.\n");
+  up({
+    sessionUpdate: "tool_call", toolCallId: "rm-edit", title: "Edit `packaging/windows/nulamp.nsi`", kind: "edit", status: "completed",
+    rawInput: { file_path: nsi },
+    content: [{ type: "diff", path: nsi, oldText: head + tail, newText: head + '; Upgrades reuse the folder the last install chose.\nInstallDirRegKey HKLM "Software\\nulamp" "InstallDir"\n' + tail }],
+    locations: [{ path: nsi, line: 1 }],
+  });
+  up({
+    sessionUpdate: "tool_call", toolCallId: "rm-build", title: "Execute `makensis -V2 packaging/windows/nulamp.nsi`", kind: "execute", status: "completed",
+    rawInput: { command: "makensis -V2 packaging/windows/nulamp.nsi" },
+    content: [{ type: "content", content: { type: "text", text: "Output: \"dist/nulamp-setup.exe\"\nTotal size: 4123456 bytes" } }],
+  });
+  say("agent_message_chunk", "Fixed. Upgrades now install into whatever folder you picked the first time.\n\n- **Change:** one `InstallDirRegKey` line in `nulamp.nsi`, reading the key the installer already writes.\n- **Checked:** `makensis` builds the setup with no warnings.\n\nFresh installs still default to `Program Files\\nulamp`.");
+}
+
 async function fakeChat(a: Record<string, unknown>, regenerate?: string) {
   const convId = a.conversationId as string;
   const ch = a.onEvent;
@@ -390,7 +433,7 @@ async function fakeChat(a: Record<string, unknown>, regenerate?: string) {
     send<ChatEvent>(ch, { type: "error", message: asst.error });
     return;
   }
-  const reply = [
+  const reply = text.includes("wide table") ? WIDE_TABLE : [
     `**Echo:** ${text || "(no text)"}`,
     "",
     `- attachments: ${atts.map((x) => `${x.name} (${x.kind})`).join(", ") || "none"}`,
@@ -789,6 +832,12 @@ function phoneMesh() {
   phone.members = mesh.members;
 }
 
+const CLAUDE_SESSIONS = [
+  { id: "c1", cwd: "/home/demo/projects/demo-app", cwdExists: true, title: "Fix login redirect", preview: "The login redirect loops when the session cookie expires. Can you fix it?", modified: Date.now() - 3_600_000, size: 412_000, imported: null },
+  { id: "c2", cwd: "/home/demo/projects/demo-app", cwdExists: true, title: "Add dark mode", preview: "Add a dark mode toggle to settings", modified: Date.now() - 86_400_000 * 3, size: 1_800_000, imported: null },
+  { id: "c3", cwd: "/home/demo/projects/old-worktree", cwdExists: false, title: "Refactor parser", preview: "Split the parser into a lexer and a parser", modified: Date.now() - 86_400_000 * 20, size: 90_000, imported: null },
+];
+
 export function install() {
   mockWindows("main");
   if (phoneApp) {
@@ -806,7 +855,15 @@ export function install() {
   const seed = (cwd: string, title: string, ago: number, activity: CodeSession["activity"], hostNode = ME) =>
     db.code.push({ id: id(), cwd, acpSessionId: null, title, modelRef: "m1", pinned: false, createdAt: now() - ago, updatedAt: now() - ago, activity, hostNode, epoch: 0, agent: "patchbay", agentModel: null, permissionMode: "default" });
   seed("/home/demo/Projects/nulamp", "Windows installer testing", 1000, "edit");
+  if (readmeDemo) {
+    readmeSessionId = db.code[db.code.length - 1].id;
+    Object.assign(db.models[0], { modelId: "qwen3-coder", displayName: "Qwen3 Coder" });
+    // A registry key, not a file: keep it from rendering as a file link.
+    (window as unknown as Record<string, unknown>).__fakeMissing = ["HKLM\\Software\\nulamp"];
+  }
   seed("/home/demo/Projects/nulamp", "Release to staging", 5000, "pr");
+  // A second folder on the phone's laptop, so project drag has two rows to swap.
+  if (phoneApp) seed("/home/demo/Projects/patchbay", "Gatekeeper quarantine", 2000, "edit");
   seed("/home/demo/Projects/omnimark", "Interactive document controls", 3000, "branch", meshDemo ? "n-studio" : ME);
   seed("/home/demo/Work/omnimark", "Session overview", 9000, null, meshDemo ? "n-old" : ME);
   if (longTurns > 0) {
@@ -818,7 +875,9 @@ export function install() {
     harnessSessionId = db.code[db.code.length - 1].id;
   }
   if (meshDemo) {
-    meshMember();
+    // The phone already built its mesh in phoneMesh(). Rebuilding it here would
+    // name the laptop with the phone's name, so its sessions show up under the phone.
+    if (!phoneApp) meshMember();
     mesh.pending = [{ nodeId: "n-new", name: "travel-pc", code: "482 913" }];
     setTimeout(fakeRemoteStream, 2500);
   }
@@ -890,13 +949,28 @@ export function install() {
         case "delete_model": db.models = db.models.filter((m) => m.id !== a.id); return null;
         case "get_preferences": return JSON.parse(db.settings.preferences ?? "{}");
         case "set_preferences": {
-          const p = a.prefs as { terminalShell?: string; autoCompactPercent?: number | null; usageLimit?: { percent: number } };
+          const p = a.prefs as {
+            terminalShell?: string;
+            autoCompactPercent?: number | null;
+            usageLimit?: { percent: number };
+            readAloudEngine?: string;
+            readAloudRate?: string;
+            readAloudServerUrl?: string;
+          };
           if (p.terminalShell && !p.terminalShell.startsWith("/")) throw `terminal shell ${p.terminalShell} does not exist`;
           if (p.autoCompactPercent != null && (p.autoCompactPercent < 10 || p.autoCompactPercent > 99)) throw "auto-compact threshold must be between 10 and 99%";
           if (p.usageLimit && (p.usageLimit.percent < 1 || p.usageLimit.percent > 100)) throw "usage limit must be between 1 and 100%";
+          if (p.readAloudEngine && !["auto", "system", "builtin", "server"].includes(p.readAloudEngine)) throw "read aloud engine must be one of auto, system, builtin, server";
+          if (p.readAloudRate && !["slower", "normal", "faster"].includes(p.readAloudRate)) throw "read aloud speed must be one of slower, normal, faster";
+          const speechUrl = p.readAloudServerUrl?.trim() ?? "";
+          if (speechUrl && !speechUrl.startsWith("http://") && !speechUrl.startsWith("https://")) throw "speech server URL must be an http or https URL";
           db.settings.preferences = JSON.stringify(a.prefs);
           return null;
         }
+        case "list_native_voices": return [];
+        case "speak_native": return null;
+        case "stop_native": return null;
+        case "synthesize_speech": throw "pnpm dev has no speech server. Use System or Built-in, or run the app.";
         case "claude_overview": {
           const cfg = JSON.parse(db.settings.preferences ?? "{}").claudeConfig ?? {};
           const off = (list: string[] | undefined, x: string) => (list ?? []).includes(x);
@@ -1027,6 +1101,44 @@ export function install() {
         }
 
         case "list_code_sessions": return [...db.code].sort((x, y) => y.updatedAt - x.updatedAt);
+        case "list_claude_sessions":
+          return CLAUDE_SESSIONS.map((c) => ({ ...c, imported: db.settings[`import.claude.${c.id}`] ?? null }));
+        case "import_claude_sessions": {
+          const made: CodeSession[] = [];
+          for (const cid of a.ids as string[]) {
+            const c = CLAUDE_SESSIONS.find((x) => x.id === cid);
+            if (!c) continue;
+            const prior = db.code.find((x) => x.id === db.settings[`import.claude.${cid}`]);
+            if (prior) {
+              made.push(prior);
+              continue;
+            }
+            const s: CodeSession = {
+              id: id(), cwd: c.cwd, acpSessionId: null, title: c.title, modelRef: null, pinned: false,
+              createdAt: c.modified - 3_600_000, updatedAt: c.modified, activity: null, agent: (a.agent as AgentId | null) ?? "patchbay",
+              agentModel: null, hostNode: ME, epoch: 0, permissionMode: "default", titleManual: true,
+            };
+            db.code.push(s);
+            db.settings[`import.claude.${cid}`] = s.id;
+            db.transcripts[s.id] = JSON.stringify({
+              v: 1,
+              earlier: {
+                entries: [
+                  { kind: "user", text: c.preview },
+                  { kind: "agent", text: "Looking at it now." },
+                  { kind: "tool", id: "t1" },
+                  { kind: "agent", text: "Fixed." },
+                  { kind: "info", text: "Imported from Claude Code. The agent gets this conversation as context with your first message." },
+                ],
+                toolCalls: { t1: { toolCallId: "t1", title: "Edit src/app.ts", kind: "edit", status: "completed" } },
+              },
+              entries: [],
+              toolCalls: {},
+            });
+            made.push(s);
+          }
+          return made;
+        }
         case "create_code_session": {
           const prefs = JSON.parse(db.settings.preferences ?? "{}") as { defaultAgent?: AgentId; permissionMode?: CodeSession["permissionMode"] };
           const s: CodeSession = {
@@ -1085,6 +1197,10 @@ export function install() {
               else if (csid === harnessSessionId) {
                 fakeHarnessReplay(csid);
                 fakeReady(csid, true);
+              } else if (csid === readmeSessionId) {
+                fakeReadmeReplay(csid);
+                fakeReady(csid, true);
+                codeEmit(csid, { type: "usage", usage: { totals: { input: 41000, cachedRead: 30000, cacheWrite: 0, output: 1800, reasoning: 0, costUsd: 0.07, apiMs: 0 }, contextTokens: 24000, contextWindow: 128000, autoCompactPercent: 85 } });
               } else fakeReady(csid);
             }, 400);
           }, 10);
@@ -1177,6 +1293,7 @@ export function install() {
         case "get_code_transcript": return db.transcripts[a.id as string] ?? null;
         case "save_code_transcript": db.transcripts[a.id as string] = a.json as string; return null;
         case "list_project_files": await sleep(80); return DEMO_FILES;
+        case "code_session_image": return "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
         case "list_mcp_servers": return db.mcp.map((m) => ({ ...m, config: { ...m.config, env: m.config.env.map((kv) => (kv.secret ? { ...kv, value: "", stored: !!kv.value } : kv)) } }));
         case "save_mcp_server": {
           const i = a.input as Omit<McpServer, "id"> & { id?: string };
@@ -1251,6 +1368,7 @@ export function install() {
           return null;
         }
         case "list_agents": return FAKE_AGENTS;
+        case "host_info": return { version: "0.11.0", os: "macos", arch: "aarch64" };
         case "code_set_agent": {
           const s = db.code.find((x) => x.id === a.id)!;
           const saved = db.transcripts[s.id];
@@ -1277,14 +1395,15 @@ export function install() {
         case "code_rewind": await sleep(150); return null;
         case "code_usage": return { totals: { ...fakeUsage }, contextTokens: null, contextWindow: 128000, autoCompactPercent: 85 };
         case "plan_limits": {
-          // `?plan=none` before any report; `?plan=over` past the limit and on extra usage.
+          // `?plan=none` before any report; `?plan=over` past the limit and on extra usage; `?plan=slow` a light burn.
           const plan = new URLSearchParams(location.search).get("plan");
           if (plan === "none") return null;
           const now = Math.floor(Date.now() / 1000);
           const over = plan === "over";
+          const slow = plan === "slow";
           return {
-            fiveHour: { utilization: over ? 1 : 0.82, resetsAt: now + 72 * 60 },
-            sevenDay: { utilization: over ? 0.96 : 0.41, resetsAt: now + 3 * 86400 + 7200 },
+            fiveHour: { utilization: over ? 1 : slow ? 0.12 : 0.82, resetsAt: now + 72 * 60 },
+            sevenDay: { utilization: over ? 0.96 : slow ? 0.1 : 0.41, resetsAt: now + 3 * 86400 + 7200 },
             overageUntil: over ? now + 72 * 60 : null,
             observedAt: now - 240,
           };

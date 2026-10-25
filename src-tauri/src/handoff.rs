@@ -485,6 +485,18 @@ pub fn switch_prompt(transcript_json: Option<&str>, from_agent: &str) -> String 
     )
 }
 
+/// What the agent gets as context for a session imported from another tool (Claude Code).
+pub fn import_prompt(transcript_json: Option<&str>, from_name: &str) -> String {
+    note(
+        &format!(
+            "This session was imported from {from_name}. You don't have its internal state, so here is \
+             the conversation so far, with the tools it used. The project files are as they are now, \
+             which may differ from when the conversation took place; check them rather than assuming."
+        ),
+        transcript_json,
+    )
+}
+
 /// The transcript after switching agents: everything shown so far moves to `earlier` (out of
 /// the new agent's own session) behind a divider, and the new agent's turns start empty.
 pub fn fold_for_switch(transcript_json: Option<&str>, divider: &str) -> String {

@@ -36,6 +36,20 @@ All eight speak ACP (over stdio, or in memory for Patchbay's own), so one client
 - DB: `code_sessions.agent` (default `grok` for rows made before the built-in agent; new sessions use the `defaultAgent` preference, `patchbay` by default) and `code_sessions.agent_model`. ACP session ids only mean something to the agent that made them, so switching agents starts a new ACP session (next section).
 - Preferences: `defaultAgent` and `agentPaths` (id -> executable). Changing `agentPaths` restarts idle sessions, like the other agent settings.
 
+## Messaging between Code sessions
+
+Each running session receives a Patchbay-owned MCP server through ACP's `mcpServers` field. Its
+`list_agent_sessions` tool discovers unarchived sessions by title and host; `send_agent_message`
+addresses one session by id. The MCP child uses a short-lived request to a loopback listener owned
+by the Patchbay process. A per-session random token and the source session id accompany that
+request; Patchbay checks that the source session is hosted on the sending member.
+
+The host routes a message to the target session's current host through the mesh. The receiving
+host starts an idle agent and sends the message as an attributed prompt. A busy agent queues it for
+its next turn; agent messages are never steered into a running turn. The recipient can reply by
+calling `send_agent_message` with the sender's session id. Members share the mesh's existing trust
+boundary, so every admitted member can send messages to every unarchived session.
+
 ## Models, modes and config options
 
 Agents report these three ways:

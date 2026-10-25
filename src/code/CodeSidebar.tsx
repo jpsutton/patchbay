@@ -1,14 +1,15 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { AGENT_LABELS, api, type AgentInfo, type CodeSession } from "../lib/ipc";
 import { memberName, remoteHost, useStore } from "../lib/store";
 import { ArchivedToggle, SectionLabel, SidebarItem } from "../components/SidebarItem";
 import { sessionActions, toggleSessionArchive } from "../lib/itemActions";
 import { fmtShort, matchesQuery } from "../lib/format";
-import { ChevronRightIcon, PlusIcon } from "../components/icons";
+import { ChevronRightIcon, GripVerticalIcon, PlusIcon } from "../components/icons";
 import { activityOf, strongest } from "../lib/activity";
 import { installedAgents, newSessionIn } from "./CodeView";
 import { ContextMenu } from "../components/ItemMenu";
 import { Dot } from "../components/Dot";
+import { loadStringList, saveStringList, useManualOrder } from "../lib/manualOrder";
 
 const COLLAPSED_KEY = "patchbay.codeSidebar.collapsed";
 const ORDER_KEY = "patchbay.codeSidebar.order";
@@ -16,37 +17,11 @@ const ORDER_KEY = "patchbay.codeSidebar.order";
 const DRAG_THRESHOLD = 4;
 
 function loadCollapsed(): Set<string> {
-  try {
-    return new Set(JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? "[]") as string[]);
-  } catch {
-    return new Set();
-  }
+  return new Set(loadStringList(COLLAPSED_KEY));
 }
 
 function saveCollapsed(s: Set<string>) {
-  try {
-    localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...s]));
-  } catch {
-    /* storage unavailable */
-  }
-}
-
-/** Folder keys in the order the user arranged them, top first. */
-function loadOrder(): string[] {
-  try {
-    const v = JSON.parse(localStorage.getItem(ORDER_KEY) ?? "[]");
-    return Array.isArray(v) ? (v as string[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveOrder(o: string[]) {
-  try {
-    localStorage.setItem(ORDER_KEY, JSON.stringify(o));
-  } catch {
-    /* storage unavailable */
-  }
+  saveStringList(COLLAPSED_KEY, [...s]);
 }
 
 function basename(p: string): string {
@@ -84,7 +59,6 @@ export function CodeSidebar() {
   const mesh = useStore((s) => s.mesh);
   const [collapsed, setCollapsed] = useState(loadCollapsed);
   const [showArchived, setShowArchived] = useState(false);
-  const [order, setOrder] = useState(loadOrder);
   /** While dragging a folder: which one, and the slot it would drop into. */
   const [drag, setDrag] = useState<{ key: string; index: number } | null>(null);
   const folderEls = useRef(new Map<string, HTMLDivElement>());
@@ -111,8 +85,10 @@ export function CodeSidebar() {
     for (const s of hits) {
       if (s.pinned) continue;
       const host = remoteHost(s, mesh);
-      const key = host ? `${host}:${s.cwd}` : s.cwd;
-      const g = by.get(key) ?? { cwd: s.cwd, host, list: [] };
+      // `/a/b` and `/a/b/` are one folder.
+      const dir = s.cwd.length > 1 ? s.cwd.replace(/[\\/]+$/, "") || s.cwd : s.cwd;
+      const key = host ? `${host}:${dir}` : dir;
+      const g = by.get(key) ?? { cwd: dir, host, list: [] };
       g.list.push(s);
       by.set(key, g);
     }
@@ -133,36 +109,17 @@ export function CodeSidebar() {
       .sort((a, b) => b.latest - a.latest);
   }, [hits, mesh]);
 
-  // Folders keep the order the user gave them. A folder seen for the first time goes on top.
+  // Folders keep the order the user gave them. A folder seen for the first time goes on top,
+  // and one that drops out of view keeps its place in storage.
+  const rankKeys = useMemo(() => byRecency.map((g) => g.key), [byRecency]);
+  const { ordered, move: moveKey } = useManualOrder(ORDER_KEY, rankKeys);
   const groups = useMemo<Group[]>(() => {
-    const rank = new Map(order.map((k, i) => [k, i]));
-    const fresh = byRecency.filter((g) => !rank.has(g.key));
-    const known = byRecency.filter((g) => rank.has(g.key)).sort((a, b) => rank.get(a.key)! - rank.get(b.key)!);
-    return [...fresh, ...known];
-  }, [byRecency, order]);
-
-  // Record first-seen folders so later activity doesn't move them. Folders that
-  // drop out of view (all archived, or a computer offline) keep their place.
-  useEffect(() => {
-    const fresh = groups.filter((g) => !order.includes(g.key)).map((g) => g.key);
-    if (fresh.length === 0) return;
-    const next = [...fresh, ...order];
-    saveOrder(next);
-    setOrder(next);
-  }, [groups, order]);
-
-  /** Move `key` so it sits just above the visible folder now at `index` (or last, past the end). */
-  const moveFolder = (key: string, index: number) => {
-    const visible = groups.map((g) => g.key);
-    const from = visible.indexOf(key);
-    if (from < 0 || index < 0 || index === from || index === from + 1) return;
-    const next = order.filter((k) => k !== key);
-    const before = visible[index];
-    if (before !== undefined) next.splice(next.indexOf(before), 0, key);
-    else next.splice(next.indexOf(visible[visible.length - 1]) + 1, 0, key);
-    saveOrder(next);
-    setOrder(next);
-  };
+    const byKey = new Map(byRecency.map((g) => [g.key, g]));
+    return ordered.flatMap((k) => {
+      const g = byKey.get(k);
+      return g ? [g] : [];
+    });
+  }, [byRecency, ordered]);
 
   /** Which slot the pointer is over: the folder whose upper half it is in, or past the last one. */
   const slotAt = (y: number) => {
@@ -198,7 +155,7 @@ export function CodeSidebar() {
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
       setDrag(null);
-      if (ev.type === "pointerup") moveFolder(key, index);
+      if (ev.type === "pointerup") moveKey(key, index);
     };
     el.addEventListener("pointermove", move);
     el.addEventListener("pointerup", up);
@@ -324,6 +281,15 @@ export function CodeSidebar() {
               }}
             >
               <button
+                className="-ml-2 flex h-6 w-3 shrink-0 cursor-grab touch-none items-center justify-center rounded text-faint opacity-0 hover:text-fg focus-visible:opacity-100 group-hover/header:opacity-100"
+                onPointerDown={(e) => startDrag(e, g.key)}
+                tabIndex={-1}
+                title="Drag to reorder"
+                aria-label={`Drag to reorder ${g.label}`}
+              >
+                <GripVerticalIcon size={12} />
+              </button>
+              <button
                 className="flex min-w-0 flex-1 items-baseline gap-1.5 text-left"
                 onPointerDown={(e) => startDrag(e, g.key)}
                 onClick={() => {
@@ -337,7 +303,7 @@ export function CodeSidebar() {
                   // Alt+Up/Down moves the folder without a pointer.
                   if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
                   e.preventDefault();
-                  moveFolder(g.key, e.key === "ArrowUp" ? i - 1 : i + 2);
+                  moveKey(g.key, e.key === "ArrowUp" ? i - 1 : i + 2);
                 }}
                 title={`${g.host ? `${g.cwd} on ${memberName(mesh, g.host)}` : g.cwd}\nDrag to reorder`}
                 aria-expanded={!isCollapsed}

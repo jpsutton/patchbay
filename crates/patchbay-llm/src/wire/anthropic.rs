@@ -6,7 +6,31 @@ use serde_json::{Value, json};
 
 use super::*;
 
+/// Output cap for a model whose settings leave it unset. Other servers that speak this format
+/// may allow less, so they keep it.
 const DEFAULT_MAX_TOKENS: u32 = 8192;
+/// The same for Claude models without a more specific entry. Thinking counts against the cap, so
+/// it needs room for a long reply after the thinking. This is also what Claude Code falls back to
+/// for a model ID it does not know.
+const CLAUDE_MAX_TOKENS: u32 = 32000;
+/// Claude Code's out-of-the-box cap for the Fable family.
+const FABLE_MAX_TOKENS: u32 = 64000;
+/// Claude Code's out-of-the-box cap for the Opus, Sonnet and Haiku 5 generation.
+const CLAUDE_5_MAX_TOKENS: u32 = 128000;
+
+/// Output cap for a model whose settings leave it unset. The Claude values match what Claude Code
+/// sends when `CLAUDE_CODE_MAX_OUTPUT_TOKENS` is unset.
+fn default_max_tokens(model: &str) -> u32 {
+    if !model.starts_with("claude-") || model.starts_with("claude-3") {
+        DEFAULT_MAX_TOKENS
+    } else if ["opus-5", "sonnet-5", "haiku-5"].iter().any(|g| model.starts_with(&format!("claude-{g}"))) {
+        CLAUDE_5_MAX_TOKENS
+    } else if model.starts_with("claude-fable") {
+        FABLE_MAX_TOKENS
+    } else {
+        CLAUDE_MAX_TOKENS
+    }
+}
 
 fn ephemeral() -> Value {
     json!({"type": "ephemeral"})
@@ -58,7 +82,7 @@ pub fn body(cfg: &Config, req: &Request) -> Value {
     let thinking = matches!(cfg.effort, Some(e) if e > Effort::Minimal);
     let mut b = json!({
         "model": cfg.model,
-        "max_tokens": cfg.max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+        "max_tokens": cfg.max_output_tokens.unwrap_or_else(|| default_max_tokens(&cfg.model)),
         "messages": messages,
         "stream": true,
     });
@@ -381,6 +405,25 @@ mod tests {
     }
 
     #[test]
+    fn current_claude_models_get_room_to_think() {
+        let cap = |model: &str, set: Option<u32>| {
+            let mut c = cfg();
+            c.model = model.into();
+            c.max_output_tokens = set;
+            body(&c, &Request::simple("s", "hi"))["max_tokens"].as_u64().unwrap()
+        };
+        assert_eq!(cap("claude-opus-5-5", None), 128000);
+        assert_eq!(cap("claude-sonnet-5-5", None), 128000);
+        assert_eq!(cap("claude-haiku-5-5", None), 128000);
+        assert_eq!(cap("claude-fable-5-1", None), 64000);
+        assert_eq!(cap("claude-opus-4-1", None), 32000);
+        assert_eq!(cap("claude-unknown-9", None), 32000);
+        assert_eq!(cap("claude-3-5-sonnet-latest", None), 8192);
+        assert_eq!(cap("kimi-k2", None), 8192);
+        assert_eq!(cap("claude-sonnet-5-5", Some(64000)), 64000);
+    }
+
+    #[test]
     fn thinking_drops_temperature() {
         let mut c = cfg();
         c.temperature = Some(0.3);
@@ -421,6 +464,24 @@ mod tests {
         assert_eq!(r.stop, StopReason::ToolUse);
         let u = r.usage.unwrap();
         assert_eq!((u.input, u.cached_read, u.cache_write, u.output), (17, 10, 2, 9));
+    }
+
+    #[test]
+    fn a_tool_call_cut_off_by_the_limit_keeps_its_partial_input() {
+        let mut p: Box<dyn Parser> = Box::new(AnthropicParser::default());
+        let mut out = Vec::new();
+        for e in [
+            r#"{"type":"message_start","message":{"model":"claude","usage":{"input_tokens":5,"output_tokens":1}}}"#,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tu","name":"Write"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\": \"a.py\""}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":8192}}"#,
+            r#"{"type":"message_stop"}"#,
+        ] {
+            p.event(None, e, &mut out).unwrap();
+        }
+        let r = p.finish().unwrap();
+        assert_eq!(r.stop, StopReason::MaxTokens);
+        assert_eq!(r.message.tool_calls().next().unwrap().arguments, json!(r#"{"file_path": "a.py""#));
     }
 
     #[test]

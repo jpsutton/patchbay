@@ -106,6 +106,9 @@ fn url_for(listen: &str, token: &str) -> String {
 }
 
 fn main() -> Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--agent-messaging-mcp") {
+        return patchbay_lib::agent_messaging::run_stdio();
+    }
     let args = parse_args()?;
     let data_dir = match args.data_dir.clone() {
         Some(d) => d,

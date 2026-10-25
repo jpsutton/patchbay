@@ -160,6 +160,8 @@ pub fn notes_part(notes: &[Note], p: Prompts) -> Option<Part> {
 /// its inbox (and the one that started this run, already in its history) are read as it goes.
 pub async fn run(parent: &Arc<Session>, agent: &Arc<SubAgent>, cancel: &CancellationToken) -> Result<String, String> {
     let child = &agent.child;
+    // Replies in a row cut off by the output token limit.
+    let mut cut_offs = 0;
     for _ in 0..parent.host.settings().limits.subagent_max_steps.max(1) {
         let inbox: Vec<String> = std::mem::take(&mut *agent.inbox.lock().unwrap());
         if !inbox.is_empty() {
@@ -191,17 +193,26 @@ pub async fn run(parent: &Arc<Session>, agent: &Arc<SubAgent>, cancel: &Cancella
             drop(t);
             parent.add_cost(u.cost_usd);
         }
+        let cut = response.stop == patchbay_llm::StopReason::MaxTokens;
+        cut_offs = if cut { cut_offs + 1 } else { 0 };
         let calls: Vec<_> = response.message.tool_calls().cloned().collect();
+        let cut_off = turn::cut_off_call(&calls, &response.stop);
         let text = response.message.text();
         child.state.lock().await.messages.push(response.message);
         if calls.is_empty() {
+            // Cut off by the output token limit: ask for the rest, a few times at most.
+            if cut && cut_offs <= turn::MAX_CUT_OFF_CONTINUES {
+                let note = prompt::reminder(&parent.prompts().msg("cut_off_reply", &[]));
+                child.state.lock().await.messages.push(Message::with_parts(Role::User, vec![Part::Text(note)]));
+                continue;
+            }
             // A message that arrived while it was answering gets an answer too.
             if !agent.inbox.lock().unwrap().is_empty() {
                 continue;
             }
             return if text.trim().is_empty() { Err("the subagent finished without a report".into()) } else { Ok(text) };
         }
-        let results = turn::execute(child, &agent.registry, calls, cancel, "↳ ").await;
+        let results = turn::execute(child, &agent.registry, calls, cut_off, cancel, "↳ ").await;
         child
             .state
             .lock()

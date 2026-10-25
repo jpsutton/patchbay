@@ -1098,6 +1098,15 @@ impl Db {
         Ok(())
     }
 
+    /// Dates for a session made from an import, so it sorts where the original did.
+    pub fn set_code_session_times(&self, id: &str, created_at: i64, updated_at: i64) -> Result<()> {
+        self.conn().execute(
+            "UPDATE code_sessions SET created_at = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, created_at, updated_at],
+        )?;
+        Ok(())
+    }
+
     /// A title someone typed (`manual`) pins it; an automatic one only lands while it isn't pinned.
     /// Returns whether it was written. Doesn't touch `updated_at`: naming isn't activity.
     pub fn set_code_session_title(&self, id: &str, title: &str, manual: bool) -> Result<bool> {

@@ -505,6 +505,19 @@ export type AcpToolCallContent =
   | { type: "diff"; path: string; oldText: string | null; newText: string }
   | { type: "terminal"; terminalId: string };
 
+export interface ClaudeSession {
+  id: string;
+  cwd: string;
+  cwdExists: boolean;
+  title: string;
+  preview: string;
+  /** Unix ms. */
+  modified: number;
+  size: number;
+  /** The Code session an earlier import made. */
+  imported: string | null;
+}
+
 export interface AcpToolCall {
   toolCallId: string;
   title?: string;
@@ -642,6 +655,19 @@ export interface Preferences {
   terminalFontSize: number;
   /** Draw typed characters before a slow shell echoes them: auto = when echo lags. */
   terminalLocalEcho: "auto" | "on" | "off";
+  /** auto | system | builtin | server. This device only; preferences are not synced. */
+  readAloudEngine: "auto" | "system" | "builtin" | "server";
+  /** Voice id for the engine in use. Empty means that engine's default. */
+  readAloudVoice: string;
+  readAloudRate: "slower" | "normal" | "faster";
+  /** Speak each new finished reply while its chat or session is on screen. */
+  readAloudListen: boolean;
+  /** OpenAI-compatible speech base URL, used when no provider is chosen. */
+  readAloudServerUrl: string;
+  readAloudServerModel: string;
+  readAloudServerVoice: string;
+  /** An OpenAI-compatible provider whose key and URL to use. */
+  readAloudServerProviderId: string;
 }
 
 export const defaultPreferences: Preferences = {
@@ -679,7 +705,25 @@ export const defaultPreferences: Preferences = {
   terminalShell: "",
   terminalFontSize: 13,
   terminalLocalEcho: "auto",
+  readAloudEngine: "auto",
+  readAloudVoice: "",
+  readAloudRate: "normal",
+  readAloudListen: false,
+  readAloudServerUrl: "",
+  readAloudServerModel: "",
+  readAloudServerVoice: "",
+  readAloudServerProviderId: "",
 };
+
+export interface SpeechAudio {
+  mime: string;
+  audioBase64: string;
+}
+
+export interface NativeVoice {
+  id: string;
+  name: string;
+}
 
 export type TermEvent = { type: "data"; data: string } | { type: "exit"; code: number | null };
 
@@ -692,6 +736,15 @@ export interface DirListing {
   home: string;
   dirs: string[];
   truncated: boolean;
+}
+
+/** Which Patchbay build a computer runs (gateway.rs, `host_info_local`). */
+export interface HostInfo {
+  version: string;
+  /** Rust's `std::env::consts::OS`: "macos", "linux", "windows". */
+  os: string;
+  /** Rust's `std::env::consts::ARCH`: "aarch64", "x86_64". */
+  arch: string;
 }
 
 /** What a computer offers for a new Code session (gateway.rs, `new_session_options_local`). */
@@ -733,6 +786,16 @@ export const api = {
   claudeOverview: (cwd: string | null) => invoke<ClaudeOverview>("claude_overview", { cwd }),
   setWebSearchKey: (key: string) => invoke<void>("set_web_search_key", { key }),
   clearWebSearchKey: () => invoke<void>("clear_web_search_key"),
+  listNativeVoices: () => invoke<NativeVoice[]>("list_native_voices"),
+  speakNative: (text: string, voice: string, rate: string) => invoke<void>("speak_native", { text, voice, rate }),
+  stopNative: () => invoke<void>("stop_native"),
+  synthesizeSpeech: (input: {
+    providerId: string;
+    baseUrl: string;
+    model: string;
+    voice: string;
+    text: string;
+  }) => invoke<SpeechAudio>("synthesize_speech", input),
   getSetting: (key: string) => invoke<string | null>("get_setting", { key }),
   setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),
 
@@ -798,6 +861,11 @@ export const api = {
   /** With `host`, the session runs on that computer, in its folder `cwd`. */
   createCodeSession: (cwd: string, modelRef: string | null, agent?: AgentId, host?: string | null) =>
     invoke<CodeSession>("create_code_session", { cwd, modelRef, agent: agent ?? null, host: host ?? null }),
+  /** Claude Code's sessions on this computer. */
+  listClaudeSessions: () => invoke<ClaudeSession[]>("list_claude_sessions"),
+  /** Make Code sessions from Claude Code's, continued by `agent` (default: the preferred one). */
+  importClaudeSessions: (ids: string[], agent?: AgentId | null) =>
+    invoke<CodeSession[]>("import_claude_sessions", { ids, agent: agent ?? null }),
   /** With `host`, the agents installed on that computer. */
   listAgents: (host?: string | null) => invoke<AgentInfo[]>("list_agents", { host: host ?? null }),
   updateCodeSession: (
@@ -825,6 +893,8 @@ export const api = {
   saveCodeTranscript: (id: string, json: string) => invoke<void>("save_code_transcript", { id, json }),
   /** With `sessionId`, lists files on the node hosting that session. */
   listProjectFiles: (cwd: string, sessionId?: string) => invoke<string[]>("list_project_files", { cwd, sessionId }),
+  /** A picture the reply linked, read on the computer that holds the session. A data URL. */
+  codeSessionImage: (id: string, path: string) => invoke<string>("code_session_image", { id, path }),
 
   listMcpServers: () => invoke<McpServer[]>("list_mcp_servers"),
   saveMcpServer: (input: { id?: string; name: string; enabled: boolean; config: McpConfig }) =>
@@ -920,6 +990,8 @@ export const api = {
   /** Folders under `path` (default: home) on this computer, for choosing one without a native dialog. */
   /** With `host`, the folders on that computer. */
   listDirs: (path: string | null, host?: string | null) => invoke<DirListing>("list_dirs", { path, host: host ?? null }),
+  /** The Patchbay version and OS of this computer, or with `host` of that one. */
+  hostInfo: (host?: string | null) => invoke<HostInfo | null>("host_info", { host: host ?? null }),
   /** With `host`, what that computer offers. */
   newSessionOptions: (host?: string | null) => invoke<NewSessionOptions>("new_session_options", { host: host ?? null }),
 };

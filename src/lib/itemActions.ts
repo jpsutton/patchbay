@@ -119,6 +119,19 @@ export function sessionActions(
     });
   }
   actions.push({ label: archived ? "Restore from archive" : "Archive", onSelect: toggleSessionArchive(s) });
+  actions.push({ label: "Session info…", onSelect: () => st().setSessionInfoId(s.id) });
+  actions.push({
+    label: "Copy session ID",
+    onSelect: attempt(async () => {
+      // The live id (the agent's last `sessionReady`) beats the saved one, which can lag.
+      const id = st().code[s.id]?.acpSessionId ?? s.acpSessionId;
+      if (!id) {
+        st().setToast("No agent session ID yet: the agent hasn't started this session.");
+        return;
+      }
+      if (await copyText(id)) st().setToast("Copied the agent session ID");
+    }),
+  });
   actions.push({
     label: "Copy folder path",
     onSelect: attempt(async () => {
