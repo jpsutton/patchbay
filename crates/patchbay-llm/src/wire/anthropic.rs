@@ -9,12 +9,27 @@ use super::*;
 /// Output cap for a model whose settings leave it unset. Other servers that speak this format
 /// may allow less, so they keep it.
 const DEFAULT_MAX_TOKENS: u32 = 8192;
-/// The same for current Claude models. Thinking counts against the cap, so it needs room for a
-/// long reply after the thinking. Every Claude model after the Claude 3 family allows this much.
+/// The same for Claude models without a more specific entry. Thinking counts against the cap, so
+/// it needs room for a long reply after the thinking. This is also what Claude Code falls back to
+/// for a model ID it does not know.
 const CLAUDE_MAX_TOKENS: u32 = 32000;
+/// Claude Code's out-of-the-box cap for the Fable family.
+const FABLE_MAX_TOKENS: u32 = 64000;
+/// Claude Code's out-of-the-box cap for the Opus, Sonnet and Haiku 5 generation.
+const CLAUDE_5_MAX_TOKENS: u32 = 128000;
 
+/// Output cap for a model whose settings leave it unset. The Claude values match what Claude Code
+/// sends when `CLAUDE_CODE_MAX_OUTPUT_TOKENS` is unset.
 fn default_max_tokens(model: &str) -> u32 {
-    if model.starts_with("claude-") && !model.starts_with("claude-3") { CLAUDE_MAX_TOKENS } else { DEFAULT_MAX_TOKENS }
+    if !model.starts_with("claude-") || model.starts_with("claude-3") {
+        DEFAULT_MAX_TOKENS
+    } else if ["opus-5", "sonnet-5", "haiku-5"].iter().any(|g| model.starts_with(&format!("claude-{g}"))) {
+        CLAUDE_5_MAX_TOKENS
+    } else if model.starts_with("claude-fable") {
+        FABLE_MAX_TOKENS
+    } else {
+        CLAUDE_MAX_TOKENS
+    }
 }
 
 fn ephemeral() -> Value {
@@ -397,8 +412,12 @@ mod tests {
             c.max_output_tokens = set;
             body(&c, &Request::simple("s", "hi"))["max_tokens"].as_u64().unwrap()
         };
-        assert_eq!(cap("claude-sonnet-5-5", None), 32000);
+        assert_eq!(cap("claude-opus-5-5", None), 128000);
+        assert_eq!(cap("claude-sonnet-5-5", None), 128000);
+        assert_eq!(cap("claude-haiku-5-5", None), 128000);
+        assert_eq!(cap("claude-fable-5-1", None), 64000);
         assert_eq!(cap("claude-opus-4-1", None), 32000);
+        assert_eq!(cap("claude-unknown-9", None), 32000);
         assert_eq!(cap("claude-3-5-sonnet-latest", None), 8192);
         assert_eq!(cap("kimi-k2", None), 8192);
         assert_eq!(cap("claude-sonnet-5-5", Some(64000)), 64000);
