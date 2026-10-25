@@ -1,6 +1,6 @@
 [package]
 name = "patchbay-remote"
-version = "0.12.1"
+version = "0.13.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Patchbay Remote: drive a Patchbay mesh's chats and Code sessions from a phone"
