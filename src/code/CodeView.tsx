@@ -458,7 +458,7 @@ function UserEntry({
           {e.text}
         </div>
       )}
-      <div className="action-row flex gap-0.5 text-muted opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+      <div className="action-row flex items-center gap-0.5 text-muted opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
         {(onEdit || onReuse) && (
           <button
             className={`flex h-7 items-center justify-center rounded-md hover:bg-panel-2 hover:text-fg ${isRemoteApp() ? "gap-1 px-1.5 text-xs" : "w-7"}`}
@@ -496,7 +496,7 @@ function AgentEntry({
       <Markdown text={text} sessionId={sessionId} />
       {settled && text.trim() && (
         <div
-          className={`action-row mt-1 flex gap-0.5 text-muted transition-opacity group-hover:opacity-100 focus-within:opacity-100 ${
+          className={`action-row mt-1 flex items-center gap-0.5 text-muted transition-opacity group-hover:opacity-100 focus-within:opacity-100 ${
             reading ? "" : "opacity-0"
           }`}
         >
