@@ -62,6 +62,15 @@ function burnPace(w: PlanWindow | null, span: number, now: number) {
   return elapsed < 0.03 ? null : current.utilization / Math.min(1, elapsed);
 }
 
+/** What the pace means for a window: usage projected at its reset, and when it would run out first, if it would. */
+function burnOutlook(w: PlanWindow | null, span: number, now: number) {
+  const pace = burnPace(w, span, now);
+  const current = live(w, now);
+  if (pace == null || !current || current.utilization <= 0) return null;
+  const runOutIn = ((1 - current.utilization) / current.utilization) * (span - (current.resetsAt - now));
+  return { pace, projected: Math.round(pace * 100), runOutIn: pace > 1 && current.utilization < 1 ? runOutIn : null };
+}
+
 /** The faster of the two windows' paces. */
 const worstPace = (l: PlanLimits | null, now: number) => {
   const paces = [burnPace(l?.fiveHour ?? null, WINDOW_SECS.fiveHour, now), burnPace(l?.sevenDay ?? null, WINDOW_SECS.sevenDay, now)].filter(
@@ -157,8 +166,9 @@ export function PlanUsageButton() {
   );
 }
 
-function WindowRow({ label, w, now, limit }: { label: string; w: PlanWindow | null; now: number; limit: number | null }) {
+function WindowRow({ label, w, span, now, limit }: { label: string; w: PlanWindow | null; span: number; now: number; limit: number | null }) {
   const current = live(w, now);
+  const burn = burnOutlook(w, span, now);
   if (!w) return null;
   const pct = current ? Math.round(current.utilization * 100) : 0;
   const t = tone(pct, limit);
@@ -179,6 +189,12 @@ function WindowRow({ label, w, now, limit }: { label: string; w: PlanWindow | nu
           <div className="absolute inset-y-0 w-px bg-fg/50" style={{ left: `${limit}%` }} title={`Stops at ${limit}%`} />
         )}
       </div>
+      {burn && (
+        <div className={`meta mt-1 ${burn.runOutIn != null ? "text-warn" : "text-faint"}`}>
+          {burn.pace.toFixed(1)}x pace ·{" "}
+          {burn.runOutIn != null ? `runs out in ${fmtSpan(burn.runOutIn)}` : `${burn.projected}% by reset`}
+        </div>
+      )}
     </div>
   );
 }
@@ -213,8 +229,8 @@ export function PlanUsageBlade({ className }: { className: string }) {
         </p>
       ) : (
         <>
-          <WindowRow label="5-hour" w={limits.fiveHour} now={now} limit={limit} />
-          <WindowRow label="Weekly" w={limits.sevenDay} now={now} limit={limit} />
+          <WindowRow label="5-hour" w={limits.fiveHour} span={WINDOW_SECS.fiveHour} now={now} limit={limit} />
+          <WindowRow label="Weekly" w={limits.sevenDay} span={WINDOW_SECS.sevenDay} now={now} limit={limit} />
           {overage && (
             <div className="mx-2 mb-1 mt-1.5 rounded-lg bg-danger/10 px-2.5 py-2 text-[12.5px] leading-[1.4] text-danger" role="alert">
               Using extra usage, billed past the plan, for {fmtSpan(limits.overageUntil! - now)} more.
