@@ -1351,14 +1351,15 @@ export function install() {
         case "code_rewind": await sleep(150); return null;
         case "code_usage": return { totals: { ...fakeUsage }, contextTokens: null, contextWindow: 128000, autoCompactPercent: 85 };
         case "plan_limits": {
-          // `?plan=none` before any report; `?plan=over` past the limit and on extra usage.
+          // `?plan=none` before any report; `?plan=over` past the limit and on extra usage; `?plan=slow` a light burn.
           const plan = new URLSearchParams(location.search).get("plan");
           if (plan === "none") return null;
           const now = Math.floor(Date.now() / 1000);
           const over = plan === "over";
+          const slow = plan === "slow";
           return {
-            fiveHour: { utilization: over ? 1 : 0.82, resetsAt: now + 72 * 60 },
-            sevenDay: { utilization: over ? 0.96 : 0.41, resetsAt: now + 3 * 86400 + 7200 },
+            fiveHour: { utilization: over ? 1 : slow ? 0.12 : 0.82, resetsAt: now + 72 * 60 },
+            sevenDay: { utilization: over ? 0.96 : slow ? 0.1 : 0.41, resetsAt: now + 3 * 86400 + 7200 },
             overageUntil: over ? now + 72 * 60 : null,
             observedAt: now - 240,
           };
