@@ -13,6 +13,7 @@ import { useStore } from "../lib/store";
 export function ReadAloudSettings() {
   const prefs = useStore((s) => s.prefs);
   const providers = useStore((s) => s.providers);
+  const models = useStore((s) => s.models);
   const update = useStore((s) => s.updatePrefs);
   const setToast = useStore((s) => s.setToast);
   const [voices, setVoices] = useState<SpeechVoice[] | null>(null);
@@ -86,9 +87,29 @@ export function ReadAloudSettings() {
           ]}
         />
       </Row>
-      <Row label="Listen to new replies" hint="Speak each finished reply while that chat or session is the one on screen.">
+      <Row label="Listen to new replies" hint="Speak new replies while that chat or session is the one on screen. A chat reads the finished reply. A Code session reads each message as the agent finishes it, so you hear the steps along the way.">
         <Toggle label="Listen to new replies" checked={prefs.readAloudListen} onChange={(v) => set("readAloudListen", v)} />
       </Row>
+      {!isRemoteApp() && (
+        <Row
+          label="Smart speech"
+          hint="A model you choose rewrites each reply for the ear before it is read: file names, code and numbers sound natural, and long passages are tightened. The reply text is sent to that model, a few paragraphs per request. If it fails, the reply is read as written. Not used on the phone."
+        >
+          <select
+            className={`${input} w-56`}
+            aria-label="Smart speech model"
+            value={models.some((m) => m.id === prefs.readAloudRewriteModel) ? prefs.readAloudRewriteModel : ""}
+            onChange={(e) => set("readAloudRewriteModel", e.target.value)}
+          >
+            <option value="">Off</option>
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.displayName}
+              </option>
+            ))}
+          </select>
+        </Row>
+      )}
       {showServer && (
         <>
           <Row

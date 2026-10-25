@@ -13,7 +13,7 @@ import { isDesktopApp, isRemoteApp } from "./platform";
 import { isMac } from "./shortcuts";
 import { useStore } from "./store";
 import { SAMPLE_RATE, renderSpeech, type SpeechRate } from "./builtinVoice";
-import { speechChunks, spokenText } from "./spokenText";
+import { speechChunks, speechSegments, spokenText } from "./spokenText";
 
 export type SpeechEngine = "system" | "builtin" | "server";
 
@@ -128,34 +128,119 @@ export function stopSpeech() {
   if (isDesktopApp()) void api.stopNative().catch(() => {});
 }
 
-/** Speak a reply. A second call replaces whatever is playing. */
-export async function speakText(markdown: string, id: string): Promise<void> {
-  const text = spokenText(markdown);
-  if (!text) return;
-  stopSpeech();
+/** Pieces of speech, in order. Each engine pulls the next one when it needs it. */
+type Feed = AsyncIterable<string>;
+
+/** Below this many spoken characters a part is not worth a model call. */
+const REWRITE_MIN = 24;
+
+/** The generation a failed-rewrite toast was last shown for, so one stop-to-stop run warns once. */
+let warnedGeneration = -1;
+
+/**
+ * The pieces to speak. With a rewrite model chosen, the reply is cut into parts and each is
+ * rewritten for the ear by that model. The first few rewrites start now, before anything is
+ * pulled, so a reply queued behind another is ready when its turn comes. A failed rewrite
+ * speaks that part as written, with the local clean-up, and says so once.
+ */
+function speechFeed(markdown: string, prefs: Preferences, max: number, token: number): Feed {
+  const modelRef = prefs.readAloudRewriteModel;
+  if (!modelRef || isRemoteApp()) {
+    return (async function* () {
+      yield* speechChunks(spokenText(markdown), max);
+    })();
+  }
+  const parts = speechSegments(markdown);
+  const jobs: Promise<string>[] = [];
+  const rewrite = async (part: string): Promise<string> => {
+    const plain = spokenText(part);
+    if (plain.length < REWRITE_MIN) return plain;
+    try {
+      const out = spokenText(await api.rewriteForSpeech(modelRef, part));
+      if (!out) throw new Error("the model returned nothing");
+      console.info("[smart speech]", { before: part, after: out });
+      return out;
+    } catch (e) {
+      console.warn("[smart speech] rewrite failed", e);
+      if (token === generation && warnedGeneration !== token) {
+        warnedGeneration = token;
+        useStore.getState().setToast(`Smart speech failed (${e instanceof Error ? e.message : String(e)}). Reading as written.`);
+      }
+      return plain;
+    }
+  };
+  const AHEAD = 2;
+  const start = (i: number) => {
+    for (let k = i; k < Math.min(parts.length, i + 1 + AHEAD); k++) jobs[k] ??= rewrite(parts[k]);
+  };
+  start(0);
+  return (async function* () {
+    for (let i = 0; i < parts.length; i++) {
+      start(i);
+      const spoken = await jobs[i];
+      if (token !== generation) return;
+      // Parts after the first are already long, so their first piece need not be short.
+      yield* speechChunks(spoken, max, i === 0 ? undefined : max);
+    }
+  })();
+}
+
+/** Resolve the voice and get the reply's feed going. The returned function plays it. */
+async function prepareSpeech(markdown: string, prefs: Preferences, token: number): Promise<(() => Promise<void>) | null> {
+  const voices = await systemVoices();
+  if (token !== generation) return null;
+  const engine = resolvedEngine(prefs, voices);
+  if (engine === "server") {
+    const feed = speechFeed(markdown, prefs, 1500, token);
+    return () => speakServer(feed, prefs, token);
+  }
+  const feed = speechFeed(markdown, prefs, 320, token);
+  if (engine === "builtin") return () => speakBuiltin(feed, prefs.readAloudRate, token);
+  return () => speakSystem(feed, prefs, voices, token);
+}
+
+/** Replies waiting their turn. Each starts when the one before it ends. */
+let queueTail: Promise<void> = Promise.resolve();
+
+/**
+ * Speak a reply after whatever is already queued or playing. Stop clears the queue. The
+ * reply's rewrite starts at once, so it is ready by the time the earlier ones finish.
+ */
+export function enqueueSpeech(markdown: string, id: string): Promise<void> {
+  if (!spokenText(markdown)) return Promise.resolve();
   const token = generation;
-  setSpeaking(id);
   const prefs = useStore.getState().prefs;
-  try {
-    const voices = await systemVoices();
+  const ready = prepareSpeech(markdown, prefs, token);
+  ready.catch(() => {});
+  const run = queueTail.then(async () => {
     if (token !== generation) return;
-    const engine = resolvedEngine(prefs, voices);
-    if (engine === "server") await speakServer(text, prefs, token);
-    else if (engine === "builtin") await speakBuiltin(text, prefs.readAloudRate, token);
-    else await speakSystem(text, prefs, voices, token);
-  } catch (e) {
-    if (token === generation) {
+    try {
+      const play = await ready;
+      if (token !== generation || !play) return;
+      setSpeaking(id);
+      await play();
+    } catch (e) {
+      if (token !== generation) return;
       setSpeaking(null);
       throw e;
     }
-    return;
-  }
-  if (token === generation) setSpeaking(null);
+    if (token === generation) setSpeaking(null);
+  });
+  queueTail = run.catch(() => {});
+  return run;
 }
 
-async function speakBuiltin(text: string, rate: SpeechRate, token: number) {
+/** Speak a reply. A second call replaces whatever is playing or queued. */
+export function speakText(markdown: string, id: string): Promise<void> {
+  if (!spokenText(markdown)) return Promise.resolve();
+  stopSpeech();
+  setSpeaking(id);
+  return enqueueSpeech(markdown, id);
+}
+
+async function speakBuiltin(feed: Feed, rate: SpeechRate, token: number) {
   primeAudio();
-  for (const chunk of speechChunks(text)) {
+  for await (const chunk of feed) {
     if (token !== generation) return;
     const samples = renderSpeech(chunk, rate);
     if (samples.length === 0) continue;
@@ -192,17 +277,17 @@ function playSamples(samples: Float32Array, token: number): Promise<void> {
   });
 }
 
-async function speakSystem(text: string, prefs: Preferences, voices: SpeechVoice[], token: number) {
+async function speakSystem(feed: Feed, prefs: Preferences, voices: SpeechVoice[], token: number) {
   const native = voices.some((v) => v.source === "native");
   if (native && isDesktopApp()) {
-    for (const chunk of speechChunks(text)) {
+    for await (const chunk of feed) {
       if (token !== generation) return;
       await api.speakNative(chunk, prefs.readAloudVoice, prefs.readAloudRate);
     }
     return;
   }
   if (voices.some((v) => v.source === "web") || webHasVoicesNow()) {
-    for (const chunk of speechChunks(text)) {
+    for await (const chunk of feed) {
       if (token !== generation) return;
       await speakWeb(chunk, prefs);
     }
@@ -211,7 +296,7 @@ async function speakSystem(text: string, prefs: Preferences, voices: SpeechVoice
   if (prefs.readAloudEngine === "system") {
     throw new Error("No system voice on this computer. Choose Built-in in Settings.");
   }
-  await speakBuiltin(text, prefs.readAloudRate, token);
+  await speakBuiltin(feed, prefs.readAloudRate, token);
 }
 
 function webHasVoicesNow(): boolean {
@@ -232,7 +317,7 @@ function speakWeb(text: string, prefs: Preferences): Promise<void> {
   });
 }
 
-async function speakServer(text: string, prefs: Preferences, token: number) {
+async function speakServer(feed: Feed, prefs: Preferences, token: number) {
   if (isRemoteApp()) throw new Error("the phone speaks with its own voice. A speech server is configured on a computer.");
   const fetchClip = (chunk: string) =>
     api.synthesizeSpeech({
@@ -242,16 +327,21 @@ async function speakServer(text: string, prefs: Preferences, token: number) {
       voice: prefs.readAloudServerVoice,
       text: chunk,
     });
-  const chunks = speechChunks(text, 1500);
-  let pending: Promise<SpeechAudio> | null = chunks.length > 0 ? fetchClip(chunks[0]) : null;
-  for (let i = 0; i < chunks.length; i++) {
+  const it = feed[Symbol.asyncIterator]();
+  // The next piece's clip, or null at the end. Called as soon as the current clip arrives.
+  const fetchNext = async (): Promise<SpeechAudio | null> => {
+    const next = await it.next();
+    return next.done ? null : fetchClip(next.value);
+  };
+  let pending: Promise<SpeechAudio | null> = fetchNext();
+  for (;;) {
     if (token !== generation) return;
     const clip = await pending;
-    if (token !== generation) return;
-    if (!clip?.audioBase64) throw new Error("the speech server returned no audio");
+    if (token !== generation || !clip) return;
+    if (!clip.audioBase64) throw new Error("the speech server returned no audio");
     // Ask for the next piece now, so it is made while this one plays.
-    pending = i + 1 < chunks.length ? fetchClip(chunks[i + 1]) : null;
-    pending?.catch(() => {});
+    pending = fetchNext();
+    pending.catch(() => {});
     await playClip(clip.audioBase64, clip.mime || "audio/mpeg", token);
   }
 }

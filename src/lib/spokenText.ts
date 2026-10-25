@@ -92,6 +92,47 @@ export function speechChunks(text: string, max = 320, first = FIRST_CHUNK): stri
   return out;
 }
 
+/** Characters in the first segment sent to the rewriting model, so speech starts quickly. */
+const FIRST_SEGMENT = 500;
+const MAX_SEGMENT = 3000;
+
+/**
+ * Cut markdown into parts for the rewriting model, at blank lines and never inside a code
+ * fence. The first part is short so audio starts early; later parts double up to a cap, so
+ * the model makes the next part while the current one plays. Joined, the parts are the input.
+ */
+export function speechSegments(markdown: string, first = FIRST_SEGMENT, max = MAX_SEGMENT): string[] {
+  const blocks: string[] = [];
+  let cur: string[] = [];
+  let fenced = false;
+  const flush = () => {
+    if (cur.length) blocks.push(cur.join("\n"));
+    cur = [];
+  };
+  for (const line of markdown.replace(/\r\n/g, "\n").split("\n")) {
+    if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+    if (!fenced && line.trim() === "") flush();
+    else cur.push(line);
+  }
+  flush();
+
+  const out: string[] = [];
+  let limit = Math.min(max, Math.max(1, first));
+  let buf = "";
+  for (const block of blocks) {
+    const next = buf ? `${buf}\n\n${block}` : block;
+    if (next.length > limit && buf) {
+      out.push(buf);
+      limit = Math.min(max, limit * 2);
+      buf = block;
+    } else {
+      buf = next;
+    }
+  }
+  if (buf) out.push(buf);
+  return out;
+}
+
 /** Agent prose written after the latest user message in a Code session. */
 export function proseSinceLastUser(entries: { kind: string; text?: string }[]): string {
   let start = 0;
@@ -103,4 +144,59 @@ export function proseSinceLastUser(entries: { kind: string; text?: string }[]): 
     .filter((e) => e.kind === "agent" && e.text)
     .map((e) => e.text as string)
     .join("\n\n");
+}
+
+/** Where live reading of a Code session has got to. */
+export interface LiveCursor {
+  /** Index of the first entry not fully spoken. */
+  next: number;
+  /** Characters of that entry already spoken. */
+  spoken: number;
+}
+
+type LiveEntry = { kind: string; text?: string };
+
+/** Start at what is on screen now: the message being written, if any, and everything after. */
+export function liveCursorNow(entries: LiveEntry[]): LiveCursor {
+  const last = entries[entries.length - 1];
+  return { next: last?.kind === "agent" ? entries.length - 1 : entries.length, spoken: 0 };
+}
+
+/**
+ * The agent prose that can be spoken now. A message is done once another entry follows it.
+ * The last one is done only when `settled` (the turn is idle). Text added to a spoken last
+ * entry later is picked up by the next call, so nothing is read twice or dropped.
+ */
+export function takeLiveProse(
+  entries: LiveEntry[],
+  from: LiveCursor,
+  settled: boolean,
+): { texts: string[]; cursor: LiveCursor } {
+  let next = from.next;
+  let spoken = from.spoken;
+  if (next > entries.length) {
+    next = entries.length;
+    spoken = 0;
+  }
+  const texts: string[] = [];
+  for (let i = next; i < entries.length; i++) {
+    const e = entries[i];
+    const last = i === entries.length - 1;
+    if (e.kind !== "agent" || !e.text) {
+      next = i + 1;
+      spoken = 0;
+      continue;
+    }
+    if (last && !settled) break;
+    const piece = e.text.slice(Math.min(spoken, e.text.length));
+    if (piece.trim()) texts.push(piece);
+    if (last) {
+      next = i;
+      spoken = e.text.length;
+    } else {
+      next = i + 1;
+      spoken = 0;
+    }
+  }
+  return { texts, cursor: { next, spoken } };
 }

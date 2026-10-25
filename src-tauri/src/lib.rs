@@ -301,6 +301,11 @@ async fn synthesize_speech(
     Ok(speech::synthesize(&state.db, &provider_id, &base_url, &model, &voice, &text).await?)
 }
 
+/// Part of a reply, rewritten by the user's chosen model so it reads well aloud.
+async fn rewrite_for_speech(state: &AppState, model_ref: String, text: String) -> CmdResult<String> {
+    Ok(speech::rewrite_for_speech(&state.db, &model_ref, &text).await?)
+}
+
 async fn set_preferences(state: &AppState, prefs: prefs::Preferences) -> CmdResult<()> {
     prefs.validate().map_err(CmdError)?;
     let desktop = state.desktop.get().map(|d| &**d);
