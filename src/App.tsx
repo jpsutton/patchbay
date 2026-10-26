@@ -649,9 +649,14 @@ export default function App() {
       .catch((e) => setToast(errorText(e)));
     useStore.getState().refreshMesh();
     api.planLimits().then((l) => useStore.getState().setPlanLimits(l), () => {});
+    const loadPlanHistory = () => api.planHistory().then((h) => useStore.getState().setPlanHistory(h), () => {});
+    loadPlanHistory();
     const unlisteners = [
       listen<CodeEnvelope>("code://event", (ev) => codeEventArrived(ev.payload)),
-      listen<PlanLimits>("code://plan-limits", (ev) => useStore.getState().setPlanLimits(ev.payload)),
+      listen<PlanLimits>("code://plan-limits", (ev) => {
+        useStore.getState().setPlanLimits(ev.payload);
+        loadPlanHistory();
+      }),
       // Mesh (see src-tauri/src/mesh): membership changes, other nodes' writes, live streams.
       listen("mesh://status", () => useStore.getState().refreshMesh()),
       listen<{ tables: string[] }>("mesh://changed", (ev) => useStore.getState().onSynced(ev.payload.tables)),
