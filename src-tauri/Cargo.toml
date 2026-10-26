@@ -98,6 +98,7 @@ rand = "0.8"
 tar = "0.4"
 urlencoding = "2"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws", "query"], optional = true }
+zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
 
 # The app-drawn title bar on Wayland: KWin keeps its own title bar unless the window announces
 # client-side decorations, which only GDK can do (same 0.18 versions Tauri already links).

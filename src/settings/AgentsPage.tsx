@@ -631,6 +631,8 @@ export function AgentPage({ id, list }: { id: AgentId; list: AgentList }) {
   const prefs = useStore((s) => s.prefs);
   const update = useStore((s) => s.updatePrefs);
   const providers = useStore((s) => s.providers);
+  const [installing, setInstalling] = useState(false);
+  const [installError, setInstallError] = useState<string | null>(null);
   useEffect(list.want, []);
   const a = list.agents?.find((x) => x.id === id);
   const onClaudeLogin = providers.some((p) => p.authMode === "claude_login");
@@ -642,6 +644,19 @@ export function AgentPage({ id, list }: { id: AgentId; list: AgentList }) {
     const err = await update({ agentPaths });
     if (!err) list.reload();
     return err;
+  };
+
+  const installAntigravity = async () => {
+    setInstalling(true);
+    setInstallError(null);
+    try {
+      await api.installAntigravityAgent();
+      await list.reload();
+    } catch (e) {
+      setInstallError(errorText(e));
+    } finally {
+      setInstalling(false);
+    }
   };
 
   if (!a) return <Loading list={list} />;
@@ -684,17 +699,62 @@ export function AgentPage({ id, list }: { id: AgentId; list: AgentList }) {
           <button className="text-xs text-accent-ink underline underline-offset-2" onClick={list.reload}>
             Check again
           </button>
+          {a.id === "antigravity" && a.available && (
+            <button
+              className="text-xs text-muted hover:text-fg underline underline-offset-2 disabled:opacity-50"
+              disabled={installing}
+              onClick={installAntigravity}
+            >
+              {installing ? "Reinstalling…" : "Reinstall"}
+            </button>
+          )}
         </div>
       </div>
+      {installError && (
+        <p className="mt-2 text-xs text-danger" role="alert">
+          {installError}
+        </p>
+      )}
       {a.takesProviders && <ProviderChoice agent={a.id} label={a.label} />}
       {((a.id === "claude-code" && !prefs.agentProviders[a.id]) || (a.id === "patchbay" && onClaudeLogin)) && (
         <UsageLimit agent={a.id} />
       )}
+      {a.id === "antigravity" && !a.available && (
+        <div className="mt-4 rounded-lg border border-border bg-panel-2/50 p-4">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <div className="text-sm font-medium">Antigravity ACP Server</div>
+              <div className="mt-0.5 text-xs text-muted">
+                Google ships the Antigravity ACP server (<code>agy_acp_server</code>) as a standalone package.
+                Patchbay can download and set up the official archive automatically.
+              </div>
+            </div>
+            <button
+              className="shrink-0 rounded-md bg-accent px-3 py-1.5 text-xs text-accent-fg hover:opacity-90 disabled:opacity-50"
+              disabled={installing}
+              onClick={installAntigravity}
+            >
+              {installing ? "Installing…" : "Install ACP Server"}
+            </button>
+          </div>
+          {installing && (
+            <p className="mt-2 text-xs text-muted">
+              Downloading ~114 MB archive from Google and unpacking…
+            </p>
+          )}
+          <div className="mt-3 border-t border-border pt-2 text-[11px] text-faint">
+            Sign-in: Uses your Google account (personal or workspace) or a Gemini API key. Patchbay will prompt for sign-in when you start your first session.
+          </div>
+        </div>
+      )}
       {(a.id !== "grok" && a.id !== "patchbay") || prefs.agentPaths[a.id] ? (
-        <Row label="Executable" hint="Absolute path. Blank looks it up on PATH.">
+        <Row
+          label="Executable"
+          hint={a.id === "antigravity" ? "Absolute path to agy_acp_server. Blank looks it up on PATH." : "Absolute path. Blank looks it up on PATH."}
+        >
           <Deferred
             value={prefs.agentPaths[a.id] ?? ""}
-            placeholder={a.id === "claude-code" ? "claude-agent-acp" : (a.program ?? "")}
+            placeholder={a.id === "claude-code" ? "claude-agent-acp" : a.id === "antigravity" ? "agy_acp_server" : (a.program ?? "")}
             mono
             onCommit={(v) => setPath(v.trim())}
           />

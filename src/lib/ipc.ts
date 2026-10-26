@@ -364,6 +364,8 @@ export interface AgentInfo {
   supportsInstructions: boolean;
   /** Can be set to run on Patchbay's providers instead of its own sign-in. */
   takesProviders: boolean;
+  /** Whether Patchbay can download and set up this agent automatically. */
+  canInstall?: boolean;
 }
 
 /** Labels for agent ids, for places that don't load the full list. */
@@ -884,6 +886,8 @@ export const api = {
     invoke<CodeSession[]>("import_claude_sessions", { ids, agent: agent ?? null }),
   /** With `host`, the agents installed on that computer. */
   listAgents: (host?: string | null) => invoke<AgentInfo[]>("list_agents", { host: host ?? null }),
+  /** Download and configure Google's Antigravity ACP server into Patchbay's data directory. */
+  installAntigravityAgent: () => invoke<string>("install_antigravity_agent"),
   updateCodeSession: (
     id: string,
     patch: { title?: string; modelRef?: string; pinned?: boolean; activity?: Activity; archived?: boolean },

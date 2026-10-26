@@ -667,6 +667,15 @@ async fn list_agents(state: &AppState, host: Option<String>) -> CmdResult<serde_
     Ok(serde_json::to_value(agents)?)
 }
 
+async fn install_antigravity_agent(state: &AppState) -> CmdResult<String> {
+    let prog = code::agents::install_antigravity(&state.data_dir).await?;
+    let path = prog.to_string_lossy().into_owned();
+    let mut prefs = prefs::load(&state.db);
+    prefs.agent_paths.insert("antigravity".to_owned(), path.clone());
+    prefs::save(&state.db, &prefs)?;
+    Ok(path)
+}
+
 async fn update_code_session(
     state: &AppState,
     id: String,

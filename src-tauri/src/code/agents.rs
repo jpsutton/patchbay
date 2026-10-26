@@ -133,7 +133,7 @@ impl AgentKind {
                 "Install Node.js (Patchbay then runs the adapter through npx), or `npm install -g @agentclientprotocol/codex-acp`. Sign in with `codex login`, or set OPENAI_API_KEY."
             }
             AgentKind::Antigravity => {
-                "Download Google's Antigravity ACP server for your platform (listed in the ACP registry at agentclientprotocol.com), unpack it, and set the path to agy_acp_server in Settings."
+                "Google distributes the Antigravity ACP server separately. Click Install in Settings to set it up automatically, or unpack agy_acp_server manually."
             }
         }
     }
@@ -357,6 +357,12 @@ pub fn resolve(kind: AgentKind, overrides: &AgentPaths) -> Result<Resolved> {
         if !program.is_file() {
             return Err(anyhow!("{} path {p} does not exist", kind.label()));
         }
+        if kind == AgentKind::Antigravity && is_interactive_cli(&program) {
+            return Err(anyhow!(
+                "\"{}\" is the Antigravity interactive CLI, not the ACP server. Antigravity requires agy_acp_server.",
+                program.display()
+            ));
+        }
         return Ok(Resolved { program, args, source: Source::Override });
     }
     if let Some(program) = names.iter().find_map(|n| which(n)) {
@@ -370,6 +376,117 @@ pub fn resolve(kind: AgentKind, overrides: &AgentPaths) -> Result<Resolved> {
         return Ok(Resolved { program: npx, args, source: Source::Npx });
     }
     Err(anyhow!("{} not found. {}", kind.label(), kind.install_hint()))
+}
+
+/// True if `program` points to the interactive Antigravity CLI (`agy`) rather than its ACP server.
+pub fn is_interactive_cli(program: &Path) -> bool {
+    let s = program.to_string_lossy();
+    let file_part = s.rsplit(['/', '\\']).next().unwrap_or(&s);
+    let stem = file_part.strip_suffix(".exe").unwrap_or(file_part);
+    stem == "agy"
+}
+
+/// The download specification for Google's Antigravity ACP server archive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AntigravityRelease {
+    pub url: &'static str,
+    pub cmd: &'static str,
+    pub sha256: &'static str,
+}
+
+pub fn antigravity_release() -> Option<AntigravityRelease> {
+    if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
+        Some(AntigravityRelease {
+            url: "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.4.3-darwin-arm64.zip",
+            cmd: "agy_acp_server.par",
+            sha256: "c57db0a9b8b712daa9c3c17cdb990a61842ea569f279e8bd79d7aa85a303b20b",
+        })
+    } else if cfg!(target_os = "macos") && cfg!(target_arch = "x86_64") {
+        Some(AntigravityRelease {
+            url: "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.4.3-darwin-x86_64.zip",
+            cmd: "agy_acp_server.par",
+            sha256: "9392dbbdad7f0663dbfb5a0bf641297b0cf80d2ee9cd2d49a616bbbc7378731d",
+        })
+    } else if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
+        Some(AntigravityRelease {
+            url: "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.4.3-linux-x86_64.zip",
+            cmd: "agy_acp_server.par",
+            sha256: "0634ce5306ba92c932945455e7a83fda78e2d99c33fa8aa6ee0566206a382714",
+        })
+    } else if cfg!(target_os = "linux") && cfg!(target_arch = "aarch64") {
+        Some(AntigravityRelease {
+            url: "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.4.3-linux-arm64.zip",
+            cmd: "agy_acp_server.par",
+            sha256: "05c153443b0b1175151c760eeddea538950bc9843e317d54786a1f03670182bc",
+        })
+    } else if cfg!(target_os = "windows") && cfg!(target_arch = "x86_64") {
+        Some(AntigravityRelease {
+            url: "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-1.4.3-windows-x86_64.zip",
+            cmd: "agy_acp_server.exe",
+            sha256: "54c2e16378d9a4952e1da70e355f3c33c4f284308d6de48ab3e6e34a127bd325",
+        })
+    } else if cfg!(target_os = "windows") && cfg!(target_arch = "aarch64") {
+        Some(AntigravityRelease {
+            url: "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-1.4.3-windows-arm64.zip",
+            cmd: "agy_acp_server.exe",
+            sha256: "fcd46431ad33d3b510ce0b98fe7b43d095bd8b3f1c363ee2d57faa7ee981c7bb",
+        })
+    } else {
+        None
+    }
+}
+
+/// Download, verify and unpack the official Antigravity ACP server into Patchbay's data directory.
+pub async fn install_antigravity(data_dir: &Path) -> Result<PathBuf> {
+    use sha2::Digest;
+
+    let release = antigravity_release().ok_or_else(|| {
+        anyhow!("Google does not publish an Antigravity ACP server release for this platform")
+    })?;
+    let dest_dir = data_dir.join("agents").join("antigravity-acp");
+    std::fs::create_dir_all(&dest_dir)?;
+
+    let client = reqwest::Client::builder()
+        .user_agent(format!("Patchbay/{}", env!("CARGO_PKG_VERSION")))
+        .build()?;
+    let resp = client.get(release.url).send().await?.error_for_status()?;
+    let bytes = resp.bytes().await?;
+
+    let checksum = hex::encode(sha2::Sha256::digest(&bytes));
+    if checksum != release.sha256 {
+        anyhow::bail!(
+            "Antigravity download checksum mismatch: expected {}, got {}",
+            release.sha256,
+            checksum
+        );
+    }
+
+    let cursor = std::io::Cursor::new(bytes);
+    let mut zip = zip::ZipArchive::new(cursor)?;
+    zip.extract(&dest_dir)?;
+
+    let binary_path = dest_dir.join(release.cmd);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for entry in std::fs::read_dir(&dest_dir)? {
+            let entry = entry?;
+            let p = entry.path();
+            if p.is_file() {
+                let mut perms = std::fs::metadata(&p)?.permissions();
+                perms.set_mode(0o755);
+                let _ = std::fs::set_permissions(&p, perms);
+            }
+        }
+    }
+
+    if !binary_path.is_file() {
+        anyhow::bail!(
+            "expected binary {} was not found in extracted archive",
+            binary_path.display()
+        );
+    }
+    Ok(binary_path)
 }
 
 /// What the Agents settings page shows for one backend.
@@ -389,6 +506,8 @@ pub struct AgentInfo {
     pub supports_instructions: bool,
     /// Can be set to run on Patchbay's providers instead of its own sign-in.
     pub takes_providers: bool,
+    /// Whether Patchbay can download and set up this agent automatically.
+    pub can_install: bool,
 }
 
 /// Probe every backend. Blocking: runs `--version` on each agent found, in parallel.
@@ -415,6 +534,7 @@ fn detect(kind: AgentKind, overrides: &AgentPaths) -> AgentInfo {
         uses_patchbay_models: kind.uses_patchbay_models(),
         supports_instructions: supports_instructions(kind),
         takes_providers: agent_providers::supported(kind),
+        can_install: kind == AgentKind::Antigravity && antigravity_release().is_some(),
     };
     if kind.is_builtin() {
         info.available = true;
@@ -784,5 +904,32 @@ mod tests {
         let r = resolve(AgentKind::Opencode, &o).unwrap();
         assert_eq!(r.source, Source::Override);
         assert_eq!(r.args, vec!["acp".to_owned()]);
+    }
+
+    #[test]
+    fn interactive_cli_is_detected_and_rejected() {
+        assert!(is_interactive_cli(Path::new("/Users/me/.local/bin/agy")));
+        assert!(is_interactive_cli(Path::new("C:\\Users\\me\\bin\\agy.exe")));
+        assert!(!is_interactive_cli(Path::new("/Users/me/bin/agy_acp_server")));
+        assert!(!is_interactive_cli(Path::new("/Users/me/bin/agy_acp_server.par")));
+
+        let mut o = AgentPaths::new();
+        let tmp_dir = std::env::temp_dir().join(format!("agy-test-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let tmp = tmp_dir.join("agy");
+        std::fs::write(&tmp, b"dummy").unwrap();
+        o.insert("antigravity".into(), tmp.to_string_lossy().into_owned());
+        let err = resolve(AgentKind::Antigravity, &o).unwrap_err().to_string();
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        assert!(err.contains("interactive CLI"), "expected CLI error: {err}");
+    }
+
+    #[test]
+    fn antigravity_release_exists_for_supported_platforms() {
+        let release = antigravity_release();
+        assert!(release.is_some());
+        let r = release.unwrap();
+        assert!(r.url.starts_with("https://dl.google.com/agy-extensions/releases/"));
+        assert!(!r.sha256.is_empty());
     }
 }
