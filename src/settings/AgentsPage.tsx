@@ -609,6 +609,9 @@ export function AgentsPage({ list, onOpen }: { list: AgentList; onOpen: (id: Age
             {prefs.defaultAgent === a.id && (
               <span className="rounded bg-panel-2 px-1.5 py-px text-[11px] text-muted">default</span>
             )}
+            {a.available && a.authStatus && (
+              <span className="rounded bg-panel-2 px-1.5 py-px text-[11px] text-muted">{a.authStatus}</span>
+            )}
           </span>
           <span className="flex shrink-0 items-center gap-2 text-xs text-muted">
             {a.available ? (a.version ?? "installed") : "not found"}
@@ -668,6 +671,16 @@ export function AgentPage({ id, list }: { id: AgentId; list: AgentList }) {
           <div className="flex items-center gap-2 text-sm">
             <StatusDot on={a.available} />
             {a.available ? "Installed" : "Not found"}
+            {a.available && a.authStatus && (
+              <span className="rounded bg-panel-2 px-1.5 py-px text-[11px] text-muted">
+                {a.authStatus}
+              </span>
+            )}
+            {a.available && a.id === "antigravity" && !a.authStatus && (
+              <span className="rounded bg-panel-2 px-1.5 py-px text-[11px] text-amber-500/80">
+                Sign-in needed
+              </span>
+            )}
             {prefs.defaultAgent === a.id && (
               <span className="rounded bg-panel-2 px-1.5 py-px text-[11px] text-muted">default</span>
             )}
@@ -687,6 +700,11 @@ export function AgentPage({ id, list }: { id: AgentId; list: AgentList }) {
             {a.usesPatchbayModels ? "Runs on your Patchbay providers and models. " : ""}
             {a.supportsInstructions ? "Receives your custom instructions." : "Doesn't receive your custom instructions."}
           </div>
+          {a.id === "antigravity" && a.available && !a.authStatus && (
+            <div className="mt-1 text-xs text-muted">
+              Sign-in: Not signed in yet. Patchbay will prompt to sign in with your Google account or API key when you start your first session.
+            </div>
+          )}
         </div>
         <div className="flex shrink-0 flex-col items-end gap-1.5">
           <button
@@ -700,13 +718,26 @@ export function AgentPage({ id, list }: { id: AgentId; list: AgentList }) {
             Check again
           </button>
           {a.id === "antigravity" && a.available && (
-            <button
-              className="text-xs text-muted hover:text-fg underline underline-offset-2 disabled:opacity-50"
-              disabled={installing}
-              onClick={installAntigravity}
-            >
-              {installing ? "Reinstalling…" : "Reinstall"}
-            </button>
+            <div className="flex items-center gap-2">
+              {a.authStatus && (
+                <button
+                  className="text-xs text-muted hover:text-fg underline underline-offset-2"
+                  onClick={async () => {
+                    await api.clearAntigravityAuth();
+                    list.reload();
+                  }}
+                >
+                  Sign out
+                </button>
+              )}
+              <button
+                className="text-xs text-muted hover:text-fg underline underline-offset-2 disabled:opacity-50"
+                disabled={installing}
+                onClick={installAntigravity}
+              >
+                {installing ? "Reinstalling…" : "Reinstall"}
+              </button>
+            </div>
           )}
         </div>
       </div>

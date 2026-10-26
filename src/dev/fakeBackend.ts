@@ -1410,8 +1410,16 @@ export function install() {
             ag.version = "1.4.3";
             ag.source = "override";
             ag.error = null;
+            ag.authStatus = "Google Account (Personal)";
           }
           return "/opt/patchbay/agents/antigravity-acp/agy_acp_server.par";
+        }
+        case "clear_antigravity_auth": {
+          const ag = FAKE_AGENTS.find((x) => x.id === "antigravity");
+          if (ag) {
+            ag.authStatus = null;
+          }
+          return null;
         }
         case "host_info": return { version: "0.11.0", os: "macos", arch: "aarch64" };
         case "code_set_agent": {

@@ -366,6 +366,8 @@ export interface AgentInfo {
   takesProviders: boolean;
   /** Whether Patchbay can download and set up this agent automatically. */
   canInstall?: boolean;
+  /** Human-readable sign-in status (e.g. "Google Account (Personal)"), if known. */
+  authStatus?: string | null;
 }
 
 /** Labels for agent ids, for places that don't load the full list. */
@@ -888,6 +890,8 @@ export const api = {
   listAgents: (host?: string | null) => invoke<AgentInfo[]>("list_agents", { host: host ?? null }),
   /** Download and configure Google's Antigravity ACP server into Patchbay's data directory. */
   installAntigravityAgent: () => invoke<string>("install_antigravity_agent"),
+  /** Clear Antigravity's saved authentication so a session prompts to sign in again. */
+  clearAntigravityAuth: () => invoke<void>("clear_antigravity_auth"),
   updateCodeSession: (
     id: string,
     patch: { title?: string; modelRef?: string; pinned?: boolean; activity?: Activity; archived?: boolean },

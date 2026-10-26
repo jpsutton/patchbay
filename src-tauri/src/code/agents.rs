@@ -489,6 +489,48 @@ pub async fn install_antigravity(data_dir: &Path) -> Result<PathBuf> {
     Ok(binary_path)
 }
 
+fn antigravity_acp_settings() -> Option<PathBuf> {
+    let base = std::env::var_os("GEMINI_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|h| h.join(".gemini")))?;
+    Some(base.join("antigravity-acp").join("settings.json"))
+}
+
+/// The current authentication status of Google's Antigravity ACP server, if configured.
+pub fn antigravity_auth_status() -> Option<String> {
+    let path = antigravity_acp_settings()?;
+    if !path.is_file() {
+        return None;
+    }
+    let content = std::fs::read_to_string(&path).ok()?;
+    let val: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let auth_type = val.get("auth")?.get("type")?.as_str()?;
+    match auth_type {
+        "oauth-personal" => Some("Google Account (Personal)".to_owned()),
+        "oauth-business" => Some("Google Account (Workspace)".to_owned()),
+        "gemini-api-key" => Some("Gemini API key".to_owned()),
+        "agent-platform" => Some("Agent Platform".to_owned()),
+        other => Some(format!("Signed in ({other})")),
+    }
+}
+
+/// Remove authentication from Antigravity's settings.json so the next session prompts for sign-in again.
+pub fn clear_antigravity_auth() -> Result<()> {
+    if let Some(path) = antigravity_acp_settings() {
+        if path.is_file() {
+            if let Ok(mut val) = std::fs::read_to_string(&path)
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)))
+            {
+                if let Some(obj) = val.as_object_mut() {
+                    obj.remove("auth");
+                }
+                std::fs::write(&path, serde_json::to_string_pretty(&val)?)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// What the Agents settings page shows for one backend.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -508,6 +550,8 @@ pub struct AgentInfo {
     pub takes_providers: bool,
     /// Whether Patchbay can download and set up this agent automatically.
     pub can_install: bool,
+    /// Human-readable sign-in status (e.g. "Google Account (Personal)"), if known.
+    pub auth_status: Option<String>,
 }
 
 /// Probe every backend. Blocking: runs `--version` on each agent found, in parallel.
@@ -535,6 +579,10 @@ fn detect(kind: AgentKind, overrides: &AgentPaths) -> AgentInfo {
         supports_instructions: supports_instructions(kind),
         takes_providers: agent_providers::supported(kind),
         can_install: kind == AgentKind::Antigravity && antigravity_release().is_some(),
+        auth_status: match kind {
+            AgentKind::Antigravity => antigravity_auth_status(),
+            _ => None,
+        },
     };
     if kind.is_builtin() {
         info.available = true;
@@ -931,5 +979,22 @@ mod tests {
         let r = release.unwrap();
         assert!(r.url.starts_with("https://dl.google.com/agy-extensions/releases/"));
         assert!(!r.sha256.is_empty());
+    }
+
+    #[test]
+    fn antigravity_auth_status_parses_settings_and_clears() {
+        let dir = std::env::temp_dir().join(format!("gemini-test-{}", crate::db::new_id()));
+        let settings = dir.join("antigravity-acp").join("settings.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(&settings, br#"{"auth": {"type": "oauth-personal"}}"#).unwrap();
+
+        unsafe { std::env::set_var("GEMINI_HOME", &dir) };
+        assert_eq!(antigravity_auth_status(), Some("Google Account (Personal)".to_owned()));
+
+        clear_antigravity_auth().unwrap();
+        assert_eq!(antigravity_auth_status(), None);
+
+        unsafe { std::env::remove_var("GEMINI_HOME") };
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

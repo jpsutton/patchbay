@@ -676,6 +676,11 @@ async fn install_antigravity_agent(state: &AppState) -> CmdResult<String> {
     Ok(path)
 }
 
+async fn clear_antigravity_auth(_state: &AppState) -> CmdResult<()> {
+    tokio::task::spawn_blocking(code::agents::clear_antigravity_auth).await??;
+    Ok(())
+}
+
 async fn update_code_session(
     state: &AppState,
     id: String,
