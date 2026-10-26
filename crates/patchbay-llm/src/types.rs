@@ -247,6 +247,10 @@ pub struct Request {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolSpec>,
     pub tool_choice: ToolChoice,
+    /// Offer the provider's own web search (Anthropic `web_search`, OpenAI Responses
+    /// `web_search`, Gemini `google_search`). The provider runs it inside the same reply, so no
+    /// tool call comes back. Wire formats without one ignore this.
+    pub web_search: bool,
     /// Groups requests that share a prefix (OpenAI `prompt_cache_key`).
     pub cache_key: Option<String>,
 }
@@ -355,6 +359,8 @@ pub enum Event {
     Reasoning(String),
     /// A tool call whose arguments are complete. Sent after the stream ends, in order.
     ToolCall(ToolCall),
+    /// The provider ran its own web search for this query while the reply streamed.
+    Search(String),
     Retrying { attempt: u32, max: u32, reason: String },
 }
 

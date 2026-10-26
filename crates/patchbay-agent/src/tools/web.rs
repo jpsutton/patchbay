@@ -301,27 +301,68 @@ fn format_results(body: &Value, p: crate::prompts::Prompts) -> String {
     out
 }
 
-#[async_trait]
-impl Tool for WebSearch {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "WebSearch".into(),
-            description: "Search the web (Brave Search) for current information past your training data: recent \
+/// The `WebSearch` tool as a model sees it. Chat offers it too when the provider has no search of
+/// its own.
+pub fn web_search_spec() -> ToolSpec {
+    ToolSpec {
+        name: "WebSearch".into(),
+        description: "Search the web (Brave Search) for current information past your training data: recent \
 events, new library versions, documentation. Returns titles, URLs and snippets; use WebFetch to read a page. \
 Include the current year in queries about recent things. After answering from results, end with a \"Sources:\" \
 list of Markdown links to the pages you used. `allowed_domains` limits results to those sites and \
 `blocked_domains` removes them (no wildcards)."
-                .into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "The search query"},
-                    "allowed_domains": {"type": "array", "items": {"type": "string"}},
-                    "blocked_domains": {"type": "array", "items": {"type": "string"}}
-                },
-                "required": ["query"]
-            }),
-        }
+            .into(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The search query"},
+                "allowed_domains": {"type": "array", "items": {"type": "string"}},
+                "blocked_domains": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["query"]
+        }),
+    }
+}
+
+/// Run one Brave search for the tool input `input` (`query`, optional domain filters). The reply is
+/// the text for the model; an error is the message for the model too.
+pub async fn brave_search(key: &str, input: &Value, cancel: &CancellationToken, minify: bool) -> Result<String, String> {
+    let Some(query) = search_query(input).filter(|q| q.trim().len() >= 2) else {
+        return Err("query is required (at least two characters)".into());
+    };
+    let http = reqwest::Client::builder().timeout(Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
+    let req = http
+        .get(format!("{}/res/v1/web/search", brave_base()))
+        .query(&[("q", query.as_str()), ("count", "10"), ("extra_snippets", "true")])
+        .header("accept", "application/json")
+        .header("x-subscription-token", key);
+    let resp = tokio::select! {
+        _ = cancel.cancelled() => return Err("Cancelled.".into()),
+        r = req.send() => r.map_err(|e| format!("Search failed: {e}"))?,
+    };
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        let detail = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| v["error"]["detail"].as_str().or(v["error"]["message"].as_str()).map(str::to_owned))
+            .unwrap_or_else(|| text.chars().take(200).collect());
+        return Err(match status.as_u16() {
+            401 | 403 | 422 => format!("Brave Search refused the API key ({status}). Check it in Settings. {detail}"),
+            429 => format!("Brave Search rate limit reached. Wait a moment, or check your plan. {detail}"),
+            _ => format!("Brave Search failed ({status}). {detail}"),
+        });
+    }
+    match resp.json::<Value>().await {
+        Ok(body) => Ok(format_results(&body, crate::prompts::Prompts::new(minify))),
+        Err(e) => Err(format!("Brave Search sent an unreadable answer: {e}")),
+    }
+}
+
+#[async_trait]
+impl Tool for WebSearch {
+    fn spec(&self) -> ToolSpec {
+        web_search_spec()
     }
 
     fn kind(&self) -> &'static str {
@@ -341,44 +382,12 @@ list of Markdown links to the pages you used. `allowed_domains` limits results t
     }
 
     async fn run(&self, input: Value, ctx: &ToolCtx) -> ToolOutput {
-        let Some(query) = search_query(&input).filter(|q| q.trim().len() >= 2) else {
-            return ToolOutput::error("query is required (at least two characters)");
-        };
         let Some(key) = ctx.session.host.web_search_key() else {
             return ToolOutput::error("Web search has no API key. Add a Brave Search API key in Settings.");
         };
-        let http = match reqwest::Client::builder().timeout(Duration::from_secs(20)).build() {
-            Ok(c) => c,
-            Err(e) => return ToolOutput::error(e.to_string()),
-        };
-        let req = http
-            .get(format!("{}/res/v1/web/search", brave_base()))
-            .query(&[("q", query.as_str()), ("count", "10"), ("extra_snippets", "true")])
-            .header("accept", "application/json")
-            .header("x-subscription-token", key);
-        let resp = tokio::select! {
-            _ = ctx.cancel.cancelled() => return ToolOutput::error("Cancelled."),
-            r = req.send() => match r {
-                Ok(r) => r,
-                Err(e) => return ToolOutput::error(format!("Search failed: {e}")),
-            },
-        };
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            let detail = serde_json::from_str::<Value>(&text)
-                .ok()
-                .and_then(|v| v["error"]["detail"].as_str().or(v["error"]["message"].as_str()).map(str::to_owned))
-                .unwrap_or_else(|| text.chars().take(200).collect());
-            return ToolOutput::error(match status.as_u16() {
-                401 | 403 | 422 => format!("Brave Search refused the API key ({status}). Check it in Settings. {detail}"),
-                429 => format!("Brave Search rate limit reached. Wait a moment, or check your plan. {detail}"),
-                _ => format!("Brave Search failed ({status}). {detail}"),
-            });
-        }
-        match resp.json::<Value>().await {
-            Ok(body) => ToolOutput::text(format_results(&body, ctx.session.prompts())),
-            Err(e) => ToolOutput::error(format!("Brave Search sent an unreadable answer: {e}")),
+        match brave_search(&key, &input, &ctx.cancel, ctx.session.prompts().minify).await {
+            Ok(text) => ToolOutput::text(text),
+            Err(e) => ToolOutput::error(e),
         }
     }
 }

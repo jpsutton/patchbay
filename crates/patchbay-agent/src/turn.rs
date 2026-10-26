@@ -289,7 +289,7 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
                 Event::Retrying { attempt, max, reason } => {
                     session.text_chunk("agent_thought_chunk", &format!("Retrying ({attempt}/{max}): {reason}\n"))
                 }
-                Event::ToolCall(_) => {}
+                Event::ToolCall(_) | Event::Search(_) => {}
             })
             .await;
         let response = match result {

@@ -122,6 +122,18 @@ pub fn wire_format(kind: &ProviderKind) -> WireFormat {
     }
 }
 
+/// Whether the provider's own web search can be offered to this model: only the vendors' own
+/// endpoints have one, not other servers that speak the same wire format.
+pub fn native_web_search(r: &Resolved) -> bool {
+    let url = r.provider.base_url.to_ascii_lowercase();
+    match r.provider.kind {
+        ProviderKind::Anthropic => r.auth == Auth::ClaudeLogin || url.contains("api.anthropic.com"),
+        ProviderKind::OpenaiResponses => url.contains("api.openai.com"),
+        ProviderKind::Gemini => url.contains("generativelanguage.googleapis.com"),
+        ProviderKind::OpenaiChat => false,
+    }
+}
+
 /// How a resolved provider authenticates for sampling / discovery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Auth {
@@ -420,5 +432,31 @@ mod tests {
         let mut req = request();
         prepare_request(&resolved(Auth::Key), &mut req);
         assert_eq!(systems(&req), ["be terse"]);
+    }
+
+    #[test]
+    fn only_vendor_endpoints_have_native_search() {
+        use super::*;
+        let on = |kind, url: &str, auth| Resolved {
+            provider: Provider { id: "p".into(), name: "n".into(), kind, base_url: url.into(), has_key: false, auth_mode: Default::default() },
+            model: Model {
+                id: "m".into(),
+                provider_id: "p".into(),
+                model_id: "x".into(),
+                display_name: "x".into(),
+                vision: false,
+                context_window: None,
+                params: Default::default(),
+            },
+            key: None,
+            auth,
+        };
+        assert!(native_web_search(&on(ProviderKind::Anthropic, "https://api.anthropic.com/v1", Auth::Key)));
+        assert!(native_web_search(&on(ProviderKind::Anthropic, "https://api.anthropic.com/v1", Auth::ClaudeLogin)));
+        assert!(native_web_search(&on(ProviderKind::OpenaiResponses, "https://api.openai.com/v1", Auth::Key)));
+        assert!(native_web_search(&on(ProviderKind::Gemini, "https://generativelanguage.googleapis.com/v1beta", Auth::Key)));
+        assert!(!native_web_search(&on(ProviderKind::Anthropic, "http://localhost:4000/v1", Auth::Key)));
+        assert!(!native_web_search(&on(ProviderKind::OpenaiResponses, "http://localhost:11434/v1", Auth::Key)));
+        assert!(!native_web_search(&on(ProviderKind::OpenaiChat, "https://api.openai.com/v1", Auth::Key)));
     }
 }
