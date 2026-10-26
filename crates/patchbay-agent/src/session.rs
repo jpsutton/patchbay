@@ -372,7 +372,7 @@ impl Session {
                 Entry::Compacted { summary } => {
                     self.text_chunk("agent_message_chunk", &format!("— Earlier conversation summarized —\n{}", summary.text()))
                 }
-                Entry::Meta { .. } | Entry::Truncate { .. } => {}
+                Entry::Meta { .. } | Entry::Truncate { .. } | Entry::Req(_) => {}
             }
         }
     }
@@ -440,7 +440,7 @@ pub fn restore(entries: &[Entry]) -> Restored {
             Entry::Compacted { summary } => {
                 r.messages = vec![summary.clone()];
             }
-            Entry::Tool { .. } | Entry::Truncate { .. } => {}
+            Entry::Tool { .. } | Entry::Truncate { .. } | Entry::Req(_) => {}
         }
     }
     r
