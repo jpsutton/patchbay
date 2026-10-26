@@ -195,6 +195,8 @@ const fakeTurns = new Set<string>();
 const fakeQueues: Record<string, { promptId: string; text: string; mentions: string[] }[]> = {};
 /** Sessions whose running turn a forced send cancelled. */
 const fakeCut = new Set<string>();
+/** Sessions whose running turn Stop cancelled; only the `/slow` scenario watches for it. */
+const fakeStopped = new Set<string>();
 
 /** Cancel the running turn for a forced send; the front of the queue goes next. */
 function fakeInterrupt(csid: string) {
@@ -485,6 +487,34 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
   };
   fakeWireRecord(s.agent, "out", { jsonrpc: "2.0", id: 3, method: "session/prompt", params: { sessionId: "acp", prompt: [{ type: "text", text }] } });
   turnEmit({ type: "update", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Planning the change." } } });
+  // `/slow`: a long turn with quiet stretches, for the Working… readout. Thoughts stream, then 8s
+  // of silence (a counter appears), a 6s tool (never "stalled"), some text, then 40s of silence
+  // (the stall warning and its Stop button). Stop ends it.
+  if (text.startsWith("/slow")) {
+    fakeStopped.delete(csid);
+    const nap = async (ms: number) => {
+      for (let t0 = 0; t0 < ms && !fakeStopped.has(csid); t0 += 200) await sleep(200);
+      return fakeStopped.has(csid);
+    };
+    const stop = () => {
+      fakeStopped.delete(csid);
+      turnEmit({ type: "promptDone", stopReason: "cancelled" });
+    };
+    for (const w of "Working out how to split this into steps, then which files each step touches. ".split(/(?<=\s)/)) {
+      turnEmit({ type: "update", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: w } } });
+      await sleep(250);
+    }
+    if (await nap(8000)) return stop();
+    const toolId = id();
+    turnEmit({ type: "update", update: { sessionUpdate: "tool_call", toolCallId: toolId, title: "Execute `cargo build`", kind: "execute", status: "in_progress", rawInput: { command: "cargo build" } } });
+    if (await nap(6000)) return stop();
+    turnEmit({ type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: toolId, status: "completed", content: [{ type: "content", content: { type: "text", text: "Finished `dev` profile" } }] } });
+    await say("Build is clean. Now checking the remaining modules, one at a time. ");
+    if (await nap(40_000)) return stop();
+    await say("Done after a long wait.");
+    turnEmit({ type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
   // Frames ACP can't decode (see `code/wire.rs`): an unknown update type, a tool status outside
   // the four known ones, and a permission option of an unknown kind.
   if (text.startsWith("/odd")) {
@@ -1356,6 +1386,7 @@ export function install() {
         case "plugin:clipboard-manager|read_text": return navigator.clipboard.readText();
         case "code_cancel": {
           fakeCut.delete(a.id as string);
+          if (fakeTurns.has(a.id as string)) fakeStopped.add(a.id as string);
           for (const [k, r] of pending) { r(null); pending.delete(k); }
           const dropped = (fakeQueues[a.id as string] ?? []).splice(0);
           if (dropped.length) codeEmit(a.id as string, { type: "unqueued", promptIds: dropped.map((d) => d.promptId), restore: true });
