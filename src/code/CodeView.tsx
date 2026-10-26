@@ -35,6 +35,7 @@ import { UsageBar } from "../components/UsageBar";
 import { TerminalPane } from "../terminal/TerminalPane";
 import { PermissionCard, PlanDocCard, planDocOf, ToolCallCard, ToolGroup } from "./ToolCallCard";
 import { SignInCard } from "./SignInCard";
+import { WorkingIndicator } from "./WorkingIndicator";
 import { TranscriptRows, type TranscriptRow } from "./TranscriptRows";
 import { DiffView, diffStats } from "./DiffView";
 import { changesKey, collectChanges, normalizePath, type FileChange } from "./changes";
@@ -1269,6 +1270,12 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             : { className: "text-faint" };
   const dotLabel = needsYou ? "needs you" : working ? "working" : status;
 
+  const stopTurn = () => {
+    if (s?.busy) skipListen.current = true;
+    if (s?.busy && remote) amendAfterStop.current = session.id;
+    api.codeCancel(session.id);
+  };
+
   const setAcpMode = async (id: string) => {
     if (!s?.modes) return;
     try {
@@ -1527,11 +1534,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     again={status === "ready"}
                   />
                 )}
-                {working && s?.permissions.length === 0 && (
-                  <div className="flex items-center gap-2 text-xs text-muted">
-                    <Dot size={6} className="signal-pulse text-live" /> Working…
-                  </div>
-                )}
+                {working && s?.permissions.length === 0 && <WorkingIndicator s={s} onStop={stopTurn} />}
                 {background.length > 0 && (
                   <div className="flex items-center gap-2 text-xs text-muted" title={background.map(backgroundLabel).join("\n")}>
                     <Dot size={6} className="signal-pulse text-live" />
@@ -1624,11 +1627,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                 }
               }}
               seed={composerSeed}
-              onStop={() => {
-                if (s?.busy) skipListen.current = true;
-                if (s?.busy && remote) amendAfterStop.current = session.id;
-                api.codeCancel(session.id);
-              }}
+              onStop={stopTurn}
               onSend={send}
               onForceSend={forceSend ? (t, a, m) => send(t, a, m, true) : undefined}
               placeholder={
