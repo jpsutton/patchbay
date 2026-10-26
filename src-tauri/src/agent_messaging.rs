@@ -45,7 +45,7 @@ impl AgentMessagingBridge {
             .unwrap()
             .insert(session_id.to_owned(), token.clone());
         Ok(json!({
-            "name": "Patchbay agent messaging",
+            "name": "patchbay-agent-messaging",
             "command": command,
             "args": ["--agent-messaging-mcp"],
             "env": [
@@ -335,6 +335,16 @@ async fn send_message_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_definition_name_matches_acp_pattern() {
+        let (bridge, listener) = AgentMessagingBridge::bind().unwrap();
+        let def = bridge.server_definition("session-1").unwrap();
+        drop(listener);
+        let name = def["name"].as_str().unwrap();
+        assert_eq!(name, "patchbay-agent-messaging");
+        assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+    }
 
     #[test]
     fn rate_limit_trips_after_max_sends() {

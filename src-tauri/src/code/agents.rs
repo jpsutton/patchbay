@@ -545,6 +545,21 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
                 env.push(("CODEX_CONFIG".to_owned(), json!({ "developer_instructions": rules }).to_string()));
             }
         }
+        AgentKind::Antigravity => {
+            // Google ships `localharness_external` beside `agy_acp_server.par`. When the server is
+            // invoked through a symlink or PATH, point ANTIGRAVITY_HARNESS_PATH at it if found beside
+            // the canonical binary.
+            let prog = resolved.program.canonicalize().unwrap_or_else(|_| resolved.program.clone());
+            if let Some(dir) = prog.parent() {
+                for name in ["localharness_external", "localharness"] {
+                    let harness = dir.join(name);
+                    if harness.is_file() {
+                        env.push(("ANTIGRAVITY_HARNESS_PATH".to_owned(), harness.to_string_lossy().into_owned()));
+                        break;
+                    }
+                }
+            }
+        }
         _ => {}
     }
     env.extend(providers.env);
