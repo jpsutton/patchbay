@@ -67,6 +67,9 @@ export interface BarSegment {
   from: number;
   to: number;
   pace: number;
+  /** When the stretch began and ended (unix seconds). */
+  t0: number;
+  t1: number;
 }
 
 /**
@@ -84,12 +87,16 @@ export function barSegments(history: PlanSample[], key: "fiveHour" | "sevenDay",
     // Reports of this window only; its reset time can drift by a few seconds between them.
     if (!r || Math.abs(r.resetsAt - w.resetsAt) > 120 || s.at <= at) continue;
     const u = Math.min(1, Math.max(level, r.utilization));
-    if (u > level) out.push({ from: level, to: u, pace: (u - level) / ((s.at - at) / span) });
+    if (u > level) out.push({ from: level, to: u, pace: (u - level) / ((s.at - at) / span), t0: at, t1: s.at });
     at = s.at;
     level = u;
   }
   return out;
 }
+
+/** `14:05`, or `Mon 14:05` once the span is longer than a day. */
+const fmtClock = (secs: number, weekday: boolean) =>
+  new Date(secs * 1000).toLocaleString([], { ...(weekday && { weekday: "short" }), hour: "numeric", minute: "2-digit" });
 
 const paceClass = (pace: number) => (pace > 2 ? "bg-danger" : pace > 1 ? "bg-warn" : "bg-ok");
 
@@ -225,6 +232,7 @@ function WindowRow({ label, w, which, now, limit }: { label: string; w: PlanWind
             key={i}
             className={`absolute inset-y-0 ${paceClass(g.pace)}`}
             style={{ left: `${g.from * 100}%`, width: `${(g.to - g.from) * 100}%` }}
+            title={`${fmtClock(g.t0, span > 86400)} to ${fmtClock(g.t1, span > 86400)} · ${g.pace.toFixed(1)}x pace · ${Math.round((g.to - g.from) * 100)}% used`}
           />
         ))}
         {/* Usage the history doesn't account for, or all of it when there is none. */}
