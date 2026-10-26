@@ -135,6 +135,7 @@ commands! {
     list_code_sessions();
     create_code_session(cwd, model_ref, agent, host);
     list_agents(host);
+    install_antigravity_agent();
     list_claude_sessions();
     import_claude_sessions(ids, agent);
     update_code_session(id, title, model_ref, pinned, activity, archived);
