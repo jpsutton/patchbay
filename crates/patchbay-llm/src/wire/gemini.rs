@@ -45,18 +45,25 @@ pub fn body(cfg: &Config, req: &Request) -> Value {
     if !gen_cfg.is_empty() {
         b["generationConfig"] = Value::Object(gen_cfg);
     }
+    let mut tools: Vec<Value> = Vec::new();
     if !req.tools.is_empty() {
-        b["tools"] = json!([{"functionDeclarations": req.tools.iter().map(|t| json!({
+        tools.push(json!({"functionDeclarations": req.tools.iter().map(|t| json!({
             "name": t.name,
             "description": t.description,
             "parametersJsonSchema": t.parameters,
-        })).collect::<Vec<_>>()}]);
+        })).collect::<Vec<_>>()}));
         b["toolConfig"] = json!({"functionCallingConfig": match &req.tool_choice {
             ToolChoice::Auto => json!({"mode": "AUTO"}),
             ToolChoice::Required => json!({"mode": "ANY"}),
             ToolChoice::None => json!({"mode": "NONE"}),
             ToolChoice::Tool(n) => json!({"mode": "ANY", "allowedFunctionNames": [n]}),
         }});
+    }
+    if req.web_search {
+        tools.push(json!({"google_search": {}}));
+    }
+    if !tools.is_empty() {
+        b["tools"] = json!(tools);
     }
     b
 }
@@ -136,6 +143,8 @@ pub struct GeminiParser {
     finish: Option<String>,
     usage: Option<Usage>,
     model: Option<String>,
+    /// Searches already reported; every chunk after the first repeats the metadata.
+    searches: Vec<String>,
 }
 
 impl Parser for GeminiParser {
@@ -164,6 +173,12 @@ impl Parser for GeminiParser {
         let Some(cand) = v.pointer("/candidates/0") else { return Ok(()) };
         if let Some(f) = cand.get("finishReason").and_then(Value::as_str) {
             self.finish = Some(f.to_owned());
+        }
+        for q in cand.pointer("/groundingMetadata/webSearchQueries").and_then(Value::as_array).into_iter().flatten() {
+            if let Some(q) = q.as_str().filter(|q| !q.is_empty() && !self.searches.iter().any(|s| s == q)) {
+                self.searches.push(q.to_owned());
+                out.push(Event::Search(q.to_owned()));
+            }
         }
         let Some(parts) = cand.pointer("/content/parts").and_then(Value::as_array) else {
             return Ok(());
@@ -290,4 +305,23 @@ mod tests {
         let mut p: Box<dyn Parser> = Box::new(GeminiParser::default());
         assert!(p.event(None, r#"{"promptFeedback":{"blockReason":"SAFETY"}}"#, &mut Vec::new()).is_err());
     }
+    #[test]
+    fn offers_google_search_and_reports_each_query_once() {
+        let cfg = Config::new(WireFormat::Gemini, "https://generativelanguage.googleapis.com/v1beta", "gemini-2.5-pro");
+        let mut req = Request::simple("sys", "news?");
+        req.web_search = true;
+        assert_eq!(body(&cfg, &req)["tools"], json!([{"google_search": {}}]));
+
+        let mut p: Box<dyn Parser> = Box::new(GeminiParser::default());
+        let mut out = Vec::new();
+        for e in [
+            r#"{"candidates":[{"content":{"parts":[{"text":"A"}]},"groundingMetadata":{"webSearchQueries":["rust release"]}}]}"#,
+            r#"{"candidates":[{"content":{"parts":[{"text":"B"}]},"finishReason":"STOP","groundingMetadata":{"webSearchQueries":["rust release"]}}]}"#,
+        ] {
+            p.event(None, e, &mut out).unwrap();
+        }
+        assert_eq!(out, vec![Event::Search("rust release".into()), Event::Text("A".into()), Event::Text("B".into())]);
+        assert_eq!(p.finish().unwrap().message.text(), "AB");
+    }
+
 }

@@ -35,6 +35,7 @@ import { UsageBar } from "../components/UsageBar";
 import { TerminalPane } from "../terminal/TerminalPane";
 import { PermissionCard, PlanDocCard, planDocOf, ToolCallCard, ToolGroup } from "./ToolCallCard";
 import { SignInCard } from "./SignInCard";
+import { WorkingIndicator } from "./WorkingIndicator";
 import { TranscriptRows, type TranscriptRow } from "./TranscriptRows";
 import { DiffView, diffStats } from "./DiffView";
 import { changesKey, collectChanges, normalizePath, type FileChange } from "./changes";
@@ -458,7 +459,7 @@ function UserEntry({
           {e.text}
         </div>
       )}
-      <div className="action-row flex gap-0.5 text-muted opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+      <div className="action-row flex items-center gap-0.5 text-muted opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
         {(onEdit || onReuse) && (
           <button
             className={`flex h-7 items-center justify-center rounded-md hover:bg-panel-2 hover:text-fg ${isRemoteApp() ? "gap-1 px-1.5 text-xs" : "w-7"}`}
@@ -496,7 +497,7 @@ function AgentEntry({
       <Markdown text={text} sessionId={sessionId} />
       {settled && text.trim() && (
         <div
-          className={`action-row mt-1 flex gap-0.5 text-muted transition-opacity group-hover:opacity-100 focus-within:opacity-100 ${
+          className={`action-row mt-1 flex items-center gap-0.5 text-muted transition-opacity group-hover:opacity-100 focus-within:opacity-100 ${
             reading ? "" : "opacity-0"
           }`}
         >
@@ -1269,6 +1270,12 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             : { className: "text-faint" };
   const dotLabel = needsYou ? "needs you" : working ? "working" : status;
 
+  const stopTurn = () => {
+    if (s?.busy) skipListen.current = true;
+    if (s?.busy && remote) amendAfterStop.current = session.id;
+    api.codeCancel(session.id);
+  };
+
   const setAcpMode = async (id: string) => {
     if (!s?.modes) return;
     try {
@@ -1527,11 +1534,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     again={status === "ready"}
                   />
                 )}
-                {working && s?.permissions.length === 0 && (
-                  <div className="flex items-center gap-2 text-xs text-muted">
-                    <Dot size={6} className="signal-pulse text-live" /> Working…
-                  </div>
-                )}
+                {working && s?.permissions.length === 0 && <WorkingIndicator s={s} onStop={stopTurn} />}
                 {background.length > 0 && (
                   <div className="flex items-center gap-2 text-xs text-muted" title={background.map(backgroundLabel).join("\n")}>
                     <Dot size={6} className="signal-pulse text-live" />
@@ -1624,11 +1627,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                 }
               }}
               seed={composerSeed}
-              onStop={() => {
-                if (s?.busy) skipListen.current = true;
-                if (s?.busy && remote) amendAfterStop.current = session.id;
-                api.codeCancel(session.id);
-              }}
+              onStop={stopTurn}
               onSend={send}
               onForceSend={forceSend ? (t, a, m) => send(t, a, m, true) : undefined}
               placeholder={

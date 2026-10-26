@@ -34,6 +34,32 @@ pub struct PlanLimits {
     pub observed_at: i64,
 }
 
+/// One report kept for the usage panel's history of busy periods.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Sample {
+    pub at: i64,
+    pub five_hour: Option<Window>,
+    pub seven_day: Option<Window>,
+}
+
+/// Samples older than this can't fall in a live window any more (the longest is seven days).
+const HISTORY_SECS: i64 = 8 * 86400;
+
+/// Adds a report to the history unless it repeats the last one, and drops samples too old to matter.
+pub fn push_sample(history: &mut Vec<Sample>, limits: &PlanLimits) -> bool {
+    let sample = Sample { at: limits.observed_at, five_hour: limits.five_hour, seven_day: limits.seven_day };
+    if sample.five_hour.is_none() && sample.seven_day.is_none() {
+        return false;
+    }
+    if history.last().is_some_and(|l| l.five_hour == sample.five_hour && l.seven_day == sample.seven_day) {
+        return false;
+    }
+    history.push(sample);
+    history.retain(|s| s.at > limits.observed_at - HISTORY_SECS);
+    true
+}
+
 /// The window over the limit, for the message that explains a stop.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hit {
@@ -128,6 +154,7 @@ pub fn now() -> i64 {
 #[derive(Default)]
 pub struct PlanGuard {
     latest: Mutex<Option<PlanLimits>>,
+    history: Mutex<Vec<Sample>>,
     /// Sessions cancelled for the limit whose turn hasn't ended yet.
     stopping: Mutex<HashSet<String>>,
 }
@@ -135,6 +162,19 @@ pub struct PlanGuard {
 impl PlanGuard {
     pub fn record(&self, limits: PlanLimits) {
         *self.latest.lock().unwrap() = Some(limits);
+    }
+
+    /// Adds the report to the history; true if that changed it.
+    pub fn record_history(&self, limits: &PlanLimits) -> bool {
+        push_sample(&mut self.history.lock().unwrap(), limits)
+    }
+
+    pub fn set_history(&self, history: Vec<Sample>) {
+        *self.history.lock().unwrap() = history;
+    }
+
+    pub fn history(&self) -> Vec<Sample> {
+        self.history.lock().unwrap().clone()
     }
 
     /// The last limits Claude Code reported, kept for the usage panel and across restarts.
@@ -186,6 +226,23 @@ mod tests {
         assert_eq!(l.seven_day.map(|w| w.resets_at), Some(90000));
         assert_eq!(l.overage_until, None);
         assert!(PlanLimits::from_update(&json!({ "used": 1, "size": 2 })).is_none());
+    }
+
+    #[test]
+    fn history_skips_repeats_and_old_samples() {
+        let at = |t: i64, five: f64| PlanLimits {
+            five_hour: Some(Window { utilization: five, resets_at: t + 100 }),
+            observed_at: t,
+            ..Default::default()
+        };
+        let mut h = Vec::new();
+        assert!(push_sample(&mut h, &at(1000, 0.1)));
+        // The same windows reported later add nothing, and neither does a report with no windows.
+        let repeat = PlanLimits { observed_at: 2000, ..at(1000, 0.1) };
+        assert!(!push_sample(&mut h, &repeat));
+        assert!(!push_sample(&mut h, &PlanLimits { observed_at: 3000, ..Default::default() }));
+        assert!(push_sample(&mut h, &at(1000 + HISTORY_SECS + 5, 0.2)));
+        assert_eq!(h.len(), 1);
     }
 
     #[test]

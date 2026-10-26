@@ -109,6 +109,13 @@ export interface PlanLimits {
   observedAt: number;
 }
 
+/** One kept report of the plan windows, for the usage panel's history of busy periods. */
+export interface PlanSample {
+  at: number;
+  fiveHour: PlanWindow | null;
+  sevenDay: PlanWindow | null;
+}
+
 /** The ACP wire log's state (see `code/wire.rs`). */
 export interface WireLogStatus {
   on: boolean;
@@ -276,6 +283,8 @@ export interface MeshMember {
   role?: string | null;
   /** Its handshake with this computer failed on the passphrase. */
   authFailed?: boolean;
+  /** App version it last reported; absent for older versions and phones. */
+  appVersion?: string | null;
 }
 
 /** Something wrong with this computer's mesh that the user has to fix. */
@@ -636,6 +645,8 @@ export interface Preferences {
   defaultSystemPrompt: string;
   expandReasoning: boolean;
   generateTitles: boolean;
+  /** Let the model search the web in chat: the provider's own search, else Brave Search when a key is set. */
+  chatWebSearch: boolean;
   defaultAgent: AgentId;
   /** Executable overrides: agent id -> path. */
   agentPaths: Partial<Record<AgentId, string>>;
@@ -683,6 +694,7 @@ export const defaultPreferences: Preferences = {
   defaultSystemPrompt: "",
   expandReasoning: false,
   generateTitles: true,
+  chatWebSearch: false,
   defaultAgent: "patchbay",
   agentPaths: {},
   agentProviders: {},
@@ -932,6 +944,7 @@ export const api = {
     invoke<void>("code_rewind", { id, ordinal, preview, revertFiles }),
   codeUsage: (id: string) => invoke<UsageView>("code_usage", { id }),
   planLimits: () => invoke<PlanLimits | null>("plan_limits"),
+  planHistory: () => invoke<PlanSample[]>("plan_history"),
   wireLogStatus: () => invoke<WireLogStatus>("wire_log_status"),
   /** Turn the wire log on (for 30 minutes) or off. */
   wireLogSet: (on: boolean) => invoke<WireLogStatus>("wire_log_set", { on }),

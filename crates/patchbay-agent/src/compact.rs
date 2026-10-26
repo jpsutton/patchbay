@@ -6,6 +6,7 @@ use patchbay_llm::{Message, Part, Request, SystemBlock};
 use tokio_util::sync::CancellationToken;
 
 use crate::host::ModelClient;
+use crate::reqlog::ReqTimer;
 use crate::session::Session;
 use crate::store::Entry;
 
@@ -70,10 +71,11 @@ pub async fn compact(
     let mut system = mc.system_prefix.clone();
     system.push(SystemBlock::new(p.msg("compact_system", &[])));
     let request = Request { system, messages, ..Default::default() };
-    let summary = mc
-        .client
-        .complete_text(&request, cancel)
-        .await
+    let mut timer = ReqTimer::start();
+    let result = mc.client.complete(&request, cancel, |ev| timer.event(&ev)).await;
+    session.store.append(&Entry::Req(timer.finish(&mc.client.config, Some("compact"), &result)));
+    let summary = result
+        .map(|r| r.message.text())
         .map_err(|e| if e.cancelled { "cancelled".to_owned() } else { format!("could not summarize: {e}") })?;
     if summary.trim().is_empty() {
         return Err("the model returned an empty summary".into());

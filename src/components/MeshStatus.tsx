@@ -139,6 +139,7 @@ export function MeshPopover({ className }: { className: string }) {
 
   if (!shown) return null;
   const { others } = summary(mesh);
+  const mine = mesh.members.find((m) => m.state === "self");
   const p = mesh.problem;
   return (
     <div
@@ -149,7 +150,10 @@ export function MeshPopover({ className }: { className: string }) {
     >
       <div className="flex items-baseline justify-between px-3 pb-1.5 pt-2">
         <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-faint">Mesh</span>
-        <span className="text-[11px] text-faint">this computer: {mesh.name}</span>
+        <span className="text-[11px] text-faint">
+          this computer: {mesh.name}
+          {mine?.appVersion ? ` v${mine.appVersion}` : ""}
+        </span>
       </div>
       {p && (
         <div className="mx-2 mb-1.5 mt-1 rounded-lg bg-danger/10 px-2.5 py-2 text-[12.5px] leading-[1.4] text-danger" role="alert">
@@ -162,6 +166,7 @@ export function MeshPopover({ className }: { className: string }) {
           <span className={`min-w-0 flex-1 truncate ${m.state === "offline" && !m.authFailed ? "text-muted" : ""}`}>
             {m.name}
             {m.role === "remote" && <span className="meta text-faint"> phone</span>}
+            {m.appVersion && <span className="meta text-faint"> v{m.appVersion}</span>}
           </span>
           <span className={`meta shrink-0 ${m.authFailed ? "text-danger" : "text-faint"}`}>{memberStatus(m)}</span>
         </div>

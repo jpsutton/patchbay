@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { PlanLimits, PlanWindow } from "../lib/ipc";
+import type { PlanLimits, PlanSample, PlanWindow } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { GaugeIcon } from "./icons";
 
@@ -61,6 +61,44 @@ function burnPace(w: PlanWindow | null, span: number, now: number) {
   const elapsed = (span - (current.resetsAt - now)) / span;
   return elapsed < 0.03 ? null : current.utilization / Math.min(1, elapsed);
 }
+
+/** A stretch of a window's bar, from one usage level to the next, and how fast usage grew across it. */
+export interface BarSegment {
+  from: number;
+  to: number;
+  pace: number;
+  /** When the stretch began and ended (unix seconds). */
+  t0: number;
+  t1: number;
+}
+
+/**
+ * Splits a window's progress bar by how fast it filled: each report since the window opened marks a level
+ * (0 to 1) reached at a time, and the pace between two reports is the growth over the share of the window
+ * that passed. Idle time between reports counts, so a long quiet stretch before a burst reads as moderate.
+ */
+export function barSegments(history: PlanSample[], key: "fiveHour" | "sevenDay", w: PlanWindow, span: number): BarSegment[] {
+  const start = w.resetsAt - span;
+  let at = start;
+  let level = 0;
+  const out: BarSegment[] = [];
+  for (const s of history) {
+    const r = s[key];
+    // Reports of this window only; its reset time can drift by a few seconds between them.
+    if (!r || Math.abs(r.resetsAt - w.resetsAt) > 120 || s.at <= at) continue;
+    const u = Math.min(1, Math.max(level, r.utilization));
+    if (u > level) out.push({ from: level, to: u, pace: (u - level) / ((s.at - at) / span), t0: at, t1: s.at });
+    at = s.at;
+    level = u;
+  }
+  return out;
+}
+
+/** `14:05`, or `Mon 14:05` once the span is longer than a day. */
+const fmtClock = (secs: number, weekday: boolean) =>
+  new Date(secs * 1000).toLocaleString([], { ...(weekday && { weekday: "short" }), hour: "numeric", minute: "2-digit" });
+
+const paceClass = (pace: number) => (pace > 2 ? "bg-danger" : pace > 1 ? "bg-warn" : "bg-ok");
 
 /** What the pace means for a window: usage projected at its reset, and when it would run out first, if it would. */
 function burnOutlook(w: PlanWindow | null, span: number, now: number) {
@@ -166,9 +204,13 @@ export function PlanUsageButton() {
   );
 }
 
-function WindowRow({ label, w, span, now, limit }: { label: string; w: PlanWindow | null; span: number; now: number; limit: number | null }) {
+function WindowRow({ label, w, which, now, limit }: { label: string; w: PlanWindow | null; which: "fiveHour" | "sevenDay"; now: number; limit: number | null }) {
+  const span = WINDOW_SECS[which];
   const current = live(w, now);
   const burn = burnOutlook(w, span, now);
+  const history = useStore((s) => s.planHistory);
+  const segments = current ? barSegments(history, which, current, span) : [];
+  const covered = segments.length ? segments[segments.length - 1].to : 0;
   if (!w) return null;
   const pct = current ? Math.round(current.utilization * 100) : 0;
   const t = tone(pct, limit);
@@ -180,11 +222,26 @@ function WindowRow({ label, w, span, now, limit }: { label: string; w: PlanWindo
           {current ? `${pct}% · resets in ${fmtSpan(current.resetsAt - now)}` : "reset since last report"}
         </span>
       </div>
-      <div className="relative mt-1.5 h-1.5 overflow-hidden rounded-full bg-panel-2" aria-hidden="true">
-        <div
-          className={`h-full rounded-full ${barClass(t)}`}
-          style={{ width: `${Math.min(100, pct)}%` }}
-        />
+      <div
+        className="relative mt-1.5 h-1.5 overflow-hidden rounded-full bg-panel-2"
+        title={segments.length ? "Color shows how fast usage grew: green at an even pace or slower, amber up to twice that, red faster" : undefined}
+        aria-hidden="true"
+      >
+        {segments.map((g, i) => (
+          <div
+            key={i}
+            className={`absolute inset-y-0 ${paceClass(g.pace)}`}
+            style={{ left: `${g.from * 100}%`, width: `${(g.to - g.from) * 100}%` }}
+            title={`${fmtClock(g.t0, span > 86400)} to ${fmtClock(g.t1, span > 86400)} · ${g.pace.toFixed(1)}x pace · ${Math.round((g.to - g.from) * 100)}% used`}
+          />
+        ))}
+        {/* Usage the history doesn't account for, or all of it when there is none. */}
+        {current && current.utilization > covered && (
+          <div
+            className={`absolute inset-y-0 ${barClass(t)}`}
+            style={{ left: `${covered * 100}%`, width: `${(Math.min(1, current.utilization) - covered) * 100}%` }}
+          />
+        )}
         {limit != null && limit < 100 && (
           <div className="absolute inset-y-0 w-px bg-fg/50" style={{ left: `${limit}%` }} title={`Stops at ${limit}%`} />
         )}
@@ -229,8 +286,8 @@ export function PlanUsageBlade({ className }: { className: string }) {
         </p>
       ) : (
         <>
-          <WindowRow label="5-hour" w={limits.fiveHour} span={WINDOW_SECS.fiveHour} now={now} limit={limit} />
-          <WindowRow label="Weekly" w={limits.sevenDay} span={WINDOW_SECS.sevenDay} now={now} limit={limit} />
+          <WindowRow label="5-hour" w={limits.fiveHour} which="fiveHour" now={now} limit={limit} />
+          <WindowRow label="Weekly" w={limits.sevenDay} which="sevenDay" now={now} limit={limit} />
           {overage && (
             <div className="mx-2 mb-1 mt-1.5 rounded-lg bg-danger/10 px-2.5 py-2 text-[12.5px] leading-[1.4] text-danger" role="alert">
               Using extra usage, billed past the plan, for {fmtSpan(limits.overageUntil! - now)} more.

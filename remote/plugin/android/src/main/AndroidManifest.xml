@@ -5,6 +5,13 @@
     <!-- Android 17: reaching a computer on the home network (Wi-Fi/Ethernet private addresses). -->
     <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
+    <!-- Make installed speech engines visible on Android 11 and later. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
+
     <application>
         <service
             android:name="dev.patchbay.remote.platform.KeepAliveService"

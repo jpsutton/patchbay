@@ -29,6 +29,8 @@ import type {
   WireLogStatus,
 } from "../lib/ipc";
 
+/** The fake plan windows' anchor, so history samples keep matching them across calls. */
+const fakePlanBase = Math.floor(Date.now() / 1000);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const fakeAgent = (id: AgentId, label: string, program: string | null, extra: Partial<AgentInfo> = {}): AgentInfo => ({
@@ -195,6 +197,8 @@ const fakeTurns = new Set<string>();
 const fakeQueues: Record<string, { promptId: string; text: string; mentions: string[] }[]> = {};
 /** Sessions whose running turn a forced send cancelled. */
 const fakeCut = new Set<string>();
+/** Sessions whose running turn Stop cancelled; only the `/slow` scenario watches for it. */
+const fakeStopped = new Set<string>();
 
 /** Cancel the running turn for a forced send; the front of the queue goes next. */
 function fakeInterrupt(csid: string) {
@@ -485,6 +489,34 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
   };
   fakeWireRecord(s.agent, "out", { jsonrpc: "2.0", id: 3, method: "session/prompt", params: { sessionId: "acp", prompt: [{ type: "text", text }] } });
   turnEmit({ type: "update", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Planning the change." } } });
+  // `/slow`: a long turn with quiet stretches, for the Working… readout. Thoughts stream, then 8s
+  // of silence (a counter appears), a 6s tool (never "stalled"), some text, then 40s of silence
+  // (the stall warning and its Stop button). Stop ends it.
+  if (text.startsWith("/slow")) {
+    fakeStopped.delete(csid);
+    const nap = async (ms: number) => {
+      for (let t0 = 0; t0 < ms && !fakeStopped.has(csid); t0 += 200) await sleep(200);
+      return fakeStopped.has(csid);
+    };
+    const stop = () => {
+      fakeStopped.delete(csid);
+      turnEmit({ type: "promptDone", stopReason: "cancelled" });
+    };
+    for (const w of "Working out how to split this into steps, then which files each step touches. ".split(/(?<=\s)/)) {
+      turnEmit({ type: "update", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: w } } });
+      await sleep(250);
+    }
+    if (await nap(8000)) return stop();
+    const toolId = id();
+    turnEmit({ type: "update", update: { sessionUpdate: "tool_call", toolCallId: toolId, title: "Execute `cargo build`", kind: "execute", status: "in_progress", rawInput: { command: "cargo build" } } });
+    if (await nap(6000)) return stop();
+    turnEmit({ type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: toolId, status: "completed", content: [{ type: "content", content: { type: "text", text: "Finished `dev` profile" } }] } });
+    await say("Build is clean. Now checking the remaining modules, one at a time. ");
+    if (await nap(40_000)) return stop();
+    await say("Done after a long wait.");
+    turnEmit({ type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
   // Frames ACP can't decode (see `code/wire.rs`): an unknown update type, a tool status outside
   // the four known ones, and a permission option of an unknown kind.
   if (text.startsWith("/odd")) {
@@ -749,9 +781,9 @@ function meshMember() {
     port: 41890,
     joining: null,
     members: [
-      { nodeId: ME, name: mesh.name, state: "self", via: null, viaName: null, rttMs: null, url: null, admittedAt: now() - 9e8, approver: ME },
-      { nodeId: "n-studio", name: "studio", state: "direct", via: null, viaName: null, rttMs: 4, url: "ws://100.64.0.7:41890", admittedAt: now() - 8e8, approver: ME },
-      { nodeId: "n-nas", name: "nas", state: "relay", via: "n-studio", viaName: "studio", rttMs: null, url: null, admittedAt: now() - 7e8, approver: "n-studio" },
+      { nodeId: ME, name: mesh.name, state: "self", via: null, viaName: null, rttMs: null, url: null, admittedAt: now() - 9e8, approver: ME, appVersion: "0.7.2" },
+      { nodeId: "n-studio", name: "studio", state: "direct", via: null, viaName: null, rttMs: 4, url: "ws://100.64.0.7:41890", admittedAt: now() - 8e8, approver: ME, appVersion: "0.7.2" },
+      { nodeId: "n-nas", name: "nas", state: "relay", via: "n-studio", viaName: "studio", rttMs: null, url: null, admittedAt: now() - 7e8, approver: "n-studio", appVersion: "0.7.1" },
       {
         nodeId: "n-phone",
         name: "pocket",
@@ -1356,6 +1388,7 @@ export function install() {
         case "plugin:clipboard-manager|read_text": return navigator.clipboard.readText();
         case "code_cancel": {
           fakeCut.delete(a.id as string);
+          if (fakeTurns.has(a.id as string)) fakeStopped.add(a.id as string);
           for (const [k, r] of pending) { r(null); pending.delete(k); }
           const dropped = (fakeQueues[a.id as string] ?? []).splice(0);
           if (dropped.length) codeEmit(a.id as string, { type: "unqueued", promptIds: dropped.map((d) => d.promptId), restore: true });
@@ -1395,6 +1428,24 @@ export function install() {
         }
         case "code_rewind": await sleep(150); return null;
         case "code_usage": return { totals: { ...fakeUsage }, contextTokens: null, contextWindow: 128000, autoCompactPercent: 85 };
+        case "plan_history": {
+          // Bursts and lulls across the fake windows, matching `plan_limits` (not for `?plan=none|over`).
+          const plan = new URLSearchParams(location.search).get("plan");
+          if (plan === "none" || plan === "over") return [];
+          const slow = plan === "slow";
+          const five = fakePlanBase + 72 * 60;
+          const seven = fakePlanBase + 3 * 86400 + 7200;
+          const mix = (span: number, resetsAt: number, k: number, pts: [number, number][]) =>
+            pts.map(([f, u]) => ({
+              at: resetsAt - span + Math.round(f * span),
+              fiveHour: k === 5 ? { utilization: slow ? u / 7 : u, resetsAt } : null,
+              sevenDay: k === 7 ? { utilization: slow ? u / 4 : u, resetsAt } : null,
+            }));
+          return [
+            ...mix(5 * 3600, five, 5, [[0.08, 0.05], [0.2, 0.12], [0.3, 0.14], [0.45, 0.4], [0.55, 0.55], [0.7, 0.6], [0.76, 0.82]]),
+            ...mix(7 * 86400, seven, 7, [[0.1, 0.06], [0.25, 0.14], [0.4, 0.2], [0.5, 0.36], [0.57, 0.41]]),
+          ].sort((a, b) => a.at - b.at);
+        }
         case "plan_limits": {
           // `?plan=none` before any report; `?plan=over` past the limit and on extra usage; `?plan=slow` a light burn.
           const plan = new URLSearchParams(location.search).get("plan");
@@ -1403,8 +1454,8 @@ export function install() {
           const over = plan === "over";
           const slow = plan === "slow";
           return {
-            fiveHour: { utilization: over ? 1 : slow ? 0.12 : 0.82, resetsAt: now + 72 * 60 },
-            sevenDay: { utilization: over ? 0.96 : slow ? 0.1 : 0.41, resetsAt: now + 3 * 86400 + 7200 },
+            fiveHour: { utilization: over ? 1 : slow ? 0.12 : 0.82, resetsAt: fakePlanBase + 72 * 60 },
+            sevenDay: { utilization: over ? 0.96 : slow ? 0.1 : 0.41, resetsAt: fakePlanBase + 3 * 86400 + 7200 },
             overageUntil: over ? now + 72 * 60 : null,
             observedAt: now - 240,
           };

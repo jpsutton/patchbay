@@ -90,6 +90,9 @@ pub struct LinkReport {
     /// Phones using this node as their gateway right now. Older nodes omit it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remotes: Vec<String>,
+    /// App version of the origin. Older nodes omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_version: Option<String>,
 }
 
 /// One synced cell write (or a row delete when `c` is the tombstone column).

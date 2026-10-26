@@ -32,6 +32,15 @@ fn default_max_tokens(model: &str) -> u32 {
     }
 }
 
+/// The output cap a request to this model carries: the setting, else the model's default.
+pub(crate) fn max_tokens(cfg: &Config) -> u32 {
+    cfg.max_output_tokens.unwrap_or_else(|| default_max_tokens(&cfg.model))
+}
+
+/// Anthropic's hosted search tool and how many searches one reply may run.
+const WEB_SEARCH_TOOL: &str = "web_search_20250305";
+const WEB_SEARCH_MAX_USES: u32 = 5;
+
 fn ephemeral() -> Value {
     json!({"type": "ephemeral"})
 }
@@ -82,7 +91,7 @@ pub fn body(cfg: &Config, req: &Request) -> Value {
     let thinking = matches!(cfg.effort, Some(e) if e > Effort::Minimal);
     let mut b = json!({
         "model": cfg.model,
-        "max_tokens": cfg.max_output_tokens.unwrap_or_else(|| default_max_tokens(&cfg.model)),
+        "max_tokens": max_tokens(cfg),
         "messages": messages,
         "stream": true,
     });
@@ -104,12 +113,18 @@ pub fn body(cfg: &Config, req: &Request) -> Value {
             b["top_p"] = json!(p);
         }
     }
+    let mut tools: Vec<Value> = req
+        .tools
+        .iter()
+        .map(|t| json!({"name": t.name, "description": t.description, "input_schema": t.parameters}))
+        .collect();
+    if req.web_search {
+        tools.push(json!({"type": WEB_SEARCH_TOOL, "name": "web_search", "max_uses": WEB_SEARCH_MAX_USES}));
+    }
+    if !tools.is_empty() {
+        b["tools"] = json!(tools);
+    }
     if !req.tools.is_empty() {
-        b["tools"] = req
-            .tools
-            .iter()
-            .map(|t| json!({"name": t.name, "description": t.description, "input_schema": t.parameters}))
-            .collect();
         b["tool_choice"] = match &req.tool_choice {
             ToolChoice::Auto => json!({"type": "auto"}),
             ToolChoice::Required => json!({"type": "any"}),
@@ -215,6 +230,8 @@ enum Blk {
     Thinking { text: String, sig: String },
     Opaque(Value),
     Tool { id: String, name: String, json: String },
+    /// A search the server runs itself: its input only feeds an [`Event::Search`].
+    Server { json: String },
 }
 
 #[derive(Default)]
@@ -252,7 +269,8 @@ impl Parser for AnthropicParser {
                         text: b.get("thinking").and_then(Value::as_str).unwrap_or("").to_owned(),
                         sig: String::new(),
                     },
-                    Some("tool_use") | Some("server_tool_use") => Blk::Tool {
+                    Some("server_tool_use") => Blk::Server { json: String::new() },
+                    Some("tool_use") => Blk::Tool {
                         id: b.get("id").and_then(Value::as_str).unwrap_or("").to_owned(),
                         name: b.get("name").and_then(Value::as_str).unwrap_or("").to_owned(),
                         json: String::new(),
@@ -282,10 +300,17 @@ impl Parser for AnthropicParser {
                     (Some("signature_delta"), Some(Blk::Thinking { sig, .. })) => {
                         sig.push_str(d.get("signature").and_then(Value::as_str).unwrap_or(""));
                     }
-                    (Some("input_json_delta"), Some(Blk::Tool { json, .. })) => {
+                    (Some("input_json_delta"), Some(Blk::Tool { json, .. } | Blk::Server { json })) => {
                         json.push_str(d.get("partial_json").and_then(Value::as_str).unwrap_or(""));
                     }
                     _ => {}
+                }
+            }
+            "content_block_stop" => {
+                if let Some(Blk::Server { json }) = self.blocks.get(&index)
+                    && let Some(q) = parse_args(json).get("query").and_then(Value::as_str).filter(|q| !q.is_empty())
+                {
+                    out.push(Event::Search(q.to_owned()));
                 }
             }
             "message_delta" => {
@@ -321,6 +346,7 @@ impl Parser for AnthropicParser {
                     opaque: None,
                 }),
                 Blk::Opaque(v) => parts.push(Part::Reasoning { text: String::new(), signature: None, opaque: Some(v) }),
+                Blk::Server { .. } => {}
                 Blk::Tool { id, name, json } => parts.push(Part::ToolCall(ToolCall {
                     id,
                     name,
@@ -402,6 +428,21 @@ mod tests {
         assert_eq!(last[0]["type"], "tool_result");
         assert_eq!(last[0]["is_error"], true);
         assert_eq!(last[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn reports_the_cap_a_request_carries() {
+        let mut c = cfg();
+        c.model = "claude-fable-5-1".into();
+        assert_eq!(super::super::max_output_tokens(&c), Some(64000));
+        assert_eq!(body(&c, &Request::simple("s", "hi"))["max_tokens"], 64000);
+        c.max_output_tokens = Some(4096);
+        assert_eq!(super::super::max_output_tokens(&c), Some(4096));
+        // Other formats leave an unset cap to the server.
+        let mut chat = Config::new(WireFormat::ChatCompletions, "http://x", "m");
+        assert_eq!(super::super::max_output_tokens(&chat), None);
+        chat.max_output_tokens = Some(100);
+        assert_eq!(super::super::max_output_tokens(&chat), Some(100));
     }
 
     #[test]
@@ -514,4 +555,38 @@ mod tests {
             .unwrap_err();
         assert!(e.retryable);
     }
+    #[test]
+    fn offers_hosted_search_and_keeps_its_blocks_out_of_the_reply() {
+        let mut req = Request::simple("sys", "news?");
+        req.web_search = true;
+        let b = body(&cfg(), &req);
+        assert_eq!(b["tools"], json!([{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]));
+        assert!(b.get("tool_choice").is_none());
+        assert!(body(&cfg(), &Request::simple("sys", "hi")).get("tools").is_none());
+
+        let mut p: Box<dyn Parser> = Box::new(AnthropicParser::default());
+        let mut out = Vec::new();
+        for e in [
+            r#"{"type":"message_start","message":{"model":"m","usage":{"input_tokens":3}}}"#,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srv1","name":"web_search","input":{}}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\": \"rust 1.9"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"0 release\"}"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srv1","content":[]}}"#,
+            r#"{"type":"content_block_stop","index":1}"#,
+            r#"{"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"Done."}}"#,
+            r#"{"type":"content_block_delta","index":2,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","url":"https://x.test"}}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}"#,
+            r#"{"type":"message_stop"}"#,
+        ] {
+            p.event(None, e, &mut out).unwrap();
+        }
+        let r = p.finish().unwrap();
+        assert_eq!(out, vec![Event::Search("rust 1.90 release".into()), Event::Text("Done.".into())]);
+        assert_eq!(r.message.tool_calls().count(), 0);
+        assert_eq!(r.message.text(), "Done.");
+        assert_eq!(r.stop, StopReason::EndTurn);
+    }
+
 }

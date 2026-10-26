@@ -100,6 +100,9 @@ impl AppState {
         if let Some(l) = state.db.get_setting(PLAN_LIMITS_KEY).ok().flatten().and_then(|j| serde_json::from_str(&j).ok()) {
             state.code.plan.record(l);
         }
+        if let Some(h) = state.db.get_setting(PLAN_HISTORY_KEY).ok().flatten().and_then(|j| serde_json::from_str(&j).ok()) {
+            state.code.plan.set_history(h);
+        }
         mesh.set_ui(emit);
         mesh.set_handler(Arc::new(MeshRpc { state: state.clone() }));
         state
@@ -743,6 +746,9 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     if let CodeEvent::PlanLimits { limits } = env.event {
         let v = serde_json::to_value(&limits).unwrap_or_default();
         let _ = state.db.set_setting(PLAN_LIMITS_KEY, &v.to_string());
+        if state.code.plan.record_history(&limits) {
+            let _ = state.db.set_setting(PLAN_HISTORY_KEY, &serde_json::to_string(&state.code.plan.history()).unwrap_or_default());
+        }
         state.code.plan.record(limits);
         (state.emit)(PLAN_LIMITS_EVENT, v);
         enforce_plan_limit(state);
@@ -808,6 +814,12 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
 /// after a restart; its reset times say when it goes stale.
 const PLAN_LIMITS_KEY: &str = "claude.planLimits";
 const PLAN_LIMITS_EVENT: &str = "code://plan-limits";
+/// Every distinct report of the last eight days, for the panel's view of busy periods.
+const PLAN_HISTORY_KEY: &str = "claude.planHistory";
+
+async fn plan_history(state: &AppState) -> CmdResult<Vec<code::plan_limits::Sample>> {
+    Ok(state.code.plan.history())
+}
 
 async fn plan_limits(state: &AppState) -> CmdResult<Option<code::plan_limits::PlanLimits>> {
     Ok(state.code.plan.latest())

@@ -843,3 +843,81 @@ fn live_claude_login() {
     assert!(errors.is_empty(), "{errors:?}");
     assert!(!text.trim().is_empty());
 }
+
+/// Chat with web search on, against a provider that has no search of its own: the model gets the
+/// Brave search tool, calls it, and answers from the result. With the setting off it gets no tools.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn smoke_chat_web_search_fallback() {
+    use std::sync::Mutex;
+
+    use crate::chat::{self, ChatEvent, ChatManager, Emit, Turn};
+    use crate::mesh::Mesh;
+    use crate::mesh::keys::MemKeyStore;
+
+    let dir = std::env::temp_dir().join(format!("patchbay-smoke-chat-search-{}", crate::db::new_id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
+    let mesh = Mesh::new(db.clone(), dir.clone(), Arc::new(MemKeyStore::default())).unwrap();
+    db.upsert_provider(
+        &Provider {
+            id: "p".into(),
+            name: "mock".into(),
+            kind: ProviderKind::OpenaiChat,
+            base_url: mock_url(),
+            has_key: false,
+            auth_mode: Default::default(),
+        },
+        Some("test-key"),
+    )
+    .unwrap();
+    db.upsert_model(&Model {
+        id: "m".into(),
+        provider_id: "p".into(),
+        model_id: "mock-echo".into(),
+        display_name: "Mock".into(),
+        vision: false,
+        context_window: None,
+        params: Default::default(),
+    })
+    .unwrap();
+    // The environment key wins over a keychain key, so the test never reads the real one.
+    unsafe {
+        std::env::set_var("BRAVE_API_KEY", "brave-test-key");
+        std::env::set_var("PATCHBAY_BRAVE_URL", mock_url().trim_end_matches("/v1"));
+    }
+
+    let ask = |on: bool, text: &'static str| {
+        let (db, dir, mesh) = (db.clone(), dir.clone(), mesh.clone());
+        async move {
+            let mut prefs = crate::prefs::load(&db);
+            prefs.chat_web_search = on;
+            crate::prefs::save(&db, &prefs).unwrap();
+            let conv = db.create_conversation(Some("m")).unwrap();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let sink = events.clone();
+            let emit = Emit(Arc::new(move |e: ChatEvent| sink.lock().unwrap().push(e)));
+            let turn = Turn::Message { text: text.into(), attachment_ids: vec![], parent: None };
+            chat::send(db.clone(), dir, Arc::new(ChatManager::default()), conv.id.clone(), "m".into(), turn, None, emit, mesh)
+                .await
+                .unwrap();
+            let reply = db.list_messages(&conv.id).unwrap().pop().unwrap();
+            let events = events.lock().unwrap().clone();
+            (reply, events)
+        }
+    };
+
+    let (reply, events) = ask(true, "!search please").await;
+    assert!(reply.error.is_none(), "{:?}", reply.error);
+    assert!(reply.content.contains("BRAVE-MOCK-HIT"), "{}", reply.content);
+    assert!(
+        events.iter().any(|e| matches!(e, ChatEvent::Status { message } if message.starts_with("Searching the web"))),
+        "{events:?}"
+    );
+
+    let (reply, _) = ask(true, "!tools").await;
+    assert!(reply.content.contains("WebSearch"), "{}", reply.content);
+    let (reply, _) = ask(false, "!tools").await;
+    assert!(!reply.content.contains("WebSearch"), "{}", reply.content);
+    let _ = std::fs::remove_dir_all(&dir);
+}

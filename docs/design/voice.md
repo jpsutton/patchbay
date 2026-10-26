@@ -99,7 +99,7 @@ Used when a probe says the voice is really there. The probe is "at least one voi
 | Windows app | `speechSynthesis` in WebView2. | When `getVoices()` is non-empty, which it is on a normal Windows 10 or 11 desktop. |
 | Linux app | None in the first version. speech-dispatcher is a settings choice later, after a probe that runs a real short utterance, because a voice list that never speaks is worse than espeak. | Never. Bundled is the default. |
 | `patchbayd` browser | That browser's `speechSynthesis` (Chrome, Firefox, Safari). | When the browser lists voices. Safari on a Mac will. Firefox on a minimal Linux desktop often will not, and then the bundled engine runs. |
-| Android | `speechSynthesis` in the system webview, which uses the phone's TTS engine. | When the webview lists voices. A phone with no voice data uses the bundled engine. A small `TextToSpeech` plugin can replace this later if the webview drops end events. It is not required to ship the button. |
+| Android app | Native `android.speech.tts.TextToSpeech` through the Remote platform plugin. | Automatic and System use Android’s default engine after initialization. Missing voice data and engine errors are visible. Built-in remains an explicit choice. |
 
 `say` on macOS is enough to prove the button and not enough to ship. Killing the process is a blunt Stop, and there is no reliable end event.
 
@@ -116,7 +116,7 @@ The first version is a short list. A row appears only when this device can use i
 - Speed. Slower, normal, faster. Default normal.
 - Listen for new replies in new chats and sessions. Default off.
 
-An explicit engine that fails toasts the error and stops. It does not quietly switch to Built-in. Automatic is the only mode that falls back.
+An explicit engine that fails toasts the error and stops. It does not quietly switch to Built-in. Automatic can fall back on other platforms. On Android, Automatic reports native engine failures; Built-in must be selected explicitly.
 
 No new database column. The per-conversation Listen switch can live in the window until it is worth saving. It does not go in a synced table.
 
@@ -146,7 +146,7 @@ Which devices show the row:
 - `patchbayd`. The preferences and the keys live on the daemon. Synthesis runs there, and the audio bytes come back to the browser to play. A file path is a path on the server, not on the laptop. A URL of `127.0.0.1` is the server. The page should say that, because it is the easy mistake when the browser is on another machine.
 - Phone. System and Built-in only, for the first cut of this setting. The phone holds no provider keys and no model files. Using the gateway's speech server would mean the gateway synthesizes and streams audio to the phone. That can wait, and the configuration would still be edited on the computer that has the key or the file.
 
-The reply text leaves the machine only for this engine. System and Built-in never send it. Listen uses whatever engine is selected, so a speech server is in the path of every new reply while Listen is on. The Test button is how you find out the URL is wrong before that happens.
+Built-in stays on the device. Android system voices marked “network” may send text to the selected engine’s provider; downloaded voices can work offline. A speech server sends text to its configured endpoint. Listen uses whatever engine is selected, so a speech server is in the path of every new reply while Listen is on. The Test button is how you find out the URL is wrong before that happens.
 
 ## Not a voice mode
 
@@ -159,7 +159,7 @@ Listen is a composer control, saved with the other read-aloud preferences on thi
 ## Files a first version touches
 
 - `src/lib/spokenText.ts` — markdown to the words that are spoken, with tests.
-- `src/lib/speech.ts` — the queue, the pick-order above, Web Audio for the bundled engine, `speechSynthesis` for Windows, the browser, and Android, one in-flight id, stop. A fake engine stands in for tests.
+- `src/lib/speech.ts` — the queue, the pick-order above, Web Audio for the bundled engine, `speechSynthesis` for Windows and the browser, native `TextToSpeech` for Android, one in-flight id, stop. A fake engine stands in for tests.
 - The WASM synthesizer and its voice data, loaded by that module. Single-threaded.
 - `src/components/icons.tsx` — a speaker and a stop square, same 24-grid as the other icons. The button shows the word too.
 - `src/chat/ChatView.tsx` and `src/code/CodeView.tsx` — the button on finished assistant prose.
@@ -167,7 +167,16 @@ Listen is a composer control, saved with the other read-aloud preferences on thi
 - `src-tauri/src/desktop.rs` and a small macOS `speech` module — `speak`, `stop_speech`, `list_speech_voices`. Compiled out of the web and Android builds. `isWeb()` and `isRemoteApp()` never call it.
 - `src-tauri/src/prefs.rs` and `src/settings/PreferencesPage.tsx` — voice, speed, default Listen, on the desktop.
 
-No Linux package dependency. No mesh change. No Android plugin in the first version.
+No Linux package dependency. No mesh change.
+
+Android uses the existing Remote platform plugin to call `TextToSpeech` directly. Automatic
+and System wait for engine initialization and list the phone’s installed voices. Empty voice
+uses the engine’s default. Voice and speed are applied per utterance; completion and errors
+settle the shared queue, Stop cancels current and pending speech, and the engine shuts down
+when the plugin is destroyed. Initialization and playback have bounded timeouts. Android
+engine failures are shown instead of silently switching to the formant fallback. Built-in
+remains an explicit choice. The manifest declares the TTS service query for Android 11+.
+The Pixel playback check is still required to assess perceived voice quality.
 
 ## Checked by hand before calling it done
 
@@ -186,7 +195,7 @@ CI cannot hear the speaker. Each of these is one reply, then Stop during the sec
 
 - Which WASM build of espeak-ng (or a peer of that size and license) we vendor, and the exact byte size it adds to the APK and the daemon UI.
 - A long macOS reply, chunked, reaches the end, and Stop cuts the current chunk immediately.
-- Whether Android's webview `speechSynthesis` drops end events often enough that the queue stalls. If it does, cancel on a timeout and fall through to the bundled engine for the rest of the reply.
+- Verify Android native engine completion, Stop, and missing voice data on a physical phone.
 - Whether Listen survives restart. Memory is enough until someone asks.
 - Whether the latest reply's action row should stay visible without hover, the way Claude keeps Read aloud on screen. The rest of Patchbay hides that row. Forcing it for the latest message makes the control findable and changes the chrome. Try it on the latest message only.
 - speech-dispatcher as an optional Linux system voice, behind a probe that really speaks. Not part of the first version, and not a package dependency.

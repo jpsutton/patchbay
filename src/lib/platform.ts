@@ -20,3 +20,8 @@ export function isWeb(): boolean {
 export function isDesktopApp(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window && !isWeb() && !isRemoteApp();
 }
+
+/** The installed Android phone app; browser previews keep using Web Speech. */
+export function isAndroidApp(): boolean {
+  return isRemoteApp() && "__TAURI_INTERNALS__" in window && /Android/i.test(navigator.userAgent);
+}

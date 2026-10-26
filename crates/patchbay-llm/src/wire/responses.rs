@@ -46,12 +46,18 @@ pub fn body(cfg: &Config, req: &Request) -> Value {
     if let Some(k) = &req.cache_key {
         b["prompt_cache_key"] = json!(k);
     }
+    let mut tools: Vec<Value> = req
+        .tools
+        .iter()
+        .map(|t| json!({"type": "function", "name": t.name, "description": t.description, "parameters": t.parameters}))
+        .collect();
+    if req.web_search {
+        tools.push(json!({"type": "web_search"}));
+    }
+    if !tools.is_empty() {
+        b["tools"] = json!(tools);
+    }
     if !req.tools.is_empty() {
-        b["tools"] = req
-            .tools
-            .iter()
-            .map(|t| json!({"type": "function", "name": t.name, "description": t.description, "parameters": t.parameters}))
-            .collect();
         b["tool_choice"] = match &req.tool_choice {
             ToolChoice::Auto => json!("auto"),
             ToolChoice::Required => json!("required"),
@@ -250,6 +256,11 @@ impl ResponsesParser {
                 }
                 self.streamed_text = false;
             }
+            Some("web_search_call") => {
+                if let Some(q) = item.pointer("/action/query").and_then(Value::as_str).filter(|q| !q.is_empty()) {
+                    out.push(Event::Search(q.to_owned()));
+                }
+            }
             Some("function_call") => {
                 let args = item.get("arguments").and_then(Value::as_str).unwrap_or("");
                 self.parts.push(Part::ToolCall(ToolCall {
@@ -318,4 +329,27 @@ mod tests {
         assert_eq!(r.stop, StopReason::ToolUse);
         assert_eq!(r.usage.unwrap().cached_read, 2);
     }
+    #[test]
+    fn offers_hosted_search_and_reports_its_queries() {
+        let cfg = Config::new(WireFormat::Responses, "https://api.openai.com/v1", "gpt");
+        let mut req = Request::simple("sys", "news?");
+        req.web_search = true;
+        let b = body(&cfg, &req);
+        assert_eq!(b["tools"], json!([{"type": "web_search"}]));
+        assert!(b.get("tool_choice").is_none());
+
+        let mut p: Box<dyn Parser> = Box::new(ResponsesParser::default());
+        let mut out = Vec::new();
+        for e in [
+            r#"{"type":"response.output_item.done","item":{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"rust release"}}}"#,
+            r#"{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"Hi","annotations":[]}]}}"#,
+            r#"{"type":"response.completed","response":{"status":"completed"}}"#,
+        ] {
+            p.event(None, e, &mut out).unwrap();
+        }
+        let r = p.finish().unwrap();
+        assert_eq!(out, vec![Event::Search("rust release".into()), Event::Text("Hi".into())]);
+        assert_eq!(r.message.parts, vec![Part::Text("Hi".into())]);
+    }
+
 }

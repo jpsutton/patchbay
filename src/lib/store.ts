@@ -24,6 +24,7 @@ import {
   type Provider,
   type UsageView,
   type PlanLimits,
+  type PlanSample,
   type Preferences,
   type MeshStatus,
   type MeshChatEvent,
@@ -34,6 +35,7 @@ import { notifyInBackground } from "./notify";
 import { activityOf, strongest, type Activity } from "./activity";
 import { isRemoteApp } from "./platform";
 import { isForegroundUpdate } from "./codeWorking";
+import { chunkChars, phaseOf, type Phase } from "./workingStatus";
 import { appendUserChunk } from "./harness";
 import { planUpdateOf } from "./todoPlan";
 
@@ -125,6 +127,12 @@ export interface CodeState {
    * background terminal streaming alone). Used with {@link codeWorking}.
    */
   lastForegroundAt: number | null;
+  /** What the agent last did in the foreground; with {@link lastForegroundAt}, says what it is doing. */
+  lastPhase: Phase | null;
+  /** When the running prompt turn began; null between turns. */
+  turnStartedAt: number | null;
+  /** Characters of text and thoughts streamed this turn, for a rough token count. */
+  turnChars: number;
 }
 
 export interface ChatStream {
@@ -164,7 +172,18 @@ const emptyCode = (): CodeState => ({
   configRev: 0,
   catalogRev: 0,
   lastForegroundAt: null,
+  lastPhase: null,
+  turnStartedAt: null,
+  turnChars: 0,
 });
+
+/** `next` with the turn clock started or cleared when `busy` flipped between `prev` and it. */
+function trackTurn(prev: CodeState, next: CodeState): CodeState {
+  if (prev.busy === next.busy) return next;
+  return next.busy
+    ? { ...next, turnStartedAt: Date.now(), turnChars: 0, lastPhase: null }
+    : { ...next, turnStartedAt: null, turnChars: 0 };
+}
 
 // The default permission mode isn't here: it only seeds new sessions, and agents always ask.
 const AGENT_PREF_KEYS: (keyof Preferences)[] = [
@@ -332,6 +351,7 @@ interface Store {
   meshPopoverOpen: boolean;
   /** The Claude plan usage Claude Code last reported; null until a Claude Code turn reports it. */
   planLimits: PlanLimits | null;
+  planHistory: PlanSample[];
   planOpen: boolean;
   prefs: Preferences;
   loadPrefs: () => Promise<void>;
@@ -353,6 +373,7 @@ interface Store {
   setAlert: (a: Alert | null) => void;
   setMeshPopoverOpen: (o: boolean) => void;
   setPlanLimits: (l: PlanLimits | null) => void;
+  setPlanHistory: (h: PlanSample[]) => void;
   setPlanOpen: (o: boolean) => void;
   refreshCatalog: () => Promise<void>;
   setDefaultModel: (ref: string) => Promise<void>;
@@ -473,7 +494,13 @@ function reduceUpdate(s: CodeState, u: AcpUpdate, agent: AgentId | undefined): C
       u.sessionUpdate === "tool_call_update"
         ? s.toolCalls[(u as unknown as AcpToolCall).toolCallId]
         : undefined;
-    return isForegroundUpdate(u, prev) ? { ...next, lastForegroundAt: Date.now() } : next;
+    if (!isForegroundUpdate(u, prev)) return next;
+    return {
+      ...next,
+      lastForegroundAt: Date.now(),
+      lastPhase: phaseOf(u) ?? next.lastPhase,
+      turnChars: next.busy ? next.turnChars + chunkChars(u) : next.turnChars,
+    };
   };
   switch (u.sessionUpdate) {
     case "user_message_chunk": {
@@ -824,6 +851,7 @@ export const useStore = create<Store>((set, get) => ({
   alert: null,
   meshPopoverOpen: false,
   planLimits: null,
+  planHistory: [],
   planOpen: false,
   confirm: null,
   prefs: defaultPreferences,
@@ -892,6 +920,7 @@ export const useStore = create<Store>((set, get) => ({
   setAlert: (alert) => set({ alert }),
   setMeshPopoverOpen: (meshPopoverOpen) => set({ meshPopoverOpen }),
   setPlanLimits: (planLimits) => set({ planLimits }),
+  setPlanHistory: (planHistory) => set({ planHistory }),
   setPlanOpen: (planOpen) => set({ planOpen }),
 
   refreshCatalog: async () => {
@@ -945,7 +974,7 @@ export const useStore = create<Store>((set, get) => ({
     flushCodeEvents(id);
     set((st) => {
       const s = st.code[id] ?? emptyCode();
-      return { code: { ...st.code, [id]: { ...s, busy } } };
+      return { code: { ...st.code, [id]: trackTurn(s, { ...s, busy }) } };
     });
   },
   clearCodeRestore: (id) =>
@@ -969,7 +998,7 @@ export const useStore = create<Store>((set, get) => ({
     let restart = false;
     for (const e of events) {
       if (e.type === "title") title = e.title;
-      else s = stepCodeEvent(id, s, e);
+      else s = trackTurn(s, stepCodeEvent(id, s, e));
       if (e.type === "promptDone" || e.type === "permissionResolved") restart = true;
     }
     // One store update for the whole batch: each one re-renders the open transcript.
@@ -1078,7 +1107,7 @@ export const useStore = create<Store>((set, get) => ({
     const rev = get().agentConfigRev;
     const catalogRev = get().catalogRev;
     set((st) => ({
-      code: { ...st.code, [id]: { ...emptyCode(), configRev: rev, catalogRev, history, earlier, status: "ready", busy: info.busy } },
+      code: { ...st.code, [id]: { ...emptyCode(), configRev: rev, catalogRev, history, earlier, status: "ready", busy: info.busy, turnStartedAt: info.busy ? Date.now() : null } },
     }));
     get().applyCodeEvents(id, info.events);
     // A replayed "ready" counts as loaded, so the cached transcript becomes the session's.

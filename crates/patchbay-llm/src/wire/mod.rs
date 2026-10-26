@@ -36,6 +36,15 @@ pub fn body(cfg: &Config, req: &Request) -> Value {
     }
 }
 
+/// The output cap a request carries, for the formats that always send one. The rest leave it to
+/// the server unless the model's settings set it.
+pub fn max_output_tokens(cfg: &Config) -> Option<u32> {
+    match cfg.format {
+        WireFormat::Anthropic => Some(anthropic::max_tokens(cfg)),
+        _ => cfg.max_output_tokens,
+    }
+}
+
 pub(crate) fn parser(cfg: &Config) -> Box<dyn Parser> {
     match cfg.format {
         WireFormat::ChatCompletions => Box::new(chat::ChatParser::default()),

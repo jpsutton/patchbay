@@ -157,6 +157,7 @@ commands! {
     code_rewind(id, ordinal, preview, revert_files);
     code_usage(id);
     plan_limits();
+    plan_history();
     wire_log_status();
     wire_log_set(on);
     wire_log_frames(session, last);

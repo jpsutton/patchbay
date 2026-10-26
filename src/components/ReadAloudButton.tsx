@@ -22,7 +22,7 @@ export function ReadAloudButton({ id, text }: { id: string; text: string }) {
   return (
     <button
       type="button"
-      className="flex h-7 items-center gap-1 rounded-md px-1.5 text-xs hover:bg-panel-2 hover:text-fg"
+      className="flex h-7 w-7 items-center justify-center rounded-md hover:bg-panel-2 hover:text-fg"
       onClick={() => {
         primeAudio();
         if (speaking) {
@@ -35,7 +35,6 @@ export function ReadAloudButton({ id, text }: { id: string; text: string }) {
       aria-label={speaking ? "Stop reading" : "Read aloud"}
     >
       {speaking ? <StopIcon size={14} /> : <SpeakerIcon size={14} />}
-      {speaking ? "Stop" : "Read aloud"}
     </button>
   );
 }
