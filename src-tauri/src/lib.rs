@@ -2180,6 +2180,12 @@ async fn save_code_transcript(state: &AppState, id: String, json: String) -> Cmd
     if json.len() > MAX {
         return Err(CmdError("transcript too large to cache".into()));
     }
+    // Only the node hosting the session writes the cache. A window viewing a session hosted
+    // elsewhere holds a partial view (stale cache plus the live tail), and the cache is a single
+    // synced cell, so its save would overwrite the host's complete one on every node.
+    if remote_host(state, &id)?.is_some() {
+        return Ok(());
+    }
     Ok(state.db.set_code_transcript(&id, &json)?)
 }
 
