@@ -129,6 +129,8 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      - name: Speech routing and queue regression
+        run: node src/lib/speech.selftest.mjs
       - name: Third-party notices are up to date
         run: pnpm notices && git diff --exit-code -- THIRD_PARTY_NOTICES.md
 
@@ -198,3 +200,51 @@ jobs:
       - name: Check the backend
         working-directory: remote/src-tauri
         run: cargo check --locked
+
+
+  # Exercise the Android bridge as well as the controller: a desktop cargo check cannot
+  # compile Kotlin or run its simulated API 26–37 lifecycle and speech tests.
+  android-speech:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.source != 'false' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Android SDK and NDK
+        run: |
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          "$sdkmanager" "platforms;android-36" "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.2.12479018"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: remote/src-tauri -> target
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:remote
+      - name: Build the Android bridge and debug APK
+        working-directory: remote
+        run: ../node_modules/.bin/tauri android build --apk --debug --target aarch64 --ci --config '{"build":{"beforeBuildCommand":""}}'
+      - name: Android speech controller tests and lint
+        working-directory: remote/src-tauri/gen/android
+        run: ./gradlew :tauri-plugin-remote-platform:testDebugUnitTest :tauri-plugin-remote-platform:lintDebug --console=plain
+      - name: Android speech reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-speech-reports
+          path: |
+            remote/plugin/android/build/test-results/testDebugUnitTest/
+            remote/plugin/android/build/reports/
+          if-no-files-found: warn

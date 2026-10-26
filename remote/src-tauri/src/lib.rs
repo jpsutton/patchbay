@@ -401,6 +401,22 @@ async fn remote_local_network(app: AppHandle) -> CmdResult<bool> {
     app.platform().local_network().await.map_err(CmdError)
 }
 
+// Speech runs on this phone, never through the mesh gateway.
+#[tauri::command]
+async fn list_native_voices(app: AppHandle) -> CmdResult<Vec<tauri_plugin_remote_platform::NativeVoice>> {
+    app.platform().speech_voices().await.map_err(CmdError)
+}
+
+#[tauri::command]
+async fn speak_native(app: AppHandle, text: String, voice: String, rate: String) -> CmdResult<()> {
+    app.platform().speak(&text, &voice, &rate).await.map_err(CmdError)
+}
+
+#[tauri::command]
+async fn stop_native(app: AppHandle) -> CmdResult<()> {
+    app.platform().stop_speech().await.map_err(CmdError)
+}
+
 /// Ask for the phone's fingerprint, face or screen lock. True when it passed (or none exists).
 #[tauri::command]
 async fn remote_unlock(app: AppHandle, reason: String) -> CmdResult<bool> {
@@ -963,6 +979,9 @@ pub fn run() {
             remote_join,
             remote_cancel_join,
             remote_local_network,
+            list_native_voices,
+            speak_native,
+            stop_native,
             remote_leave,
             remote_kick,
             remote_set_foreground,
