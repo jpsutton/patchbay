@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use patchbay_llm::Message;
+use patchbay_llm::{Message, StopReason, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -30,6 +30,58 @@ pub enum Entry {
     Compacted { summary: Message },
     /// Rewind: keep only the first `len` messages since the last compaction.
     Truncate { len: usize },
+    /// How one model call went. Diagnostics only: replay and restore skip it, and a build that
+    /// predates it skips the line.
+    Req(ReqRec),
+}
+
+/// What happened to one model call, written when it ends, whichever way. A call that never ends
+/// (the app is killed mid-request) leaves nothing, which shows as a message with no `Req` after it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReqRec {
+    /// When the call started, in Unix milliseconds.
+    pub at: u64,
+    /// What the call was for; absent for a step of the turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The model ID the endpoint was asked for.
+    pub model: String,
+    /// The output cap the request carried; absent when the server picks it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    pub outcome: ReqOutcome,
+    /// Why the reply ended, when one came back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<StopReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    /// Milliseconds until the first text or reasoning arrived; absent when none did (a reply that
+    /// is only tool calls, or a call that failed first).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_ms: Option<u64>,
+    /// Milliseconds from the start to the end of the call, retries included.
+    pub total_ms: u64,
+    /// Retries after the first attempt.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub retries: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The HTTP status of the failure, when it had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReqOutcome {
+    Ok,
+    Error,
+    /// The user stopped it.
+    Cancelled,
 }
 
 /// The entries that still count: a compaction and a rewind drop what they replace.
@@ -150,5 +202,68 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert!(matches!(&entries[1], Entry::Msg { m } if m.text() == "hi"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn req(error: &str) -> ReqRec {
+        ReqRec {
+            at: 1,
+            kind: None,
+            model: "claude-fable-5-1".into(),
+            max_tokens: Some(64000),
+            outcome: ReqOutcome::Error,
+            stop: None,
+            usage: None,
+            first_ms: None,
+            total_ms: 180_000,
+            retries: 0,
+            error: Some(error.into()),
+            status: None,
+        }
+    }
+
+    #[test]
+    fn a_request_record_round_trips_and_stays_compact() {
+        let mut rec = req("no data for 180s");
+        rec.outcome = ReqOutcome::Ok;
+        rec.error = None;
+        rec.stop = Some(StopReason::MaxTokens);
+        rec.usage = Some(Usage { input: 5, output: 7, ..Default::default() });
+        rec.first_ms = Some(900);
+        let line = serde_json::to_string(&Entry::Req(rec.clone())).unwrap();
+        assert!(line.contains(r#""t":"req""#) && line.contains(r#""stop":"max_tokens""#), "{line}");
+        // Unset fields stay out of the line.
+        assert!(!line.contains("kind") && !line.contains("retries") && !line.contains("error"), "{line}");
+        let back: Entry = serde_json::from_str(&line).unwrap();
+        assert!(matches!(back, Entry::Req(r) if r == rec));
+    }
+
+    #[test]
+    fn a_build_without_request_records_skips_their_lines() {
+        // What an older build's `Entry` does with a `req` line: it fails to parse and `load` drops it.
+        #[derive(Deserialize)]
+        #[serde(tag = "t", rename_all = "snake_case")]
+        #[allow(dead_code)]
+        enum Old {
+            Msg { m: Message },
+        }
+        let line = serde_json::to_string(&Entry::Req(req("boom"))).unwrap();
+        assert!(serde_json::from_str::<Old>(&line).is_err());
+    }
+
+    #[test]
+    fn request_records_never_reach_the_conversation_and_follow_a_rewind() {
+        let msg = |t: &str| Entry::Msg { m: Message::user(t) };
+        let entries = vec![
+            msg("one"),
+            Entry::Req(req("a")),
+            msg("two"),
+            Entry::Req(req("b")),
+            Entry::Truncate { len: 1 },
+            msg("three"),
+        ];
+        let kept = effective(&entries);
+        assert_eq!(kept.iter().filter(|e| matches!(e, Entry::Req(_))).count(), 1, "the rewound call's record goes with it");
+        let restored = crate::session::restore(&entries);
+        assert_eq!(restored.messages.iter().map(|m| m.text()).collect::<Vec<_>>(), ["one", "three"]);
     }
 }

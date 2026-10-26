@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::claude;
 use crate::compact;
 use crate::prompt;
+use crate::reqlog::ReqTimer;
 use crate::session::{Mode, PromptRec, Session, Totals, stamp_of};
 use crate::subagent::notes_part;
 use crate::store::Entry;
@@ -278,20 +279,25 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
         };
 
         let mut streamed = String::new();
+        let mut timer = ReqTimer::start();
         let result = mc
             .client
-            .complete(&request, &cancel, |ev| match ev {
-                Event::Text(t) => {
-                    streamed.push_str(&t);
-                    session.text_chunk("agent_message_chunk", &t);
+            .complete(&request, &cancel, |ev| {
+                timer.event(&ev);
+                match ev {
+                    Event::Text(t) => {
+                        streamed.push_str(&t);
+                        session.text_chunk("agent_message_chunk", &t);
+                    }
+                    Event::Reasoning(t) => session.text_chunk("agent_thought_chunk", &t),
+                    Event::Retrying { attempt, max, reason } => {
+                        session.text_chunk("agent_thought_chunk", &format!("Retrying ({attempt}/{max}): {reason}\n"))
+                    }
+                    Event::ToolCall(_) | Event::Search(_) => {}
                 }
-                Event::Reasoning(t) => session.text_chunk("agent_thought_chunk", &t),
-                Event::Retrying { attempt, max, reason } => {
-                    session.text_chunk("agent_thought_chunk", &format!("Retrying ({attempt}/{max}): {reason}\n"))
-                }
-                Event::ToolCall(_) | Event::Search(_) => {}
             })
             .await;
+        session.store.append(&Entry::Req(timer.finish(&mc.client.config, None, &result)));
         let response = match result {
             Ok(r) => r,
             Err(e) if e.cancelled => {

@@ -12,6 +12,7 @@ mod host;
 mod mcp;
 mod prompt;
 mod prompts;
+mod reqlog;
 mod rpc;
 mod session;
 mod store;

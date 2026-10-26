@@ -32,6 +32,11 @@ fn default_max_tokens(model: &str) -> u32 {
     }
 }
 
+/// The output cap a request to this model carries: the setting, else the model's default.
+pub(crate) fn max_tokens(cfg: &Config) -> u32 {
+    cfg.max_output_tokens.unwrap_or_else(|| default_max_tokens(&cfg.model))
+}
+
 /// Anthropic's hosted search tool and how many searches one reply may run.
 const WEB_SEARCH_TOOL: &str = "web_search_20250305";
 const WEB_SEARCH_MAX_USES: u32 = 5;
@@ -86,7 +91,7 @@ pub fn body(cfg: &Config, req: &Request) -> Value {
     let thinking = matches!(cfg.effort, Some(e) if e > Effort::Minimal);
     let mut b = json!({
         "model": cfg.model,
-        "max_tokens": cfg.max_output_tokens.unwrap_or_else(|| default_max_tokens(&cfg.model)),
+        "max_tokens": max_tokens(cfg),
         "messages": messages,
         "stream": true,
     });
@@ -423,6 +428,21 @@ mod tests {
         assert_eq!(last[0]["type"], "tool_result");
         assert_eq!(last[0]["is_error"], true);
         assert_eq!(last[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn reports_the_cap_a_request_carries() {
+        let mut c = cfg();
+        c.model = "claude-fable-5-1".into();
+        assert_eq!(super::super::max_output_tokens(&c), Some(64000));
+        assert_eq!(body(&c, &Request::simple("s", "hi"))["max_tokens"], 64000);
+        c.max_output_tokens = Some(4096);
+        assert_eq!(super::super::max_output_tokens(&c), Some(4096));
+        // Other formats leave an unset cap to the server.
+        let mut chat = Config::new(WireFormat::ChatCompletions, "http://x", "m");
+        assert_eq!(super::super::max_output_tokens(&chat), None);
+        chat.max_output_tokens = Some(100);
+        assert_eq!(super::super::max_output_tokens(&chat), Some(100));
     }
 
     #[test]

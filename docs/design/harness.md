@@ -76,7 +76,7 @@ A subagent is a child `Session` (`session.rs`): same client, model and MCP serve
 
 ### Persistence
 
-One JSON line per entry in `<data>/agent/sessions/<id>.jsonl`: settings, messages (the neutral form, so reasoning signatures and encrypted reasoning survive), the final card of each tool call, compactions and rewinds. `session/load` replays the effective entries as updates, so the UI shows what it showed before. The file moves with the session between computers (`code/agent_state.rs`).
+One JSON line per entry in `<data>/agent/sessions/<id>.jsonl`: settings, messages (the neutral form, so reasoning signatures and encrypted reasoning survive), the final card of each tool call, compactions and rewinds, and a `req` entry per model call (outcome, stop reason, the output cap sent, usage, time to first text, total time, retries, error), so a stalled or failed turn can be explained afterwards (`jq 'select(.t=="req")' <id>.jsonl`). Replay and restore skip `req` entries, and a build that predates them skips the lines. `session/load` replays the effective entries as updates, so the UI shows what it showed before. The file moves with the session between computers (`code/agent_state.rs`).
 
 ## What is left out
 
