@@ -24,6 +24,7 @@ import {
   type Provider,
   type UsageView,
   type PlanLimits,
+  type PlanSample,
   type Preferences,
   type MeshStatus,
   type MeshChatEvent,
@@ -350,6 +351,7 @@ interface Store {
   meshPopoverOpen: boolean;
   /** The Claude plan usage Claude Code last reported; null until a Claude Code turn reports it. */
   planLimits: PlanLimits | null;
+  planHistory: PlanSample[];
   planOpen: boolean;
   prefs: Preferences;
   loadPrefs: () => Promise<void>;
@@ -371,6 +373,7 @@ interface Store {
   setAlert: (a: Alert | null) => void;
   setMeshPopoverOpen: (o: boolean) => void;
   setPlanLimits: (l: PlanLimits | null) => void;
+  setPlanHistory: (h: PlanSample[]) => void;
   setPlanOpen: (o: boolean) => void;
   refreshCatalog: () => Promise<void>;
   setDefaultModel: (ref: string) => Promise<void>;
@@ -848,6 +851,7 @@ export const useStore = create<Store>((set, get) => ({
   alert: null,
   meshPopoverOpen: false,
   planLimits: null,
+  planHistory: [],
   planOpen: false,
   confirm: null,
   prefs: defaultPreferences,
@@ -916,6 +920,7 @@ export const useStore = create<Store>((set, get) => ({
   setAlert: (alert) => set({ alert }),
   setMeshPopoverOpen: (meshPopoverOpen) => set({ meshPopoverOpen }),
   setPlanLimits: (planLimits) => set({ planLimits }),
+  setPlanHistory: (planHistory) => set({ planHistory }),
   setPlanOpen: (planOpen) => set({ planOpen }),
 
   refreshCatalog: async () => {

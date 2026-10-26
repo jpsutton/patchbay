@@ -109,6 +109,13 @@ export interface PlanLimits {
   observedAt: number;
 }
 
+/** One kept report of the plan windows, for the usage panel's history of busy periods. */
+export interface PlanSample {
+  at: number;
+  fiveHour: PlanWindow | null;
+  sevenDay: PlanWindow | null;
+}
+
 /** The ACP wire log's state (see `code/wire.rs`). */
 export interface WireLogStatus {
   on: boolean;
@@ -937,6 +944,7 @@ export const api = {
     invoke<void>("code_rewind", { id, ordinal, preview, revertFiles }),
   codeUsage: (id: string) => invoke<UsageView>("code_usage", { id }),
   planLimits: () => invoke<PlanLimits | null>("plan_limits"),
+  planHistory: () => invoke<PlanSample[]>("plan_history"),
   wireLogStatus: () => invoke<WireLogStatus>("wire_log_status"),
   /** Turn the wire log on (for 30 minutes) or off. */
   wireLogSet: (on: boolean) => invoke<WireLogStatus>("wire_log_set", { on }),

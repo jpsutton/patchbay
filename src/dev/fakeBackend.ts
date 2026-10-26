@@ -29,6 +29,8 @@ import type {
   WireLogStatus,
 } from "../lib/ipc";
 
+/** The fake plan windows' anchor, so history samples keep matching them across calls. */
+const fakePlanBase = Math.floor(Date.now() / 1000);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const fakeAgent = (id: AgentId, label: string, program: string | null, extra: Partial<AgentInfo> = {}): AgentInfo => ({
@@ -1426,6 +1428,24 @@ export function install() {
         }
         case "code_rewind": await sleep(150); return null;
         case "code_usage": return { totals: { ...fakeUsage }, contextTokens: null, contextWindow: 128000, autoCompactPercent: 85 };
+        case "plan_history": {
+          // Bursts and lulls across the fake windows, matching `plan_limits` (not for `?plan=none|over`).
+          const plan = new URLSearchParams(location.search).get("plan");
+          if (plan === "none" || plan === "over") return [];
+          const slow = plan === "slow";
+          const five = fakePlanBase + 72 * 60;
+          const seven = fakePlanBase + 3 * 86400 + 7200;
+          const mix = (span: number, resetsAt: number, k: number, pts: [number, number][]) =>
+            pts.map(([f, u]) => ({
+              at: resetsAt - span + Math.round(f * span),
+              fiveHour: k === 5 ? { utilization: slow ? u / 7 : u, resetsAt } : null,
+              sevenDay: k === 7 ? { utilization: slow ? u / 4 : u, resetsAt } : null,
+            }));
+          return [
+            ...mix(5 * 3600, five, 5, [[0.08, 0.05], [0.2, 0.12], [0.3, 0.14], [0.45, 0.4], [0.55, 0.55], [0.7, 0.6], [0.76, 0.82]]),
+            ...mix(7 * 86400, seven, 7, [[0.1, 0.06], [0.25, 0.14], [0.4, 0.2], [0.5, 0.36], [0.57, 0.41]]),
+          ].sort((a, b) => a.at - b.at);
+        }
         case "plan_limits": {
           // `?plan=none` before any report; `?plan=over` past the limit and on extra usage; `?plan=slow` a light burn.
           const plan = new URLSearchParams(location.search).get("plan");
@@ -1434,8 +1454,8 @@ export function install() {
           const over = plan === "over";
           const slow = plan === "slow";
           return {
-            fiveHour: { utilization: over ? 1 : slow ? 0.12 : 0.82, resetsAt: now + 72 * 60 },
-            sevenDay: { utilization: over ? 0.96 : slow ? 0.1 : 0.41, resetsAt: now + 3 * 86400 + 7200 },
+            fiveHour: { utilization: over ? 1 : slow ? 0.12 : 0.82, resetsAt: fakePlanBase + 72 * 60 },
+            sevenDay: { utilization: over ? 0.96 : slow ? 0.1 : 0.41, resetsAt: fakePlanBase + 3 * 86400 + 7200 },
             overageUntil: over ? now + 72 * 60 : null,
             observedAt: now - 240,
           };
