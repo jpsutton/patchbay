@@ -82,6 +82,15 @@ fn member_state(n: &Node, id: &str) -> String {
         .unwrap_or_default()
 }
 
+fn member_version(n: &Node, id: &str) -> Option<String> {
+    n.mesh.status()["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["nodeId"] == id)
+        .and_then(|m| m["appVersion"].as_str().map(str::to_owned))
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn join_sync_relay_and_rpc() {
     let (a, b, c) = (node("alpha"), node("bravo"), node("charlie"));
@@ -198,6 +207,10 @@ async fn members_find_each_other_through_gossip() {
     admit(&b, &c).await;
     let cid = c.mesh.node_id().to_owned();
     until("alpha connects to charlie directly", 20, || member_state(&a, &cid) == "direct").await;
+    // Versions reach every member through link reports, relayed or not.
+    let version = env!("CARGO_PKG_VERSION");
+    until("alpha learns charlie's version", 20, || member_version(&a, &cid).as_deref() == Some(version)).await;
+    assert_eq!(member_version(&a, a.mesh.node_id()).as_deref(), Some(version));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -276,6 +276,8 @@ export interface MeshMember {
   role?: string | null;
   /** Its handshake with this computer failed on the passphrase. */
   authFailed?: boolean;
+  /** App version it last reported; absent for older versions and phones. */
+  appVersion?: string | null;
 }
 
 /** Something wrong with this computer's mesh that the user has to fix. */

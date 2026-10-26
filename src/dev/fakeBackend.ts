@@ -779,9 +779,9 @@ function meshMember() {
     port: 41890,
     joining: null,
     members: [
-      { nodeId: ME, name: mesh.name, state: "self", via: null, viaName: null, rttMs: null, url: null, admittedAt: now() - 9e8, approver: ME },
-      { nodeId: "n-studio", name: "studio", state: "direct", via: null, viaName: null, rttMs: 4, url: "ws://100.64.0.7:41890", admittedAt: now() - 8e8, approver: ME },
-      { nodeId: "n-nas", name: "nas", state: "relay", via: "n-studio", viaName: "studio", rttMs: null, url: null, admittedAt: now() - 7e8, approver: "n-studio" },
+      { nodeId: ME, name: mesh.name, state: "self", via: null, viaName: null, rttMs: null, url: null, admittedAt: now() - 9e8, approver: ME, appVersion: "0.7.2" },
+      { nodeId: "n-studio", name: "studio", state: "direct", via: null, viaName: null, rttMs: 4, url: "ws://100.64.0.7:41890", admittedAt: now() - 8e8, approver: ME, appVersion: "0.7.2" },
+      { nodeId: "n-nas", name: "nas", state: "relay", via: "n-studio", viaName: "studio", rttMs: null, url: null, admittedAt: now() - 7e8, approver: "n-studio", appVersion: "0.7.1" },
       {
         nodeId: "n-phone",
         name: "pocket",

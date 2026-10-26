@@ -772,6 +772,12 @@ impl Inner {
                     "approver": m.approver,
                     "role": m.role,
                     "authFailed": st.auth_failed.contains_key(&m.node_id),
+                    // Last version it reported; kept while it is offline.
+                    "appVersion": if m.node_id == self.me {
+                        Some(env!("CARGO_PKG_VERSION").to_owned())
+                    } else {
+                        st.links.get(&m.node_id).and_then(|r| r.app_version.clone())
+                    },
                 })
             })
             .collect();
@@ -2098,6 +2104,7 @@ impl Inner {
                     .filter_map(|(n, s)| s.url.clone().map(|u| (n.clone(), u)))
                     .collect(),
                 remotes: st.remotes.keys().cloned().collect(),
+                app_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
             }
         };
         self.broadcast(Msg::Links(report));
