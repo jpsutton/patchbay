@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { loadWidth, ResizeHandle, saveWidth } from "./components/ResizeHandle";
 import {
   api,
   errorText,
@@ -55,84 +56,7 @@ const SIDEBAR_DEFAULT = 256;
 const SIDEBAR_MIN = 248;
 const SIDEBAR_MAX = 520;
 
-const clampWidth = (w: number) => Math.round(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, w)));
-
-function loadSidebarWidth(): number {
-  try {
-    const w = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
-    return w ? clampWidth(w) : SIDEBAR_DEFAULT;
-  } catch {
-    return SIDEBAR_DEFAULT;
-  }
-}
-
-function saveSidebarWidth(w: number) {
-  try {
-    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(w));
-  } catch {
-    /* storage unavailable */
-  }
-}
-
-/** Drag the sidebar's right edge to resize it; double-click resets, arrow keys nudge. */
-function ResizeHandle({ width, onChange }: { width: number; onChange: (w: number, done: boolean) => void }) {
-  const [dragging, setDragging] = useState(false);
-  return (
-    <div
-      role="separator"
-      aria-orientation="vertical"
-      aria-label="Resize sidebar"
-      aria-valuenow={width}
-      aria-valuemin={SIDEBAR_MIN}
-      aria-valuemax={SIDEBAR_MAX}
-      tabIndex={0}
-      title="Drag to resize · double-click to reset"
-      className="group absolute -right-1 top-0 bottom-0 z-20 w-2 cursor-col-resize outline-none"
-      onPointerDown={(e) => {
-        if (e.button !== 0) return;
-        e.preventDefault();
-        const startX = e.clientX;
-        const startW = width;
-        const el = e.currentTarget;
-        el.setPointerCapture(e.pointerId);
-        setDragging(true);
-        document.body.style.cursor = "col-resize";
-        document.body.style.userSelect = "none";
-        let last = startW;
-        const move = (ev: PointerEvent) => {
-          last = clampWidth(startW + ev.clientX - startX);
-          onChange(last, false);
-        };
-        const up = () => {
-          el.removeEventListener("pointermove", move);
-          el.removeEventListener("pointerup", up);
-          el.removeEventListener("pointercancel", up);
-          document.body.style.cursor = "";
-          document.body.style.userSelect = "";
-          setDragging(false);
-          onChange(last, true);
-        };
-        el.addEventListener("pointermove", move);
-        el.addEventListener("pointerup", up);
-        el.addEventListener("pointercancel", up);
-      }}
-      onDoubleClick={() => onChange(SIDEBAR_DEFAULT, true)}
-      onKeyDown={(e) => {
-        const step = e.shiftKey ? 48 : 16;
-        if (e.key === "ArrowLeft") onChange(clampWidth(width - step), true);
-        else if (e.key === "ArrowRight") onChange(clampWidth(width + step), true);
-        else return;
-        e.preventDefault();
-      }}
-    >
-      <div
-        className={`mx-auto h-full w-0.5 transition-colors ${
-          dragging ? "bg-accent" : "bg-transparent group-hover:bg-accent/50 group-focus-visible:bg-accent"
-        }`}
-      />
-    </div>
-  );
-}
+const loadSidebarWidth = () => loadWidth(SIDEBAR_WIDTH_KEY, SIDEBAR_DEFAULT, SIDEBAR_MIN, SIDEBAR_MAX);
 
 /** New chat, or in Code a new session in the current folder (a folder picker when there is none). */
 function newThing() {
@@ -722,9 +646,14 @@ export default function App() {
         >
           <ResizeHandle
             width={sidebarWidth}
+            min={SIDEBAR_MIN}
+            max={SIDEBAR_MAX}
+            initial={SIDEBAR_DEFAULT}
+            edge="right"
+            label="Resize sidebar"
             onChange={(w, done) => {
               setSidebarWidth(w);
-              if (done) saveSidebarWidth(w);
+              if (done) saveWidth(SIDEBAR_WIDTH_KEY, w);
             }}
           />
           <div {...drag} className="flex items-center gap-0.5 px-2 pb-1 pt-2">

@@ -27,6 +27,7 @@ import {
 } from "../lib/store";
 import { HostBadge, MoveDialog, OfflineHostBanner } from "./HostControls";
 import { Composer } from "../components/Composer";
+import { loadWidth, ResizeHandle, saveWidth } from "../components/ResizeHandle";
 import { MessageTime } from "../components/MessageTime";
 import { Markdown } from "../components/Markdown";
 import { FileLinkContext } from "../components/FileLink";
@@ -55,7 +56,6 @@ import { isRemoteApp } from "../lib/platform";
 import {
   ActivityIcon,
   CheckIcon,
-  ChevronDownIcon,
   ChevronRightIcon,
   CopyIcon,
   FileDiffIcon,
@@ -644,64 +644,9 @@ function UnrecognizedEntry({ text, raw, count }: { text: string; raw: string; co
  * transcript is shorter by its height and nothing renders underneath it. Collapsed it is one row:
  * the current step and the progress. Expanded it lists every step.
  */
-function PlanPanel({ plan }: { plan: NonNullable<CodeState["plan"]> }) {
-  const [open, setOpen] = useState(false);
-  if (plan.length === 0) return null;
-  const done = plan.filter((p) => p.status === "completed").length;
-  // Cancelled steps stay listed but don't count toward the total.
-  const total = plan.filter((p) => p.status !== "cancelled").length;
-  const current = plan.find((p) => p.status === "in_progress") ?? plan.find((p) => p.status === "pending");
-  const summary = current ? current.content : "All steps done";
-  return (
-    <section aria-label="Plan" className="mb-2 flex flex-col rounded-xl border border-line bg-panel/60 text-[13px]">
-      <button
-        className="flex w-full min-w-0 items-center gap-2.5 px-3.5 py-2 text-left"
-        aria-expanded={open}
-        aria-label={open ? "Collapse plan" : "Expand plan"}
-        onClick={() => setOpen(!open)}
-      >
-        {open ? (
-          <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-faint">Plan</span>
-        ) : (
-          <>
-            <span className="flex h-5 w-3.5 shrink-0 items-center justify-center">
-              {current ? (
-                <span className="signal-pulse h-2 w-2 rounded-full bg-accent" />
-              ) : (
-                <span className="flex text-ok">
-                  <CheckIcon size={14} strokeWidth={2.4} />
-                </span>
-              )}
-            </span>
-            <span className="min-w-0 flex-1 truncate text-fg">{summary}</span>
-          </>
-        )}
-        {open && <span className="flex-1" />}
-        <div
-          className="h-[3px] w-20 shrink-0 overflow-hidden rounded-full bg-panel-2"
-          role="progressbar"
-          aria-valuemin={0}
-          aria-valuemax={total}
-          aria-valuenow={done}
-          aria-label="Plan progress"
-        >
-          <div className="h-full bg-accent transition-[width]" style={{ width: `${total ? (done / total) * 100 : 0}%` }} />
-        </div>
-        <span className="shrink-0 font-mono text-[11px] text-faint">
-          {done} of {total}
-        </span>
-        <span className={`flex shrink-0 text-faint transition-transform ${open ? "" : "rotate-180"}`}>
-          <ChevronDownIcon size={14} />
-        </span>
-      </button>
-      {open && <PlanSteps plan={plan} />}
-    </section>
-  );
-}
-
 function PlanSteps({ plan }: { plan: NonNullable<CodeState["plan"]> }) {
   return (
-      <ol className="flex max-h-48 flex-col gap-1 overflow-y-auto border-t border-line px-3.5 py-2.5">
+      <ol className="flex flex-col gap-1 px-3.5 py-2.5 text-[13px]">
         {plan.map((p, i) => (
           <li key={i} className="flex items-start gap-2.5">
             <span className="flex h-5 w-3.5 shrink-0 items-center justify-center">
@@ -743,6 +688,12 @@ function backgroundLabel(tc: AcpToolCall): string {
   return ((toolDescription(tc) ?? tc.title) || "a command").split("\n")[0];
 }
 
+/** The right blade (Activity, Changes): its width is kept between runs. */
+const BLADE_WIDTH_KEY = "patchbay.bladeWidth";
+const BLADE_DEFAULT = 440;
+const BLADE_MIN = 320;
+const BLADE_MAX = 900;
+
 /**
  * Tool calls that run now: background jobs first, then calls the agent waits on. A call left
  * `in_progress` by a turn that is over (a replay, a crash) doesn't run.
@@ -755,42 +706,79 @@ function runningJobs(calls: Record<string, AcpToolCall>, busy: boolean): AcpTool
   ];
 }
 
-/** The right-hand panel of what runs now, each job with its own Stop. */
-function JobsPanel({ jobs, onClose }: { jobs: AcpToolCall[]; onClose: () => void }) {
+/** Plan steps the agent has not finished (cancelled ones no longer count). */
+function openSteps(plan: CodeState["plan"] | undefined): number {
+  return (plan ?? []).filter((p) => p.status !== "completed" && p.status !== "cancelled").length;
+}
+
+/** A titled part of the Activity panel. */
+function ActivitySection({ title, meta, className, children }: { title: string; meta?: string; className: string; children: ReactNode }) {
+  return (
+    <section aria-label={title} className={`flex min-h-0 flex-col ${className}`}>
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-4">
+        <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-faint">{title}</span>
+        {meta && <span className="font-mono text-[11px] text-faint">{meta}</span>}
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
+    </section>
+  );
+}
+
+/**
+ * The right-hand panel of what the agent is doing: its plan above, and what runs now (background
+ * jobs, calls it waits on) below, each job with its own Stop.
+ */
+function ActivityPanel({
+  plan,
+  jobs,
+  onClose,
+}: {
+  plan: NonNullable<CodeState["plan"]>;
+  jobs: AcpToolCall[];
+  onClose: () => void;
+}) {
+  const done = plan.filter((p) => p.status === "completed").length;
+  const total = plan.filter((p) => p.status !== "cancelled").length;
   return (
     <div className="flex h-full flex-col">
       <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line pl-4 pr-2">
-        <span className="flex-1 text-[13px] font-medium">Jobs</span>
+        <span className="flex-1 text-[13px] font-medium">Activity</span>
         <button
           className="flex h-7 w-7 items-center justify-center rounded-md text-muted hover:bg-panel-2 hover:text-fg"
           onClick={onClose}
-          aria-label="Close jobs"
+          aria-label="Close activity"
           title="Close"
         >
           <XIcon size={14} />
         </button>
       </div>
-      {jobs.length === 0 && <div className="p-4 text-xs text-faint">Nothing is running.</div>}
-      <ul className="flex min-h-0 flex-1 flex-col gap-px overflow-y-auto p-1.5">
-        {jobs.map((tc) => {
-          const cmd = (tc.rawInput as { command?: unknown } | null | undefined)?.command;
-          return (
-            <li key={tc.toolCallId} className="flex items-center gap-2 rounded-md px-2.5 py-2 hover:bg-panel-2/60">
-              <Dot size={6} className="signal-pulse shrink-0 text-live" />
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-[13px]" title={backgroundLabel(tc)}>
-                  {backgroundLabel(tc)}
+      {/* The plan takes the room its steps need, up to 60%; jobs get the rest. */}
+      <ActivitySection title="Plan" meta={total ? `${done} of ${total}` : undefined} className="max-h-[60%] shrink-0 border-b border-line">
+        {plan.length === 0 ? <div className="p-4 text-xs text-faint">No plan yet.</div> : <PlanSteps plan={plan} />}
+      </ActivitySection>
+      <ActivitySection title="Jobs" meta={jobs.length ? String(jobs.length) : undefined} className="flex-1">
+        {jobs.length === 0 && <div className="p-4 text-xs text-faint">Nothing is running.</div>}
+        <ul className="flex flex-col gap-px p-1.5">
+          {jobs.map((tc) => {
+            const cmd = (tc.rawInput as { command?: unknown } | null | undefined)?.command;
+            return (
+              <li key={tc.toolCallId} className="flex items-center gap-2 rounded-md px-2.5 py-2 hover:bg-panel-2/60">
+                <Dot size={6} className="signal-pulse shrink-0 text-live" />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[13px]" title={backgroundLabel(tc)}>
+                    {backgroundLabel(tc)}
+                  </div>
+                  <div className="truncate font-mono text-[11px] text-faint" title={typeof cmd === "string" ? cmd : undefined}>
+                    {tc.background ? "in the background" : "running"}
+                    {typeof cmd === "string" && ` · ${cmd}`}
+                  </div>
                 </div>
-                <div className="truncate font-mono text-[11px] text-faint" title={typeof cmd === "string" ? cmd : undefined}>
-                  {tc.background ? "in the background" : "running"}
-                  {typeof cmd === "string" && ` · ${cmd}`}
-                </div>
-              </div>
-              <StopButton tc={tc} />
-            </li>
-          );
-        })}
-      </ul>
+                <StopButton tc={tc} />
+              </li>
+            );
+          })}
+        </ul>
+      </ActivitySection>
     </div>
   );
 }
@@ -923,8 +911,9 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const session = sessions.find((s) => s.id === activeId) ?? null;
 
   const [showTerm, setShowTerm] = useState(false);
-  const [showChanges, setShowChanges] = useState(false);
-  const [showJobs, setShowJobs] = useState(false);
+  /** Which panel the right blade shows, if any. */
+  const [blade, setBlade] = useState<"activity" | "changes" | null>(null);
+  const [bladeWidth, setBladeWidth] = useState(() => loadWidth(BLADE_WIDTH_KEY, BLADE_DEFAULT, BLADE_MIN, BLADE_MAX));
   const [termMounted, setTermMounted] = useState<Record<string, boolean>>({});
   const [editingIdx, setEditingIdx] = useState<number | null>(null);
   /** Fills the composer after Stop when this agent cannot rewind. */
@@ -1170,6 +1159,14 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   // they end).
   const background = Object.values(s?.toolCalls ?? {}).filter((tc) => tc.background);
   const jobs = runningJobs(s?.toolCalls ?? {}, !!s?.busy);
+  // What the Activity button counts: jobs running, plus plan steps not done.
+  const outstanding = jobs.length + openSteps(s?.plan);
+  const bladePanel =
+    blade === "activity" ? (
+      <ActivityPanel plan={s?.plan ?? []} jobs={jobs} onClose={() => setBlade(null)} />
+    ) : blade === "changes" ? (
+      <ChangesPanel changes={changes} cwd={session.cwd} onClose={() => setBlade(null)} />
+    ) : null;
 
   // What the session is waiting on, said plainly. A phone reaches it through a gateway, so it
   // can be reconnecting, or catching up on a session whose agent already runs.
@@ -1538,24 +1535,18 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
           />
         )}
         <HeaderButton
-          label="Jobs"
-          active={showJobs}
-          badge={jobs.length}
-          onClick={() => {
-            setShowJobs(!showJobs);
-            setShowChanges(false);
-          }}
+          label="Activity: plan and jobs"
+          active={blade === "activity"}
+          badge={outstanding}
+          onClick={() => setBlade(blade === "activity" ? null : "activity")}
         >
           <ActivityIcon />
         </HeaderButton>
         <HeaderButton
           label="Changes"
-          active={showChanges}
+          active={blade === "changes"}
           badge={changes.length}
-          onClick={() => {
-            setShowChanges(!showChanges);
-            setShowJobs(false);
-          }}
+          onClick={() => setBlade(blade === "changes" ? null : "changes")}
         >
           <FileDiffIcon />
         </HeaderButton>
@@ -1687,15 +1678,11 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                 ))}
               </ul>
             )}
-            {s?.plan && s.plan.length > 0 && <PlanPanel key={session.id} plan={s.plan} />}
             {remote && changes.length > 0 && (
               <button
                 type="button"
                 className="mb-2 inline-flex h-9 items-center gap-2 rounded-full border border-line px-3 text-[13px] active:bg-panel-2"
-                onClick={() => {
-                  setShowChanges(true);
-                  setShowJobs(false);
-                }}
+                onClick={() => setBlade("changes")}
                 aria-label={`Diff, ${changeStats.add} lines added, ${changeStats.del} lines removed`}
               >
                 <span className="font-medium">Diff</span>
@@ -1830,24 +1817,29 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             />
           </div>
         </div>
-        {showChanges && !remote && (
-          <aside className="w-[42%] min-w-80 shrink-0 border-l border-line bg-panel/50">
-            <ChangesPanel changes={changes} cwd={session.cwd} onClose={() => setShowChanges(false)} />
+        {blade && !remote && (
+          <aside
+            className="relative max-w-[70%] shrink-0 border-l border-line bg-panel/50"
+            style={{ width: bladeWidth }}
+          >
+            <ResizeHandle
+              width={bladeWidth}
+              min={BLADE_MIN}
+              max={BLADE_MAX}
+              initial={BLADE_DEFAULT}
+              edge="left"
+              label="Resize panel"
+              onChange={(w, done) => {
+                setBladeWidth(w);
+                if (done) saveWidth(BLADE_WIDTH_KEY, w);
+              }}
+            />
+            {bladePanel}
           </aside>
         )}
-        {showJobs && !remote && (
-          <aside className="w-[42%] min-w-80 shrink-0 border-l border-line bg-panel/50">
-            <JobsPanel jobs={jobs} onClose={() => setShowJobs(false)} />
-          </aside>
-        )}
-        {showJobs && remote && (
+        {blade && remote && (
           <div className="fixed inset-0 z-40 flex flex-col bg-bg pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
-            <JobsPanel jobs={jobs} onClose={() => setShowJobs(false)} />
-          </div>
-        )}
-        {showChanges && remote && (
-          <div className="fixed inset-0 z-40 flex flex-col bg-bg pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
-            <ChangesPanel changes={changes} cwd={session.cwd} onClose={() => setShowChanges(false)} />
+            {bladePanel}
           </div>
         )}
       </div>
