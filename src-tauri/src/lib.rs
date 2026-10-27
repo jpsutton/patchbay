@@ -720,6 +720,32 @@ async fn archive_code_session(state: &AppState, id: &str, archived: bool) -> any
     state.db.set_code_session_archived(id, archived)
 }
 
+/// How often the age limit for Code sessions (`Preferences::auto_archive_days`) is applied.
+const AUTO_ARCHIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Archive the Code sessions this node hosts that nobody prompted for `auto_archive_days` days,
+/// except pinned ones and ones mid-turn. Returns how many it archived.
+async fn auto_archive_sweep(state: &AppState) -> anyhow::Result<usize> {
+    let Some(days) = prefs::load(&state.db).auto_archive_days else {
+        return Ok(0);
+    };
+    let cutoff = db::now_ms() - i64::from(days) * 24 * 60 * 60 * 1000;
+    let mut archived = 0;
+    for id in state.db.stale_code_session_ids(cutoff)? {
+        if state.code.is_busy(&id) || state.code.is_moving(&id) {
+            continue;
+        }
+        match archive_code_session(state, &id, true).await {
+            Ok(()) => archived += 1,
+            Err(e) => tracing::warn!("auto-archive of session {id}: {e:#}"),
+        }
+    }
+    if archived > 0 {
+        (state.emit)("mesh://changed", serde_json::json!({ "tables": ["code_sessions"] }));
+    }
+    Ok(archived)
+}
+
 /// The node hosting session `id`, when that isn't this one.
 fn remote_host(state: &AppState, id: &str) -> CmdResult<Option<String>> {
     let s = state
@@ -2334,6 +2360,15 @@ pub fn open_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow::Result
     if mesh.is_member() {
         api::spawn(async move { mesh.start() });
     }
+    let sweeper = state.clone();
+    api::spawn(async move {
+        loop {
+            if let Err(e) = auto_archive_sweep(&sweeper).await {
+                tracing::warn!("auto-archive: {e:#}");
+            }
+            tokio::time::sleep(AUTO_ARCHIVE_EVERY).await;
+        }
+    });
     Ok(state)
 }
 

@@ -582,6 +582,22 @@ export function AgentsPage({ list, onOpen }: { list: AgentList; onOpen: (id: Age
           ]}
         />
       </Row>
+      <Row
+        label="Auto-archive after (days)"
+        hint="Archive Code sessions nobody has prompted for this long, on the computer that runs them. Pinned sessions stay. Restore from the archive any time. Blank = never."
+      >
+        <Deferred
+          value={prefs.autoArchiveDays == null ? "" : String(prefs.autoArchiveDays)}
+          placeholder="Never"
+          mono
+          width="w-24"
+          onCommit={(v) => {
+            const t = v.trim();
+            if (t && !/^\d+$/.test(t)) return Promise.resolve("Enter a whole number");
+            return update({ autoArchiveDays: t ? Number(t) : null });
+          }}
+        />
+      </Row>
       <div className="pt-3">
         <div className="text-sm">Custom instructions</div>
         <div className="mt-0.5 text-xs text-muted">

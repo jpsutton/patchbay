@@ -654,6 +654,8 @@ export interface Preferences {
   agentProviders: Partial<Record<AgentId, string>>;
   /** Stop turns on a Claude plan (Claude Code, or Patchbay's agent on a Claude login) at `percent`. */
   usageLimit: { enabled: boolean; percent: number };
+  /** Archive Code sessions this many days after their last prompt, unless pinned; null = never. */
+  autoArchiveDays: number | null;
   permissionMode: "default" | "auto" | "always-approve";
   agentInstructions: string;
   webFetch: boolean;
@@ -699,6 +701,7 @@ export const defaultPreferences: Preferences = {
   agentPaths: {},
   agentProviders: {},
   usageLimit: { enabled: true, percent: 95 },
+  autoArchiveDays: null,
   permissionMode: "default",
   agentInstructions: "",
   webFetch: false,
