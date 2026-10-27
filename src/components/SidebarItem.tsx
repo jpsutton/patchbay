@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState, type MouseEvent, type ReactNode } from "react";
 import { ContextMenu, type ItemAction } from "./ItemMenu";
 import type { Activity } from "../lib/activity";
 import { Dot } from "./Dot";
@@ -47,6 +47,7 @@ export function SidebarItem({
   attention,
   indent,
   pinned,
+  selected,
   onSelect,
   onRename,
   onDelete,
@@ -70,7 +71,10 @@ export function SidebarItem({
   attention?: boolean;
   indent?: boolean;
   pinned?: boolean;
-  onSelect: () => void;
+  /** Part of a multi-selection, apart from the open item. */
+  selected?: boolean;
+  /** Gets the click, so a caller can read Shift/Ctrl/Cmd. */
+  onSelect: (e: MouseEvent) => void;
   onRename: (t: string) => void;
   onDelete: () => void;
   /** When set, the row's hover button archives instead of deleting. */
@@ -110,9 +114,17 @@ export function SidebarItem({
   return (
     <div
       className={`group mx-2 flex h-[34px] cursor-pointer items-center gap-2.5 rounded-lg pr-2 text-[14px] ${indent ? "pl-4" : "pl-2.5"} ${
-        active ? "bg-panel-2 font-medium text-fg" : "text-fg/75 hover:bg-panel-2/50 hover:text-fg"
+        selected
+          ? `bg-accent/20 text-fg ${active ? "font-medium" : ""}`
+          : active
+            ? "bg-panel-2 font-medium text-fg"
+            : "text-fg/75 hover:bg-panel-2/50 hover:text-fg"
       } ${subtitle ? "h-auto py-1.5" : ""}`}
       onClick={onSelect}
+      // Shift-click would also select the text between the rows.
+      onMouseDown={(e) => {
+        if (e.shiftKey) e.preventDefault();
+      }}
       onDoubleClick={rename}
       onContextMenu={(e) => {
         if (!menu) return;
