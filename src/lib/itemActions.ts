@@ -85,6 +85,24 @@ export function toggleSessionArchive(s: CodeSession): () => void {
   });
 }
 
+/** Archive several Code sessions at once, with one refresh and one toast. */
+export function archiveSessions(list: CodeSession[]): void {
+  const st = useStore.getState;
+  attempt(async () => {
+    const results = await Promise.allSettled(list.map((s) => api.updateCodeSession(s.id, { archived: true })));
+    const failed = results.filter((r) => r.status === "rejected");
+    const active = st().activeCodeSessionId;
+    const gone = new Set(list.filter((_, i) => results[i].status === "fulfilled").map((s) => s.id));
+    if (active && gone.has(active)) st().selectCodeSession(null);
+    await st().refreshCodeSessions();
+    if (failed.length > 0) {
+      st().setToast(`Archived ${gone.size} of ${list.length}: ${errorText((failed[0] as PromiseRejectedResult).reason)}`);
+    } else {
+      st().setToast(`Archived ${list.length} sessions`);
+    }
+  })();
+}
+
 export function sessionActions(
   s: CodeSession,
   { rename, desktop, running, local }: { rename: () => void; desktop: boolean; running: boolean; local: boolean },
