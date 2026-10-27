@@ -35,7 +35,7 @@ Modules: `agent.rs` (ACP methods), `session.rs` (history, mode, files, shells, p
 
 1. Turn the ACP prompt into parts, add the harness's reminders and record a rewind point.
 2. Compact first when the last request filled the window past the threshold (the model's own auto-compact percent, else the preference, else 85).
-3. Build the request: the static system block (persona, tool guidance, honesty about outcomes) with a cache breakpoint, then a dynamic block (environment, plan-mode note, the user's instructions, `AGENTS.md`/`CLAUDE.md` from the working directory up to the repository root), then the history and the tools for the mode.
+3. Build the request: the static system block (persona, tool guidance, honesty about outcomes) with a cache breakpoint (see the cache clock below), then a dynamic block (environment, plan-mode note, the user's instructions, `AGENTS.md`/`CLAUDE.md` from the working directory up to the repository root), then the history and the tools for the mode.
 4. Stream the reply as `agent_message_chunk` and `agent_thought_chunk`.
 5. Announce every tool call as a pending card, then run them: consecutive read-only calls that need no approval together, the rest one after another. A call that changes anything asks first with `session/request_permission` (with a diff preview for edits). Output of long commands streams on the card's terminal channel.
 6. Append the results, with reminders, and go round again until the model stops asking for tools (at most 100 requests per prompt).
@@ -71,8 +71,19 @@ A subagent is a child `Session` (`session.rs`): same client, model and MCP serve
 
 - Plan mode is an ACP mode. The model is offered only read-only tools plus `ExitPlanMode`, whose approval is a decision the client always asks about.
 - Compaction (`/compact [focus]` or automatic) asks the model for a structured summary and replaces the history with it (`Entry::Compacted`). The summarizer sees the history without images and with shortened tool output.
+- Stopping one call. Each running tool call has its own cancel token, a child of the turn's, kept in `Session.calls` by tool call id. `patchbay/cancel_tool` (`sessionId`, `toolCallId`) cancels it: the call ends as failed, the model reads that the user stopped it (`call_stopped`, not `interrupted`, which is for a stopped turn) and the turn goes on. `patchbay/kill_shell` (`sessionId`, `shellId`) kills one background Bash job. A background Bash call's final update carries `_meta.background_shell {id}` (the id BashOutput and KillShell take); when the job ends a `tool_call_update` with `_meta.background_shell {id, done: true, exit_code}` follows (`-1` when it was killed). The app offers both as a Stop button on the card and in the Jobs panel, only when `extensions.cancelTool` is set (Patchbay's own agent, hosts that have this change). Test: `stopping_a_tool_call_or_job_that_is_not_running_does_nothing`, `registry_kills_one_job_by_id`.
 - Rewind (`patchbay/rewind/points` and `.../execute`) drops a prompt and everything after it (`Entry::Truncate`), and with `mode: "all"` puts back the files the later prompts changed from per-prompt snapshots taken before the first change. Snapshots live in memory: after a restart the conversation can still rewind, the files can't. Files changed through Bash are not tracked.
 - Reminders are `<system-reminder>` parts the harness adds to the next user message: a file the agent read changed under it, the model was switched, the task list went stale.
+
+### Prompt cache clock and `/keepwarm`
+
+Anthropic keeps a cached prompt for a fixed time after its last use, and a prompt that arrives later re-writes the whole context at the cache-write price. The TTL is chosen per request (`cache_control.ttl`): the API default is 5 minutes, `"1h"` asks for an hour. A Claude subscription login asks for `"1h"` for the agent (`providers::agent_cache_ttl`, as Claude Code does; the API accepts it on the OAuth token without an extra beta header). A stored API key keeps the 5-minute default, because the 1-hour write costs more per token. Chat keeps the default. Every breakpoint of one request carries the same TTL, since the API rejects a 5-minute entry ahead of a 1-hour one.
+
+The session (`cache.rs`) records when a request last read or wrote the cache, and sends it in `usage_update`'s `_meta.cache` (`lastAt`, `ttlSecs`, `auto`). Only Anthropic requests have a clock; for the other formats the endpoint decides and nothing is sent. `code/usage.rs` keeps it in the session's usage state and the usage bar counts down from `lastAt` (amber in the last 5 minutes of a context of 30k tokens or more, "cold" after). A model change, an effort change or a compaction clears `lastAt`, because the cached prefix no longer matches.
+
+- `/keepwarm` sends the history again with the one-line question "Reply with just: ok" and drops the answer. The request comes from the same `turn::build_request` as the real one, so the provider reads the cached prefix and restarts its clock for the price of a cache read. The history is not changed.
+- `/keepwarm auto` toggles auto mode. Every 30 seconds an idle session in auto mode checks the clock and refreshes when the cache is warm with under 5 minutes left and the context is at least 30k tokens, up to 3 times until the next real request.
+- A prompt sent after the cache expired on a context of 30k tokens or more gets a one-line note saying what it will re-cache.
 
 ### Persistence
 

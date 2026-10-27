@@ -644,6 +644,9 @@ fn create_code_session_local(
     model_ref: Option<&str>,
     agent: Option<String>,
 ) -> anyhow::Result<CodeSession> {
+    // Native folder pickers can return a trailing slash (the KDE portal does); `/a/b` and `/a/b/`
+    // are one folder, and the same permission rules and recent-folder entry must serve both.
+    let cwd = gateway::folder_key(cwd);
     if !std::path::Path::new(cwd).is_dir() {
         anyhow::bail!("{cwd} is not a directory");
     }
@@ -715,6 +718,32 @@ async fn archive_code_session(state: &AppState, id: &str, archived: bool) -> any
         }
     }
     state.db.set_code_session_archived(id, archived)
+}
+
+/// How often the age limit for Code sessions (`Preferences::auto_archive_days`) is applied.
+const AUTO_ARCHIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Archive the Code sessions this node hosts that nobody prompted for `auto_archive_days` days,
+/// except pinned ones and ones mid-turn. Returns how many it archived.
+async fn auto_archive_sweep(state: &AppState) -> anyhow::Result<usize> {
+    let Some(days) = prefs::load(&state.db).auto_archive_days else {
+        return Ok(0);
+    };
+    let cutoff = db::now_ms() - i64::from(days) * 24 * 60 * 60 * 1000;
+    let mut archived = 0;
+    for id in state.db.stale_code_session_ids(cutoff)? {
+        if state.code.is_busy(&id) || state.code.is_moving(&id) {
+            continue;
+        }
+        match archive_code_session(state, &id, true).await {
+            Ok(()) => archived += 1,
+            Err(e) => tracing::warn!("auto-archive of session {id}: {e:#}"),
+        }
+    }
+    if archived > 0 {
+        (state.emit)("mesh://changed", serde_json::json!({ "tables": ["code_sessions"] }));
+    }
+    Ok(archived)
 }
 
 /// The node hosting session `id`, when that isn't this one.
@@ -1347,6 +1376,24 @@ async fn code_cancel(state: &AppState, id: String) -> CmdResult<()> {
     Ok(state.code.send(&id, AgentCmd::Cancel)?)
 }
 
+/// Stop one running tool call; the turn goes on.
+async fn code_cancel_tool(state: &AppState, id: String, tool_call_id: String) -> CmdResult<()> {
+    if let Some(host) = remote_host(state, &id)? {
+        state.mesh.rpc(&host, "code.cancel_tool", serde_json::json!({ "id": id, "toolCallId": tool_call_id })).await?;
+        return Ok(());
+    }
+    Ok(state.code.send(&id, AgentCmd::CancelTool { tool_call_id })?)
+}
+
+/// Stop one background shell.
+async fn code_kill_shell(state: &AppState, id: String, shell_id: String) -> CmdResult<()> {
+    if let Some(host) = remote_host(state, &id)? {
+        state.mesh.rpc(&host, "code.kill_shell", serde_json::json!({ "id": id, "shellId": shell_id })).await?;
+        return Ok(());
+    }
+    Ok(state.code.send(&id, AgentCmd::KillShell { shell_id })?)
+}
+
 async fn code_set_model_local(state: &AppState, id: &str, model_id: String) -> anyhow::Result<()> {
     ensure_local_host(state, id)?;
     state.code.set_model(id, model_id.clone()).await?;
@@ -1754,6 +1801,16 @@ impl mesh::RpcHandler for MeshRpc {
             "code.cancel" => {
                 ensure_local_host(state, &id()?)?;
                 state.code.send(&id()?, AgentCmd::Cancel).map(|_| Value::Null)
+            }
+            "code.cancel_tool" => {
+                ensure_local_host(state, &id()?)?;
+                let tool_call_id = param(&p, "toolCallId")?.to_owned();
+                state.code.send(&id()?, AgentCmd::CancelTool { tool_call_id }).map(|_| Value::Null)
+            }
+            "code.kill_shell" => {
+                ensure_local_host(state, &id()?)?;
+                let shell_id = param(&p, "shellId")?.to_owned();
+                state.code.send(&id()?, AgentCmd::KillShell { shell_id }).map(|_| Value::Null)
             }
             "code.unqueue" => {
                 ensure_local_host(state, &id()?)?;
@@ -2180,6 +2237,12 @@ async fn save_code_transcript(state: &AppState, id: String, json: String) -> Cmd
     if json.len() > MAX {
         return Err(CmdError("transcript too large to cache".into()));
     }
+    // Only the node hosting the session writes the cache. A window viewing a session hosted
+    // elsewhere holds a partial view (stale cache plus the live tail), and the cache is a single
+    // synced cell, so its save would overwrite the host's complete one on every node.
+    if remote_host(state, &id)?.is_some() {
+        return Ok(());
+    }
     Ok(state.db.set_code_transcript(&id, &json)?)
 }
 
@@ -2325,6 +2388,15 @@ pub fn open_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow::Result
     if mesh.is_member() {
         api::spawn(async move { mesh.start() });
     }
+    let sweeper = state.clone();
+    api::spawn(async move {
+        loop {
+            if let Err(e) = auto_archive_sweep(&sweeper).await {
+                tracing::warn!("auto-archive: {e:#}");
+            }
+            tokio::time::sleep(AUTO_ARCHIVE_EVERY).await;
+        }
+    });
     Ok(state)
 }
 

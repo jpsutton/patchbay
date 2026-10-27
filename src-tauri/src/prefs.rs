@@ -69,6 +69,8 @@ pub struct Preferences {
     pub agent_providers: std::collections::BTreeMap<String, String>,
     /// Stop Claude Code turns before its sign-in's plan limits run into extra usage.
     pub usage_limit: UsageLimit,
+    /// Archive Code sessions this many days after their last prompt, unless pinned; `None` = never.
+    pub auto_archive_days: Option<u32>,
 
     // ---- Grok Build ----
     /// default | auto | always-approve
@@ -191,6 +193,7 @@ impl Default for Preferences {
             agent_paths: Default::default(),
             agent_providers: Default::default(),
             usage_limit: UsageLimit::default(),
+            auto_archive_days: None,
             permission_mode: "default".into(),
             agent_instructions: String::new(),
             web_fetch: false,
@@ -259,6 +262,11 @@ impl Preferences {
         if !(1..=100).contains(&self.usage_limit.percent) {
             return Err("usage limit must be between 1 and 100%".into());
         }
+        if let Some(d) = self.auto_archive_days
+            && !(1..=3650).contains(&d)
+        {
+            return Err("auto-archive age must be between 1 and 3650 days".into());
+        }
         if !(8..=32).contains(&self.terminal_font_size) {
             return Err("terminal font size must be between 8 and 32".into());
         }
@@ -292,6 +300,7 @@ mod tests {
         let p: Preferences = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
         assert_eq!(p.theme, "dark");
         assert_eq!(p.terminal_font_size, 13);
+        assert_eq!(p.auto_archive_days, None);
         assert_eq!(p.read_aloud_engine, "auto");
         assert!(!p.read_aloud_listen);
         assert!(p.background_summaries);
@@ -312,6 +321,8 @@ mod tests {
         assert!(bad(|p| p.permission_mode = "yolo".into()));
         assert!(bad(|p| p.auto_compact_percent = Some(100)));
         assert!(bad(|p| p.terminal_font_size = 4));
+        assert!(bad(|p| p.auto_archive_days = Some(0)));
+        assert!(bad(|p| p.auto_archive_days = Some(3651)));
         assert!(bad(|p| p.usage_limit.percent = 0));
         assert!(bad(|p| p.usage_limit.percent = 101));
         assert!(bad(|p| p.terminal_shell = "/no/such/shell".into()));

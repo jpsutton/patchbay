@@ -195,10 +195,16 @@ const FAKE_STEERING = new Set(["patchbay", "grok", "claude-code", "codex"]);
 /** Sessions mid-turn, and the prompts queued behind each turn. */
 const fakeTurns = new Set<string>();
 const fakeQueues: Record<string, { promptId: string; text: string; mentions: string[] }[]> = {};
+/** Messages steered into a session's running turn, which Send now can still take back out. */
+const fakeSteered: Record<string, { promptId: string; text: string; mentions: string[] }[]> = {};
 /** Sessions whose running turn a forced send cancelled. */
 const fakeCut = new Set<string>();
 /** Sessions whose running turn Stop cancelled; only the `/slow` scenario watches for it. */
 const fakeStopped = new Set<string>();
+/** Background jobs the `/jobs` demo started: shell id -> the call that started it. */
+const fakeJobs = new Map<string, { csid: string; toolId: string }>();
+/** Running calls the `/jobs` demo can stop: tool call id -> session. */
+const fakeSlowCalls = new Map<string, string>();
 
 /** Cancel the running turn for a forced send; the front of the queue goes next. */
 function fakeInterrupt(csid: string) {
@@ -217,6 +223,7 @@ async function runFakeTurns(csid: string, promptId: string, text: string, mentio
   await fakeAgentTurn(csid, text, mentions);
   if (fakeCut.delete(csid)) codeEmit(csid, { type: "promptDone", stopReason: "cancelled" });
   fakeTurns.delete(csid);
+  delete fakeSteered[csid];
   const next = fakeQueues[csid]?.shift();
   if (next) void runFakeTurns(csid, next.promptId, next.text, next.mentions);
 }
@@ -242,7 +249,7 @@ function fakeReady(csid: string, loaded = false) {
       ? null
       : { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] },
     configOptions: fakeOptionsFor(csid),
-    extensions: { statusLine: agentId === "grok", rewind: grok, patchbayModels: grok, steering: FAKE_STEERING.has(agentId), forceSend: true },
+    extensions: { statusLine: agentId === "grok", rewind: grok, patchbayModels: grok, steering: FAKE_STEERING.has(agentId), forceSend: true, cancelTool: agentId === "patchbay" },
   });
   codeEmit(csid, {
     type: "update",
@@ -514,6 +521,30 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
     await say("Build is clean. Now checking the remaining modules, one at a time. ");
     if (await nap(40_000)) return stop();
     await say("Done after a long wait.");
+    turnEmit({ type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
+  // `/jobs`: a running tool call and two background jobs, for the Jobs panel and the Stop buttons.
+  // Stopping the running call ends it and the turn carries on; stopping a job ends just that job.
+  if (text.startsWith("/jobs")) {
+    for (const [name, cmd] of [["dev server", "pnpm dev"], ["test watcher", "pnpm test --watch"]]) {
+      const jobId = id();
+      const shellId = `bash_${fakeJobs.size + 1}`;
+      fakeJobs.set(shellId, { csid, toolId: jobId });
+      codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: jobId, title: `Start ${name}`, kind: "execute", status: "in_progress", rawInput: { command: cmd, run_in_background: true } } });
+      codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: jobId, status: "completed", content: [{ type: "content", content: { type: "text", text: `Command running in background with ID: ${shellId}.` } }], _meta: { background_shell: { id: shellId } } } });
+    }
+    const slowId = id();
+    fakeSlowCalls.set(slowId, csid);
+    turnEmit({ type: "update", update: { sessionUpdate: "tool_call", toolCallId: slowId, title: "Execute `cargo build --release`", kind: "execute", status: "in_progress", rawInput: { command: "cargo build --release" } } });
+    for (let t0 = 0; t0 < 60_000 && fakeSlowCalls.has(slowId) && !fakeStopped.has(csid); t0 += 200) await sleep(200);
+    if (fakeStopped.has(csid)) {
+      fakeStopped.delete(csid);
+      fakeSlowCalls.delete(slowId);
+      turnEmit({ type: "promptDone", stopReason: "cancelled" });
+      return;
+    }
+    await say("Both jobs are running. The build was stopped, so I carry on without it.");
     turnEmit({ type: "promptDone", stopReason: "end_turn" });
     return;
   }
@@ -985,6 +1016,7 @@ export function install() {
             terminalShell?: string;
             autoCompactPercent?: number | null;
             usageLimit?: { percent: number };
+            autoArchiveDays?: number | null;
             readAloudEngine?: string;
             readAloudRate?: string;
             readAloudServerUrl?: string;
@@ -992,6 +1024,7 @@ export function install() {
           if (p.terminalShell && !p.terminalShell.startsWith("/")) throw `terminal shell ${p.terminalShell} does not exist`;
           if (p.autoCompactPercent != null && (p.autoCompactPercent < 10 || p.autoCompactPercent > 99)) throw "auto-compact threshold must be between 10 and 99%";
           if (p.usageLimit && (p.usageLimit.percent < 1 || p.usageLimit.percent > 100)) throw "usage limit must be between 1 and 100%";
+          if (p.autoArchiveDays != null && (p.autoArchiveDays < 1 || p.autoArchiveDays > 3650)) throw "auto-archive age must be between 1 and 3650 days";
           if (p.readAloudEngine && !["auto", "system", "builtin", "server"].includes(p.readAloudEngine)) throw "read aloud engine must be one of auto, system, builtin, server";
           if (p.readAloudRate && !["slower", "normal", "faster"].includes(p.readAloudRate)) throw "read aloud speed must be one of slower, normal, faster";
           const speechUrl = p.readAloudServerUrl?.trim() ?? "";
@@ -1233,7 +1266,7 @@ export function install() {
               } else if (csid === readmeSessionId) {
                 fakeReadmeReplay(csid);
                 fakeReady(csid, true);
-                codeEmit(csid, { type: "usage", usage: { totals: { input: 41000, cachedRead: 30000, cacheWrite: 0, output: 1800, reasoning: 0, costUsd: 0.07, apiMs: 0 }, contextTokens: 24000, contextWindow: 128000, autoCompactPercent: 85 } });
+                codeEmit(csid, { type: "usage", usage: { totals: { input: 41000, cachedRead: 30000, cacheWrite: 0, output: 1800, reasoning: 0, costUsd: 0.07, apiMs: 0 }, contextTokens: 24000, contextWindow: 128000, autoCompactPercent: 85, cache: { lastAt: Date.now() - 20 * 60_000, ttlSecs: 3600, auto: false } } });
               } else fakeReady(csid);
             }, 400);
           }, 10);
@@ -1287,6 +1320,7 @@ export function install() {
           if (fakeTurns.has(s.id)) {
             if (FAKE_STEERING.has(s.agent)) {
               fakeEcho(s.id, promptId, a.text as string, "steered");
+              (fakeSteered[s.id] ??= []).push({ promptId, text: a.text as string, mentions });
               codeEmit(s.id, { type: "update", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `\n\n(Noted mid-turn: ${a.text})\n\n` } } });
             } else {
               (fakeQueues[s.id] ??= []).push({ promptId, text: a.text as string, mentions });
@@ -1307,10 +1341,18 @@ export function install() {
           return null;
         }
         case "code_send_now": {
-          const q = fakeQueues[a.id as string] ?? [];
+          const q = (fakeQueues[a.id as string] ??= []);
           const i = q.findIndex((x) => x.promptId === a.promptId);
+          const st = fakeSteered[a.id as string] ?? [];
+          const j = st.findIndex((x) => x.promptId === a.promptId);
           if (i >= 0 && fakeTurns.has(a.id as string)) {
             q.unshift(...q.splice(i, 1));
+            fakeInterrupt(a.id as string);
+          } else if (j >= 0 && fakeTurns.has(a.id as string)) {
+            // Steered in, not read yet: it leaves the turn and goes next.
+            const [m] = st.splice(j, 1);
+            q.unshift(m);
+            fakeEcho(a.id as string, m.promptId, m.text, "queued");
             fakeInterrupt(a.id as string);
           }
           return null;
@@ -1392,6 +1434,22 @@ export function install() {
           for (const [k, r] of pending) { r(null); pending.delete(k); }
           const dropped = (fakeQueues[a.id as string] ?? []).splice(0);
           if (dropped.length) codeEmit(a.id as string, { type: "unqueued", promptIds: dropped.map((d) => d.promptId), restore: true });
+          return null;
+        }
+        case "code_cancel_tool": {
+          const csid = fakeSlowCalls.get(a.toolCallId as string);
+          if (csid) {
+            fakeSlowCalls.delete(a.toolCallId as string);
+            codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: a.toolCallId as string, status: "failed", content: [{ type: "content", content: { type: "text", text: "The user stopped this tool call before it finished." } }] } });
+          }
+          return null;
+        }
+        case "code_kill_shell": {
+          const job = fakeJobs.get(a.shellId as string);
+          if (job) {
+            fakeJobs.delete(a.shellId as string);
+            codeEmit(job.csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: job.toolId, _meta: { background_shell: { id: a.shellId as string, done: true, exit_code: -1 } } } });
+          }
           return null;
         }
         case "code_set_model": case "code_set_mode": return null;

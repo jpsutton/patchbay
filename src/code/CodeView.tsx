@@ -33,7 +33,8 @@ import { FileLinkContext } from "../components/FileLink";
 import { EditMessage } from "../components/EditMessage";
 import { UsageBar } from "../components/UsageBar";
 import { TerminalPane } from "../terminal/TerminalPane";
-import { PermissionCard, PlanDocCard, planDocOf, ToolCallCard, ToolGroup } from "./ToolCallCard";
+import { PermissionCard, PlanDocCard, planDocOf, StopButton, ToolCallCard, ToolGroup } from "./ToolCallCard";
+import { toolDescription } from "./toolLabel";
 import { SignInCard } from "./SignInCard";
 import { WorkingIndicator } from "./WorkingIndicator";
 import { TranscriptRows, type TranscriptRow } from "./TranscriptRows";
@@ -412,6 +413,7 @@ function UserEntry({
   setEditing,
   onEdit,
   onReuse,
+  onSendNow,
 }: {
   e: Extract<Entry, { kind: "user" }>;
   editing: boolean;
@@ -419,6 +421,8 @@ function UserEntry({
   onEdit?: (text: string, atts: Attachment[]) => Promise<boolean>;
   /** Phone, when this agent cannot rewind: put the prompt back in the composer. */
   onReuse?: () => void;
+  /** Steered in and not read yet: stop the turn and send it as a prompt of its own. */
+  onSendNow?: () => void;
 }) {
   if (editing && onEdit) {
     return (
@@ -457,6 +461,20 @@ function UserEntry({
       {e.text && (
         <div className="max-w-[82%] whitespace-pre-wrap rounded-[16px_16px_4px_16px] border border-line bg-panel-2 px-3.5 py-2.5 leading-6">
           {e.text}
+        </div>
+      )}
+      {e.pending && (
+        <div className="flex items-center gap-2 text-xs text-muted">
+          <span>Waiting for the agent's next step</span>
+          {onSendNow && (
+            <button
+              className="rounded-md px-1.5 py-0.5 text-[11px] text-accent-ink hover:bg-panel-2"
+              onClick={onSendNow}
+              title="Stop the current turn and send this now"
+            >
+              Send now
+            </button>
+          )}
         </div>
       )}
       <div className="action-row flex items-center gap-0.5 text-muted opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
@@ -531,6 +549,7 @@ const EntryView = memo(function EntryView({
   settled,
   canReuse,
   onReuse,
+  onSendNow,
   sessionId,
 }: {
   e: Entry;
@@ -551,6 +570,8 @@ const EntryView = memo(function EntryView({
   /** Phone, when this agent cannot rewind: put this prompt back in the composer. */
   canReuse?: boolean;
   onReuse?: (i: number) => void;
+  /** Send now for a steered message still waiting; given the prompt id. */
+  onSendNow?: (promptId: string) => void;
   sessionId: string;
 }) {
   switch (e.kind) {
@@ -562,6 +583,7 @@ const EntryView = memo(function EntryView({
           setEditing={(on) => onEditing?.(on ? i : null)}
           onEdit={canEdit && onEdit ? (t, a) => onEdit(i, t, a) : undefined}
           onReuse={canReuse && onReuse ? () => onReuse(i) : undefined}
+          onSendNow={e.pending && e.promptId && onSendNow ? () => onSendNow(e.promptId!) : undefined}
         />
       );
     case "agent":
@@ -718,9 +740,59 @@ function PlanSteps({ plan }: { plan: NonNullable<CodeState["plan"]> }) {
 
 /** What a backgrounded command is doing: the agent's description of it, else its title. */
 function backgroundLabel(tc: AcpToolCall): string {
-  const raw = (tc.rawInput ?? {}) as Record<string, unknown>;
-  const label = typeof raw.description === "string" && raw.description.trim() ? raw.description : tc.title;
-  return (label || "a command").split("\n")[0];
+  return ((toolDescription(tc) ?? tc.title) || "a command").split("\n")[0];
+}
+
+/**
+ * Tool calls that run now: background jobs first, then calls the agent waits on. A call left
+ * `in_progress` by a turn that is over (a replay, a crash) doesn't run.
+ */
+function runningJobs(calls: Record<string, AcpToolCall>, busy: boolean): AcpToolCall[] {
+  const all = Object.values(calls);
+  return [
+    ...all.filter((tc) => tc.background),
+    ...all.filter((tc) => busy && !tc.background && tc.status === "in_progress"),
+  ];
+}
+
+/** The right-hand panel of what runs now, each job with its own Stop. */
+function JobsPanel({ jobs, onClose }: { jobs: AcpToolCall[]; onClose: () => void }) {
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line pl-4 pr-2">
+        <span className="flex-1 text-[13px] font-medium">Jobs</span>
+        <button
+          className="flex h-7 w-7 items-center justify-center rounded-md text-muted hover:bg-panel-2 hover:text-fg"
+          onClick={onClose}
+          aria-label="Close jobs"
+          title="Close"
+        >
+          <XIcon size={14} />
+        </button>
+      </div>
+      {jobs.length === 0 && <div className="p-4 text-xs text-faint">Nothing is running.</div>}
+      <ul className="flex min-h-0 flex-1 flex-col gap-px overflow-y-auto p-1.5">
+        {jobs.map((tc) => {
+          const cmd = (tc.rawInput as { command?: unknown } | null | undefined)?.command;
+          return (
+            <li key={tc.toolCallId} className="flex items-center gap-2 rounded-md px-2.5 py-2 hover:bg-panel-2/60">
+              <Dot size={6} className="signal-pulse shrink-0 text-live" />
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-[13px]" title={backgroundLabel(tc)}>
+                  {backgroundLabel(tc)}
+                </div>
+                <div className="truncate font-mono text-[11px] text-faint" title={typeof cmd === "string" ? cmd : undefined}>
+                  {tc.background ? "in the background" : "running"}
+                  {typeof cmd === "string" && ` · ${cmd}`}
+                </div>
+              </div>
+              <StopButton tc={tc} />
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
 }
 
 type Run = { i: number; e: Entry } | { tools: { i: number; e: Entry }[] };
@@ -852,6 +924,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
 
   const [showTerm, setShowTerm] = useState(false);
   const [showChanges, setShowChanges] = useState(false);
+  const [showJobs, setShowJobs] = useState(false);
   const [termMounted, setTermMounted] = useState<Record<string, boolean>>({});
   const [editingIdx, setEditingIdx] = useState<number | null>(null);
   /** Fills the composer after Stop when this agent cannot rewind. */
@@ -916,6 +989,14 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     (i: number) => {
       const en = activeId ? useStore.getState().code[activeId]?.entries[i] : undefined;
       if (en?.kind === "user" && en.text) setComposerSeed({ id: Date.now(), text: en.text, replace: true });
+    },
+    [activeId],
+  );
+
+  // A steered message the agent hasn't read: stop the turn and send it as a prompt of its own.
+  const onSendNow = useCallback(
+    (promptId: string) => {
+      if (activeId) api.codeSendNow(activeId, promptId).catch((e) => setToast(errorText(e)));
     },
     [activeId],
   );
@@ -1088,6 +1169,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   // Commands the agent backgrounded: its turn is over, but they still run (and it resumes when
   // they end).
   const background = Object.values(s?.toolCalls ?? {}).filter((tc) => tc.background);
+  const jobs = runningJobs(s?.toolCalls ?? {}, !!s?.busy);
 
   // What the session is waiting on, said plainly. A phone reaches it through a gateway, so it
   // can be reconnecting, or catching up on a session whose agent already runs.
@@ -1248,6 +1330,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             settled={!(s.busy && i === s.entries.length - 1)}
             canReuse={canReuse && i === lastUser && e.kind === "user" && !!e.text}
             onReuse={onReuse}
+            onSendNow={forceSend ? onSendNow : undefined}
             sessionId={session.id}
           />
         )),
@@ -1455,10 +1538,24 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
           />
         )}
         <HeaderButton
+          label="Jobs"
+          active={showJobs}
+          badge={jobs.length}
+          onClick={() => {
+            setShowJobs(!showJobs);
+            setShowChanges(false);
+          }}
+        >
+          <ActivityIcon />
+        </HeaderButton>
+        <HeaderButton
           label="Changes"
           active={showChanges}
           badge={changes.length}
-          onClick={() => setShowChanges(!showChanges)}
+          onClick={() => {
+            setShowChanges(!showChanges);
+            setShowJobs(false);
+          }}
         >
           <FileDiffIcon />
         </HeaderButton>
@@ -1595,7 +1692,10 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
               <button
                 type="button"
                 className="mb-2 inline-flex h-9 items-center gap-2 rounded-full border border-line px-3 text-[13px] active:bg-panel-2"
-                onClick={() => setShowChanges(true)}
+                onClick={() => {
+                  setShowChanges(true);
+                  setShowJobs(false);
+                }}
                 aria-label={`Diff, ${changeStats.add} lines added, ${changeStats.del} lines removed`}
               >
                 <span className="font-medium">Diff</span>
@@ -1725,6 +1825,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
               contextWindow={s?.usage?.contextWindow ?? model?.contextWindow ?? null}
               autoCompactPercent={s?.usage?.autoCompactPercent ?? null}
               estimatedCostUsd={s?.usage ? estimateCost(s.usage.totals, model?.params.pricing) : null}
+              cache={s?.usage?.cache ?? null}
               onConfigureWindow={() => useStore.getState().setSettingsOpen(true)}
             />
           </div>
@@ -1733,6 +1834,16 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
           <aside className="w-[42%] min-w-80 shrink-0 border-l border-line bg-panel/50">
             <ChangesPanel changes={changes} cwd={session.cwd} onClose={() => setShowChanges(false)} />
           </aside>
+        )}
+        {showJobs && !remote && (
+          <aside className="w-[42%] min-w-80 shrink-0 border-l border-line bg-panel/50">
+            <JobsPanel jobs={jobs} onClose={() => setShowJobs(false)} />
+          </aside>
+        )}
+        {showJobs && remote && (
+          <div className="fixed inset-0 z-40 flex flex-col bg-bg pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
+            <JobsPanel jobs={jobs} onClose={() => setShowJobs(false)} />
+          </div>
         )}
         {showChanges && remote && (
           <div className="fixed inset-0 z-40 flex flex-col bg-bg pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">

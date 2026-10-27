@@ -170,6 +170,8 @@ impl Agent {
                     st.mode
                 };
                 s.save_meta(id, mode);
+                // Each model has its own cache.
+                s.cache_reset();
                 // The "model default" effort follows the model.
                 s.update(json!({"sessionUpdate": "config_option_update", "configOptions": self.options_of(&s).await}));
                 Ok(json!({}))
@@ -203,6 +205,8 @@ impl Agent {
                             v => Some(Effort::parse(v).ok_or_else(|| RpcError::invalid_params(format!("unknown effort {v:?}")))?),
                         };
                         *s.effort.lock().unwrap() = effort;
+                        // Changing the thinking settings changes the request's cached prefix.
+                        s.cache_reset();
                     }
                     other => return Err(RpcError::invalid_params(format!("unknown config option {other}"))),
                 }
@@ -227,6 +231,21 @@ impl Agent {
                 Ok(json!({"rewind_points": points}))
             }
             "patchbay/rewind/execute" => self.rewind(&params).await,
+            // Stop one running tool call; the turn goes on and the model sees it was stopped.
+            "patchbay/cancel_tool" => {
+                let s = self.need_session(&params)?;
+                let id = param_str(&params, "toolCallId")?;
+                let token = s.calls.lock().unwrap().get(id).cloned();
+                if let Some(t) = &token {
+                    t.cancel();
+                }
+                Ok(json!({"cancelled": token.is_some()}))
+            }
+            // Stop one background shell started with Bash `run_in_background`.
+            "patchbay/kill_shell" => {
+                let s = self.need_session(&params)?;
+                Ok(json!({"killed": s.shells.kill(param_str(&params, "shellId")?)}))
+            }
             _ => Err(RpcError::new(-32601, format!("method not found: {method}"))),
         }
     }
@@ -364,6 +383,7 @@ impl Agent {
         self.start_claude(&s, "startup").await;
         self.attach_mcp(&s, params).await;
         self.sessions.lock().unwrap().insert(id.clone(), s.clone());
+        crate::cache::spawn_auto(&s);
         let mut info = self.session_info(&s).await;
         info["sessionId"] = json!(id);
         Ok(info)
@@ -401,6 +421,7 @@ impl Agent {
         self.start_claude(&s, "resume").await;
         self.attach_mcp(&s, params).await;
         self.sessions.lock().unwrap().insert(id, s.clone());
+        crate::cache::spawn_auto(&s);
         Ok(self.session_info(&s).await)
     }
 

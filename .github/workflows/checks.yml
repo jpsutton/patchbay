@@ -146,6 +146,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: scripts/ci/deps-ubuntu.sh
+        timeout-minutes: 20
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -186,6 +187,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: scripts/ci/deps-ubuntu.sh
+        timeout-minutes: 20
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

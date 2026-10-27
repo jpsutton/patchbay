@@ -97,6 +97,26 @@ pub enum Cache {
     Breakpoint,
 }
 
+/// How long Anthropic keeps a prompt cache entry after its last read. The default is the API's
+/// own (5 minutes); `OneHour` asks for the longer entry, whose writes cost more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheTtl {
+    #[default]
+    Default,
+    OneHour,
+}
+
+impl CacheTtl {
+    /// Seconds an Anthropic cache entry lives after its last use.
+    pub fn secs(self) -> u64 {
+        match self {
+            CacheTtl::Default => 300,
+            CacheTtl::OneHour => 3600,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemBlock {
     pub text: String,
