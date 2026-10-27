@@ -195,6 +195,14 @@ async fn remote_session_commands_and_terminal() {
     let note = a.state.db.get_setting(&format!("mesh.handoff.{}", s.id)).unwrap().unwrap();
     assert!(note.contains("taking over") && note.contains("User: hi"), "{note}");
 
+    // B only views the session: its partial transcript must not replace the host's cache.
+    save_code_transcript(&b.state, s.id.clone(), r#"{"v":1,"entries":[],"toolCalls":{}}"#.into()).await.unwrap();
+    assert_eq!(b.state.db.code_transcript(&s.id).unwrap(), None);
+    save_code_transcript(&a.state, s.id.clone(), r#"{"v":1,"entries":[{"kind":"user","text":"host"}],"toolCalls":{}}"#.into())
+        .await
+        .unwrap();
+    assert!(a.state.db.code_transcript(&s.id).unwrap().unwrap().contains("host"));
+
     // A shell on A, driven from B.
     let p = json!({ "termId": "t1", "sessionId": s.id, "cols": 80, "rows": 24 });
     b.state.mesh.rpc(&an, "term.open", p).await.unwrap();
