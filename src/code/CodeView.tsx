@@ -34,6 +34,7 @@ import { EditMessage } from "../components/EditMessage";
 import { UsageBar } from "../components/UsageBar";
 import { TerminalPane } from "../terminal/TerminalPane";
 import { PermissionCard, PlanDocCard, planDocOf, ToolCallCard, ToolGroup } from "./ToolCallCard";
+import { toolDescription } from "./toolLabel";
 import { SignInCard } from "./SignInCard";
 import { WorkingIndicator } from "./WorkingIndicator";
 import { TranscriptRows, type TranscriptRow } from "./TranscriptRows";
@@ -718,9 +719,7 @@ function PlanSteps({ plan }: { plan: NonNullable<CodeState["plan"]> }) {
 
 /** What a backgrounded command is doing: the agent's description of it, else its title. */
 function backgroundLabel(tc: AcpToolCall): string {
-  const raw = (tc.rawInput ?? {}) as Record<string, unknown>;
-  const label = typeof raw.description === "string" && raw.description.trim() ? raw.description : tc.title;
-  return (label || "a command").split("\n")[0];
+  return ((toolDescription(tc) ?? tc.title) || "a command").split("\n")[0];
 }
 
 type Run = { i: number; e: Entry } | { tools: { i: number; e: Entry }[] };

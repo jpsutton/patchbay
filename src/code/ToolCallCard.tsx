@@ -4,6 +4,7 @@ import { api, errorText } from "../lib/ipc";
 import { mergeToolCall, useStore } from "../lib/store";
 import { DiffView, diffStats } from "./DiffView";
 import { hunkStarts } from "./hunkStarts";
+import { toolDescription } from "./toolLabel";
 import { Markdown } from "../components/Markdown";
 import { CopyButton } from "../components/CopyButton";
 import { AgentImage } from "../components/AgentImage";
@@ -141,6 +142,8 @@ function CommandBlock({ cmd }: { cmd: string }) {
 export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withImages?: boolean }) {
   const content = tc.content ?? [];
   const cmd = tc.kind === "execute" ? commandOf(tc) : null;
+  // The row shows the agent's plain-English line, so the raw title (usually the call itself) moves here.
+  const rawTitle = !cmd && toolDescription(tc) ? tc.title : null;
   const images = imagesOf(tc);
   const diffs = content.filter((c): c is Extract<AcpToolCallContent, { type: "diff" }> => c.type === "diff");
   const starts = hunkStarts(diffs, tc.locations);
@@ -152,6 +155,7 @@ export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withI
   return (
     <div className="flex flex-col gap-2">
       {cmd && <CommandBlock cmd={cmd} />}
+      {rawTitle && <div className="break-words font-mono text-[12px] text-faint">{rawTitle}</div>}
       {withImages && images.length > 0 && <ToolImages images={images} label={tc.title || "Tool output"} />}
       {diffs.map((d, i) => (
         <DiffView key={i} path={d.path ?? ""} oldText={d.oldText} newText={d.newText ?? ""} {...starts[i]} />
@@ -194,7 +198,9 @@ export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withI
 export function ToolCallCard({ tc, autoApproved }: { tc: AcpToolCall; autoApproved?: string }) {
   const hasDiff = (tc.content ?? []).some((c) => c.type === "diff");
   const [open, setOpen] = useState(hasDiff);
-  const summary = inputSummary(tc.rawInput);
+  const description = toolDescription(tc);
+  // Without a description from the agent, fall back to the call itself: its title and main input.
+  const summary = description ? null : inputSummary(tc.rawInput);
   const Icon = KIND_ICON[tc.kind ?? "other"] ?? DotIcon;
   // Images show without opening the row: they're usually what the agent wanted you to see.
   const images = imagesOf(tc);
@@ -213,7 +219,7 @@ export function ToolCallCard({ tc, autoApproved }: { tc: AcpToolCall; autoApprov
           <Icon size={15} />
         </span>
         <span className="min-w-0 flex-1 truncate">
-          <span className="text-fg/85">{tc.title || tc.kind || "Tool call"}</span>
+          <span className="text-fg/85">{description ?? (tc.title || tc.kind || "Tool call")}</span>
           {summary && tc.title !== summary && (
             <span className="ml-2 font-mono text-[12px] text-faint" title={summary}>
               {summary}
@@ -369,6 +375,7 @@ export function PermissionCard({
     respond(allowId);
   };
   const cmd = tc.kind === "execute" ? commandOf(tc) : null;
+  const description = toolDescription(tc);
   const plan = planDocOf(tc);
   // The one-off "allow" leads as the primary button; broader allows follow it.
   const allows = request.options
@@ -396,13 +403,16 @@ export function PermissionCard({
         </span>
       </div>
       {cmd ? (
-        <CommandBlock cmd={cmd} />
+        <>
+          {description && <div className="text-sm font-medium">{description}</div>}
+          <CommandBlock cmd={cmd} />
+        </>
       ) : plan ? (
         // A plan waiting for approval reads the same as it does once answered.
         <PlanDocCard name={plan.name} text={plan.text} />
       ) : (
         <>
-          <div className="text-sm font-medium">{tc.title || tc.kind || "Tool call"}</div>
+          <div className="text-sm font-medium">{description ?? (tc.title || tc.kind || "Tool call")}</div>
           <ToolCallBody tc={tc} />
         </>
       )}
