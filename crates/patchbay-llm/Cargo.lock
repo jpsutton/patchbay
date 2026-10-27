@@ -537,7 +537,7 @@ dependencies = [
 
 [[package]]
 name = "patchbay-llm"
-version = "0.13.2"
+version = "0.13.3"
 dependencies = [
  "futures",
  "reqwest",
