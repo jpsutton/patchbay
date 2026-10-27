@@ -157,7 +157,7 @@ const RECENT_FOLDERS: usize = 12;
 const MAX_DIRS: usize = 500;
 
 /// A folder path without trailing slashes, so `/a/b` and `/a/b/` compare equal. The root stays `/`.
-fn folder_key(path: &str) -> &str {
+pub(crate) fn folder_key(path: &str) -> &str {
     let t = path.trim_end_matches('/');
     if t.is_empty() && !path.is_empty() { "/" } else { t }
 }
