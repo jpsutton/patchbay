@@ -1173,6 +1173,20 @@ impl Db {
         Ok(())
     }
 
+    /// Ids of unarchived, unpinned sessions this node hosts that nobody prompted since `cutoff`
+    /// (unix ms). Sessions another node hosts are left to that node.
+    pub fn stale_code_session_ids(&self, cutoff: i64) -> Result<Vec<String>> {
+        let node = self.node_id();
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM code_sessions
+             WHERE archived_at IS NULL AND NOT pinned AND updated_at < ?1
+               AND (host_node IS NULL OR host_node = ?2)",
+        )?;
+        let rows = stmt.query_map(params![cutoff, node], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn set_code_session_pinned(&self, id: &str, pinned: bool) -> Result<()> {
         self.conn().execute(
             "UPDATE code_sessions SET pinned = ?2 WHERE id = ?1",
@@ -1552,6 +1566,22 @@ mod tests {
         db.set_code_session_archived(&s.id, false).unwrap();
         assert_eq!(db.get_conversation(&c.id).unwrap().unwrap().archived_at, None);
         assert_eq!(db.get_code_session(&s.id).unwrap().unwrap().archived_at, None);
+    }
+
+    #[test]
+    fn stale_sessions_skip_pinned_archived_fresh_and_foreign_ones() {
+        let (db, _) = temp_db();
+        let mk = || db.create_code_session("/tmp", None, "grok", "default").unwrap().id;
+        let (old, pinned, archived, fresh, foreign) = (mk(), mk(), mk(), mk(), mk());
+        db.set_code_session_pinned(&pinned, true).unwrap();
+        db.set_code_session_archived(&archived, true).unwrap();
+        db.set_code_session_host(&foreign, "other-node", "/tmp", None).unwrap();
+        let cutoff = now_ms() + 1000;
+        // Everything is older than the cutoff but `fresh`, whose cutoff is in the past.
+        db.conn()
+            .execute("UPDATE code_sessions SET updated_at = ?1 WHERE id = ?2", params![cutoff + 5000, fresh])
+            .unwrap();
+        assert_eq!(db.stale_code_session_ids(cutoff).unwrap(), [old]);
     }
 
     #[test]

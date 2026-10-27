@@ -985,6 +985,7 @@ export function install() {
             terminalShell?: string;
             autoCompactPercent?: number | null;
             usageLimit?: { percent: number };
+            autoArchiveDays?: number | null;
             readAloudEngine?: string;
             readAloudRate?: string;
             readAloudServerUrl?: string;
@@ -992,6 +993,7 @@ export function install() {
           if (p.terminalShell && !p.terminalShell.startsWith("/")) throw `terminal shell ${p.terminalShell} does not exist`;
           if (p.autoCompactPercent != null && (p.autoCompactPercent < 10 || p.autoCompactPercent > 99)) throw "auto-compact threshold must be between 10 and 99%";
           if (p.usageLimit && (p.usageLimit.percent < 1 || p.usageLimit.percent > 100)) throw "usage limit must be between 1 and 100%";
+          if (p.autoArchiveDays != null && (p.autoArchiveDays < 1 || p.autoArchiveDays > 3650)) throw "auto-archive age must be between 1 and 3650 days";
           if (p.readAloudEngine && !["auto", "system", "builtin", "server"].includes(p.readAloudEngine)) throw "read aloud engine must be one of auto, system, builtin, server";
           if (p.readAloudRate && !["slower", "normal", "faster"].includes(p.readAloudRate)) throw "read aloud speed must be one of slower, normal, faster";
           const speechUrl = p.readAloudServerUrl?.trim() ?? "";
