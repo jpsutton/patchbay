@@ -201,6 +201,10 @@ const fakeSteered: Record<string, { promptId: string; text: string; mentions: st
 const fakeCut = new Set<string>();
 /** Sessions whose running turn Stop cancelled; only the `/slow` scenario watches for it. */
 const fakeStopped = new Set<string>();
+/** Background jobs the `/jobs` demo started: shell id -> the call that started it. */
+const fakeJobs = new Map<string, { csid: string; toolId: string }>();
+/** Running calls the `/jobs` demo can stop: tool call id -> session. */
+const fakeSlowCalls = new Map<string, string>();
 
 /** Cancel the running turn for a forced send; the front of the queue goes next. */
 function fakeInterrupt(csid: string) {
@@ -245,7 +249,7 @@ function fakeReady(csid: string, loaded = false) {
       ? null
       : { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] },
     configOptions: fakeOptionsFor(csid),
-    extensions: { statusLine: agentId === "grok", rewind: grok, patchbayModels: grok, steering: FAKE_STEERING.has(agentId), forceSend: true },
+    extensions: { statusLine: agentId === "grok", rewind: grok, patchbayModels: grok, steering: FAKE_STEERING.has(agentId), forceSend: true, cancelTool: agentId === "patchbay" },
   });
   codeEmit(csid, {
     type: "update",
@@ -517,6 +521,30 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
     await say("Build is clean. Now checking the remaining modules, one at a time. ");
     if (await nap(40_000)) return stop();
     await say("Done after a long wait.");
+    turnEmit({ type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
+  // `/jobs`: a running tool call and two background jobs, for the Jobs panel and the Stop buttons.
+  // Stopping the running call ends it and the turn carries on; stopping a job ends just that job.
+  if (text.startsWith("/jobs")) {
+    for (const [name, cmd] of [["dev server", "pnpm dev"], ["test watcher", "pnpm test --watch"]]) {
+      const jobId = id();
+      const shellId = `bash_${fakeJobs.size + 1}`;
+      fakeJobs.set(shellId, { csid, toolId: jobId });
+      codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call", toolCallId: jobId, title: `Start ${name}`, kind: "execute", status: "in_progress", rawInput: { command: cmd, run_in_background: true } } });
+      codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: jobId, status: "completed", content: [{ type: "content", content: { type: "text", text: `Command running in background with ID: ${shellId}.` } }], _meta: { background_shell: { id: shellId } } } });
+    }
+    const slowId = id();
+    fakeSlowCalls.set(slowId, csid);
+    turnEmit({ type: "update", update: { sessionUpdate: "tool_call", toolCallId: slowId, title: "Execute `cargo build --release`", kind: "execute", status: "in_progress", rawInput: { command: "cargo build --release" } } });
+    for (let t0 = 0; t0 < 60_000 && fakeSlowCalls.has(slowId) && !fakeStopped.has(csid); t0 += 200) await sleep(200);
+    if (fakeStopped.has(csid)) {
+      fakeStopped.delete(csid);
+      fakeSlowCalls.delete(slowId);
+      turnEmit({ type: "promptDone", stopReason: "cancelled" });
+      return;
+    }
+    await say("Both jobs are running. The build was stopped, so I carry on without it.");
     turnEmit({ type: "promptDone", stopReason: "end_turn" });
     return;
   }
@@ -1406,6 +1434,22 @@ export function install() {
           for (const [k, r] of pending) { r(null); pending.delete(k); }
           const dropped = (fakeQueues[a.id as string] ?? []).splice(0);
           if (dropped.length) codeEmit(a.id as string, { type: "unqueued", promptIds: dropped.map((d) => d.promptId), restore: true });
+          return null;
+        }
+        case "code_cancel_tool": {
+          const csid = fakeSlowCalls.get(a.toolCallId as string);
+          if (csid) {
+            fakeSlowCalls.delete(a.toolCallId as string);
+            codeEmit(csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: a.toolCallId as string, status: "failed", content: [{ type: "content", content: { type: "text", text: "The user stopped this tool call before it finished." } }] } });
+          }
+          return null;
+        }
+        case "code_kill_shell": {
+          const job = fakeJobs.get(a.shellId as string);
+          if (job) {
+            fakeJobs.delete(a.shellId as string);
+            codeEmit(job.csid, { type: "update", update: { sessionUpdate: "tool_call_update", toolCallId: job.toolId, _meta: { background_shell: { id: a.shellId as string, done: true, exit_code: -1 } } } });
+          }
           return null;
         }
         case "code_set_model": case "code_set_mode": return null;

@@ -55,6 +55,17 @@ impl Registry {
         self.cwd.lock().unwrap().clone().filter(|p| p.is_dir()).unwrap_or_else(|| fallback.to_path_buf())
     }
 
+    /// Stop one background command; false when there is none with this id.
+    pub fn kill(&self, id: &str) -> bool {
+        match self.shells.lock().unwrap().get(id) {
+            Some(b) => {
+                b.run.kill.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Stop every background command (the session is closing).
     pub fn kill_all(&self) {
         for b in self.shells.lock().unwrap().values() {
@@ -189,11 +200,16 @@ fn kill_tree(pid: Option<u32>) {
 fn kill_tree(_pid: Option<u32>) {}
 
 async fn finished(run: &mut Running) -> i32 {
+    wait_done(run.done.clone()).await
+}
+
+/// The exit code once the command ended.
+async fn wait_done(mut done: watch::Receiver<Option<i32>>) -> i32 {
     loop {
-        if let Some(c) = *run.done.borrow() {
+        if let Some(c) = *done.borrow() {
             return c;
         }
-        if run.done.changed().await.is_err() {
+        if done.changed().await.is_err() {
             return -1;
         }
     }
@@ -254,7 +270,7 @@ Do not sleep in a loop to wait: read the output instead."
         let session = &ctx.session;
         let dir = session.shells.cwd(&session.cwd);
         if bool_arg(&input, "run_in_background") {
-            return start_background(session, command, &dir);
+            return start_background(session, &ctx.call_id, command, &dir);
         }
         let timeout_ms = u64_arg(&input, "timeout").unwrap_or(ctx.session.host.settings().limits.shell_timeout_ms).clamp(1, MAX_TIMEOUT_MS);
         let cwd_file = std::env::temp_dir().join(format!("pb-cwd-{}", uuid::Uuid::new_v4()));
@@ -316,21 +332,34 @@ Do not sleep in a loop to wait: read the output instead."
     }
 }
 
-fn start_background(session: &Session, command: &str, dir: &Path) -> ToolOutput {
+fn start_background(session: &Arc<Session>, call_id: &str, command: &str, dir: &Path) -> ToolOutput {
     let run = match spawn_shell(command, dir, None, None) {
         Ok(r) => r,
         Err(e) => return ToolOutput::error(e),
     };
     let id = format!("bash_{}", session.shells.next.fetch_add(1, Ordering::Relaxed) + 1);
+    // Tell the client when the job ends, on the card of the call that started it.
+    let done = run.done.clone();
+    let (watcher, card, job) = (session.clone(), call_id.to_owned(), id.clone());
+    tokio::spawn(async move {
+        let code = wait_done(done).await;
+        watcher.update(json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": card,
+            "_meta": {"background_shell": {"id": job, "done": true, "exit_code": code}},
+        }));
+    });
     session
         .shells
         .shells
         .lock()
         .unwrap()
         .insert(id.clone(), Arc::new(Background { run, read: Mutex::new(0) }));
-    ToolOutput::text(format!(
+    let mut out = ToolOutput::text(format!(
         "Command running in background with ID: {id}. Read its output with BashOutput, stop it with KillShell."
-    ))
+    ));
+    out.meta = Some(json!({"background_shell": {"id": id}}));
+    out
 }
 
 // --- BashOutput ---
@@ -461,6 +490,19 @@ mod tests {
         let mut run = spawn_shell("sleep 30 & sleep 30", &dir, None, None).unwrap();
         run.kill.cancel();
         let code = tokio::time::timeout(Duration::from_secs(3), finished(&mut run)).await.expect("stopped");
+        assert_eq!(code, -1);
+    }
+
+    #[tokio::test]
+    async fn registry_kills_one_job_by_id() {
+        let dir = std::env::temp_dir();
+        let run = spawn_shell("sleep 30", &dir, None, None).unwrap();
+        let done = run.done.clone();
+        let reg = Registry::default();
+        reg.shells.lock().unwrap().insert("bash_1".into(), Arc::new(Background { run, read: Mutex::new(0) }));
+        assert!(!reg.kill("bash_2"));
+        assert!(reg.kill("bash_1"));
+        let code = tokio::time::timeout(Duration::from_secs(3), wait_done(done)).await.expect("stopped");
         assert_eq!(code, -1);
     }
 

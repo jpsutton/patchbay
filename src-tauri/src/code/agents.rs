@@ -173,6 +173,9 @@ pub struct Extensions {
     /// The host can cancel the running turn to send a message next (Ctrl+Enter, "Send now").
     /// Always set once the agent starts; older hosts leave it out.
     pub force_send: bool,
+    /// The agent can stop one running tool call, or one background shell, without ending the
+    /// turn (`patchbay/cancel_tool`, `patchbay/kill_shell`). Patchbay's own agent only.
+    pub cancel_tool: bool,
 }
 
 /// What makes an agent ask Patchbay before acting, so the session's approval mode decides
@@ -577,7 +580,7 @@ fn prepare_patchbay(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSess
         args: Vec::new(),
         env: Vec::new(),
         env_remove: Vec::new(),
-        ext: Extensions { patchbay_models: true, rewind: true, ..Extensions::default() },
+        ext: Extensions { patchbay_models: true, rewind: true, cancel_tool: true, ..Extensions::default() },
         session_meta: json!({ "model": initial_model }),
         initial_model,
         login_hint: AgentKind::Patchbay.login_hint(),
@@ -626,7 +629,7 @@ fn prepare_grok(
         args,
         env,
         env_remove: vec!["XAI_API_KEY".into(), "GROK_CODE_XAI_API_KEY".into()],
-        ext: Extensions { status_line: true, rewind: true, patchbay_models: true, interject: true, steering: false, force_send: false },
+        ext: Extensions { status_line: true, rewind: true, patchbay_models: true, interject: true, steering: false, force_send: false, cancel_tool: false },
         session_meta,
         initial_model: None,
         login_hint: "",

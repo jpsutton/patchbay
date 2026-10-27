@@ -296,6 +296,19 @@ async fn rewind_drops_prompts_and_restores_files() {
 
 #[tokio::test]
 #[ignore]
+async fn stopping_a_tool_call_or_job_that_is_not_running_does_nothing() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::Anthropic, cwd.join("data"));
+    let sid = open(&mut acp, &cwd).await;
+    let r = acp.call("patchbay/cancel_tool", json!({"sessionId": sid, "toolCallId": "nope"})).await;
+    assert_eq!(r["cancelled"], false);
+    let r = acp.call("patchbay/kill_shell", json!({"sessionId": sid, "shellId": "bash_9"})).await;
+    assert_eq!(r["killed"], false);
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
 async fn tells_the_model_about_files_changed_behind_its_back() {
     let cwd = workdir();
     let mut acp = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));

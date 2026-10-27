@@ -456,6 +456,8 @@ type TerminalMeta = {
   terminal_output?: { data?: string };
   terminal_output_delta?: { data?: string };
   terminal_exit?: { exit_code?: number | null };
+  /** Patchbay's own agent: a call started a background job; `done` when it ended. */
+  background_shell?: { id?: string; done?: boolean; exit_code?: number | null };
 };
 
 export function mergeToolCall(prev: AcpToolCall | undefined, upd: AcpToolCall): AcpToolCall {
@@ -476,6 +478,13 @@ export function mergeToolCall(prev: AcpToolCall | undefined, upd: AcpToolCall): 
       out.terminalExit = { exitCode: meta.terminal_exit.exit_code ?? null };
       out.background = false;
     }
+    const job = meta.background_shell;
+    if (job?.id) {
+      // The job can end before the call's own update lands: once done, it stays done.
+      const done = !!job.done || (out.shell?.id === job.id && out.shell.done);
+      out.shell = { id: job.id, done, exitCode: job.exit_code ?? out.shell?.exitCode };
+      out.background = !done;
+    }
   }
   if (out.terminal && !out.terminalExit && out.status === "completed") out.background = true;
   return out;
@@ -485,7 +494,10 @@ export function mergeToolCall(prev: AcpToolCall | undefined, upd: AcpToolCall): 
 function endBackground(calls: Record<string, AcpToolCall>): Record<string, AcpToolCall> {
   if (!Object.values(calls).some((tc) => tc.background)) return calls;
   return Object.fromEntries(
-    Object.entries(calls).map(([k, tc]) => [k, tc.background ? { ...tc, background: false } : tc]),
+    Object.entries(calls).map(([k, tc]) => [
+      k,
+      tc.background ? { ...tc, background: false, shell: tc.shell && { ...tc.shell, done: true } } : tc,
+    ]),
   );
 }
 
