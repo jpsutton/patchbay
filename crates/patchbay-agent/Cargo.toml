@@ -1,6 +1,6 @@
 [package]
 name = "patchbay-agent"
-version = "0.13.2"
+version = "0.13.3"
 edition = "2024"
 license = "Apache-2.0"
 description = "Patchbay's own coding agent: an ACP server over patchbay-llm with file, search, shell, web and MCP tools"
