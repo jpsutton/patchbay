@@ -45,6 +45,20 @@ impl Tokens {
     }
 }
 
+/// The agent's prompt cache clock, from `usage_update`'s `_meta.cache` (Patchbay's own agent on
+/// Anthropic). The UI counts down from `last_at`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CacheClock {
+    /// Unix milliseconds of the last request that used the cache; `None` when it is not known
+    /// to be warm.
+    pub last_at: Option<u64>,
+    /// How long the cache lives after that.
+    pub ttl_secs: u64,
+    /// The agent refreshes the cache itself before it expires.
+    pub auto: bool,
+}
+
 /// Persisted usage for a code session. Grok Build's ledger resets with each agent process, so
 /// totals from earlier processes are folded into `baseline` when a new one starts.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -55,6 +69,7 @@ pub struct CodeUsageState {
     pub context_tokens: Option<u64>,
     pub context_window: Option<u64>,
     pub auto_compact_percent: Option<u64>,
+    pub cache: Option<CacheClock>,
     /// This process reports totals through Grok's status line, so per-turn usage would double
     /// count.
     #[serde(skip)]
@@ -69,6 +84,7 @@ pub struct UsageView {
     pub context_tokens: Option<u64>,
     pub context_window: Option<u64>,
     pub auto_compact_percent: Option<u64>,
+    pub cache: Option<CacheClock>,
 }
 
 impl CodeUsageState {
@@ -78,6 +94,7 @@ impl CodeUsageState {
             context_tokens: self.context_tokens,
             context_window: self.context_window,
             auto_compact_percent: self.auto_compact_percent,
+            cache: self.cache,
         }
     }
 
@@ -86,6 +103,10 @@ impl CodeUsageState {
         self.baseline = self.baseline.add(&self.current);
         self.current = Tokens::default();
         self.status_line = false;
+        // The cache stays warm across a restart, but auto keep-warm lives in the agent process.
+        if let Some(c) = &mut self.cache {
+            c.auto = false;
+        }
     }
 
     /// Fold in ACP's `usage_update`: context fill and the process's cumulative cost. Ignored
@@ -103,6 +124,10 @@ impl CodeUsageState {
         // Patchbay's own agent says where it compacts; Grok reports that in its status line.
         if let Some(p) = update["_meta"]["autoCompactPercent"].as_u64() {
             self.auto_compact_percent = Some(p);
+        }
+        if let Some(ttl_secs) = update["_meta"]["cache"]["ttlSecs"].as_u64().filter(|t| *t > 0) {
+            let c = &update["_meta"]["cache"];
+            self.cache = Some(CacheClock { last_at: c["lastAt"].as_u64(), ttl_secs, auto: c["auto"].as_bool().unwrap_or(false) });
         }
         if let Some(c) = update["cost"]["amount"].as_f64()
             && update["cost"]["currency"].as_str().is_none_or(|c| c.eq_ignore_ascii_case("USD"))
@@ -210,6 +235,28 @@ mod tests {
         s.apply_status(&status(10, 0, 5, 15));
         s.apply_turn(&turn);
         assert_eq!(s.view().totals.input, 10);
+    }
+
+    #[test]
+    fn the_agents_cache_clock_reaches_the_view() {
+        let mut s = CodeUsageState::default();
+        assert_eq!(s.view().cache, None);
+        s.apply_context(&serde_json::json!({ "used": 100, "size": 1000, "_meta": { "cache": { "lastAt": 1700000000000u64, "ttlSecs": 3600, "auto": true } } }));
+        let want = CacheClock { last_at: Some(1_700_000_000_000), ttl_secs: 3600, auto: true };
+        assert_eq!(s.view().cache, Some(want));
+        // A clock-only update leaves the context alone; a reset clears when it was last used.
+        s.apply_context(&serde_json::json!({ "_meta": { "cache": { "lastAt": null, "ttlSecs": 3600, "auto": true } } }));
+        assert_eq!(s.view().cache, Some(CacheClock { last_at: None, ..want }));
+        assert_eq!(s.view().context_tokens, Some(100));
+        // Updates without a clock (other agents) leave it as it was, and old saved state loads.
+        s.apply_context(&serde_json::json!({ "used": 200 }));
+        assert_eq!(s.view().cache, Some(CacheClock { last_at: None, ..want }));
+        let old: CodeUsageState = serde_json::from_str(r#"{"contextTokens": 5}"#).unwrap();
+        assert_eq!(old.cache, None);
+        // A restarted agent has auto keep-warm off, but the cache is as warm as it was.
+        s.apply_context(&serde_json::json!({ "_meta": { "cache": { "lastAt": 7, "ttlSecs": 3600, "auto": true } } }));
+        s.roll_over();
+        assert_eq!(s.view().cache, Some(CacheClock { last_at: Some(7), ttl_secs: 3600, auto: false }));
     }
 
     #[test]

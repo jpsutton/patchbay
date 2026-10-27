@@ -129,6 +129,8 @@ pub struct Session {
     pub claude: Mutex<Arc<crate::claude::Setup>>,
     /// Context the SessionStart hooks gave, for the first prompt.
     pub start_context: Mutex<Vec<String>>,
+    /// When the provider's prompt cache was last used (see `cache.rs`).
+    pub cache: Mutex<crate::cache::CacheState>,
 }
 
 /// Messages steered into a running turn, waiting for the next step.
@@ -188,6 +190,7 @@ impl Session {
             cost_usd: Mutex::new(None),
             claude: Mutex::default(),
             start_context: Mutex::default(),
+            cache: Mutex::default(),
         })
     }
 
@@ -246,6 +249,11 @@ impl Session {
             "description": "Summarize the conversation to free up context",
             "input": {"hint": "what the summary should focus on"},
         })];
+        list.push(json!({
+            "name": "keepwarm",
+            "description": "Refresh the prompt cache now; \"auto\" toggles automatic refresh",
+            "input": {"hint": "auto"},
+        }));
         for c in &setup.commands {
             let mut v = json!({"name": c.name, "description": c.description});
             if let Some(h) = &c.argument_hint {
@@ -327,6 +335,7 @@ impl Session {
             cost_usd: Mutex::new(None),
             claude: Mutex::new(self.claude()),
             start_context: Mutex::default(),
+            cache: Mutex::default(),
         })
     }
 

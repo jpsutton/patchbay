@@ -45,6 +45,7 @@ impl Host for AppHost {
         providers::ensure_token(&mut resolved).await.map_err(|e| format!("{e:#}"))?;
         let engine = crate::prefs::load(&self.db).agent_engine;
         let mut cfg = providers::llm_config(&resolved);
+        cfg.cache_ttl = providers::agent_cache_ttl(&resolved);
         if let Some(n) = engine.request_retries {
             cfg.max_retries = n.min(10);
         }

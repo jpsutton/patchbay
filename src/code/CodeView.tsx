@@ -1755,6 +1755,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
               contextWindow={s?.usage?.contextWindow ?? model?.contextWindow ?? null}
               autoCompactPercent={s?.usage?.autoCompactPercent ?? null}
               estimatedCostUsd={s?.usage ? estimateCost(s.usage.totals, model?.params.pricing) : null}
+              cache={s?.usage?.cache ?? null}
               onConfigureWindow={() => useStore.getState().setSettingsOpen(true)}
             />
           </div>

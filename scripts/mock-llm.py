@@ -338,7 +338,9 @@ class Handler(BaseHTTPRequestHandler):
         ev = lambda name, obj: self._send(json.dumps({"type": name, **obj}), event=name)
         ev("message_start", {"message": {"id": "msg_mock", "type": "message", "role": "assistant", "model": model,
                                           "content": [], "stop_reason": None, "stop_sequence": None,
-                                          "usage": {"input_tokens": 42, "output_tokens": 0}}})
+                                          "usage": {"input_tokens": 42, "output_tokens": 0,
+                                                    # A request that mentions "!cached" anywhere reads 4000 tokens from the cache.
+                                                    **({"cache_read_input_tokens": 4000} if "!cached" in json.dumps(body) else {})}}})
         ev("content_block_start", {"index": 0, "content_block": {"type": "text", "text": ""}})
         whole = json.dumps(body)
         if "!cutcall" in text and not after_tool:

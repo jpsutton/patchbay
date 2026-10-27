@@ -7,7 +7,9 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::claude;
+use crate::cache;
 use crate::compact;
+use crate::host::ModelClient;
 use crate::prompt;
 use crate::reqlog::ReqTimer;
 use crate::session::{Mode, PromptRec, Session, Totals, stamp_of};
@@ -129,11 +131,105 @@ async fn reminders(session: &Session, model_name: &str) -> Option<Part> {
     (!notes.is_empty()).then(|| Part::Text(prompt::reminder(&notes.join("\n\n"))))
 }
 
+/// The tools and the request for the next model call over `messages`. The prompt cache keys on
+/// this exactly, so everything that builds a request for the session's history goes through here:
+/// a refresh of the cache is only a refresh when it matches the real request.
+pub(crate) async fn build_request(
+    session: &Arc<Session>,
+    mc: &ModelClient,
+    model_id: &str,
+    mode: Mode,
+    messages: Vec<Message>,
+) -> (Registry, Request) {
+    let settings = session.host.settings();
+    let setup = session.claude();
+    let mcp = session.mcp.lock().await.clone();
+    let mut registry = Registry::builtin(settings.web_fetch, session.host.web_search_key().is_some());
+    for t in mcp.tools() {
+        registry.push(t);
+    }
+    if !setup.skills.is_empty() {
+        registry.push(Arc::new(crate::tools::skill::Skill));
+    }
+    if !setup.agents.is_empty() {
+        let custom = setup.agents.iter().map(|a| (a.name.clone(), a.description.clone())).collect();
+        registry.retain(|n| n != "Task");
+        registry.push(Arc::new(crate::tools::task::Task { custom }));
+    }
+    let mut system = mc.system_prefix.clone();
+    let model_name = session.host.models().into_iter().find(|m| m.id == model_id).map(|m| m.name).unwrap_or(model_id.to_owned());
+    let extras = prompt::Extras { claude: settings.claude.clone(), skills: &setup.skills };
+    system.extend(prompt::system_blocks(&session.cwd, &model_name, &settings.instructions, mode, session.prompts(), &extras));
+    let request = Request {
+        system,
+        messages,
+        tools: registry.specs(mode == Mode::Plan, session.prompts()),
+        cache_key: Some(session.id.clone()),
+        ..Default::default()
+    };
+    (registry, request)
+}
+
 /// `/compact [focus]`: the user asked for a summary instead of a reply.
 fn compact_command(parts: &[Part]) -> Option<String> {
     let [Part::Text(t)] = parts else { return None };
     let rest = t.trim().strip_prefix("/compact")?;
     (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim().to_owned())
+}
+
+/// Before a prompt on a cache that has expired: say what it will cost, since a big context is
+/// re-cached at the cache-write price.
+async fn note_cold_cache(session: &Session) {
+    let context = session.state.lock().await.context_tokens;
+    let expired = session.cache.lock().unwrap().remaining_ms(cache::now_ms()).is_some_and(|left| left <= 0);
+    if expired && context >= cache::BIG_CONTEXT_TOKENS {
+        session.text_chunk(
+            "agent_thought_chunk",
+            &format!("The prompt cache expired, so this prompt re-caches about {} tokens. /compact first makes that cheaper.\n", cache::kilo(context)),
+        );
+    }
+}
+
+/// `/keepwarm [auto]`: the user asked about the prompt cache instead of sending a prompt.
+fn keepwarm_command(parts: &[Part]) -> Option<String> {
+    let [Part::Text(t)] = parts else { return None };
+    let rest = t.trim().strip_prefix("/keepwarm")?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim().to_owned())
+}
+
+/// Answer `/keepwarm`: flip auto mode, or refresh the cache now.
+async fn keepwarm(session: &Arc<Session>, args: &str, cancel: &CancellationToken) -> TurnResult {
+    let say = |text: &str| session.text_chunk("agent_message_chunk", text);
+    let done = |stop_reason| TurnResult { stop_reason, usage: Totals::default() };
+    if args == "auto" {
+        let on = {
+            let mut c = session.cache.lock().unwrap();
+            c.auto = !c.auto;
+            c.auto_runs = 0;
+            c.auto
+        };
+        session.announce_cache();
+        say(&if on {
+            format!(
+                "Auto keep-warm on: refreshes up to {} times per idle stretch when the cache has under {}m left.",
+                cache::AUTO_LIMIT,
+                cache::WARN_SECS / 60
+            )
+        } else {
+            "Auto keep-warm off.".to_owned()
+        });
+        return done("end_turn");
+    }
+    if !args.is_empty() {
+        say("Usage: /keepwarm refreshes the prompt cache now. /keepwarm auto turns automatic refresh on or off.");
+        return done("end_turn");
+    }
+    match cache::keep_warm(session, cancel).await {
+        Ok(w) => say(&w.say()),
+        Err(e) if e == "Cancelled." => return done("cancelled"),
+        Err(e) => say(&e),
+    }
+    done("end_turn")
 }
 
 pub async fn run_turn(session: Arc<Session>, prompt_blocks: &Value, cancel: CancellationToken) -> Result<TurnResult, String> {
@@ -168,6 +264,10 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
             }
         };
     }
+    if let Some(args) = keepwarm_command(&parts) {
+        return Ok(keepwarm(&session, &args, &cancel).await);
+    }
+    note_cold_cache(&session).await;
     if session.reload_claude() {
         session.announce_commands();
     }
@@ -253,30 +353,7 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
             session.text_chunk("agent_thought_chunk", &format!("Could not compact the conversation: {e}\n"));
         }
         let messages = session.state.lock().await.messages.clone();
-        let mcp = session.mcp.lock().await.clone();
-        let mut registry = Registry::builtin(settings.web_fetch, session.host.web_search_key().is_some());
-        for t in mcp.tools() {
-            registry.push(t);
-        }
-        if !setup.skills.is_empty() {
-            registry.push(Arc::new(crate::tools::skill::Skill));
-        }
-        if !setup.agents.is_empty() {
-            let custom = setup.agents.iter().map(|a| (a.name.clone(), a.description.clone())).collect();
-            registry.retain(|n| n != "Task");
-            registry.push(Arc::new(crate::tools::task::Task { custom }));
-        }
-        let mut system = mc.system_prefix.clone();
-        let model_name = session.host.models().into_iter().find(|m| m.id == model_id).map(|m| m.name).unwrap_or(model_id.clone());
-        let extras = prompt::Extras { claude: settings.claude.clone(), skills: &setup.skills };
-        system.extend(prompt::system_blocks(&session.cwd, &model_name, &settings.instructions, mode, session.prompts(), &extras));
-        let request = Request {
-            system,
-            messages,
-            tools: registry.specs(mode == Mode::Plan, session.prompts()),
-            cache_key: Some(session.id.clone()),
-            ..Default::default()
-        };
+        let (registry, request) = build_request(&session, &mc, &model_id, mode, messages).await;
 
         let mut streamed = String::new();
         let mut timer = ReqTimer::start();
@@ -319,6 +396,9 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
             totals.output += u.output;
             totals.reasoning += u.reasoning;
             session.state.lock().await.context_tokens = u.input + u.output;
+            if u.cached_read + u.cache_write > 0 {
+                session.cache_used(mc.client.config.cache_ttl_secs(), false);
+            }
             let mut update = json!({
                 "sessionUpdate": "usage_update",
                 "used": u.input + u.output,
@@ -332,6 +412,9 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
             }
             if let Some(plan) = &response.plan {
                 update["_meta"]["_claude/rateLimit"] = plan_meta(plan);
+            }
+            if let Some(cache) = session.cache.lock().unwrap().meta() {
+                update["_meta"]["cache"] = cache;
             }
             session.update(update);
         }

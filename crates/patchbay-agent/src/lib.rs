@@ -6,6 +6,7 @@
 //! supplies providers and keys through [`Host`]; nothing about providers lives here.
 
 mod agent;
+mod cache;
 mod compact;
 mod extract;
 mod host;
