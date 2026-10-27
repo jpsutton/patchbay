@@ -216,6 +216,10 @@ function Dialog() {
                 </div>
 
                 <div className={labelCls}>Folder</div>
+                <button className={`${rowCls} text-accent-ink`} onClick={pickFolder}>
+                  <FolderPlusIcon size={14} />
+                  {folders.length ? "Another folder…" : "Choose a folder…"}
+                </button>
                 <div role="radiogroup" aria-label="Folder">
                   {folders.map((f) => (
                     <button key={f} role="radio" aria-checked={folder === f} className={rowCls} onClick={() => setFolder(f)}>
@@ -224,10 +228,6 @@ function Dialog() {
                     </button>
                   ))}
                 </div>
-                <button className={`${rowCls} text-accent-ink`} onClick={pickFolder}>
-                  <FolderPlusIcon size={14} />
-                  {folders.length ? "Another folder…" : "Choose a folder…"}
-                </button>
               </>
             )}
           </div>

@@ -412,6 +412,7 @@ function UserEntry({
   setEditing,
   onEdit,
   onReuse,
+  onSendNow,
 }: {
   e: Extract<Entry, { kind: "user" }>;
   editing: boolean;
@@ -419,6 +420,8 @@ function UserEntry({
   onEdit?: (text: string, atts: Attachment[]) => Promise<boolean>;
   /** Phone, when this agent cannot rewind: put the prompt back in the composer. */
   onReuse?: () => void;
+  /** Steered in and not read yet: stop the turn and send it as a prompt of its own. */
+  onSendNow?: () => void;
 }) {
   if (editing && onEdit) {
     return (
@@ -457,6 +460,20 @@ function UserEntry({
       {e.text && (
         <div className="max-w-[82%] whitespace-pre-wrap rounded-[16px_16px_4px_16px] border border-line bg-panel-2 px-3.5 py-2.5 leading-6">
           {e.text}
+        </div>
+      )}
+      {e.pending && (
+        <div className="flex items-center gap-2 text-xs text-muted">
+          <span>Waiting for the agent's next step</span>
+          {onSendNow && (
+            <button
+              className="rounded-md px-1.5 py-0.5 text-[11px] text-accent-ink hover:bg-panel-2"
+              onClick={onSendNow}
+              title="Stop the current turn and send this now"
+            >
+              Send now
+            </button>
+          )}
         </div>
       )}
       <div className="action-row flex items-center gap-0.5 text-muted opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
@@ -531,6 +548,7 @@ const EntryView = memo(function EntryView({
   settled,
   canReuse,
   onReuse,
+  onSendNow,
   sessionId,
 }: {
   e: Entry;
@@ -551,6 +569,8 @@ const EntryView = memo(function EntryView({
   /** Phone, when this agent cannot rewind: put this prompt back in the composer. */
   canReuse?: boolean;
   onReuse?: (i: number) => void;
+  /** Send now for a steered message still waiting; given the prompt id. */
+  onSendNow?: (promptId: string) => void;
   sessionId: string;
 }) {
   switch (e.kind) {
@@ -562,6 +582,7 @@ const EntryView = memo(function EntryView({
           setEditing={(on) => onEditing?.(on ? i : null)}
           onEdit={canEdit && onEdit ? (t, a) => onEdit(i, t, a) : undefined}
           onReuse={canReuse && onReuse ? () => onReuse(i) : undefined}
+          onSendNow={e.pending && e.promptId && onSendNow ? () => onSendNow(e.promptId!) : undefined}
         />
       );
     case "agent":
@@ -920,6 +941,14 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     [activeId],
   );
 
+  // A steered message the agent hasn't read: stop the turn and send it as a prompt of its own.
+  const onSendNow = useCallback(
+    (promptId: string) => {
+      if (activeId) api.codeSendNow(activeId, promptId).catch((e) => setToast(errorText(e)));
+    },
+    [activeId],
+  );
+
   // The header's badge needs the count even with the panel shut, so this always runs; the key
   // keeps it from redoing the work when only text or non-diff tool output changed.
   const changesCache = useRef<{ key: unknown[]; value: FileChange[] } | null>(null);
@@ -1248,6 +1277,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             settled={!(s.busy && i === s.entries.length - 1)}
             canReuse={canReuse && i === lastUser && e.kind === "user" && !!e.text}
             onReuse={onReuse}
+            onSendNow={forceSend ? onSendNow : undefined}
             sessionId={session.id}
           />
         )),

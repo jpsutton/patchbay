@@ -140,6 +140,10 @@ async fn desktop_starts_a_session_in_a_remote_folder() {
     assert_eq!(host_of(&a, &s.id).as_deref(), Some(an.as_str()));
     assert_eq!(host_of(&b, &s.id).as_deref(), Some(an.as_str()));
 
+    // A folder picker's trailing slash is not part of the folder.
+    let slashed = create_code_session(&b.state, format!("{cwd}/"), None, Some("grok".into()), Some(an.clone())).await.unwrap();
+    assert_eq!(slashed.cwd, cwd);
+
     // Naming this computer as host is the same as naming none.
     let bn = b.state.mesh.node_id().to_owned();
     let bproj = b.dir.join("proj");
@@ -194,6 +198,14 @@ async fn remote_session_commands_and_terminal() {
     assert_eq!(t["earlier"]["entries"][0]["text"], "hi");
     let note = a.state.db.get_setting(&format!("mesh.handoff.{}", s.id)).unwrap().unwrap();
     assert!(note.contains("taking over") && note.contains("User: hi"), "{note}");
+
+    // B only views the session: its partial transcript must not replace the host's cache.
+    save_code_transcript(&b.state, s.id.clone(), r#"{"v":1,"entries":[],"toolCalls":{}}"#.into()).await.unwrap();
+    assert_eq!(b.state.db.code_transcript(&s.id).unwrap(), None);
+    save_code_transcript(&a.state, s.id.clone(), r#"{"v":1,"entries":[{"kind":"user","text":"host"}],"toolCalls":{}}"#.into())
+        .await
+        .unwrap();
+    assert!(a.state.db.code_transcript(&s.id).unwrap().unwrap().contains("host"));
 
     // A shell on A, driven from B.
     let p = json!({ "termId": "t1", "sessionId": s.id, "cols": 80, "rows": 24 });

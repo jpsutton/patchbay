@@ -1,8 +1,8 @@
-import { useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { AGENT_LABELS, api, type AgentInfo, type CodeSession } from "../lib/ipc";
 import { memberName, remoteHost, useStore } from "../lib/store";
 import { ArchivedToggle, SectionLabel, SidebarItem } from "../components/SidebarItem";
-import { sessionActions, toggleSessionArchive } from "../lib/itemActions";
+import { archiveSessions, sessionActions, toggleSessionArchive } from "../lib/itemActions";
 import { fmtShort, matchesQuery } from "../lib/format";
 import { ChevronRightIcon, GripVerticalIcon, PlusIcon } from "../components/icons";
 import { activityOf, strongest } from "../lib/activity";
@@ -73,6 +73,10 @@ export function CodeSidebar() {
   } | null>(null);
   /** Right-click on a group header: collapse/expand actions. */
   const [groupMenu, setGroupMenu] = useState<{ x: number; y: number } | null>(null);
+  /** Rows picked with Shift/Ctrl/Cmd-click, for archiving together. */
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  /** The row a Shift-click extends from: the last one clicked. */
+  const anchor = useRef<string | null>(null);
 
   const matching = useMemo(() => sessions.filter((s) => matchesQuery(query, s.title, s.cwd)), [sessions, query]);
   const hits = useMemo(() => matching.filter((s) => s.archivedAt == null), [matching]);
@@ -179,6 +183,47 @@ export function CodeSidebar() {
       return next;
     });
 
+  /** The rows a Shift-click can span: the pinned list, or one folder's. */
+  const listOf = (id: string): CodeSession[] =>
+    pinned.some((s) => s.id === id) ? pinned : (groups.find((g) => g.sessions.some((s) => s.id === id))?.sessions ?? []);
+
+  /** Shift-click picks everything from the last click to this row; Ctrl/Cmd-click adds or drops one. */
+  const pick = (s: CodeSession, shift: boolean) => {
+    const list = listOf(s.id);
+    const from = list.findIndex((x) => x.id === anchor.current);
+    if (shift && from >= 0) {
+      const to = list.findIndex((x) => x.id === s.id);
+      const range = list.slice(Math.min(from, to), Math.max(from, to) + 1).map((x) => x.id);
+      setPicked(new Set(range));
+      return;
+    }
+    // No usable anchor: the first pick starts one.
+    anchor.current = s.id;
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(s.id)) next.delete(s.id);
+      else next.add(s.id);
+      return next;
+    });
+  };
+
+  // Rows that were archived, removed or filtered out drop from the selection.
+  const chosen = hits.filter((s) => picked.has(s.id));
+
+  const hasChosen = chosen.length > 0;
+  // Esc drops the selection, unless a field (rename, search) wants it.
+  useEffect(() => {
+    if (!hasChosen) return;
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (e.key === "Escape" && !e.defaultPrevented && t?.tagName !== "INPUT" && t?.tagName !== "TEXTAREA") {
+        setPicked(new Set());
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [hasChosen]);
+
   // No line where the drop would leave the folder in place.
   const from = drag ? groups.findIndex((g) => g.key === drag.key) : -1;
   const dropAt = drag && drag.index !== from && drag.index !== from + 1 ? drag.index : null;
@@ -202,12 +247,22 @@ export function CodeSidebar() {
         title={s.title}
         subtitle={inPinned ? basename(s.cwd) : undefined}
         active={s.id === activeId}
+        selected={picked.has(s.id) && s.archivedAt == null}
         busy={st?.busy}
         attention={(st?.permissions.length ?? 0) > 0}
         meta={fmtShort(s.updatedAt)}
         pinned={s.pinned}
         status={st && (st.status === "ready" || st.status === "starting") ? "running" : "idle"}
-        onSelect={async () => {
+        onSelect={async (e) => {
+          if (s.archivedAt == null && (e.shiftKey || e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            // A Shift-click with nothing clicked yet starts from the open session.
+            if (e.shiftKey && anchor.current == null) anchor.current = activeId;
+            pick(s, e.shiftKey);
+            return;
+          }
+          anchor.current = s.id;
+          setPicked(new Set());
           // Opening an archived session brings it back.
           if (s.archivedAt != null) {
             await api.updateCodeSession(s.id, { archived: false });
@@ -250,6 +305,23 @@ export function CodeSidebar() {
 
   return (
     <>
+      {chosen.length > 0 && (
+        <div className="sticky top-0 z-10 mx-2 mb-1 flex items-center gap-1 rounded-lg border border-line bg-panel px-2 py-1 text-[13px]">
+          <span className="min-w-0 flex-1 truncate text-fg/90">{chosen.length} selected</span>
+          <button
+            className="rounded-md px-2 py-1 text-fg hover:bg-panel-2"
+            onClick={() => {
+              archiveSessions(chosen);
+              setPicked(new Set());
+            }}
+          >
+            Archive
+          </button>
+          <button className="rounded-md px-2 py-1 text-muted hover:bg-panel-2 hover:text-fg" onClick={() => setPicked(new Set())}>
+            Clear
+          </button>
+        </div>
+      )}
       {pinned.length > 0 && (
         <div className="mb-1 flex flex-col gap-0.5">
           <SectionLabel>Pinned</SectionLabel>

@@ -45,8 +45,9 @@ export { harnessTags } from "./harness";
 export type Mode = "chat" | "code";
 
 export type Entry =
-  /** `promptId`: names the prompt in its `userPrompt` events, so each shows once. */
-  | { kind: "user"; text: string; attachments?: Attachment[]; promptId?: string; at?: number }
+  /** `promptId`: names the prompt in its `userPrompt` events, so each shows once. `pending`: steered
+   *  into the running turn, and the agent has not taken a step since (see `readSteers`). */
+  | { kind: "user"; text: string; attachments?: Attachment[]; promptId?: string; at?: number; pending?: boolean }
   | { kind: "agent"; text: string; at?: number }
   /** An image the agent sent in its reply (an ACP image block). */
   | { kind: "image"; data: string; mimeType: string; from?: "user" }
@@ -488,6 +489,35 @@ function endBackground(calls: Record<string, AcpToolCall>): Record<string, AcpTo
   );
 }
 
+/** `entries` with no steered message waiting on the agent: its turn is over. */
+function noPending(entries: Entry[]): Entry[] {
+  return entries.some((x) => x.kind === "user" && x.pending)
+    ? entries.map((x) => (x.kind === "user" && x.pending ? { ...x, pending: false } : x))
+    : entries;
+}
+
+/**
+ * Steered messages the agent has probably read: it takes one in before its next model request, so
+ * once a tool call after the message has finished and the agent goes on, it is no longer waiting.
+ * ACP says nothing when a steer is read, so this is a guess from the transcript.
+ */
+function readSteers(s: CodeState): CodeState {
+  if (!s.entries.some((x) => x.kind === "user" && x.pending)) return s;
+  let stepped = false;
+  let entries = s.entries;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const x = entries[i];
+    if (x.kind === "tool") {
+      const status = s.toolCalls[x.id]?.status;
+      if (status === "completed" || status === "failed") stepped = true;
+    } else if (x.kind === "user" && x.pending && stepped) {
+      if (entries === s.entries) entries = [...entries];
+      entries[i] = { ...x, pending: false };
+    }
+  }
+  return entries === s.entries ? s : { ...s, entries };
+}
+
 function reduceUpdate(s: CodeState, u: AcpUpdate, agent: AgentId | undefined): CodeState {
   const stamp = (next: CodeState): CodeState => {
     const prev =
@@ -566,6 +596,7 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
         ...s,
         status: e.state,
         busy: e.state === "exited" ? false : s.busy,
+        entries: e.state === "exited" ? noPending(s.entries) : s.entries,
         permissions: e.state === "exited" ? [] : s.permissions,
         auth: e.state === "exited" ? null : s.auth,
         // The agent's queue goes with it; this window gets back what it wrote.
@@ -655,9 +686,19 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
       }
       break;
     }
-    case "update":
+    case "update": {
       next = reduceUpdate(s, e.update, useStore.getState().codeSessions.find((x) => x.id === id)?.agent);
+      const u = e.update;
+      // The agent speaks or starts a tool: a step it took after a steered message came in.
+      if (
+        u.sessionUpdate === "agent_message_chunk" ||
+        u.sessionUpdate === "agent_thought_chunk" ||
+        (u.sessionUpdate === "tool_call" && !s.toolCalls[(u as unknown as AcpToolCall).toolCallId])
+      ) {
+        next = readSteers(next);
+      }
       break;
+    }
     case "permission": {
       // The request may carry fields no update did (a diff, rawInput): keep them with the call
       // so they outlast the request and reach the Changes panel. A call no update announced yet
@@ -683,10 +724,12 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
           : e.stopReason === "max_tokens"
             ? "Stopped: the reply hit the output token limit. Raise Max output tokens in the model's settings, or ask the agent to continue."
             : null;
+      // The turn is over: a steered message was read, or went out as a prompt of its own.
+      const entries = noPending(s.entries);
       next = {
         ...s,
         busy: false,
-        entries: note ? [...s.entries, { kind: "info", text: note }] : s.entries,
+        entries: note ? [...entries, { kind: "info", text: note }] : entries,
       };
       saveTranscript(id, next);
       {
@@ -729,9 +772,22 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
         next = {
           ...s,
           busy: e.delivery === "steered" ? s.busy : true,
+          // Sent as a turn of its own (a steer handed back): it is no longer waiting on one.
           entries: shown
-            ? s.entries
-            : [...s.entries, { kind: "user", text: e.text, attachments, promptId: pid, ...(e.replay || s.status !== "ready" ? {} : { at: Date.now() }) }],
+            ? s.entries.map((x) =>
+                isIt(x) && x.kind === "user" && x.pending && e.delivery !== "steered" ? { ...x, pending: false } : x,
+              )
+            : [
+                ...s.entries,
+                {
+                  kind: "user",
+                  text: e.text,
+                  attachments,
+                  promptId: pid,
+                  ...(e.replay || s.status !== "ready" ? {} : { at: Date.now() }),
+                  ...(e.delivery === "steered" && !e.replay ? { pending: true } : {}),
+                },
+              ],
           queued,
         };
       }

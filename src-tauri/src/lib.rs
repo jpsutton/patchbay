@@ -644,6 +644,9 @@ fn create_code_session_local(
     model_ref: Option<&str>,
     agent: Option<String>,
 ) -> anyhow::Result<CodeSession> {
+    // Native folder pickers can return a trailing slash (the KDE portal does); `/a/b` and `/a/b/`
+    // are one folder, and the same permission rules and recent-folder entry must serve both.
+    let cwd = gateway::folder_key(cwd);
     if !std::path::Path::new(cwd).is_dir() {
         anyhow::bail!("{cwd} is not a directory");
     }
@@ -2205,6 +2208,12 @@ async fn save_code_transcript(state: &AppState, id: String, json: String) -> Cmd
     const MAX: usize = 4 * 1024 * 1024;
     if json.len() > MAX {
         return Err(CmdError("transcript too large to cache".into()));
+    }
+    // Only the node hosting the session writes the cache. A window viewing a session hosted
+    // elsewhere holds a partial view (stale cache plus the live tail), and the cache is a single
+    // synced cell, so its save would overwrite the host's complete one on every node.
+    if remote_host(state, &id)?.is_some() {
+        return Ok(());
     }
     Ok(state.db.set_code_transcript(&id, &json)?)
 }

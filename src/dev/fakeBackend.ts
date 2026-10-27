@@ -195,6 +195,8 @@ const FAKE_STEERING = new Set(["patchbay", "grok", "claude-code", "codex"]);
 /** Sessions mid-turn, and the prompts queued behind each turn. */
 const fakeTurns = new Set<string>();
 const fakeQueues: Record<string, { promptId: string; text: string; mentions: string[] }[]> = {};
+/** Messages steered into a session's running turn, which Send now can still take back out. */
+const fakeSteered: Record<string, { promptId: string; text: string; mentions: string[] }[]> = {};
 /** Sessions whose running turn a forced send cancelled. */
 const fakeCut = new Set<string>();
 /** Sessions whose running turn Stop cancelled; only the `/slow` scenario watches for it. */
@@ -217,6 +219,7 @@ async function runFakeTurns(csid: string, promptId: string, text: string, mentio
   await fakeAgentTurn(csid, text, mentions);
   if (fakeCut.delete(csid)) codeEmit(csid, { type: "promptDone", stopReason: "cancelled" });
   fakeTurns.delete(csid);
+  delete fakeSteered[csid];
   const next = fakeQueues[csid]?.shift();
   if (next) void runFakeTurns(csid, next.promptId, next.text, next.mentions);
 }
@@ -1289,6 +1292,7 @@ export function install() {
           if (fakeTurns.has(s.id)) {
             if (FAKE_STEERING.has(s.agent)) {
               fakeEcho(s.id, promptId, a.text as string, "steered");
+              (fakeSteered[s.id] ??= []).push({ promptId, text: a.text as string, mentions });
               codeEmit(s.id, { type: "update", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `\n\n(Noted mid-turn: ${a.text})\n\n` } } });
             } else {
               (fakeQueues[s.id] ??= []).push({ promptId, text: a.text as string, mentions });
@@ -1309,10 +1313,18 @@ export function install() {
           return null;
         }
         case "code_send_now": {
-          const q = fakeQueues[a.id as string] ?? [];
+          const q = (fakeQueues[a.id as string] ??= []);
           const i = q.findIndex((x) => x.promptId === a.promptId);
+          const st = fakeSteered[a.id as string] ?? [];
+          const j = st.findIndex((x) => x.promptId === a.promptId);
           if (i >= 0 && fakeTurns.has(a.id as string)) {
             q.unshift(...q.splice(i, 1));
+            fakeInterrupt(a.id as string);
+          } else if (j >= 0 && fakeTurns.has(a.id as string)) {
+            // Steered in, not read yet: it leaves the turn and goes next.
+            const [m] = st.splice(j, 1);
+            q.unshift(m);
+            fakeEcho(a.id as string, m.promptId, m.text, "queued");
             fakeInterrupt(a.id as string);
           }
           return null;

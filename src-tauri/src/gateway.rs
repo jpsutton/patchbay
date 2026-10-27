@@ -156,6 +156,17 @@ const RECENT_FOLDERS: usize = 12;
 /// Most folders one listing returns.
 const MAX_DIRS: usize = 500;
 
+/// A folder path without trailing slashes, so `/a/b` and `/a/b/` compare equal. The root stays `/`.
+pub(crate) fn folder_key(path: &str) -> &str {
+    let t = path.trim_end_matches('/');
+    if t.is_empty() && !path.is_empty() { "/" } else { t }
+}
+
+/// Whether `list` already holds `path`, ignoring trailing slashes.
+fn has_folder(list: &[String], path: &str) -> bool {
+    list.iter().any(|f| folder_key(f) == folder_key(path))
+}
+
 /// What a phone needs to start a Code session on this computer: the agents installed here,
 /// the default one, the home folder to browse from, and folders recent sessions here used.
 pub(crate) async fn new_session_options_local(state: &AppState) -> Result<Value> {
@@ -166,7 +177,7 @@ pub(crate) async fn new_session_options_local(state: &AppState) -> Result<Value>
     let mut recent: Vec<String> = Vec::new();
     for s in state.db.list_code_sessions()? {
         let here = s.host_node.as_deref().is_none_or(|h| h == me);
-        if here && !recent.contains(&s.cwd) && std::path::Path::new(&s.cwd).is_dir() {
+        if here && !has_folder(&recent, &s.cwd) && std::path::Path::new(&s.cwd).is_dir() {
             recent.push(s.cwd);
         }
         if recent.len() == RECENT_FOLDERS {
@@ -371,4 +382,18 @@ async fn upload(state: &AppState, p: &Value) -> Result<Value> {
     let (db, data_dir) = (state.db.clone(), state.data_dir.clone());
     let att = tokio::task::spawn_blocking(move || attachments::ingest(&db, &data_dir, &name, &bytes)).await??;
     Ok(json!(att))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recent_folders_ignore_trailing_slash() {
+        let list = vec!["/home/me/inkstash/".to_owned()];
+        assert!(has_folder(&list, "/home/me/inkstash"));
+        assert!(has_folder(&list, "/home/me/inkstash//"));
+        assert!(!has_folder(&list, "/home/me/ink"));
+        assert!(has_folder(&["/".to_owned()], "/"));
+    }
 }
