@@ -83,6 +83,10 @@
     "full": "Interrupted by the user.",
     "min": "Interrupted by user."
   },
+  "call_stopped": {
+    "full": "The user stopped this tool call before it finished, so it has no complete result. Carry on without it, or ask what they would like instead. Do not retry it unless asked.",
+    "min": "User stopped this tool call before finish; no complete result. Carry on without it, or ask what they want. Don't retry unless asked."
+  },
   "notes_intro": {
     "full": "Background subagents have finished. Their results are below; read them and carry on. Do not repeat them verbatim to the user unless asked.\n\n{body}",
     "min": "Background subagents finished. Results below; read, carry on. Don't repeat verbatim to user unless asked.\n\n{body}"

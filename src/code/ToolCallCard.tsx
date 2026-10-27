@@ -23,8 +23,46 @@ import {
   SearchIcon,
   TerminalIcon,
   TrashIcon,
+  StopIcon,
   XIcon,
 } from "../components/icons";
+
+/**
+ * Whether the user can stop this call, and what stopping it does: a running tool call is
+ * stopped on its own (the turn goes on), a background job is killed. Null when it can't be
+ * stopped: it isn't running, or the agent can't (only Patchbay's own agent can).
+ */
+export function stopAction(tc: AcpToolCall, sessionId: string | null, supported: boolean) {
+  if (!supported || !sessionId) return null;
+  if (tc.background && tc.shell && !tc.shell.done) {
+    const shell = tc.shell.id;
+    return { label: "Stop job", run: () => api.codeKillShell(sessionId, shell) };
+  }
+  if (!tc.background && tc.status === "in_progress") {
+    return { label: "Stop this call", run: () => api.codeCancelTool(sessionId, tc.toolCallId) };
+  }
+  return null;
+}
+
+/** Stop button for a running tool call or background job; nothing when it can't be stopped. */
+export function StopButton({ tc, className = "" }: { tc: AcpToolCall; className?: string }) {
+  const sessionId = useStore((s) => s.activeCodeSessionId);
+  const supported = useStore((s) => !!(s.activeCodeSessionId && s.code[s.activeCodeSessionId]?.extensions.cancelTool));
+  const action = stopAction(tc, sessionId, supported);
+  if (!action) return null;
+  return (
+    <button
+      type="button"
+      className={`flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-border px-2 text-[12px] text-muted hover:border-danger/50 hover:bg-danger/10 hover:text-danger ${className}`}
+      onClick={() => action.run().catch((e) => useStore.getState().setToast(errorText(e)))}
+      title={action.label}
+      aria-label={`${action.label}: ${tc.title || tc.kind || "tool call"}`}
+    >
+      <StopIcon size={11} />
+      Stop
+    </button>
+  );
+}
 
 function StatusMark({ status, background }: { status: string; background?: boolean }) {
   if (background) {
@@ -210,8 +248,9 @@ export function ToolCallCard({ tc, autoApproved }: { tc: AcpToolCall; autoApprov
     .reduce((a, b) => ({ add: a.add + b.add, del: a.del + b.del }), { add: 0, del: 0 });
   return (
     <div>
+      <div className="flex items-center hover:bg-panel-2/40">
       <button
-        className="flex h-[38px] w-full items-center gap-2.5 px-3 text-left text-[13px] hover:bg-panel-2/40"
+        className="flex h-[38px] min-w-0 flex-1 items-center gap-2.5 px-3 text-left text-[13px]"
         onClick={() => setOpen(!open)}
         aria-expanded={open}
       >
@@ -241,6 +280,8 @@ export function ToolCallCard({ tc, autoApproved }: { tc: AcpToolCall; autoApprov
           <ChevronRightIcon size={12} />
         </span>
       </button>
+      <StopButton tc={tc} className="mr-2" />
+      </div>
       {images.length > 0 && (
         <div className="border-t border-line px-3 py-2.5">
           <ToolImages images={images} label={tc.title || "Tool output"} />

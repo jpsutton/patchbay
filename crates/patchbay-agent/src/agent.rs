@@ -227,6 +227,21 @@ impl Agent {
                 Ok(json!({"rewind_points": points}))
             }
             "patchbay/rewind/execute" => self.rewind(&params).await,
+            // Stop one running tool call; the turn goes on and the model sees it was stopped.
+            "patchbay/cancel_tool" => {
+                let s = self.need_session(&params)?;
+                let id = param_str(&params, "toolCallId")?;
+                let token = s.calls.lock().unwrap().get(id).cloned();
+                if let Some(t) = &token {
+                    t.cancel();
+                }
+                Ok(json!({"cancelled": token.is_some()}))
+            }
+            // Stop one background shell started with Bash `run_in_background`.
+            "patchbay/kill_shell" => {
+                let s = self.need_session(&params)?;
+                Ok(json!({"killed": s.shells.kill(param_str(&params, "shellId")?)}))
+            }
             _ => Err(RpcError::new(-32601, format!("method not found: {method}"))),
         }
     }

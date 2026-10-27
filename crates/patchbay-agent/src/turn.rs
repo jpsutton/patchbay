@@ -628,11 +628,20 @@ async fn run_call(
     }
     let card_id = card["toolCallId"].as_str().unwrap_or(&call.id).to_owned();
     session.update(json!({"sessionUpdate": "tool_call_update", "toolCallId": card_id, "status": "in_progress"}));
-    let ctx = ToolCtx { session: session.clone(), call_id: card_id, cancel: cancel.clone() };
+    // The user can stop this one call (`patchbay/cancel_tool`) without ending the turn.
+    let call_cancel = cancel.child_token();
+    session.calls.lock().unwrap().insert(card_id.clone(), call_cancel.clone());
+    let ctx = ToolCtx { session: session.clone(), call_id: card_id.clone(), cancel: call_cancel.clone() };
+    // Biased: the tool sees the cancel first, so a shell command is killed before we move on.
     let out: ToolOutput = tokio::select! {
+        biased;
         out = tool.run(call.arguments.clone(), &ctx) => out,
-        _ = cancel.cancelled() => ToolOutput::error(session.prompts().msg("interrupted", &[])),
+        _ = call_cancel.cancelled() => {
+            let key = if cancel.is_cancelled() { "interrupted" } else { "call_stopped" };
+            ToolOutput::error(session.prompts().msg(key, &[]))
+        }
     };
+    session.calls.lock().unwrap().remove(&card_id);
     let text = out.text_of();
     let content = if out.ui.is_empty() { text_content(&text) } else { out.ui.clone() };
     let raw = if out.raw.is_null() { json!(card_text(&text)) } else { out.raw.clone() };

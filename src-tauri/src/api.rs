@@ -148,6 +148,8 @@ commands! {
     code_unqueue(id, prompt_id);
     code_send_now(id, prompt_id);
     code_cancel(id);
+    code_cancel_tool(id, tool_call_id);
+    code_kill_shell(id, shell_id);
     code_set_model(id, model_id);
     code_set_config_option(id, config_id, value);
     code_authenticate(id, method_id, api_key);

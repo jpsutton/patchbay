@@ -393,6 +393,8 @@ export interface AgentExtensions {
   steering?: boolean;
   /** The host can cancel the running turn to send a message next (older hosts leave it out). */
   forceSend?: boolean;
+  /** The agent can stop one tool call or background job without ending the turn. */
+  cancelTool?: boolean;
 }
 
 /** An ACP session config option (only `select` ones are shown). */
@@ -547,6 +549,11 @@ export interface AcpToolCall {
    * (a terminal with no exit yet). Cleared by its `terminal_exit` or when the agent stops.
    */
   background?: boolean;
+  /**
+   * Patchbay's own, from `_meta.background_shell`: the background job this call started.
+   * `done` once it ended; `exitCode` is -1 when it was stopped.
+   */
+  shell?: { id: string; done: boolean; exitCode?: number | null };
 }
 
 export interface AcpCommand {
@@ -929,6 +936,10 @@ export const api = {
   quickSubmit: (text: string) => invoke<void>("quick_submit", { text }),
   quickDismiss: () => invoke<void>("quick_dismiss"),
   codeCancel: (id: string) => invoke<void>("code_cancel", { id }),
+  /** Stop one running tool call; the turn goes on. */
+  codeCancelTool: (id: string, toolCallId: string) => invoke<void>("code_cancel_tool", { id, toolCallId }),
+  /** Stop one background job (`AcpToolCall.shell.id`). */
+  codeKillShell: (id: string, shellId: string) => invoke<void>("code_kill_shell", { id, shellId }),
   codeSetModel: (id: string, modelId: string) => invoke<void>("code_set_model", { id, modelId }),
   codeSetMode: (id: string, modeId: string) => invoke<void>("code_set_mode", { id, modeId }),
   codeSetPermissionMode: (id: string, mode: "default" | "auto" | "always-approve") =>

@@ -22,6 +22,8 @@ const CODE_METHODS: &[&str] = &[
     "code.stop",
     "code.prompt",
     "code.cancel",
+    "code.cancel_tool",
+    "code.kill_shell",
     "code.unqueue",
     "code.send_now",
     "code.set_model",

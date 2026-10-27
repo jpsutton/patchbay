@@ -231,6 +231,10 @@ pub enum AgentCmd {
     /// and send it next.
     SendNow { prompt_id: String },
     Cancel,
+    /// Stop one running tool call; the turn goes on. Patchbay's own agent only.
+    CancelTool { tool_call_id: String },
+    /// Stop one background shell. Patchbay's own agent only.
+    KillShell { shell_id: String },
     SetModel { model_id: String, reply: oneshot::Sender<Result<()>> },
     SetMode { mode_id: String, reply: oneshot::Sender<Result<()>> },
     SetConfigOption { config_id: String, value: String, reply: oneshot::Sender<Result<()>> },
@@ -444,6 +448,15 @@ fn cancel_turn(conn: &Rc<acp::ClientSideConnection>, session_id: &str) {
             let _ = conn.cancel(n).await;
         });
     }
+}
+
+/// Ask the agent to stop one tool call or background shell. It answers by ending that call, so
+/// the reply says nothing the UI needs.
+fn stop_job(conn: &Rc<acp::ClientSideConnection>, method: &'static str, params: Value) {
+    let conn = conn.clone();
+    tokio::task::spawn_local(async move {
+        let _ = ext(&conn, method, params).await;
+    });
 }
 
 fn drop_queue(ctx: &TurnCtx, queue: &mut Queue) {
@@ -1550,6 +1563,16 @@ async fn run(
                         force_armed = false;
                         cancel_turn(&conn, &session_id);
                     }
+                    AgentCmd::CancelTool { tool_call_id } => {
+                        if extensions.cancel_tool {
+                            stop_job(&conn, "patchbay/cancel_tool", json!({ "sessionId": session_id, "toolCallId": tool_call_id }));
+                        }
+                    }
+                    AgentCmd::KillShell { shell_id } => {
+                        if extensions.cancel_tool {
+                            stop_job(&conn, "patchbay/kill_shell", json!({ "sessionId": session_id, "shellId": shell_id }));
+                        }
+                    }
                     AgentCmd::SetModel { model_id, reply } => {
                         let ids = config_ids.borrow().clone();
                         let r = set_model(&conn, &session_id, &ids, &model_id).await;
@@ -1703,7 +1726,12 @@ fn refuse_until_signed_in(cmd: AgentCmd) {
         }
         AgentCmd::Prompt { reply, .. } => answer(reply, Err(anyhow!("the agent isn't signed in yet"))),
         AgentCmd::AgentMessage { reply, .. } => answer(reply, Err(anyhow!("the agent isn't signed in yet"))),
-        AgentCmd::Unqueue { .. } | AgentCmd::SendNow { .. } | AgentCmd::Cancel | AgentCmd::Shutdown => {}
+        AgentCmd::Unqueue { .. }
+        | AgentCmd::SendNow { .. }
+        | AgentCmd::Cancel
+        | AgentCmd::CancelTool { .. }
+        | AgentCmd::KillShell { .. }
+        | AgentCmd::Shutdown => {}
     }
 }
 

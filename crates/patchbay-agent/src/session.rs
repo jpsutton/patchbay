@@ -97,6 +97,8 @@ pub struct Session {
     pub state: tokio::sync::Mutex<State>,
     /// Cancels the running turn.
     pub cancel: Mutex<Option<CancellationToken>>,
+    /// Cancels one running tool call, by tool call id, without ending the turn.
+    pub calls: Mutex<HashMap<String, CancellationToken>>,
     pub busy: AtomicBool,
     pub files: Mutex<HashMap<PathBuf, Stamp>>,
     /// Changes of files the agent read that it was already told about.
@@ -170,6 +172,7 @@ impl Session {
                 since_todo_write: 0,
             }),
             cancel: Mutex::new(None),
+            calls: Mutex::default(),
             busy: AtomicBool::new(false),
             files: Mutex::default(),
             notified: Mutex::default(),
@@ -308,6 +311,7 @@ impl Session {
                 since_todo_write: 0,
             }),
             cancel: Mutex::new(None),
+            calls: Mutex::default(),
             busy: AtomicBool::new(false),
             files: Mutex::default(),
             notified: Mutex::default(),

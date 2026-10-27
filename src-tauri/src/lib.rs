@@ -1350,6 +1350,24 @@ async fn code_cancel(state: &AppState, id: String) -> CmdResult<()> {
     Ok(state.code.send(&id, AgentCmd::Cancel)?)
 }
 
+/// Stop one running tool call; the turn goes on.
+async fn code_cancel_tool(state: &AppState, id: String, tool_call_id: String) -> CmdResult<()> {
+    if let Some(host) = remote_host(state, &id)? {
+        state.mesh.rpc(&host, "code.cancel_tool", serde_json::json!({ "id": id, "toolCallId": tool_call_id })).await?;
+        return Ok(());
+    }
+    Ok(state.code.send(&id, AgentCmd::CancelTool { tool_call_id })?)
+}
+
+/// Stop one background shell.
+async fn code_kill_shell(state: &AppState, id: String, shell_id: String) -> CmdResult<()> {
+    if let Some(host) = remote_host(state, &id)? {
+        state.mesh.rpc(&host, "code.kill_shell", serde_json::json!({ "id": id, "shellId": shell_id })).await?;
+        return Ok(());
+    }
+    Ok(state.code.send(&id, AgentCmd::KillShell { shell_id })?)
+}
+
 async fn code_set_model_local(state: &AppState, id: &str, model_id: String) -> anyhow::Result<()> {
     ensure_local_host(state, id)?;
     state.code.set_model(id, model_id.clone()).await?;
@@ -1757,6 +1775,16 @@ impl mesh::RpcHandler for MeshRpc {
             "code.cancel" => {
                 ensure_local_host(state, &id()?)?;
                 state.code.send(&id()?, AgentCmd::Cancel).map(|_| Value::Null)
+            }
+            "code.cancel_tool" => {
+                ensure_local_host(state, &id()?)?;
+                let tool_call_id = param(&p, "toolCallId")?.to_owned();
+                state.code.send(&id()?, AgentCmd::CancelTool { tool_call_id }).map(|_| Value::Null)
+            }
+            "code.kill_shell" => {
+                ensure_local_host(state, &id()?)?;
+                let shell_id = param(&p, "shellId")?.to_owned();
+                state.code.send(&id()?, AgentCmd::KillShell { shell_id }).map(|_| Value::Null)
             }
             "code.unqueue" => {
                 ensure_local_host(state, &id()?)?;
