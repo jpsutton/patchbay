@@ -235,11 +235,11 @@ Do not sleep in a loop to wait: read the output instead."
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "The command to run"},
-                    "description": {"type": "string", "description": "A short description of what it does"},
+                    "description": {"type": "string", "description": "Plain-English summary of what this command does and why, in 5-10 words (for example \"Run the unit tests\" or \"Watch CI for PR 198\"). The person watching reads this instead of the command."},
                     "timeout": {"type": "integer", "description": "Timeout in milliseconds (max 600000)"},
                     "run_in_background": {"type": "boolean", "description": "Run in the background and return an id"}
                 },
-                "required": ["command"]
+                "required": ["command", "description"]
             }),
         }
     }
