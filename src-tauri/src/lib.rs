@@ -644,6 +644,9 @@ fn create_code_session_local(
     model_ref: Option<&str>,
     agent: Option<String>,
 ) -> anyhow::Result<CodeSession> {
+    // Native folder pickers can return a trailing slash (the KDE portal does); `/a/b` and `/a/b/`
+    // are one folder, and the same permission rules and recent-folder entry must serve both.
+    let cwd = gateway::folder_key(cwd);
     if !std::path::Path::new(cwd).is_dir() {
         anyhow::bail!("{cwd} is not a directory");
     }

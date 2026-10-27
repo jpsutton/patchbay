@@ -140,6 +140,10 @@ async fn desktop_starts_a_session_in_a_remote_folder() {
     assert_eq!(host_of(&a, &s.id).as_deref(), Some(an.as_str()));
     assert_eq!(host_of(&b, &s.id).as_deref(), Some(an.as_str()));
 
+    // A folder picker's trailing slash is not part of the folder.
+    let slashed = create_code_session(&b.state, format!("{cwd}/"), None, Some("grok".into()), Some(an.clone())).await.unwrap();
+    assert_eq!(slashed.cwd, cwd);
+
     // Naming this computer as host is the same as naming none.
     let bn = b.state.mesh.node_id().to_owned();
     let bproj = b.dir.join("proj");
