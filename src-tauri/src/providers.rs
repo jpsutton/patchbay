@@ -199,6 +199,18 @@ pub fn prepare_request(r: &Resolved, req: &mut patchbay_llm::Request) {
     }
 }
 
+/// How long the coding agent asks Anthropic to keep its prompt cache. A Claude subscription gets
+/// the 1-hour cache, as in Claude Code: cache writes cost plan usage there, not dollars, and a
+/// long-lived coding session is idle between prompts far more than 5 minutes. A stored API key
+/// pays for the dearer 1-hour write, so it keeps the API's 5-minute default.
+pub fn agent_cache_ttl(r: &Resolved) -> patchbay_llm::CacheTtl {
+    if r.provider.kind == ProviderKind::Anthropic && r.auth == Auth::ClaudeLogin {
+        patchbay_llm::CacheTtl::OneHour
+    } else {
+        patchbay_llm::CacheTtl::Default
+    }
+}
+
 pub fn llm_config(r: &Resolved) -> patchbay_llm::Config {
     let mut cfg = patchbay_llm::Config::new(
         wire_format(&r.provider.kind),

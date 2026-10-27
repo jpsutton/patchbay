@@ -268,6 +268,59 @@ async fn compaction_replaces_the_history_and_survives_a_reload() {
 
 #[tokio::test]
 #[ignore]
+async fn keepwarm_refreshes_the_cache_and_toggles_auto() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::Anthropic, cwd.join("data"));
+    let sid = open(&mut acp, &cwd).await;
+
+    // Nothing to refresh before the first prompt.
+    let r = prompt(&mut acp, &sid, "/keepwarm").await;
+    assert_eq!(r["stopReason"], "end_turn");
+    assert!(acp.text_of("agent_message_chunk").contains("Nothing is cached yet"), "{}", acp.text_of("agent_message_chunk"));
+
+    // A reply that read the cache starts the clock, and the client is told.
+    prompt(&mut acp, &sid, "hello !cached").await;
+    let clock = |acp: &Acp| acp.updates.iter().rev().find_map(|u| u["_meta"]["cache"].as_object().cloned());
+    let c = clock(&acp).expect("a usage_update carries the cache clock");
+    assert_eq!(c["ttlSecs"], 300);
+    assert_eq!(c["auto"], false);
+    assert!(c["lastAt"].as_u64().is_some_and(|t| t > 0), "{c:?}");
+
+    // The refresh reads the cache again, answers the user, and leaves the history alone.
+    let before = std::fs::read_to_string(cwd.join("data/agent/sessions").join(format!("{sid}.jsonl"))).unwrap();
+    let r = prompt(&mut acp, &sid, "/keepwarm").await;
+    assert_eq!(r["stopReason"], "end_turn");
+    let said = acp.text_of("agent_message_chunk");
+    assert!(said.contains("Cache refreshed: 4k tokens read from cache, good for another 5m."), "{said}");
+    let after = std::fs::read_to_string(cwd.join("data/agent/sessions").join(format!("{sid}.jsonl"))).unwrap();
+    assert!(!after.replace(&before, "").contains("\"t\":\"msg\""), "the refresh wrote to the history");
+
+    // Auto mode toggles and shows in the clock.
+    prompt(&mut acp, &sid, "/keepwarm auto").await;
+    assert!(acp.text_of("agent_message_chunk").contains("Auto keep-warm on"));
+    assert_eq!(clock(&acp).unwrap()["auto"], true);
+    prompt(&mut acp, &sid, "/keepwarm auto").await;
+    assert!(acp.text_of("agent_message_chunk").contains("Auto keep-warm off."));
+    assert_eq!(clock(&acp).unwrap()["auto"], false);
+
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
+async fn keepwarm_says_when_the_model_has_no_refreshable_cache() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));
+    let sid = open(&mut acp, &cwd).await;
+    prompt(&mut acp, &sid, "hello").await;
+    prompt(&mut acp, &sid, "/keepwarm").await;
+    assert!(acp.text_of("agent_message_chunk").contains("only be refreshed on Anthropic models"), "{}", acp.text_of("agent_message_chunk"));
+    assert!(acp.updates.iter().all(|u| u["_meta"]["cache"].is_null()), "no clock for a format without a known TTL");
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
 async fn rewind_drops_prompts_and_restores_files() {
     let cwd = workdir();
     let mut acp = Acp::start(WireFormat::Anthropic, cwd.join("data"));

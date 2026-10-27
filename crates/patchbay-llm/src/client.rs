@@ -27,6 +27,8 @@ pub struct Config {
     pub max_retries: u32,
     /// Give up when the stream is silent this long.
     pub idle_timeout: Duration,
+    /// How long Anthropic keeps this request's cache entries. Other formats ignore it.
+    pub cache_ttl: CacheTtl,
 }
 
 impl Config {
@@ -49,7 +51,14 @@ impl Config {
             summary: None,
             max_retries: 2,
             idle_timeout: Duration::from_secs(180),
+            cache_ttl: CacheTtl::Default,
         }
+    }
+
+    /// Seconds the prompt cache lives after its last use, for the wire format that lets the
+    /// client know it (Anthropic). `None`: the endpoint decides, so there is nothing to count down.
+    pub fn cache_ttl_secs(&self) -> Option<u64> {
+        (self.format == WireFormat::Anthropic).then(|| self.cache_ttl.secs())
     }
 }
 

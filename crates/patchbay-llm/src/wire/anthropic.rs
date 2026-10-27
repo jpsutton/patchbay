@@ -41,8 +41,13 @@ pub(crate) fn max_tokens(cfg: &Config) -> u32 {
 const WEB_SEARCH_TOOL: &str = "web_search_20250305";
 const WEB_SEARCH_MAX_USES: u32 = 5;
 
-fn ephemeral() -> Value {
-    json!({"type": "ephemeral"})
+fn ephemeral(cfg: &Config) -> Value {
+    match cfg.cache_ttl {
+        CacheTtl::Default => json!({"type": "ephemeral"}),
+        // Every breakpoint of a request must carry the same TTL: the API rejects a 5-minute
+        // entry ahead of a 1-hour one.
+        CacheTtl::OneHour => json!({"type": "ephemeral", "ttl": "1h"}),
+    }
 }
 
 pub fn body(cfg: &Config, req: &Request) -> Value {
@@ -53,7 +58,7 @@ pub fn body(cfg: &Config, req: &Request) -> Value {
         .map(|b| {
             let mut v = json!({"type": "text", "text": b.text});
             if b.cache == Cache::Breakpoint {
-                v["cache_control"] = ephemeral();
+                v["cache_control"] = ephemeral(cfg);
             }
             v
         })
@@ -85,7 +90,7 @@ pub fn body(cfg: &Config, req: &Request) -> Value {
         && block["type"] != "thinking"
         && block["type"] != "redacted_thinking"
     {
-        block["cache_control"] = ephemeral();
+        block["cache_control"] = ephemeral(cfg);
     }
 
     let thinking = matches!(cfg.effort, Some(e) if e > Effort::Minimal);
@@ -428,6 +433,28 @@ mod tests {
         assert_eq!(last[0]["type"], "tool_result");
         assert_eq!(last[0]["is_error"], true);
         assert_eq!(last[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn one_hour_ttl_goes_on_every_breakpoint() {
+        let req = Request {
+            system: vec![SystemBlock::cached("static rules"), SystemBlock::new("dynamic")],
+            messages: vec![Message::user("go")],
+            ..Default::default()
+        };
+        let default = body(&cfg(), &req);
+        assert!(default["system"][0]["cache_control"].get("ttl").is_none());
+        assert!(default["messages"][0]["content"][0]["cache_control"].get("ttl").is_none());
+
+        let mut c = cfg();
+        c.cache_ttl = CacheTtl::OneHour;
+        let b = body(&c, &req);
+        assert_eq!(b["system"][0]["cache_control"], json!({"type": "ephemeral", "ttl": "1h"}));
+        assert_eq!(b["messages"][0]["content"][0]["cache_control"], json!({"type": "ephemeral", "ttl": "1h"}));
+        assert_eq!(c.cache_ttl_secs(), Some(3600));
+        assert_eq!(cfg().cache_ttl_secs(), Some(300));
+        // Formats that do not let the client pick a TTL have no countdown.
+        assert_eq!(Config::new(WireFormat::ChatCompletions, "http://x", "m").cache_ttl_secs(), None);
     }
 
     #[test]

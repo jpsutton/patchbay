@@ -1266,7 +1266,7 @@ export function install() {
               } else if (csid === readmeSessionId) {
                 fakeReadmeReplay(csid);
                 fakeReady(csid, true);
-                codeEmit(csid, { type: "usage", usage: { totals: { input: 41000, cachedRead: 30000, cacheWrite: 0, output: 1800, reasoning: 0, costUsd: 0.07, apiMs: 0 }, contextTokens: 24000, contextWindow: 128000, autoCompactPercent: 85 } });
+                codeEmit(csid, { type: "usage", usage: { totals: { input: 41000, cachedRead: 30000, cacheWrite: 0, output: 1800, reasoning: 0, costUsd: 0.07, apiMs: 0 }, contextTokens: 24000, contextWindow: 128000, autoCompactPercent: 85, cache: { lastAt: Date.now() - 20 * 60_000, ttlSecs: 3600, auto: false } } });
               } else fakeReady(csid);
             }, 400);
           }, 10);

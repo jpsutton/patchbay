@@ -91,8 +91,9 @@ pub async fn compact(
         st.context_tokens = (summary.len() as u64) / 3;
         st.messages = vec![message];
     }
-    // Rewind points before the summary no longer exist.
+    // Rewind points before the summary no longer exist, and neither does the cached prefix.
     session.prompts.lock().unwrap().clear();
+    session.cache_reset();
     session.text_chunk("agent_thought_chunk", "Summarized the conversation to free up context.\n");
     Ok(())
 }

@@ -87,11 +87,23 @@ export interface Tokens {
   apiMs: number;
 }
 
+/** The prompt cache's clock, from Patchbay's own agent on Anthropic. The UI counts down from `lastAt`. */
+export interface CacheClock {
+  /** Unix milliseconds of the last request that used the cache; null when it is not known to be warm. */
+  lastAt: number | null;
+  /** How long the cache lives after that. */
+  ttlSecs: number;
+  /** The agent refreshes the cache itself before it expires. */
+  auto: boolean;
+}
+
 export interface UsageView {
   totals: Tokens;
   contextTokens: number | null;
   contextWindow: number | null;
   autoCompactPercent: number | null;
+  /** Absent for agents that report no cache clock, and from older hosts. */
+  cache?: CacheClock | null;
 }
 
 /** One Claude plan usage window: the fraction used (0 to 1) and when it resets (unix seconds). */
