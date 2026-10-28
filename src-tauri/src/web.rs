@@ -3,9 +3,12 @@
 //!
 //! Wire format (JSON text frames):
 //! - client → server: `{"auth": token}` first, then `{"id": n, "cmd": name, "args": {...}}`;
-//! - server → client: `{"ready": true}` after auth, `{"id": n, "ok": value}` or
-//!   `{"id": n, "err": message}` per command, `{"chan": n, "msg": value}` for a channel passed
-//!   as an argument (`__CHANNEL__:n`), and `{"event": name, "payload": value}` for app events.
+//! - server → client: `{"ready": true, "version": v}` after auth, `{"id": n, "ok": value}`
+//!   or `{"id": n, "err": message}` per command, `{"chan": n, "msg": value}` for a channel passed
+//!   as an argument (`__CHANNEL__:n`), `{"chanEnd": n}` once the daemon is done with that
+//!   channel, and `{"event": name, "payload": value}` for app events.
+//!
+//! The command loop is `ipc::server::serve_session`, shared with the desktop app's local socket.
 //!
 //! Anyone holding the token can run agents and terminals as this user, so the server binds to
 //! loopback unless told otherwise, and every socket must present the token before anything else.
@@ -16,28 +19,18 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::Router;
-use axum::extract::ws::{Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 
 use crate::AppState;
-use crate::api::{self, ChanFactory, ChanSend};
-
-/// App events for every connected tab, already serialized.
-pub type Events = broadcast::Sender<Utf8Bytes>;
-
-/// A `UiSink` that hands events to the web clients.
-pub fn ui_sink(events: Events) -> crate::mesh::node::UiSink {
-    Arc::new(move |name: &str, payload: Value| {
-        // No receivers just means no tab is open.
-        let _ = events.send(json!({ "event": name, "payload": payload }).to_string().into());
-    })
-}
+use crate::ipc::server::{Events, ready_frame, serve_session};
+use crate::ipc::token_matches;
 
 pub struct Config {
     pub listen: SocketAddr,
@@ -82,10 +75,6 @@ fn same_origin(headers: &HeaderMap) -> bool {
     origin.split_once("://").is_some_and(|(_, h)| h == host)
 }
 
-fn token_matches(given: &str, want: &str) -> bool {
-    given.len() == want.len() && given.bytes().zip(want.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
-}
-
 async fn conn(ctx: Ctx, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
 
@@ -103,57 +92,23 @@ async fn conn(ctx: Ctx, socket: WebSocket) {
         return;
     }
 
-    let (tx, mut rx) = mpsc::unbounded_channel::<Utf8Bytes>();
-    let mut events = ctx.events.subscribe();
-    let _ = tx.send(json!({ "ready": true }).to_string().into());
+    let events = ctx.events.subscribe();
+    let (tx, mut rx) = mpsc::unbounded_channel::<Arc<str>>();
+    let _ = tx.send(ready_frame());
     let writer = tokio::spawn(async move {
-        loop {
-            let msg = tokio::select! {
-                m = rx.recv() => match m {
-                    Some(m) => m,
-                    None => break,
-                },
-                e = events.recv() => match e {
-                    Ok(e) => e,
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("web client fell behind; dropped {n} events");
-                        continue;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                },
-            };
-            if sink.send(Message::Text(msg)).await.is_err() {
+        while let Some(m) = rx.recv().await {
+            if sink.send(Message::Text(m.to_string().into())).await.is_err() {
                 break;
             }
         }
     });
-
-    let chans: ChanFactory = {
-        let tx = tx.clone();
-        Arc::new(move |id: &str| {
-            let n: u64 = id.strip_prefix("__CHANNEL__:")?.parse().ok()?;
-            let tx = tx.clone();
-            Some(Arc::new(move |msg: Value| tx.send(json!({ "chan": n, "msg": msg }).to_string().into()).is_ok())
-                as ChanSend)
+    let incoming = stream.take_while(|m| std::future::ready(m.is_ok())).filter_map(|m| {
+        std::future::ready(match m {
+            Ok(Message::Text(t)) => Some(t.as_str().to_owned()),
+            _ => None,
         })
-    };
-
-    while let Some(Ok(msg)) = stream.next().await {
-        let Message::Text(text) = msg else { continue };
-        let Ok(mut req) = serde_json::from_str::<Value>(&text) else { continue };
-        let id = req["id"].clone();
-        let cmd = req["cmd"].as_str().unwrap_or_default().to_owned();
-        let args = req["args"].take();
-        let (state, chans, tx) = (ctx.state.clone(), chans.clone(), tx.clone());
-        tokio::spawn(async move {
-            let reply = match api::call(&state, &cmd, args, &chans).await {
-                Ok(v) => json!({ "id": id, "ok": v }),
-                Err(e) => json!({ "id": id, "err": e.0 }),
-            };
-            let _ = tx.send(reply.to_string().into());
-        });
-    }
-    drop(tx);
+    });
+    serve_session(ctx.state.clone(), events, std::pin::pin!(incoming), tx).await;
     writer.abort();
 }
 
@@ -227,12 +182,5 @@ mod tests {
         assert!(same_origin(&h));
         h.insert(header::ORIGIN, HeaderValue::from_static("https://evil.example"));
         assert!(!same_origin(&h));
-    }
-
-    #[test]
-    fn token_comparison() {
-        assert!(token_matches("abc", "abc"));
-        assert!(!token_matches("abd", "abc"));
-        assert!(!token_matches("ab", "abc"));
     }
 }
