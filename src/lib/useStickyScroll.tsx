@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState, type DependencyList, type UIEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type DependencyList, type UIEvent } from "react";
 
-const NEAR_BOTTOM_PX = 80;
+import { NEAR_BOTTOM_PX, nextLastTop, nextStick } from "./stickyScroll";
 
 /**
  * Keeps a scroller pinned to the bottom while content streams in, until the user scrolls up.
@@ -18,7 +18,9 @@ export function useStickyScroll(deps: DependencyList) {
     setEl(node);
   }, []);
 
-  useEffect(() => {
+  // Layout effect, not a passive one: the latter runs after paint, so every streamed chunk would
+  // render one frame short of the bottom first.
+  useLayoutEffect(() => {
     const node = elRef.current;
     if (node && stick.current) node.scrollTop = node.scrollHeight;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -46,15 +48,10 @@ export function useStickyScroll(deps: DependencyList) {
   const onScroll = (e: UIEvent<HTMLDivElement>) => {
     const node = e.currentTarget;
     const near = node.scrollHeight - node.scrollTop - node.clientHeight < NEAR_BOTTOM_PX;
-    // Any upward scroll detaches, even inside the near-bottom zone: smooth scrolling moves a few
-    // pixels per frame, so checking `near` first would re-pin on every streamed chunk and the user
-    // could never scroll away. A scrollTop drop from content shrinking is a layout shift, not the
-    // user, and must not detach.
-    const shrank = node.scrollHeight < lastHeight.current;
-    if (node.scrollTop < lastTop.current && !shrank) stick.current = false;
-    else if (near) stick.current = true;
-    lastTop.current = node.scrollTop;
-    lastHeight.current = node.scrollHeight;
+    const cur = { scrollTop: node.scrollTop, scrollHeight: node.scrollHeight, clientHeight: node.clientHeight };
+    stick.current = nextStick(stick.current, { scrollTop: lastTop.current, scrollHeight: lastHeight.current, clientHeight: cur.clientHeight }, cur);
+    lastTop.current = nextLastTop(lastTop.current, cur.scrollTop);
+    lastHeight.current = cur.scrollHeight;
     setAtBottom(near);
     setAtTop(node.scrollTop < 1);
   };

@@ -131,6 +131,8 @@ jobs:
       - run: pnpm build
       - name: Speech routing and queue regression
         run: node src/lib/speech.selftest.mjs
+      - name: Sticky-scroll pin decision
+        run: node --experimental-strip-types src/lib/stickyScroll.selftest.ts
       - name: Third-party notices are up to date
         run: pnpm notices && git diff --exit-code -- THIRD_PARTY_NOTICES.md
 
