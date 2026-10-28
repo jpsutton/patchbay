@@ -5,7 +5,8 @@
 //! - client → server: `{"auth": token}` first, then `{"id": n, "cmd": name, "args": {...}}`;
 //! - server → client: `{"ready": true, "version": v}` after auth, `{"id": n, "ok": value}`
 //!   or `{"id": n, "err": message}` per command, `{"chan": n, "msg": value}` for a channel passed
-//!   as an argument (`__CHANNEL__:n`), and `{"event": name, "payload": value}` for app events.
+//!   as an argument (`__CHANNEL__:n`), `{"chanEnd": n}` once the daemon is done with that
+//!   channel, and `{"event": name, "payload": value}` for app events.
 //!
 //! The command loop is `ipc::server::serve_session`, shared with the desktop app's local socket.
 //!

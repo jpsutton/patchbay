@@ -16,7 +16,7 @@
 //! socket's name first (possible with named pipes) learns nothing and can't pose as the daemon.
 //!
 //! Then the frames of web.rs: `{"id", "cmd", "args"}` from the client, and `{"id", "ok"}`,
-//! `{"id", "err"}`, `{"chan", "msg"}` and `{"event", "payload"}` from the server.
+//! `{"id", "err"}`, `{"chan", "msg"}`, `{"chanEnd"}` and `{"event", "payload"}` from the server.
 
 use std::path::Path;
 #[cfg(unix)]
@@ -129,6 +129,19 @@ pub mod server {
         json!({ "ready": true, "version": VERSION }).to_string().into()
     }
 
+    /// Sends `{"chanEnd": n}` when the last handle to channel `n` drops, after its last message,
+    /// so the client can forget the channel.
+    struct ChanEnd {
+        n: u64,
+        out: mpsc::UnboundedSender<Arc<str>>,
+    }
+
+    impl Drop for ChanEnd {
+        fn drop(&mut self) {
+            let _ = self.out.send(json!({ "chanEnd": self.n }).to_string().into());
+        }
+    }
+
     /// Serve one signed-in client until `incoming` ends: run each `{"id", "cmd", "args"}` frame
     /// through `api::call`, and queue the replies, channel messages and app events on `out`.
     /// `events` should be subscribed before the client is told it is ready, so it misses nothing.
@@ -161,9 +174,10 @@ pub mod server {
             let out = out.clone();
             Arc::new(move |id: &str| {
                 let n: u64 = id.strip_prefix("__CHANNEL__:")?.parse().ok()?;
-                let out = out.clone();
-                Some(Arc::new(move |msg: Value| out.send(json!({ "chan": n, "msg": msg }).to_string().into()).is_ok())
-                    as ChanSend)
+                let end = ChanEnd { n, out: out.clone() };
+                Some(Arc::new(move |msg: Value| {
+                    end.out.send(json!({ "chan": end.n, "msg": msg }).to_string().into()).is_ok()
+                }) as ChanSend)
             })
         };
 
@@ -446,9 +460,18 @@ pub mod client {
                 {
                     self.chans.lock().unwrap_or_else(|e| e.into_inner()).remove(&n);
                 }
+            } else if let Some(n) = m.get("chanEnd").and_then(Value::as_u64) {
+                // The daemon dropped the channel: no more messages will come for it.
+                self.chans.lock().unwrap_or_else(|e| e.into_inner()).remove(&n);
             } else if let Some(name) = m.get("event").and_then(Value::as_str).map(str::to_owned) {
                 on_event(&name, m.get_mut("payload").map(Value::take).unwrap_or(Value::Null));
             }
+        }
+
+        /// Channels the daemon may still send on.
+        #[cfg(test)]
+        fn open_channels(&self) -> usize {
+            self.chans.lock().unwrap().len()
         }
 
         /// Run `cmd` on the daemon. Channel arguments are opened through `chans`, as `api::call`
@@ -551,6 +574,34 @@ mod tests {
         let err = conn.call("list_messages", json!({}), &no_chans).await.unwrap_err();
         assert!(err.contains("conversationId"), "{err}");
 
+        // A chat turn on a missing conversation fails at once: its error arrives on the channel,
+        // then the daemon drops the channel and the client forgets it.
+        let chat = Arc::new(Mutex::new(Vec::new()));
+        let c = chat.clone();
+        let chat_chans: crate::api::ChanFactory = Arc::new(move |_| {
+            let c = c.clone();
+            Some(Arc::new(move |v: Value| {
+                c.lock().unwrap().push(v);
+                true
+            }) as crate::api::ChanSend)
+        });
+        let args = json!({
+            "conversationId": "missing",
+            "modelRef": "none",
+            "text": "hi",
+            "attachmentIds": [],
+            "onEvent": "__CHANNEL__:1",
+        });
+        conn.call("send_chat_message", args, &chat_chans).await.unwrap();
+        for _ in 0..200 {
+            if conn.open_channels() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(conn.open_channels(), 0);
+        assert!(chat.lock().unwrap().iter().any(|e| e["type"] == "error"), "{:?}", chat.lock().unwrap());
+
         (server::ui_sink(events.clone()))("test://ping", json!(7));
         for _ in 0..100 {
             if !got.lock().unwrap().is_empty() {
@@ -605,6 +656,10 @@ mod tests {
             let chan: u64 = req["args"]["onEvent"].as_str().unwrap().strip_prefix("__CHANNEL__:").unwrap().parse().unwrap();
             write_frame(&mut w, &json!({ "chan": chan, "msg": "hi" })).await.unwrap();
             write_frame(&mut w, &json!({ "id": req["id"], "ok": null })).await.unwrap();
+            write_frame(&mut w, &json!({ "chanEnd": chan })).await.unwrap();
+            // Held open until the client has read everything.
+            let mut rest = String::new();
+            let _ = r.read_line(&mut rest).await;
         });
 
         let conn = client::Conn::open(&dir, Arc::new(|_, _| {}), || {}).await.unwrap();
@@ -620,7 +675,16 @@ mod tests {
         });
         conn.call("send_chat_message", json!({ "onEvent": "__CHANNEL__:42" }), &chans).await.unwrap();
         assert_eq!(*got.lock().unwrap(), vec![json!("hi")]);
-        fake.await.unwrap();
+        // The stand-in keeps the socket open, so only `chanEnd` can clear the channel.
+        for _ in 0..200 {
+            if conn.open_channels() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(conn.open_channels(), 0);
+        drop(conn);
+        fake.abort();
         let _ = std::fs::remove_dir_all(dir);
     }
 }

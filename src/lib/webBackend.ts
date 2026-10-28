@@ -148,6 +148,9 @@ export async function install() {
       const index = chanIndex.get(m.chan) ?? 0;
       chanIndex.set(m.chan, index + 1);
       internals().runCallback(m.chan, { index, message: m.msg });
+    } else if ("chanEnd" in m) {
+      // The daemon is done with this channel: no more messages will come for it.
+      chanIndex.delete(m.chanEnd);
     } else if ("event" in m) {
       void emit(m.event, m.payload);
     }
