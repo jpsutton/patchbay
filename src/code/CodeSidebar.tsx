@@ -116,7 +116,10 @@ export function CodeSidebar() {
   // Folders keep the order the user gave them. A folder seen for the first time goes on top,
   // and one that drops out of view keeps its place in storage.
   const rankKeys = useMemo(() => byRecency.map((g) => g.key), [byRecency]);
-  const { ordered, move: moveKey } = useManualOrder(ORDER_KEY, rankKeys);
+  // Until the mesh status arrives, a session on another computer looks local and gets a local key.
+  // Recording that key would pin a later local folder at the same path to a stale slot.
+  const keysUnsettled = mesh == null && sessions.some((s) => s.hostNode);
+  const { ordered, move: moveKey } = useManualOrder(ORDER_KEY, rankKeys, keysUnsettled);
   const groups = useMemo<Group[]>(() => {
     const byKey = new Map(byRecency.map((g) => [g.key, g]));
     return ordered.flatMap((k) => {
