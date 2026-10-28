@@ -5,6 +5,7 @@ import { Dot } from "./Dot";
 import {
   ArchiveIcon,
   ChatIcon,
+  CloudIcon,
   FileDiffIcon,
   GitBranchIcon,
   GitCommitIcon,
@@ -44,6 +45,7 @@ export function SidebarItem({
   icon,
   ring,
   meta,
+  host,
   attention,
   indent,
   pinned,
@@ -67,6 +69,8 @@ export function SidebarItem({
   ring?: ReactNode;
   /** Right-aligned mono detail, e.g. a short time; hidden while the row's buttons show. */
   meta?: string;
+  /** Name of the computer hosting this item, when that isn't this one: shows a cloud icon by `meta`. */
+  host?: string;
   /** A session waiting on the user (a permission request). */
   attention?: boolean;
   indent?: boolean;
@@ -145,6 +149,12 @@ export function SidebarItem({
         <div className="truncate">{title}</div>
         {subtitle && <div className="truncate font-mono text-[11px] font-normal text-faint">{subtitle}</div>}
       </div>
+      {host && (
+        // Stays visible while the row's buttons show, so it can be hovered.
+        <span className="flex shrink-0 text-faint" title={`On ${host}`} aria-label={`On ${host}`}>
+          <CloudIcon size={14} />
+        </span>
+      )}
       {attention ? (
         <span className="shrink-0 text-[11px] font-normal text-accent-ink group-hover:hidden">Needs you</span>
       ) : (

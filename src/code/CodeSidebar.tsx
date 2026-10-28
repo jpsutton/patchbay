@@ -43,6 +43,8 @@ interface Group {
   host: string | null;
   label: string;
   where: string;
+  /** Every folder the group's sessions are in, with the computer for those on another one. */
+  places: string[];
   sessions: CodeSession[];
   latest: number;
 }
@@ -84,34 +86,45 @@ export function CodeSidebar() {
   const pinned = useMemo(() => hits.filter((s) => s.pinned), [hits]);
 
   const byRecency = useMemo<Group[]>(() => {
-    // The same path on two computers is two folders.
-    const by = new Map<string, { cwd: string; host: string | null; list: CodeSession[] }>();
+    // `/a/b` and `/a/b/` are one folder.
+    const dirOf = (s: CodeSession) => (s.cwd.length > 1 ? s.cwd.replace(/[\\/]+$/, "") || s.cwd : s.cwd);
+    // Normally the same path on two computers is two folders. Grouping by project name makes
+    // every folder with the same name one group, wherever it lives.
+    const by = new Map<string, CodeSession[]>();
     for (const s of hits) {
       if (s.pinned) continue;
       const host = remoteHost(s, mesh);
-      // `/a/b` and `/a/b/` are one folder.
-      const dir = s.cwd.length > 1 ? s.cwd.replace(/[\\/]+$/, "") || s.cwd : s.cwd;
-      const key = host ? `${host}:${dir}` : dir;
-      const g = by.get(key) ?? { cwd: dir, host, list: [] };
-      g.list.push(s);
-      by.set(key, g);
+      const dir = dirOf(s);
+      // The prefix keeps a project's key apart from a folder's.
+      const key = prefs.groupByProject ? `project:${basename(dir)}` : host ? `${host}:${dir}` : dir;
+      const list = by.get(key);
+      if (list) list.push(s);
+      else by.set(key, [s]);
     }
     return [...by.entries()]
-      .map(([key, { cwd, host, list }]) => {
+      .map(([key, list]) => {
         const sorted = [...list].sort((a, b) => b.updatedAt - a.updatedAt);
+        // A project can span folders: "+" starts a session where its latest one is.
+        const top = sorted[0];
+        const cwd = dirOf(top);
+        const host = remoteHost(top, mesh);
         return {
           key,
           cwd,
           host,
           label: basename(cwd),
-          // Same folder name in two places: show where each one lives.
-          where: host ? `${memberName(mesh, host)}:${parentLabel(cwd)}` : parentLabel(cwd),
+          // Same folder name in two places: show where each one lives. A project has no one place.
+          where: prefs.groupByProject ? "" : host ? `${memberName(mesh, host)}:${parentLabel(cwd)}` : parentLabel(cwd),
+          places: [...new Set(sorted.map((s) => {
+            const h = remoteHost(s, mesh);
+            return h ? `${dirOf(s)} on ${memberName(mesh, h)}` : dirOf(s);
+          }))],
           sessions: sorted,
-          latest: sorted[0]?.updatedAt ?? 0,
+          latest: top.updatedAt,
         };
       })
       .sort((a, b) => b.latest - a.latest);
-  }, [hits, mesh]);
+  }, [hits, mesh, prefs.groupByProject]);
 
   // Folders keep the order the user gave them. A folder seen for the first time goes on top,
   // and one that drops out of view keeps its place in storage.
@@ -235,6 +248,12 @@ export function CodeSidebar() {
     return <div className="px-4 py-2 text-xs text-muted">No matches</div>;
   }
 
+  /** The other computer hosting `s`, by name. */
+  const hostLabel = (s: CodeSession) => {
+    const h = remoteHost(s, mesh);
+    return h ? memberName(mesh, h) : undefined;
+  };
+
   const item = (s: CodeSession, inPinned: boolean) => {
     const st = code[s.id];
     // Live tool calls show a new edit or commit before the turn ends and it's saved.
@@ -251,6 +270,7 @@ export function CodeSidebar() {
         busy={st?.busy}
         attention={(st?.permissions.length ?? 0) > 0}
         meta={fmtShort(s.updatedAt)}
+        host={prefs.groupByProject ? hostLabel(s) : undefined}
         pinned={s.pinned}
         status={st && (st.status === "ready" || st.status === "starting") ? "running" : "idle"}
         onSelect={async (e) => {
@@ -377,7 +397,7 @@ export function CodeSidebar() {
                   e.preventDefault();
                   moveKey(g.key, e.key === "ArrowUp" ? i - 1 : i + 2);
                 }}
-                title={`${g.host ? `${g.cwd} on ${memberName(mesh, g.host)}` : g.cwd}\nDrag to reorder`}
+                title={`${g.places.join("\n")}\nDrag to reorder`}
                 aria-expanded={!isCollapsed}
               >
                 <span className="shrink-0 truncate text-[13px] font-medium text-fg/90">{g.label}</span>

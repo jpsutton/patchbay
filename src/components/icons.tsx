@@ -501,6 +501,8 @@ export const SpeakerIcon = icon(
 
 export const StopIcon = icon(<rect x="6" y="6" width="12" height="12" rx="1" fill="currentColor" stroke="none" />);
 
+export const CloudIcon = icon(<path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />);
+
 export const MonitorUpIcon = icon(
   <>
     <path d="m9 10 3-3 3 3" />

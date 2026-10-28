@@ -27,6 +27,9 @@ pub struct Preferences {
     pub quick_entry_shortcut: String,
     /// system = the window manager's title bar | app = none; Patchbay draws the window controls.
     pub title_bar: String,
+    /// Code sidebar: group sessions by project (folder) name, whichever computer hosts them
+    /// (UI-only). Off = one group per folder per computer.
+    pub group_by_project: bool,
 
     // ---- Chat ----
     /// Copied into each new conversation; editable per conversation afterwards.
@@ -176,6 +179,7 @@ impl Default for Preferences {
             notifications: true,
             quick_entry_shortcut: String::new(),
             title_bar: "system".into(),
+            group_by_project: false,
             default_system_prompt: String::new(),
             expand_reasoning: false,
             generate_titles: true,
@@ -305,6 +309,7 @@ mod tests {
         assert!(!p.read_aloud_listen);
         assert!(p.background_summaries);
         assert!(p.generate_titles);
+        assert!(!p.group_by_project);
         assert!(p.claude_config.skills && p.claude_config.hooks);
         assert_eq!(p.usage_limit, super::UsageLimit { enabled: true, percent: 95 });
     }
