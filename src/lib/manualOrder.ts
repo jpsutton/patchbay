@@ -62,18 +62,21 @@ export function moveInOrder(saved: string[], visible: string[], key: string, ind
 /**
  * Persist a manual order under `storageKey`. `keys` is the default order (newest first, usually).
  * A key seen for the first time is recorded at the front, so later activity doesn't move it.
+ * While `hold` is true, nothing is recorded: the keys may still change (for example, before the
+ * mesh status says which sessions are on another computer) and a wrong key would stay in storage.
  */
-export function useManualOrder(storageKey: string, keys: string[]) {
+export function useManualOrder(storageKey: string, keys: string[], hold = false) {
   const [saved, setSaved] = useState(() => loadStringList(storageKey));
   const ordered = useMemo(() => applyOrder(keys, saved), [keys, saved]);
 
   useEffect(() => {
+    if (hold) return;
     const fresh = ordered.filter((k) => !saved.includes(k));
     if (fresh.length === 0) return;
     const next = [...fresh, ...saved];
     saveStringList(storageKey, next);
     setSaved(next);
-  }, [ordered, saved, storageKey]);
+  }, [ordered, saved, storageKey, hold]);
 
   /** `visible` is the list the index refers to. Omit it to use `keys` in their saved order. */
   const move = (key: string, index: number, visible?: string[]) => {

@@ -55,7 +55,7 @@ The Linux packages include two units:
   sudo systemctl enable --now patchbayd@alice
   ```
 
-Pick one per user. Both use the same data folder, and only one Patchbay may use it at a time.
+Pick one per user. Both use the same data folder, and only one of them may run at a time.
 
 The tarball ships the user unit in `share/patchbay/patchbayd.service`, pointed at `~/.local/opt/patchbayd`:
 
@@ -90,7 +90,17 @@ Then open `http://127.0.0.1:4420/` on the laptop.
 | `--no-web` | Don't serve the web UI. The node is then reachable through the mesh only. |
 | `PATCHBAY_LOG` | Log filter, e.g. `debug` or `patchbay_lib=debug`. Default `info`. |
 
-Only one Patchbay may use a data folder at a time. `patchbayd` refuses to start while the desktop app runs on the same folder, and the app refuses while the daemon runs.
+Only one Patchbay process may own a data folder at a time. `patchbayd` refuses to start while the desktop app runs on the same folder.
+
+## The desktop app on a running daemon
+
+If you start the desktop app while `patchbayd` runs on the same data folder, the app attaches to the daemon and uses it as its backend. You get the native window, tray icon, quick-entry shortcut and notifications, while chats, Code sessions, terminals and the mesh run in the daemon. Closing the app leaves the daemon and its agents running.
+
+- They talk over a socket in the data folder (`patchbayd.sock`; a named pipe on Windows), readable by you only. Each side proves it knows the token in `ipc-token`, which the daemon writes on every start, so no other process can pose as either one. The socket works with `--no-web` and any `--listen` address.
+- The app and the daemon must be the same version. If they differ, the app says so and doesn't start. Update one of them, or stop the daemon to use the app on its own.
+- If the daemon stops or restarts, the app shows a banner and reconnects when the daemon is back. It doesn't take the data folder over, so a restarting daemon can start again.
+- The quick-entry shortcut and title bar settings apply to the app's window as usual. The daemon saves them with the other preferences.
+- A second copy of the app (not the daemon) still can't start on the same folder.
 
 ## What's different from the desktop app
 

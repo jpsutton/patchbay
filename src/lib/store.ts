@@ -197,6 +197,27 @@ const AGENT_PREF_KEYS: (keyof Preferences)[] = [
   "agentProviders",
 ];
 
+/** Saved preferences with defaults filled in for anything an older backend leaves out. */
+function withDefaults(loaded: Partial<Preferences> | null | undefined): Preferences {
+  return {
+    ...defaultPreferences,
+    ...loaded,
+    claudeConfig: { ...defaultPreferences.claudeConfig, ...loaded?.claudeConfig },
+    usageLimit: { ...defaultPreferences.usageLimit, ...loaded?.usageLimit },
+    agentEngine: { ...defaultPreferences.agentEngine, ...loaded?.agentEngine },
+  };
+}
+
+/** Show and apply saved preferences; agents restart when a setting they run with changed. */
+function setPrefs(next: Preferences) {
+  const prev = useStore.getState().prefs;
+  useStore.setState({ prefs: next });
+  applyUiPrefs(next);
+  if (AGENT_PREF_KEYS.some((k) => JSON.stringify(prev[k]) !== JSON.stringify(next[k]))) {
+    useStore.getState().bumpAgentConfig();
+  }
+}
+
 /** Add the queued prompts `me` sent (live, not from a catch-up) to what its composer takes back. */
 function handBack(prev: ComposerRestore | null, dropped: QueuedPrompt[], me: string | undefined): ComposerRestore | null {
   const mine = dropped.filter((q) => q.origin === me && !q.replayed);
@@ -356,6 +377,8 @@ interface Store {
   planOpen: boolean;
   prefs: Preferences;
   loadPrefs: () => Promise<void>;
+  /** Preferences someone saved on this backend (another window or browser tab): show them here. */
+  prefsSaved: (saved: Preferences) => void;
   /** Persist a change; resolves to an error message when the backend rejects it. */
   updatePrefs: (patch: Partial<Preferences>) => Promise<string | null>;
   confirm: (ConfirmRequest & { resolve: (r: ConfirmResult) => void }) | null;
@@ -924,28 +947,20 @@ export const useStore = create<Store>((set, get) => ({
   confirm: null,
   prefs: defaultPreferences,
   loadPrefs: async () => {
-    const loaded = await api.getPreferences();
-    const prefs = {
-      ...defaultPreferences,
-      ...loaded,
-      claudeConfig: { ...defaultPreferences.claudeConfig, ...loaded?.claudeConfig },
-      usageLimit: { ...defaultPreferences.usageLimit, ...loaded?.usageLimit },
-      agentEngine: { ...defaultPreferences.agentEngine, ...loaded?.agentEngine },
-    };
+    const prefs = withDefaults(await api.getPreferences());
     set({ prefs });
     applyUiPrefs(prefs);
   },
+  prefsSaved: (saved) => setPrefs(withDefaults(saved)),
   updatePrefs: async (patch) => {
-    const prev = get().prefs;
-    const next = { ...prev, ...patch };
+    const next = { ...get().prefs, ...patch };
     try {
       await api.setPreferences(next);
     } catch (e) {
       return String(e);
     }
-    set({ prefs: next });
-    applyUiPrefs(next);
-    if (AGENT_PREF_KEYS.some((k) => JSON.stringify(prev[k]) !== JSON.stringify(next[k]))) get().bumpAgentConfig();
+    // The backend's `prefs://changed` may have arrived first and applied them already.
+    setPrefs(next);
     return null;
   },
 

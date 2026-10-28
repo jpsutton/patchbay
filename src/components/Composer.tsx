@@ -533,7 +533,7 @@ export function Composer({
               ? "Ctrl+Enter to send, Enter for a new line"
               : "Enter to send, Shift+Enter for a new line") + (forceHint ? `\n${forceHint}` : "")
         }
-        className="block w-full resize-none bg-transparent px-4 pb-2 pt-3.5 text-[15px] leading-6 text-fg outline-none placeholder:text-faint"
+        className="block w-full resize-none overflow-x-hidden bg-transparent px-4 pb-2 pt-3.5 text-[15px] leading-6 text-fg outline-none placeholder:text-faint"
         onChange={(e) => {
           setText(e.target.value);
           setCaret(e.target.selectionStart ?? e.target.value.length);

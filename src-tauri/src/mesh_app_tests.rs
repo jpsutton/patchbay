@@ -757,6 +757,10 @@ async fn usage_limit_stops_claude_turns() {
     });
     prefs.usage_limit = prefs::UsageLimit { enabled: true, percent: 50 };
     crate::api::call(&a.state, "set_preferences", json!({ "prefs": prefs }), &chans).await.unwrap();
+    // Other windows on this backend hear about the change.
+    assert!(
+        a.events.lock().unwrap().iter().any(|(n, p)| n == crate::PREFS_CHANGED_EVENT && p["usageLimit"]["percent"] == 50)
+    );
     assert!(matches!(claude_rx.try_recv(), Ok(AgentCmd::Cancel)));
     assert_eq!(notices(), 2);
 

@@ -129,12 +129,9 @@ fn main() -> Result<()> {
 }
 
 async fn run(args: Args, data_dir: PathBuf, listen: String) -> Result<()> {
-    #[cfg(feature = "web")]
-    let events: patchbay_lib::web::Events = tokio::sync::broadcast::channel(4096).0;
-    #[cfg(feature = "web")]
-    let emit = patchbay_lib::web::ui_sink(events.clone());
-    #[cfg(not(feature = "web"))]
-    let emit: patchbay_lib::UiSink = std::sync::Arc::new(|_: &str, _: serde_json::Value| {});
+    // App events for browser tabs and an attached desktop app.
+    let events: patchbay_lib::ipc::server::Events = tokio::sync::broadcast::channel(4096).0;
+    let emit = patchbay_lib::ipc::server::ui_sink(events.clone());
 
     // Servers rarely run a keyring, so API keys may be stored in the database: a folder the
     // daemon creates is readable by this user only.
@@ -145,6 +142,10 @@ async fn run(args: Args, data_dir: PathBuf, listen: String) -> Result<()> {
     }
     let state = patchbay_lib::open_state(data_dir.clone(), emit)?;
     tracing::info!("patchbayd running on {}", data_dir.display());
+    // A desktop app started on the same folder attaches here and uses this daemon as its backend.
+    if let Err(e) = patchbay_lib::ipc::server::start(state.clone(), events.clone(), &data_dir) {
+        tracing::warn!("the desktop app can't attach to this daemon: {e:#}");
+    }
 
     #[cfg(feature = "web")]
     let server = if args.no_web {
@@ -162,7 +163,7 @@ async fn run(args: Args, data_dir: PathBuf, listen: String) -> Result<()> {
         let token = load_token(&data_dir, false)?;
         let cfg = patchbay_lib::web::Config { listen: addr, ui_dir, token: token.clone() };
         let state = state.clone();
-        let task = tokio::spawn(patchbay_lib::web::serve(state, events, cfg));
+        let task = tokio::spawn(patchbay_lib::web::serve(state, events.clone(), cfg));
         println!("Patchbay web UI: {}", url_for(&listen, &token));
         Some(task)
     };
@@ -190,6 +191,7 @@ async fn run(args: Args, data_dir: PathBuf, listen: String) -> Result<()> {
     };
 
     tracing::info!("shutting down");
+    patchbay_lib::ipc::server::cleanup(&data_dir);
     state.shutdown();
     result
 }

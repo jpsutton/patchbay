@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { QuickEntry } from "./QuickEntry";
+import { watchDaemonLink } from "./lib/connectionBanner";
 import "@fontsource-variable/geist";
 import "@fontsource-variable/geist-mono";
 import "./index.css";
@@ -11,6 +12,9 @@ async function boot() {
   if (!("__TAURI_INTERNALS__" in window)) {
     if (import.meta.env.DEV) (await import("./dev/fakeBackend")).install();
     else await (await import("./lib/webBackend")).install();
+  } else {
+    // The desktop app may run on patchbayd's backend: show when the daemon goes away.
+    void watchDaemonLink();
   }
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>

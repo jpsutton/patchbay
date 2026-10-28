@@ -5,10 +5,13 @@ mod claude_auth;
 mod code;
 mod db;
 #[cfg(feature = "desktop")]
+mod daemon_link;
+#[cfg(feature = "desktop")]
 mod desktop;
 mod files;
 mod gateway;
 mod handoff;
+pub mod ipc;
 mod mesh;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 mod portal_shortcuts;
@@ -334,8 +337,13 @@ async fn set_preferences(state: &AppState, prefs: prefs::Preferences) -> CmdResu
     if old.usage_limit != prefs.usage_limit {
         enforce_plan_limit(state);
     }
+    // Other windows on this backend (browser tabs, a desktop app attached to patchbayd) show them.
+    (state.emit)(PREFS_CHANGED_EVENT, serde_json::to_value(&prefs).unwrap_or_default());
     Ok(())
 }
+
+/// App event with the preferences just saved.
+pub const PREFS_CHANGED_EVENT: &str = "prefs://changed";
 
 /// Whether web search has a Brave API key, and where it comes from (`env`, `keychain`, `database`).
 async fn web_search_status(state: &AppState) -> CmdResult<serde_json::Value> {
@@ -2370,14 +2378,36 @@ pub fn default_data_dir() -> anyhow::Result<PathBuf> {
 /// Opens the database and mesh under `data_dir` and wires them into a fresh `AppState`. Both
 /// the desktop app and the daemon start here; `emit` reaches their windows or web clients.
 pub fn open_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow::Result<AppState> {
-    std::fs::create_dir_all(&data_dir)?;
-    // One process per data folder: two would share a mesh identity and fight over sessions.
-    let lock = std::fs::File::create(data_dir.join("instance.lock"))?;
-    if lock.try_lock().is_err() {
-        anyhow::bail!("another Patchbay (the app or patchbayd) is already using {}", data_dir.display());
+    if !lock_data_dir(&data_dir)? {
+        anyhow::bail!("{}", data_dir_busy(&data_dir));
     }
-    // Held until the process exits.
-    std::mem::forget(lock);
+    open_locked_state(data_dir, emit)
+}
+
+/// Take this process's lock on `data_dir`, held until it exits. One process per data folder: two
+/// would share a mesh identity and fight over sessions. False when another process (the app or
+/// patchbayd) holds it; a desktop app then attaches to a daemon that holds it (see ipc.rs).
+pub fn lock_data_dir(data_dir: &std::path::Path) -> anyhow::Result<bool> {
+    use anyhow::Context as _;
+    std::fs::create_dir_all(data_dir)?;
+    let lock = std::fs::File::create(data_dir.join("instance.lock"))?;
+    match lock.try_lock() {
+        Ok(()) => {
+            std::mem::forget(lock);
+            Ok(true)
+        }
+        Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+        Err(std::fs::TryLockError::Error(e)) => Err(e).context("locking the data folder"),
+    }
+}
+
+/// Why a data folder can't be opened while another process holds its lock.
+pub fn data_dir_busy(data_dir: &std::path::Path) -> String {
+    format!("another Patchbay (the app or patchbayd) is already using {}", data_dir.display())
+}
+
+/// `open_state` for a caller that already holds the folder's lock (`lock_data_dir`).
+pub fn open_locked_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow::Result<AppState> {
     let db = Arc::new(Db::open(&data_dir.join("patchbay.sqlite"))?);
     let keys = Arc::new(mesh::keys::OsKeyStore::new(&data_dir));
     let mesh = Mesh::new(db.clone(), data_dir.clone(), keys)?;
