@@ -35,6 +35,7 @@ export function UsageBar({
   cache?: CacheClock | null;
   onConfigureWindow?: () => void;
 }) {
+  const cacheNote = useCacheNote(cache ?? null, contextTokens);
   const hasTotals = !!totals && (totals.input > 0 || totals.output > 0);
   if (!hasTotals && contextTokens == null) return <div className="h-5" />;
 
@@ -65,17 +66,21 @@ export function UsageBar({
   const limit = autoCompactPercent ?? 90;
   const tone =
     pct == null ? "stroke-muted" : pct >= limit ? "stroke-danger" : pct >= limit * 0.75 ? "stroke-warn" : "stroke-live";
-  const ctxTitle =
+  const ctxTitle = [
     contextTokens == null
       ? "Context fill is reported after the next model call"
       : contextWindow
-        ? `${contextTokens.toLocaleString()} of ${contextWindow.toLocaleString()} tokens in context` +
+        ? `${contextTokens.toLocaleString()} of ${contextWindow.toLocaleString()} tokens in context (${Math.round(pct ?? 0)}%)` +
           (autoCompactPercent ? `\nAuto-compacts at ${autoCompactPercent}%` : "")
-        : `${contextTokens.toLocaleString()} tokens in context. Set this model's context window in Settings to see a meter.`;
+        : `${contextTokens.toLocaleString()} tokens in context. Set this model's context window in Settings to see a meter.`,
+    cacheNote,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 
   return (
     <div className="meta mt-1.5 flex h-5 items-center gap-3 px-1.5 text-faint" aria-label="Token usage">
-      {/* Narrow screens (phones) leave out the cached count and the context counts; both are in the tooltips. */}
+      {/* Narrow screens (phones) leave out the cached count; it is in the tooltip. The context fill and the prompt cache clock are only in the meter's tooltip. */}
       {hasTotals && totals && (
         <div className="flex shrink-0 items-center gap-2 whitespace-nowrap" title={detail}>
           <span>
@@ -94,26 +99,16 @@ export function UsageBar({
           )}
         </div>
       )}
-      {cache && <CacheClockChip cache={cache} contextTokens={contextTokens} />}
       <div className="flex-1" />
       <div className="flex shrink-0 items-center gap-1.5 whitespace-nowrap" title={ctxTitle}>
-        {contextWindow ? <ContextRing pct={pct ?? 0} tone={tone} compactAt={autoCompactPercent ?? null} /> : null}
-        <span>
-          {/* Next to its meter a bare percentage reads as context; a bare count wouldn't. */}
-          <span className={pct != null ? "hidden sm:inline" : ""}>Context </span>
-          {contextTokens == null ? (
-            "—"
-          ) : pct != null ? (
-            <>
-              <span className="hidden sm:inline">
-                <span className="text-muted">{fmtTokens(contextTokens)}</span> / {fmtTokens(contextWindow!)} ·{" "}
-              </span>
-              <span className="text-muted">{Math.round(pct)}%</span>
-            </>
-          ) : (
-            <span className="text-muted">{fmtTokens(contextTokens)}</span>
-          )}
-        </span>
+        {contextWindow ? (
+          <ContextRing pct={pct ?? 0} tone={tone} compactAt={autoCompactPercent ?? null} />
+        ) : (
+          // No window, no meter: the bare count stays as the thing to hover.
+          <span>
+            Context <span className="text-muted">{contextTokens == null ? "—" : fmtTokens(contextTokens)}</span>
+          </span>
+        )}
         {!contextWindow && onConfigureWindow && contextTokens != null && (
           <button className="hidden shrink-0 whitespace-nowrap font-sans text-accent-ink hover:underline sm:inline" onClick={onConfigureWindow}>
             set window
@@ -124,58 +119,35 @@ export function UsageBar({
   );
 }
 
-/** Warn when the cache has this little time left. Matches the agent's auto refresh. */
-const CACHE_WARN_MS = 5 * 60_000;
-/** A context smaller than this costs next to nothing to re-cache, so a cold cache is not worth a warning. */
-const CACHE_BIG_CONTEXT = 30_000;
-
 function fmtClock(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
 /**
- * The prompt cache as a countdown: warm for N more minutes, or cold. Anthropic bills a prompt
- * that arrives after the cache expires at the cache-write price for the whole context, so the
- * count turns amber in the last minutes and `/keepwarm` refreshes it.
+ * The prompt cache clock as tooltip text: warm for N more minutes, or cold. Anthropic bills a
+ * prompt that arrives after the cache expires at the cache-write price for the whole context, and
+ * `/keepwarm` refreshes it. Null while no cache clock is known.
  */
-function CacheClockChip({ cache, contextTokens }: { cache: CacheClock; contextTokens: number | null }) {
-  const timed = cache.lastAt != null;
+function useCacheNote(cache: CacheClock | null, contextTokens: number | null): string | null {
+  const lastAt = cache?.lastAt ?? null;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!timed) return;
+    if (lastAt == null) return;
     setNow(Date.now());
     const t = setInterval(() => setNow(Date.now()), 15_000);
     return () => clearInterval(t);
-  }, [timed, cache.lastAt]);
-  if (cache.lastAt == null) return null;
+  }, [lastAt]);
+  if (!cache || lastAt == null) return null;
 
-  const expiresAt = cache.lastAt + cache.ttlSecs * 1000;
+  const expiresAt = lastAt + cache.ttlSecs * 1000;
   const left = expiresAt - now;
-  const big = (contextTokens ?? 0) >= CACHE_BIG_CONTEXT;
   const auto = cache.auto ? "\nAuto keep-warm is on: /keepwarm auto turns it off." : "\n/keepwarm refreshes it; /keepwarm auto does it for you.";
   if (left <= 0) {
-    return (
-      <span
-        className={`shrink-0 whitespace-nowrap ${big ? "text-danger" : ""}`}
-        title={`Prompt cache expired at ${fmtClock(expiresAt)}.${
-          contextTokens != null ? ` The next prompt re-caches about ${fmtTokens(contextTokens)} tokens at the cache-write price.` : ""
-        }${auto}`}
-      >
-        cache cold
-      </span>
-    );
+    return `Prompt cache expired at ${fmtClock(expiresAt)}.${
+      contextTokens != null ? ` The next prompt re-caches about ${fmtTokens(contextTokens)} tokens at the cache-write price.` : ""
+    }${auto}`;
   }
-  const minutes = Math.ceil(left / 60_000);
-  const warn = left <= CACHE_WARN_MS && big;
-  return (
-    <span
-      className={`shrink-0 whitespace-nowrap ${warn ? "text-warn" : ""}`}
-      title={`Prompt cache is warm until ${fmtClock(expiresAt)}. A prompt sent before then reads it at the cache-read price.${auto}`}
-    >
-      cache <span className={warn ? "" : "text-muted"}>{minutes}m</span>
-      {cache.auto && <span className="hidden sm:inline"> · auto</span>}
-    </span>
-  );
+  return `Prompt cache is warm for ${Math.ceil(left / 60_000)}m, until ${fmtClock(expiresAt)}. A prompt sent before then reads it at the cache-read price.${auto}`;
 }
 
 const RING_R = 5.5;
