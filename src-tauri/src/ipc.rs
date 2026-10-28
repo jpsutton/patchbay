@@ -470,7 +470,7 @@ pub mod client {
 
         /// Channels the daemon may still send on.
         #[cfg(test)]
-        fn open_channels(&self) -> usize {
+        pub(super) fn open_channels(&self) -> usize {
             self.chans.lock().unwrap().len()
         }
 
