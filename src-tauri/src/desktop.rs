@@ -414,11 +414,13 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'stat
     }
 }
 
-/// Run a shared command for the window, answering through the invoke's resolver.
+/// Run a shared command for the window, answering through the invoke's resolver: on this app's
+/// own backend, or on the patchbayd it attached to (see daemon_link.rs).
 fn dispatch<R: tauri::Runtime>(invoke: tauri::ipc::Invoke<R>) {
     let cmd = invoke.message.command().to_owned();
     let webview = invoke.message.webview();
-    let state = webview.state::<crate::AppState>().inner().clone();
+    let state = webview.try_state::<crate::AppState>().map(|s| s.inner().clone());
+    let link = crate::daemon_link::attached(&webview);
     let args = match invoke.message.payload() {
         tauri::ipc::InvokeBody::Json(v) => v.clone(),
         tauri::ipc::InvokeBody::Raw(_) => serde_json::Value::Null,
@@ -430,11 +432,45 @@ fn dispatch<R: tauri::Runtime>(invoke: tauri::ipc::Invoke<R>) {
     });
     let resolver = invoke.resolver;
     tauri::async_runtime::spawn(async move {
-        match crate::api::call(&state, &cmd, args, &chans).await {
+        let r = match (state, link) {
+            (Some(state), _) => crate::api::call(&state, &cmd, args, &chans).await.map_err(|e| e.0),
+            (None, Some(link)) if cmd == "set_preferences" => link.set_preferences(args, &chans).await,
+            (None, Some(link)) => link.call(&cmd, args, &chans).await,
+            (None, None) => Err("Patchbay is still starting".to_owned()),
+        };
+        match r {
             Ok(v) => resolver.resolve(v),
-            Err(e) => resolver.reject(e.0),
+            Err(e) => resolver.reject(e),
         }
     });
+}
+
+/// Start this app's backend: its own on the data folder, or the patchbayd that already holds the
+/// folder. Returns the saved title bar and quick-entry shortcut, or what to tell the user.
+fn start_backend(app: &AppHandle, data_dir: std::path::PathBuf) -> std::result::Result<(String, String), String> {
+    if crate::lock_data_dir(&data_dir).map_err(|e| format!("{e:#}"))? {
+        let emit: crate::mesh::node::UiSink = {
+            let h = app.clone();
+            std::sync::Arc::new(move |name: &str, payload: serde_json::Value| {
+                let _ = h.emit(name, payload);
+            })
+        };
+        let state = crate::open_locked_state(data_dir, emit).map_err(|e| format!("{e:#}"))?;
+        let _ = state.desktop.set(std::sync::Arc::new(Hooks(app.clone())));
+        let p = crate::prefs::load(&state.db);
+        app.manage(state);
+        return Ok((p.title_bar, p.quick_entry_shortcut));
+    }
+    match crate::daemon_link::DaemonLink::attach(app, data_dir.clone()) {
+        Ok(link) => {
+            tracing::info!("attached to the patchbayd running on {}", data_dir.display());
+            let prefs = link.startup_prefs();
+            app.manage(link);
+            Ok(prefs)
+        }
+        Err(crate::ipc::client::AttachError::Unreachable(_)) => Err(crate::data_dir_busy(&data_dir)),
+        Err(e) => Err(format!("{}\n\n{e}", crate::data_dir_busy(&data_dir))),
+    }
 }
 
 /// GDK backends to try, in order, when `GDK_BACKEND` is not set. X11 comes first so a Wayland
@@ -462,28 +498,19 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(PendingUpdate::default())
         .setup(|app| {
-            let emit: crate::mesh::node::UiSink = {
-                let h = app.handle().clone();
-                std::sync::Arc::new(move |name: &str, payload: serde_json::Value| {
-                    let _ = h.emit(name, payload);
-                })
-            };
-            let state = match crate::open_state(app.path().app_data_dir()?, emit) {
-                Ok(s) => s,
-                Err(e) => {
+            let handle = app.handle().clone();
+            let (title_bar, quick_entry_shortcut) = match start_backend(&handle, app.path().app_data_dir()?) {
+                Ok(p) => p,
+                Err(message) => {
                     use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
                     app.dialog()
-                        .message(format!("{e:#}"))
+                        .message(message)
                         .title("Patchbay can't start")
                         .kind(MessageDialogKind::Error)
                         .blocking_show();
                     std::process::exit(1);
                 }
             };
-            let handle = app.handle().clone();
-            let _ = state.desktop.set(std::sync::Arc::new(Hooks(handle.clone())));
-            let p = crate::prefs::load(&state.db);
-            app.manage(state);
             // A tray needs a StatusNotifier host on Linux; never let its absence stop the app.
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_tray(&handle))) {
                 Ok(Err(e)) => tracing::warn!("tray icon unavailable: {e:#}"),
@@ -504,10 +531,10 @@ pub fn run() {
                     }
                 });
             }
-            if p.title_bar != "system" {
-                apply_title_bar(&handle, &p.title_bar);
+            if title_bar != "system" {
+                apply_title_bar(&handle, &title_bar);
             }
-            init_quick_shortcut(&handle, &p.quick_entry_shortcut);
+            init_quick_shortcut(&handle, &quick_entry_shortcut);
             Ok(())
         })
         .on_window_event(|w, ev| {

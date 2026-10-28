@@ -3,6 +3,7 @@
 // of the UI keeps using @tauri-apps/api as in the desktop app.
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
+import { showConnectionBanner } from "./connectionBanner";
 
 const TOKEN_KEY = "patchbay.webToken";
 
@@ -112,20 +113,7 @@ async function signIn(): Promise<WebSocket> {
 
 /** A banner while the daemon is unreachable; reloads once it's back, since streams didn't survive. */
 function onDisconnect() {
-  const bar = document.createElement("div");
-  bar.textContent = "Lost the connection to patchbayd. Reconnecting…";
-  bar.setAttribute("role", "status");
-  Object.assign(bar.style, {
-    position: "fixed",
-    inset: "0 0 auto 0",
-    zIndex: "9999",
-    padding: "8px 12px",
-    font: "13px system-ui, sans-serif",
-    textAlign: "center",
-    background: "#b42318",
-    color: "#fff",
-  });
-  document.body.appendChild(bar);
+  showConnectionBanner("Lost the connection to patchbayd. Reconnecting…");
   const retry = () => {
     const ws = new WebSocket(wsUrl());
     ws.onopen = () => {
