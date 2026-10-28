@@ -661,6 +661,8 @@ export interface Preferences {
   quickEntryShortcut: string;
   /** system: the window manager's title bar; app: none, Patchbay draws the window controls. */
   titleBar: "system" | "app";
+  /** Code sidebar: group sessions by project name, whichever computer hosts them. */
+  groupByProject: boolean;
   defaultSystemPrompt: string;
   expandReasoning: boolean;
   generateTitles: boolean;
@@ -712,6 +714,7 @@ export const defaultPreferences: Preferences = {
   notifications: true,
   quickEntryShortcut: "",
   titleBar: "system",
+  groupByProject: false,
   defaultSystemPrompt: "",
   expandReasoning: false,
   generateTitles: true,

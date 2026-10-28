@@ -195,6 +195,12 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
             ]}
           />
         </Row>
+        <Row
+          label="Group Code sessions by project name"
+          hint="Sessions in same-named folders share one group, whichever computer hosts them. Sessions on another computer get a cloud icon naming it."
+        >
+          <Toggle label="Group Code sessions by project name" checked={prefs.groupByProject} onChange={(v) => set("groupByProject", v)} />
+        </Row>
         <Row label="Open on launch">
           <Choice
             value={prefs.launchTab}
