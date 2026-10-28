@@ -9,6 +9,7 @@ import {
   type MeshChatEvent,
   type MeshProblem,
   type PlanLimits,
+  type Preferences,
 } from "./lib/ipc";
 import { codeEventArrived, remoteHost, useStore, type Mode } from "./lib/store";
 import { goBack, goForward, resetHistory, useHistory } from "./lib/history";
@@ -577,6 +578,8 @@ export default function App() {
     loadPlanHistory();
     const unlisteners = [
       listen<CodeEnvelope>("code://event", (ev) => codeEventArrived(ev.payload)),
+      // Preferences saved from another window or browser tab on this backend.
+      listen<Preferences>("prefs://changed", (ev) => useStore.getState().prefsSaved(ev.payload)),
       listen<PlanLimits>("code://plan-limits", (ev) => {
         useStore.getState().setPlanLimits(ev.payload);
         loadPlanHistory();

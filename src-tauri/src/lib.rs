@@ -337,8 +337,13 @@ async fn set_preferences(state: &AppState, prefs: prefs::Preferences) -> CmdResu
     if old.usage_limit != prefs.usage_limit {
         enforce_plan_limit(state);
     }
+    // Other windows on this backend (browser tabs, a desktop app attached to patchbayd) show them.
+    (state.emit)(PREFS_CHANGED_EVENT, serde_json::to_value(&prefs).unwrap_or_default());
     Ok(())
 }
+
+/// App event with the preferences just saved.
+pub const PREFS_CHANGED_EVENT: &str = "prefs://changed";
 
 /// Whether web search has a Brave API key, and where it comes from (`env`, `keychain`, `database`).
 async fn web_search_status(state: &AppState) -> CmdResult<serde_json::Value> {
