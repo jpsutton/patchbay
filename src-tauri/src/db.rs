@@ -332,6 +332,9 @@ pub struct ModelParams {
     pub reasoning_summary: Option<String>,
     /// Code agent: compact the conversation when context reaches this percentage.
     pub auto_compact_percent: Option<u8>,
+    /// Chat Completions only: send earlier reasoning back as `reasoning_content`. `None` = on;
+    /// turn it off for a server that rejects the field.
+    pub send_reasoning: Option<bool>,
     pub pricing: Pricing,
 }
 

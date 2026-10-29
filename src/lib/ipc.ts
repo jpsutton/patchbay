@@ -33,6 +33,8 @@ export interface ModelParams {
   reasoningEffort: ReasoningEffort | null;
   reasoningSummary: ReasoningSummary | null;
   autoCompactPercent: number | null;
+  /** Chat Completions only: send earlier reasoning back as `reasoning_content`. null = on. */
+  sendReasoning: boolean | null;
   pricing: Pricing;
 }
 
@@ -53,6 +55,7 @@ export const emptyParams = (): ModelParams => ({
   reasoningEffort: null,
   reasoningSummary: null,
   autoCompactPercent: null,
+  sendReasoning: null,
   pricing: { input: null, cachedInput: null, cacheWrite: null, output: null },
 });
 

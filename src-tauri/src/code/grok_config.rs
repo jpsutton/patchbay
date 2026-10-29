@@ -241,6 +241,7 @@ mod tests {
                 reasoning_effort: Some("high".into()),
                 reasoning_summary: Some("detailed".into()),
                 auto_compact_percent: Some(70),
+                send_reasoning: None,
                 pricing: Pricing::default(),
             },
         })

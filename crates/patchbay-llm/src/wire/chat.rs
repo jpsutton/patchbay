@@ -19,7 +19,7 @@ pub fn body(cfg: &Config, req: &Request) -> Value {
     for m in &req.messages {
         match m.role {
             Role::User => user_messages(m, &mut messages),
-            Role::Assistant => messages.push(assistant_message(m)),
+            Role::Assistant => messages.push(assistant_message(m, send_reasoning(cfg))),
         }
     }
     let mut b = json!({
@@ -112,7 +112,13 @@ fn user_messages(m: &Message, out: &mut Vec<Value>) {
     }
 }
 
-fn assistant_message(m: &Message) -> Value {
+/// Whether assistant turns carry their reasoning back. OpenAI's own Chat Completions never
+/// returns reasoning text and has no field to take it, so it never gets one.
+fn send_reasoning(cfg: &Config) -> bool {
+    cfg.send_reasoning && !is_openai(cfg)
+}
+
+fn assistant_message(m: &Message, with_reasoning: bool) -> Value {
     let text = m.text();
     let calls: Vec<Value> = m
         .tool_calls()
@@ -131,6 +137,19 @@ fn assistant_message(m: &Message) -> Value {
         msg["tool_calls"] = json!(calls);
     } else if text.is_empty() {
         msg["content"] = json!("");
+    }
+    if with_reasoning {
+        let reasoning: Vec<&str> = m
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Reasoning { text: t, .. } if !t.is_empty() => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        if !reasoning.is_empty() {
+            msg["reasoning_content"] = json!(reasoning.join("\n\n"));
+        }
     }
     msg
 }
@@ -313,6 +332,34 @@ mod tests {
         assert_eq!(b["messages"][2]["tool_calls"][0]["function"]["arguments"], "{\"path\":\"a\"}");
         assert_eq!(b["messages"][3], json!({"role": "tool", "tool_call_id": "c1", "content": "contents"}));
         assert_eq!(b["tools"][0]["function"]["name"], "read");
+    }
+
+    #[test]
+    fn sends_reasoning_back_unless_turned_off() {
+        let call = ToolCall { id: "c1".into(), name: "read".into(), arguments: json!({}), signature: None };
+        let mut req = Request::simple("sys", "hi");
+        req.messages.push(Message::with_parts(
+            Role::Assistant,
+            vec![
+                Part::Reasoning { text: "need the file".into(), signature: None, opaque: None },
+                // An Anthropic redacted block carries no text and must not add an empty entry.
+                Part::Reasoning { text: String::new(), signature: None, opaque: Some(json!({"type": "redacted_thinking"})) },
+                Part::ToolCall(call.clone()),
+            ],
+        ));
+        req.messages.push(Message::with_parts(Role::User, vec![Part::ToolResult(ToolResult::text(&call, "x", false))]));
+        let assistant = |c: &Config| body(c, &req)["messages"][2].clone();
+
+        let on = assistant(&cfg());
+        assert_eq!(on["reasoning_content"], "need the file");
+        assert_eq!(on["tool_calls"][0]["id"], "c1");
+
+        let mut off = cfg();
+        off.send_reasoning = false;
+        assert!(assistant(&off).get("reasoning_content").is_none());
+
+        let openai = Config::new(WireFormat::ChatCompletions, "https://api.openai.com/v1", "m");
+        assert!(assistant(&openai).get("reasoning_content").is_none());
     }
 
     #[test]
