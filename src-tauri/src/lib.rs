@@ -41,7 +41,7 @@ use crate::code::CodeManager;
 use crate::code::acp::AgentCmd;
 use crate::db::{
     Attachment, ChatUsageRow, CodeSession, CodeUsageRow, Conversation, Db, McpServer, Message, Model,
-    PermissionRule, Prompt, Provider, SearchHit, new_id,
+    PermissionRule, Prompt, Provider, SearchHit, SidebarEntry, new_id,
 };
 use crate::mesh::Mesh;
 use crate::terminal::{TermEvent, TerminalManager};
@@ -2318,6 +2318,31 @@ async fn add_permission_rule(
 
 async fn delete_permission_rule(state: &AppState, id: String) -> CmdResult<()> {
     Ok(state.db.delete_permission_rule(&id)?)
+}
+
+// ---------------- sidebar layout ----------------
+
+async fn list_sidebar_layout(state: &AppState) -> CmdResult<Vec<SidebarEntry>> {
+    Ok(state.db.list_sidebar_layout()?)
+}
+
+async fn apply_sidebar_layout(state: &AppState, put: Vec<SidebarEntry>, remove: Vec<String>) -> CmdResult<()> {
+    for e in &put {
+        if e.key.is_empty() {
+            return Err(CmdError("key is required".into()));
+        }
+        if e.kind != "group" && e.kind != "folder" {
+            return Err(CmdError(format!("unknown layout kind {}", e.kind)));
+        }
+    }
+    let put: Vec<SidebarEntry> = put
+        .into_iter()
+        .map(|mut e| {
+            e.name = e.name.trim().to_owned();
+            e
+        })
+        .collect();
+    Ok(state.db.apply_sidebar_layout(&put, &remove)?)
 }
 
 // ---------------- prompts ----------------

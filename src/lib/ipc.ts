@@ -1,6 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type { Activity } from "./activity";
 import type { UpdateInfo } from "./update";
+import type { SidebarEntry } from "./sidebarLayout";
 
 export type ProviderKind = "openai_chat" | "openai_responses" | "anthropic" | "gemini";
 export type AuthMode = "api_key" | "claude_login";
@@ -945,6 +946,9 @@ export const api = {
   addPermissionRule: (cwd: string, toolKind: string, pattern: string) =>
     invoke<PermissionRule>("add_permission_rule", { cwd, toolKind, pattern }),
   deletePermissionRule: (id: string) => invoke<void>("delete_permission_rule", { id }),
+
+  listSidebarLayout: () => invoke<SidebarEntry[]>("list_sidebar_layout"),
+  applySidebarLayout: (put: SidebarEntry[], remove: string[]) => invoke<void>("apply_sidebar_layout", { put, remove }),
 
   listPrompts: () => invoke<Prompt[]>("list_prompts"),
   savePrompt: (input: { id?: string; name: string; content: string }) => invoke<Prompt>("save_prompt", input),

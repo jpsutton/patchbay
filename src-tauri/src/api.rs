@@ -195,6 +195,8 @@ commands! {
     list_permission_rules();
     add_permission_rule(cwd, tool_kind, pattern);
     delete_permission_rule(id);
+    list_sidebar_layout();
+    apply_sidebar_layout(put, remove);
     list_prompts();
     save_prompt(id, name, content);
     delete_prompt(id);
