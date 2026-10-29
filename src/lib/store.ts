@@ -38,6 +38,7 @@ import { isForegroundUpdate } from "./codeWorking";
 import { chunkChars, phaseOf, type Phase } from "./workingStatus";
 import { appendUserChunk } from "./harness";
 import { planUpdateOf } from "./todoPlan";
+import { applyChange, type LayoutChange, type SidebarEntry } from "./sidebarLayout";
 
 export { codeWorking, FOREGROUND_IDLE_MS, hasActiveForegroundTools } from "./codeWorking";
 export { harnessTags } from "./harness";
@@ -404,6 +405,11 @@ interface Store {
   refreshConversations: () => Promise<void>;
   selectConversation: (id: string | null) => void;
   refreshCodeSessions: () => Promise<void>;
+  /** The Code sidebar's groups and folder order, synced across the mesh. Null until first loaded. */
+  sidebarLayout: SidebarEntry[] | null;
+  refreshSidebarLayout: () => Promise<void>;
+  /** Show a layout change at once, then write it; reload if the write fails. */
+  changeSidebarLayout: (change: LayoutChange) => Promise<void>;
   selectCodeSession: (id: string | null) => void;
   resetCode: (id: string) => void;
   pushCodeEntry: (id: string, e: Entry) => void;
@@ -855,6 +861,8 @@ function loadSidebarCollapsed(): boolean {
 let catalogKey: string | null = null;
 /** Counts session-list loads, so only the latest one's answer is kept. */
 let codeSessionsSeq = 0;
+/** Same for the sidebar layout. */
+let sidebarLayoutSeq = 0;
 
 export const useStore = create<Store>((set, get) => ({
   mode: "chat",
@@ -935,6 +943,7 @@ export const useStore = create<Store>((set, get) => ({
   conversations: [],
   activeConversationId: null,
   codeSessions: [],
+  sidebarLayout: null,
   activeCodeSessionId: null,
   code: {},
   chatStreams: {},
@@ -1039,6 +1048,24 @@ export const useStore = create<Store>((set, get) => ({
     set({ codeSessions: list });
     backfillActivity();
   },
+  refreshSidebarLayout: async () => {
+    const seq = ++sidebarLayoutSeq;
+    const list = await api.listSidebarLayout();
+    if (seq !== sidebarLayoutSeq) return;
+    set({ sidebarLayout: list });
+  },
+  changeSidebarLayout: async (change) => {
+    if (change.put.length === 0 && change.remove.length === 0) return;
+    // A slower, older reload must not undo this change.
+    ++sidebarLayoutSeq;
+    set((st) => ({ sidebarLayout: applyChange(st.sidebarLayout ?? [], change) }));
+    try {
+      await api.applySidebarLayout(change.put, change.remove);
+    } catch (e) {
+      get().setToast(errorText(e));
+      await get().refreshSidebarLayout().catch(() => {});
+    }
+  },
   selectCodeSession: (id) => set({ activeCodeSessionId: id }),
 
   resetCode: (id) => {
@@ -1115,6 +1142,7 @@ export const useStore = create<Store>((set, get) => ({
     const has = (...t: string[]) => t.some((x) => tables.includes(x));
     if (has("conversations", "messages")) get().refreshConversations().catch(() => {});
     if (has("code_sessions")) get().refreshCodeSessions().catch(() => {});
+    if (has("sidebar_layout")) get().refreshSidebarLayout().catch(() => {});
     if (has("providers", "models", "mesh_secrets")) get().refreshCatalog().catch(() => {});
     if (has("mesh_members")) get().refreshMesh();
   },

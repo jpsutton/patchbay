@@ -78,6 +78,7 @@ pub const TABLES: &[Table] = &[
     Table { name: "mcp_servers", pk: &["id"], cols: &["name", "config_json", "enabled", "created_at"] },
     Table { name: "permission_rules", pk: &["id"], cols: &["cwd", "tool_kind", "pattern", "created_at"] },
     Table { name: "prompts", pk: &["id"], cols: &["name", "content", "created_at", "updated_at"] },
+    Table { name: "sidebar_layout", pk: &["id"], cols: &["kind", "name", "parent", "pos"] },
     Table {
         name: "mesh_members",
         pk: &["node_id"],
@@ -794,6 +795,34 @@ mod tests {
         let b = temp_db();
         sync(&a, &b);
         assert_eq!(b.list_prompts().unwrap()[0].id, p.id);
+    }
+
+    #[test]
+    fn sidebar_layout_syncs() {
+        use crate::db::SidebarEntry;
+        let entry = |key: &str, kind: &str, name: &str, parent: &str, pos| SidebarEntry {
+            key: key.into(),
+            kind: kind.into(),
+            name: name.into(),
+            parent: parent.into(),
+            pos,
+        };
+        let (a, b) = (temp_db(), temp_db());
+        a.apply_sidebar_layout(
+            &[entry("group:g1", "group", "IPS", "", 1024), entry("n1:/work/ips-a", "folder", "", "group:g1", 1024)],
+            &[],
+        )
+        .unwrap();
+        sync(&a, &b);
+        let got = b.list_sidebar_layout().unwrap();
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().any(|e| e.key == "group:g1" && e.name == "IPS"));
+        // Moving a folder out of its group, and removing the group, reach the other node.
+        b.apply_sidebar_layout(&[entry("n1:/work/ips-a", "folder", "", "", 2048)], &["group:g1".to_string()]).unwrap();
+        sync(&b, &a);
+        let got = a.list_sidebar_layout().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].parent.as_str(), got[0].pos), ("", 2048));
     }
 
     struct AttDefaults;

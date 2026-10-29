@@ -216,6 +216,17 @@ ALTER TABLE code_sessions ADD COLUMN title_manual INTEGER NOT NULL DEFAULT 0;
 "#, r#"
 -- How an Anthropic provider authenticates: stored API key, or Claude Code's subscription login.
 ALTER TABLE providers ADD COLUMN auth_mode TEXT NOT NULL DEFAULT 'api_key';
+"#, r#"
+-- How the Code sidebar is laid out: user-made groups, which group each folder sits in, and the
+-- manual order of both. `id` is `group:<uuid>` for a group or the folder's key for a folder;
+-- `parent` is a group's id, or '' at the top; `pos` orders entries that share a parent.
+CREATE TABLE sidebar_layout (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    parent TEXT NOT NULL DEFAULT '',
+    pos INTEGER NOT NULL DEFAULT 0
+);
 "#];
 
 pub fn now_ms() -> i64 {
@@ -435,6 +446,24 @@ pub struct McpServer {
     pub enabled: bool,
     /// `McpConfig` with secret values blanked; secrets live in the keyring.
     pub config: serde_json::Value,
+}
+
+/// One row of the Code sidebar's layout: a group or a folder, and where it sits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SidebarEntry {
+    /// `group:<id>` for a group, or the folder's key.
+    pub key: String,
+    /// `group` or `folder`.
+    pub kind: String,
+    /// A group's name; empty for a folder.
+    #[serde(default)]
+    pub name: String,
+    /// The key of the group this entry is in; empty at the top level.
+    #[serde(default)]
+    pub parent: String,
+    /// Order among entries with the same parent, lowest first.
+    pub pos: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1315,6 +1344,35 @@ impl Db {
 
     pub fn delete_permission_rule(&self, id: &str) -> Result<()> {
         self.conn().execute("DELETE FROM permission_rules WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    // ---- sidebar layout ----
+
+    pub fn list_sidebar_layout(&self) -> Result<Vec<SidebarEntry>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT id, kind, name, parent, pos FROM sidebar_layout ORDER BY parent, pos, id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(SidebarEntry { key: r.get(0)?, kind: r.get(1)?, name: r.get(2)?, parent: r.get(3)?, pos: r.get(4)? })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Write `put` (insert or update by key) and delete `remove`, all or nothing.
+    pub fn apply_sidebar_layout(&self, put: &[SidebarEntry], remove: &[String]) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        for e in put {
+            tx.execute(
+                "INSERT INTO sidebar_layout (id, kind, name, parent, pos) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(id) DO UPDATE SET kind = ?2, name = ?3, parent = ?4, pos = ?5",
+                params![e.key, e.kind, e.name, e.parent, e.pos],
+            )?;
+        }
+        for key in remove {
+            tx.execute("DELETE FROM sidebar_layout WHERE id = ?1", [key])?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
