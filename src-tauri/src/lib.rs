@@ -816,6 +816,19 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
                     l.ready = Some(ev);
                     l.auth = None;
                 }
+                CodeEvent::Config { .. } => {
+                    // A window attaching later replays `ready`, so it has to carry the model, modes
+                    // and options as they are now, not as the agent started. Same merge as the
+                    // front end's `config` event: models and modes stay when absent.
+                    if let Some(r) = live.get_mut(&id).and_then(|l| l.ready.as_mut()) {
+                        for key in ["models", "modes"] {
+                            if !ev[key].is_null() {
+                                r[key] = ev[key].clone();
+                            }
+                        }
+                        r["configOptions"] = ev["configOptions"].clone();
+                    }
+                }
                 CodeEvent::AuthRequired { .. } => live.entry(id).or_default().auth = Some(ev),
                 CodeEvent::AuthResolved => {
                     if let Some(l) = live.get_mut(&id) {
