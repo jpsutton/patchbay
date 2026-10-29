@@ -335,6 +335,8 @@ async fn phone_joins_follows_resumes_and_switches_gateway() {
     // Lists come from the gateway; the phone learns B's address for later.
     let idx = p.client.rpc("remote.index", Value::Null).await.unwrap();
     assert!(idx["codeSessions"].as_array().unwrap().iter().any(|c| c["id"] == s.id));
+    // The sidebar layout comes with the lists, for the phone's groups.
+    assert!(idx["sidebarLayout"].is_array());
     until("phone knows two computers", 10, || {
         p.client.status()["members"].as_array().unwrap().iter().filter(|m| m["role"].is_null()).count() == 2
     })

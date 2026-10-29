@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { ActionSheet, useHold, type ItemAction } from "../components/ItemMenu";
 import { Dot } from "../components/Dot";
 import { ChevronRightIcon, MonitorIcon, PlusIcon, StarIcon } from "../components/icons";
 import { fmtShort } from "../lib/format";
 import { api, errorText, type CodeSession } from "../lib/ipc";
 import { promptRename, sessionActions } from "../lib/itemActions";
-import { loadStringList, saveStringList, useManualOrder } from "../lib/manualOrder";
+import { loadStringList, saveStringList } from "../lib/manualOrder";
+import { arrange } from "../lib/sidebarLayout";
 import { memberName, memberOnline, useStore } from "../lib/store";
 
 /** What a gateway knows a Code session is doing. */
@@ -16,10 +17,7 @@ export interface Live {
   last: number;
 }
 
-const ORDER_KEY = "patchbay.remote.codeProjectOrder";
 const COLLAPSED_KEY = "patchbay.remote.codeProjectCollapsed";
-/** How far the pointer moves before a press on a grip becomes a drag. */
-const DRAG_THRESHOLD = 4;
 
 function basename(p: string): string {
   return p.split(/[\\/]/).filter(Boolean).pop() ?? p;
@@ -33,8 +31,17 @@ function parentLabel(p: string): string {
   return (home ? "~/" : "/") + parts.slice(home).join("/");
 }
 
+/** `/a/b` and `/a/b/` are one folder. */
+function dirOf(s: CodeSession): string {
+  return s.cwd.length > 1 ? s.cwd.replace(/[\\/]+$/, "") || s.cwd : s.cwd;
+}
+
+/**
+ * The folder's key in the Code sidebar layout. It is the same on every computer, so it names
+ * the computer the folder is on (see `CodeSidebar`).
+ */
 function projectKey(s: CodeSession): string {
-  return `${s.hostNode ?? ""}:${s.cwd}`;
+  return s.hostNode ? `${s.hostNode}:${dirOf(s)}` : dirOf(s);
 }
 
 interface Project {
@@ -43,8 +50,10 @@ interface Project {
   cwd: string;
   label: string;
   where: string;
-  /** Unpinned sessions, newest first. Pins are listed above the computers. */
+  /** Unpinned sessions, newest first. Pins are listed above the folders. */
   sessions: CodeSession[];
+  /** When the folder's newest session, pinned or not, last changed. */
+  latest: number;
 }
 
 /** The collapsed "Archived" row at the end of a list. */
@@ -63,8 +72,9 @@ export function ArchivedRow({ count, open, onToggle }: { count: number; open: bo
 }
 
 /**
- * The phone's Code list. With `groupByProject`, sessions nest under the folder they run in,
- * and those folders drag into order within their computer. The order is this phone's alone.
+ * The phone's Code list. With `groupByProject`, sessions nest under the folder they run in, and
+ * the folders follow the Code sidebar's layout: the groups and the order set on the computers.
+ * The phone only shows that layout; it is changed on a computer.
  */
 export function CodeSessionList({
   live,
@@ -82,49 +92,49 @@ export function CodeSessionList({
 }) {
   const sessions = useStore((s) => s.codeSessions);
   const mesh = useStore((s) => s.mesh);
+  const layout = useStore((s) => s.sidebarLayout);
   const [showArchived, setShowArchived] = useState(false);
   const [collapsed, setCollapsed] = useState(() => new Set(loadStringList(COLLAPSED_KEY)));
   const [menu, setMenu] = useState<{ title: string; actions: ItemAction[] } | null>(null);
-  const [drag, setDrag] = useState<{ key: string; index: number } | null>(null);
-  const headerEls = useRef(new Map<string, HTMLDivElement>());
-  const dragged = useRef(false);
 
   const pinnedFirst = (a: CodeSession, b: CodeSession) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt;
   const active = useMemo(() => sessions.filter((s) => s.archivedAt == null), [sessions]);
   const archived = useMemo(() => sessions.filter((s) => s.archivedAt != null), [sessions]);
 
-  const projects = useMemo<Project[]>(() => {
-    const by = new Map<string, { host: string; cwd: string; list: CodeSession[] }>();
+  // Every folder, including one whose sessions are all pinned, so unpinning puts it back where it was.
+  const projects = useMemo(() => {
+    const by = new Map<string, CodeSession[]>();
     for (const s of active) {
-      const key = projectKey(s);
-      const g = by.get(key) ?? { host: s.hostNode ?? "", cwd: s.cwd, list: [] };
-      g.list.push(s);
-      by.set(key, g);
+      const k = projectKey(s);
+      const list = by.get(k);
+      if (list) list.push(s);
+      else by.set(k, [s]);
     }
-    return [...by.values()].map(({ host, cwd, list }) => ({
-      key: `${host}:${cwd}`,
-      host,
-      cwd,
-      label: basename(cwd),
-      where: parentLabel(cwd),
-      sessions: list.filter((s) => !s.pinned).sort((a, b) => b.updatedAt - a.updatedAt),
-    }));
-  }, [active]);
+    const out = new Map<string, Project>();
+    for (const [key, list] of by) {
+      const newest = [...list].sort((a, b) => b.updatedAt - a.updatedAt);
+      const top = newest[0];
+      const host = top.hostNode ?? "";
+      const cwd = dirOf(top);
+      out.set(key, {
+        key,
+        host,
+        cwd,
+        label: basename(cwd),
+        // The same folder name can live on two computers: say which one this is.
+        where: host ? `${memberName(mesh, host) || "unknown computer"}:${parentLabel(cwd)}` : parentLabel(cwd),
+        sessions: newest.filter((s) => !s.pinned),
+        latest: top.updatedAt,
+      });
+    }
+    return out;
+  }, [active, mesh]);
 
-  // Every project, including one whose sessions are all pinned, so unpinning puts it back where it was.
-  const rankKeys = useMemo(() => {
-    const by = new Map<string, number>();
-    for (const s of active) by.set(projectKey(s), Math.max(by.get(projectKey(s)) ?? 0, s.updatedAt));
-    return [...by.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k);
-  }, [active]);
-  const { ordered, move } = useManualOrder(ORDER_KEY, rankKeys);
-  const orderedProjects = useMemo(() => {
-    const byKey = new Map(projects.map((p) => [p.key, p]));
-    return ordered.flatMap((k) => {
-      const p = byKey.get(k);
-      return p && p.sessions.length > 0 ? [p] : [];
-    });
-  }, [projects, ordered]);
+  // Folders and groups in the layout's order. A folder it has never seen goes on top, newest first.
+  const top = useMemo(
+    () => arrange([...projects.values()].sort((a, b) => b.latest - a.latest).map((p) => p.key), layout ?? []).top,
+    [projects, layout],
+  );
 
   const hosts = useMemo(() => {
     const ids: string[] = [];
@@ -146,47 +156,6 @@ export function CodeSessionList({
       saveStringList(COLLAPSED_KEY, [...next]);
       return next;
     });
-
-  const slotAt = (keys: string[], y: number) => {
-    const i = keys.findIndex((k) => {
-      const r = headerEls.current.get(k)?.getBoundingClientRect();
-      return r != null && y < r.top + r.height / 2;
-    });
-    return i < 0 ? keys.length : i;
-  };
-
-  const startDrag = (e: ReactPointerEvent<HTMLButtonElement>, key: string, hostKeys: string[]) => {
-    if (e.button !== 0) return;
-    e.stopPropagation();
-    const startY = e.clientY;
-    const el = e.currentTarget;
-    let index: number | null = null;
-    dragged.current = false;
-    el.setPointerCapture(e.pointerId);
-    const onMove = (ev: PointerEvent) => {
-      if (index == null) {
-        if (Math.abs(ev.clientY - startY) < DRAG_THRESHOLD) return;
-        document.body.style.cursor = "grabbing";
-        document.body.style.userSelect = "none";
-        dragged.current = true;
-      }
-      index = slotAt(hostKeys, ev.clientY);
-      setDrag({ key, index });
-    };
-    const up = (ev: PointerEvent) => {
-      el.removeEventListener("pointermove", onMove);
-      el.removeEventListener("pointerup", up);
-      el.removeEventListener("pointercancel", up);
-      if (index == null) return;
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-      setDrag(null);
-      if (ev.type === "pointerup") move(key, index, hostKeys);
-    };
-    el.addEventListener("pointermove", onMove);
-    el.addEventListener("pointerup", up);
-    el.addEventListener("pointercancel", up);
-  };
 
   const openSession = async (s: CodeSession) => {
     try {
@@ -232,6 +201,24 @@ export function CodeSessionList({
     );
   };
 
+  /** A folder with the sessions in it, or nothing when all of them are pinned. */
+  const folder = (key: string) => {
+    const p = projects.get(key);
+    if (!p || p.sessions.length === 0) return null;
+    return (
+      <ProjectBlock
+        key={p.key}
+        project={p}
+        collapsed={collapsed.has(p.key)}
+        online={memberOnline(mesh, p.host)}
+        onToggle={() => toggleCollapsed(p.key)}
+        onNew={() => onNewIn(p.host, p.cwd)}
+      >
+        {p.sessions.map((s) => row(s, true))}
+      </ProjectBlock>
+    );
+  };
+
   return (
     <>
       {menu && <ActionSheet title={menu.title} actions={menu.actions} onClose={() => setMenu(null)} />}
@@ -243,47 +230,21 @@ export function CodeSessionList({
               {pinned.map((s) => row(s, false))}
             </section>
           )}
-          {hosts.map((host) => {
-            const list = orderedProjects.filter((p) => p.host === host);
-            if (list.length === 0) return null;
-            const hostKeys = list.map((p) => p.key);
-            return (
-              <section key={host}>
-                <Section>
-                  <MonitorIcon size={12} />
-                  {memberName(mesh, host) || "unknown computer"}
-                  {!memberOnline(mesh, host) && <span className="font-sans normal-case tracking-normal">· offline</span>}
-                </Section>
-                {list.map((p, i) => (
-                  <ProjectBlock
-                    key={p.key}
-                    project={p}
-                    index={i}
-                    hostKeys={hostKeys}
-                    collapsed={collapsed.has(p.key)}
-                    online={memberOnline(mesh, p.host)}
-                    dragging={drag?.key === p.key}
-                    dropAt={dropIndex(drag, hostKeys)}
-                    headerEls={headerEls}
-                    onToggle={() => toggleCollapsed(p.key)}
-                    onDrag={(e) => startDrag(e, p.key, hostKeys)}
-                    onReorder={() =>
-                      setMenu({
-                        title: p.label,
-                        actions: [
-                          { label: "Move up", onSelect: () => move(p.key, i - 1, hostKeys) },
-                          { label: "Move down", onSelect: () => move(p.key, i + 2, hostKeys) },
-                        ],
-                      })
-                    }
-                    onNew={() => onNewIn(p.host, p.cwd)}
-                  >
-                    {p.sessions.map((s) => row(s, true))}
-                  </ProjectBlock>
-                ))}
-              </section>
-            );
-          })}
+          <div className="pt-2">
+            {top.map((t) => {
+              if (t.type === "folder") return folder(t.key);
+              // A group with no folder to show is left out.
+              const kids = t.children.filter((k) => (projects.get(k)?.sessions.length ?? 0) > 0);
+              if (kids.length === 0) return null;
+              const open = !collapsed.has(t.key);
+              return (
+                <div key={t.key}>
+                  <GroupHeader name={t.name} count={kids.length} collapsed={!open} onToggle={() => toggleCollapsed(t.key)} />
+                  {open && <div className="ml-3 border-l border-line">{kids.map((k) => folder(k))}</div>}
+                </div>
+              );
+            })}
+          </div>
         </>
       ) : (
         hosts.map((host) => (
@@ -306,72 +267,50 @@ export function CodeSessionList({
   );
 }
 
-/** Where the dragged project will land, or null when the pointer is still over its own slot. */
-function dropIndex(drag: { key: string; index: number } | null, hostKeys: string[]): number | null {
-  if (!drag || !hostKeys.includes(drag.key)) return null;
-  const from = hostKeys.indexOf(drag.key);
-  if (drag.index === from || drag.index === from + 1) return null;
-  return drag.index;
+/** A user-made group of folders, shown above them. */
+function GroupHeader({
+  name,
+  count,
+  collapsed,
+  onToggle,
+}: {
+  name: string;
+  count: number;
+  collapsed: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      className="mt-2 flex w-full items-center gap-2 px-4 py-2 text-left font-mono text-[11px] uppercase tracking-[0.06em] text-faint"
+      aria-expanded={!collapsed}
+      onClick={onToggle}
+    >
+      <ChevronRightIcon size={13} className={`shrink-0 transition-transform ${collapsed ? "" : "rotate-90"}`} />
+      <span className="min-w-0 truncate">{name || "Group"}</span>
+      {collapsed && <span className="shrink-0">{count}</span>}
+    </button>
+  );
 }
 
 function ProjectBlock({
   project,
-  index,
-  hostKeys,
   collapsed,
   online,
-  dragging,
-  dropAt,
-  headerEls,
   onToggle,
-  onDrag,
-  onReorder,
   onNew,
   children,
 }: {
   project: Project;
-  index: number;
-  hostKeys: string[];
   collapsed: boolean;
   online: boolean;
-  dragging: boolean;
-  dropAt: number | null;
-  headerEls: RefObject<Map<string, HTMLDivElement>>;
   onToggle: () => void;
-  onDrag: (e: ReactPointerEvent<HTMLButtonElement>) => void;
-  onReorder: () => void;
   onNew: () => void;
   children: ReactNode;
 }) {
-  const hold = useHold(onReorder);
-  useEffect(() => {
-    const els = headerEls.current;
-    const key = project.key;
-    return () => {
-      els.delete(key);
-    };
-  }, [headerEls, project.key]);
   return (
-    <div
-      ref={(el) => {
-        if (el) headerEls.current.set(project.key, el);
-      }}
-      className={dragging ? "opacity-40" : ""}
-    >
-      {dropAt === index && <div className="mx-4 my-0.5 h-0.5 rounded-full bg-accent" />}
-      <div className="mx-2 mt-0.5 flex items-center gap-0.5 rounded-lg py-0.5 pl-1 pr-1">
-        <button
-          className="flex h-9 w-7 shrink-0 touch-none items-center justify-center"
-          aria-label={`Reorder ${project.label}`}
-          onPointerDown={onDrag}
-        >
-          <span className="grid grid-cols-2 gap-[3px]" aria-hidden>
-            {Array.from({ length: 6 }, (_, n) => (
-              <span key={n} className="h-[3px] w-[3px] rounded-full bg-faint/80" />
-            ))}
-          </span>
-        </button>
-        <button className="flex min-w-0 flex-1 items-center gap-1.5 py-1.5 text-left" aria-expanded={!collapsed} onClick={onToggle} {...hold}>
+    <div>
+      <div className="mx-2 mt-0.5 flex items-center gap-0.5 rounded-lg py-0.5 pl-2 pr-1">
+        <button className="flex min-w-0 flex-1 items-center gap-1.5 py-2 text-left" aria-expanded={!collapsed} onClick={onToggle}>
           <span className="shrink-0 truncate text-[13px] font-medium text-fg/90">{project.label}</span>
           <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-faint">{project.where}</span>
           <ChevronRightIcon size={14} className={`shrink-0 text-faint transition-transform ${collapsed ? "" : "rotate-90"}`} />
@@ -388,7 +327,6 @@ function ProjectBlock({
           </button>
         )}
       </div>
-      {dropAt === hostKeys.length && index === hostKeys.length - 1 && <div className="mx-4 my-0.5 h-0.5 rounded-full bg-accent" />}
       {!collapsed && children}
     </div>
   );
