@@ -88,6 +88,7 @@ Sync doesn't need relaying: a change from A reaches B through C as ordinary sync
 | Conversations, messages, message attachments | Messages form an immutable tree keyed by UUID, so concurrent sends become siblings. |
 | Attachment records | The bytes are fetched on demand from any connected peer (`mesh.file` RPC) and checked against their SHA-256. `attachments.path` stays local. |
 | Code sessions | Including the cached transcript, usage, `host_node` and `epoch`. |
+| Code sidebar layout | `sidebar_layout`: the user's folder groups, which group each folder is in, and the manual order of groups and folders. A folder's id names its computer (`<node_id>:<path>`), so the same path on two computers stays two entries. |
 | Prompts, MCP servers, permission rules | Permission rules keep their absolute folder, so they apply only where paths match. |
 | Providers and models | `providers.inline_key` stays local. Keys travel sealed in `mesh_secrets`. |
 | `mesh_members`, `mesh_secrets` | Membership and sealed secrets. |

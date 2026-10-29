@@ -246,6 +246,13 @@ impl Agent {
                 let s = self.need_session(&params)?;
                 Ok(json!({"killed": s.shells.kill(param_str(&params, "shellId")?)}))
             }
+            // Move the running foreground shell commands to the background, so the turn goes on
+            // and reads a steered message (the host's forced send).
+            "patchbay/background_tools" => {
+                let s = self.need_session(&params)?;
+                s.shells.background_foreground();
+                Ok(json!({}))
+            }
             _ => Err(RpcError::new(-32601, format!("method not found: {method}"))),
         }
     }

@@ -4,6 +4,7 @@ import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 import type { Channel } from "@tauri-apps/api/core";
 import { emptyParams, usesPatchbayModels } from "../lib/ipc";
+import { applyChange, type SidebarEntry } from "../lib/sidebarLayout";
 import type {
   MeshChatEvent,
   MeshStatus,
@@ -133,6 +134,7 @@ const db = {
   leaf: {} as Record<string, string | null>,
   mcp: [] as McpServer[],
   rules: [] as PermissionRule[],
+  sidebarLayout: [] as SidebarEntry[],
   prompts: [] as Prompt[],
   transcripts: {} as Record<string, string>,
 };
@@ -1386,6 +1388,11 @@ export function install() {
           return rule;
         }
         case "delete_permission_rule": db.rules = db.rules.filter((r) => r.id !== a.id); return null;
+        case "list_sidebar_layout": return db.sidebarLayout;
+        case "apply_sidebar_layout": {
+          db.sidebarLayout = applyChange(db.sidebarLayout, { put: a.put as SidebarEntry[], remove: a.remove as string[] });
+          return null;
+        }
         case "list_prompts": return [...db.prompts].sort((x, y) => x.name.localeCompare(y.name));
         case "save_prompt": {
           const existing = db.prompts.find((p) => p.id === a.id);

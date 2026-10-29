@@ -48,6 +48,8 @@ pub struct Registry {
     next: AtomicU64,
     /// Where commands run next: a `cd` in one command carries to the next.
     cwd: Mutex<Option<PathBuf>>,
+    /// Woken to move the foreground commands that are running to the background.
+    to_background: tokio::sync::Notify,
 }
 
 impl Registry {
@@ -64,6 +66,11 @@ impl Registry {
             }
             None => false,
         }
+    }
+
+    /// Ask every foreground Bash call that is running to move its command to the background.
+    pub fn background_foreground(&self) {
+        self.to_background.notify_waiters();
     }
 
     /// Stop every background command (the session is closing).
@@ -290,9 +297,28 @@ Do not sleep in a loop to wait: read the output instead."
             code = finished(&mut run) => Ok(code),
             _ = tokio::time::sleep(Duration::from_millis(timeout_ms)) => Err("timeout"),
             _ = ctx.cancel.cancelled() => Err("cancelled"),
+            _ = session.shells.to_background.notified() => Err("background"),
         };
         let code = match outcome {
             Ok(c) => c,
+            // The user sent a message: the command keeps running, as a background one, and the
+            // turn goes on. Its `cd` is lost.
+            Err("background") => {
+                let _ = std::fs::remove_file(&cwd_file);
+                // What it printed so far goes to the model now, so BashOutput starts after it.
+                let so_far = run.output();
+                let id = adopt(session, &ctx.call_id, run, so_far.len());
+                let mut text = clip_middle(so_far.trim_end(), MODEL_OUTPUT_CHARS);
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(&format!(
+                    "Command moved to the background with ID: {id}. Read its output with BashOutput, stop it with KillShell."
+                ));
+                let mut out = ToolOutput::text(text);
+                out.meta = Some(json!({"background_shell": {"id": id}}));
+                return out;
+            }
             Err(why) => {
                 run.kill.cancel();
                 let _ = tokio::time::timeout(Duration::from_secs(2), finished(&mut run)).await;
@@ -332,13 +358,10 @@ Do not sleep in a loop to wait: read the output instead."
     }
 }
 
-fn start_background(session: &Arc<Session>, call_id: &str, command: &str, dir: &Path) -> ToolOutput {
-    let run = match spawn_shell(command, dir, None, None) {
-        Ok(r) => r,
-        Err(e) => return ToolOutput::error(e),
-    };
+/// Register a running command as a background one: the client hears when it ends, on the card
+/// of the call that started it. Returns its id.
+fn adopt(session: &Arc<Session>, call_id: &str, run: Running, read: usize) -> String {
     let id = format!("bash_{}", session.shells.next.fetch_add(1, Ordering::Relaxed) + 1);
-    // Tell the client when the job ends, on the card of the call that started it.
     let done = run.done.clone();
     let (watcher, card, job) = (session.clone(), call_id.to_owned(), id.clone());
     tokio::spawn(async move {
@@ -354,7 +377,16 @@ fn start_background(session: &Arc<Session>, call_id: &str, command: &str, dir: &
         .shells
         .lock()
         .unwrap()
-        .insert(id.clone(), Arc::new(Background { run, read: Mutex::new(0) }));
+        .insert(id.clone(), Arc::new(Background { run, read: Mutex::new(read) }));
+    id
+}
+
+fn start_background(session: &Arc<Session>, call_id: &str, command: &str, dir: &Path) -> ToolOutput {
+    let run = match spawn_shell(command, dir, None, None) {
+        Ok(r) => r,
+        Err(e) => return ToolOutput::error(e),
+    };
+    let id = adopt(session, call_id, run, 0);
     let mut out = ToolOutput::text(format!(
         "Command running in background with ID: {id}. Read its output with BashOutput, stop it with KillShell."
     ));

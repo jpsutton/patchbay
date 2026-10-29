@@ -572,6 +572,7 @@ export default function App() {
         if (s.models.length === 0) s.setSettingsOpen(true);
       })
       .catch((e) => setToast(errorText(e)));
+    useStore.getState().refreshSidebarLayout().catch(() => {});
     useStore.getState().refreshMesh();
     api.planLimits().then((l) => useStore.getState().setPlanLimits(l), () => {});
     const loadPlanHistory = () => api.planHistory().then((h) => useStore.getState().setPlanHistory(h), () => {});
