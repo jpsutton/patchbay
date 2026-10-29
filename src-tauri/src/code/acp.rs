@@ -1470,6 +1470,21 @@ async fn run(
             }
             cmd = rx.recv() => {
                 let Some(cmd) = cmd else { break };
+                // A forced send steers instead of cancelling where steering moves a running shell
+                // command to the background and `session/cancel` would kill it (`force_steers`).
+                let force_steers = extensions.force_steers && steer == Some(Steer::Acp) && running && !forcing;
+                let background_tools = |conn: &Rc<acp::ClientSideConnection>| {
+                    if force_steers && extensions.background_tools {
+                        stop_job(conn, "patchbay/background_tools", json!({ "sessionId": session_id }));
+                    }
+                };
+                let cmd = match cmd {
+                    AgentCmd::Prompt { msg, force: true, reply } if force_steers => {
+                        background_tools(&conn);
+                        AgentCmd::Prompt { msg, force: false, reply }
+                    }
+                    other => other,
+                };
                 match cmd {
                     AgentCmd::Prompt { msg, force: true, reply } => {
                         if !running {
@@ -1523,6 +1538,26 @@ async fn run(
                         }
                     }
                     AgentCmd::SendNow { prompt_id } => {
+                        if force_steers {
+                            // Nothing is cancelled: a steered message stays steered, once the
+                            // shell command it waits on is in the background. A queued one is
+                            // steered in now.
+                            background_tools(&conn);
+                            let Some(i) = queue.iter().position(|(_, m)| m.id == prompt_id) else { continue };
+                            let (rank, msg) = queue.remove(i).expect("found above");
+                            let Some((method, params)) = steer.and_then(|s| s.request(&session_id, &msg.blocks)) else {
+                                queue.insert(i, (rank, msg));
+                                continue;
+                            };
+                            emit(&sink, &csid, msg.event(Delivery::Steered));
+                            steered_in.insert(msg.id.clone(), msg.clone());
+                            let (conn, steered, sent_at) = (conn.clone(), steered_tx.clone(), forces);
+                            tokio::task::spawn_local(async move {
+                                let resp = ext(&conn, method, params).await;
+                                let _ = steered.send((msg, None, resp, sent_at));
+                            });
+                            continue;
+                        }
                         let (rank, i, msg) = if let Some(i) = queue.iter().position(|(_, m)| m.id == prompt_id) {
                             let (rank, msg) = queue.remove(i).expect("found above");
                             (rank, i, msg)
@@ -2986,6 +3021,30 @@ for line in sys.stdin:
                 ("urgent".into(), Delivery::Sent),
             ]
         );
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Claude Code and Patchbay's agent move a running shell command to the background on a steer,
+    /// where `session/cancel` kills it: a forced send steers there and the turn is not cancelled.
+    #[test]
+    fn force_send_steers_where_that_backgrounds_tools() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let ext = crate::code::agents::Extensions { force_steers: true, ..Default::default() };
+        let Some((events, tx, thread)) = spawn_fake_agent_ext(&dir, &["--no-methods", "--steering"], "", ext) else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        assert_eq!(force(&tx, "urgent"), Delivery::Steered);
+        assert_eq!(prompt(&tx, "release"), Delivery::Steered);
+        wait_for(&events, "promptDone", |evs| evs.iter().any(prompt_done));
+
+        assert_eq!(agent_heard(&events, 3), ["prompt:hold", "steer:urgent", "steer:release"]);
+        assert_eq!(stop_reasons(&events), [json!("end_turn")]);
         no_errors(&events);
         tx.send(AgentCmd::Shutdown).unwrap();
         thread.join().unwrap();
