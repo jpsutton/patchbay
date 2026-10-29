@@ -176,6 +176,15 @@ pub struct Extensions {
     /// The agent can stop one running tool call, or one background shell, without ending the
     /// turn (`patchbay/cancel_tool`, `patchbay/kill_shell`). Patchbay's own agent only.
     pub cancel_tool: bool,
+    /// A forced send steers the message in instead of cancelling the turn. Claude Code moves the
+    /// foreground tool it waits on (a shell command) to the background on a steer, as its own
+    /// CLI does; `session/cancel` would kill it. Needs the agent to take steering too.
+    #[serde(skip)]
+    pub force_steers: bool,
+    /// The agent moves its running foreground shell commands to the background on
+    /// `patchbay/background_tools`, which a forced send asks for first. Patchbay's own agent only.
+    #[serde(skip)]
+    pub background_tools: bool,
 }
 
 /// What makes an agent ask Patchbay before acting, so the session's approval mode decides
@@ -556,7 +565,7 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
         args: resolved.args,
         env,
         env_remove: providers.env_remove,
-        ext: Extensions::default(),
+        ext: Extensions { force_steers: kind == AgentKind::ClaudeCode, ..Extensions::default() },
         session_meta,
         initial_model: session.agent_model.clone(),
         login_hint: kind.login_hint(),
@@ -580,7 +589,14 @@ fn prepare_patchbay(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSess
         args: Vec::new(),
         env: Vec::new(),
         env_remove: Vec::new(),
-        ext: Extensions { patchbay_models: true, rewind: true, cancel_tool: true, ..Extensions::default() },
+        ext: Extensions {
+            patchbay_models: true,
+            rewind: true,
+            cancel_tool: true,
+            force_steers: true,
+            background_tools: true,
+            ..Extensions::default()
+        },
         session_meta: json!({ "model": initial_model }),
         initial_model,
         login_hint: AgentKind::Patchbay.login_hint(),
@@ -629,7 +645,7 @@ fn prepare_grok(
         args,
         env,
         env_remove: vec!["XAI_API_KEY".into(), "GROK_CODE_XAI_API_KEY".into()],
-        ext: Extensions { status_line: true, rewind: true, patchbay_models: true, interject: true, steering: false, force_send: false, cancel_tool: false },
+        ext: Extensions { status_line: true, rewind: true, patchbay_models: true, interject: true, steering: false, force_send: false, cancel_tool: false, force_steers: false, background_tools: false },
         session_meta,
         initial_model: None,
         login_hint: "",
