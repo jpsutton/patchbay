@@ -781,7 +781,7 @@ async fn usage_limit_stops_claude_turns() {
         attachments: json!([]),
         delivery: Delivery::Sent,
     });
-    prefs.usage_limit = prefs::UsageLimit { enabled: true, percent: 50 };
+    prefs.usage_limit = prefs::UsageLimit { enabled: true, percent: 50, ..Default::default() };
     crate::api::call(&a.state, "set_preferences", json!({ "prefs": prefs }), &chans).await.unwrap();
     // Other windows on this backend hear about the change.
     assert!(

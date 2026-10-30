@@ -149,6 +149,18 @@ function UsageLimit({ agent }: { agent: string }) {
           />
         </Row>
       )}
+      {limit.enabled && (
+        <Row
+          label="Continue after reset"
+          hint="When the limit resets, tell each session it stopped to continue where it left off. Prompts that were queued in those sessions stay in their composers."
+        >
+          <Toggle
+            label="Continue after reset"
+            checked={limit.autoResume}
+            onChange={(autoResume) => update({ usageLimit: { ...limit, autoResume } })}
+          />
+        </Row>
+      )}
     </>
   );
 }

@@ -7,7 +7,7 @@
 //! Patchbay's own agent, on a Claude login, reads the same numbers from Anthropic's
 //! `anthropic-ratelimit-unified-*` response headers and reports them in the same shape.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -157,6 +157,8 @@ pub struct PlanGuard {
     history: Mutex<Vec<Sample>>,
     /// Sessions cancelled for the limit whose turn hasn't ended yet.
     stopping: Mutex<HashSet<String>>,
+    /// Sessions the guard stopped, to prompt again once the limit lifts: id -> when it resets.
+    resume: Mutex<BTreeMap<String, i64>>,
 }
 
 impl PlanGuard {
@@ -196,6 +198,42 @@ impl PlanGuard {
 
     pub fn turn_ended(&self, code_session_id: &str) {
         self.stopping.lock().unwrap().remove(code_session_id);
+    }
+
+    /// Prompt the session again once `resets_at` has passed and the limit no longer holds.
+    pub fn schedule_resume(&self, code_session_id: &str, resets_at: i64) {
+        self.resume.lock().unwrap().insert(code_session_id.to_owned(), resets_at);
+    }
+
+    /// The user prompted the session themselves, so it needn't be resumed. True if it was waiting.
+    pub fn cancel_resume(&self, code_session_id: &str) -> bool {
+        self.resume.lock().unwrap().remove(code_session_id).is_some()
+    }
+
+    /// Drop every waiting session; true if there were any.
+    pub fn clear_resumes(&self) -> bool {
+        let mut r = self.resume.lock().unwrap();
+        let any = !r.is_empty();
+        r.clear();
+        any
+    }
+
+    /// Take the sessions whose limit reset at or before `now`.
+    pub fn take_due(&self, now: i64) -> Vec<String> {
+        let mut r = self.resume.lock().unwrap();
+        let due: Vec<String> = r.iter().filter(|(_, at)| **at <= now).map(|(id, _)| id.clone()).collect();
+        for id in &due {
+            r.remove(id);
+        }
+        due
+    }
+
+    pub fn resumes(&self) -> BTreeMap<String, i64> {
+        self.resume.lock().unwrap().clone()
+    }
+
+    pub fn set_resumes(&self, resumes: BTreeMap<String, i64>) {
+        *self.resume.lock().unwrap() = resumes;
     }
 }
 
@@ -283,13 +321,29 @@ mod tests {
     fn guard_respects_the_switch_and_stops_once() {
         let g = PlanGuard::default();
         g.record(PlanLimits::from_update(&update(0.97, 0.1, false)).unwrap());
-        let on = UsageLimit { enabled: true, percent: 95 };
+        let on = UsageLimit { enabled: true, percent: 95, auto_resume: false };
         assert!(g.hit(&on, 1000).is_some());
-        assert!(g.hit(&UsageLimit { enabled: false, percent: 95 }, 1000).is_none());
+        assert!(g.hit(&UsageLimit { enabled: false, ..on }, 1000).is_none());
         assert!(g.start_stopping("s1"));
         assert!(!g.start_stopping("s1"));
         g.turn_ended("s1");
         assert!(g.start_stopping("s1"));
+    }
+
+    #[test]
+    fn resumes_come_due_at_their_reset() {
+        let g = PlanGuard::default();
+        g.schedule_resume("a", 1000);
+        g.schedule_resume("b", 2000);
+        g.schedule_resume("c", 3000);
+        assert!(g.take_due(999).is_empty());
+        assert_eq!(g.take_due(2000), ["a", "b"]);
+        assert!(g.take_due(2500).is_empty(), "taken once");
+        assert!(g.cancel_resume("c"));
+        assert!(!g.cancel_resume("c"));
+        g.schedule_resume("d", 4000);
+        assert!(g.clear_resumes());
+        assert!(g.resumes().is_empty());
     }
 
     #[test]
