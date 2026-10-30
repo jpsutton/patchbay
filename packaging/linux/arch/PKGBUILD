@@ -2,7 +2,7 @@
 #   cd packaging/linux/arch && makepkg -si
 pkgbase=patchbay
 pkgname=(patchbay patchbayd)
-pkgver=0.14.0
+pkgver=0.15.0
 pkgrel=1
 pkgdesc="Desktop LLM client with chat and a coding agent, for any provider"
 arch=(x86_64 aarch64)
