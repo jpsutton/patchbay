@@ -8,7 +8,7 @@ import {
   type Conversation,
   type MeshChatEvent,
   type MeshProblem,
-  type PlanLimits,
+  type PlanAccount,
   type Preferences,
 } from "./lib/ipc";
 import { codeEventArrived, remoteHost, useStore, type Mode } from "./lib/store";
@@ -574,17 +574,12 @@ export default function App() {
       .catch((e) => setToast(errorText(e)));
     useStore.getState().refreshSidebarLayout().catch(() => {});
     useStore.getState().refreshMesh();
-    api.planLimits().then((l) => useStore.getState().setPlanLimits(l), () => {});
-    const loadPlanHistory = () => api.planHistory().then((h) => useStore.getState().setPlanHistory(h), () => {});
-    loadPlanHistory();
+    api.planAccounts().then((a) => useStore.getState().setPlanAccounts(a), () => {});
     const unlisteners = [
       listen<CodeEnvelope>("code://event", (ev) => codeEventArrived(ev.payload)),
       // Preferences saved from another window or browser tab on this backend.
       listen<Preferences>("prefs://changed", (ev) => useStore.getState().prefsSaved(ev.payload)),
-      listen<PlanLimits>("code://plan-limits", (ev) => {
-        useStore.getState().setPlanLimits(ev.payload);
-        loadPlanHistory();
-      }),
+      listen<PlanAccount[]>("code://plan-limits", (ev) => useStore.getState().setPlanAccounts(ev.payload)),
       // Mesh (see src-tauri/src/mesh): membership changes, other nodes' writes, live streams.
       listen("mesh://status", () => useStore.getState().refreshMesh()),
       listen<{ tables: string[] }>("mesh://changed", (ev) => useStore.getState().onSynced(ev.payload.tables)),

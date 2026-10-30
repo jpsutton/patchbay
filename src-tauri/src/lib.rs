@@ -100,12 +100,7 @@ impl AppState {
             remote_terms: Arc::default(),
             desktop: Arc::default(),
         };
-        if let Some(l) = state.db.get_setting(PLAN_LIMITS_KEY).ok().flatten().and_then(|j| serde_json::from_str(&j).ok()) {
-            state.code.plan.record(l);
-        }
-        if let Some(h) = state.db.get_setting(PLAN_HISTORY_KEY).ok().flatten().and_then(|j| serde_json::from_str(&j).ok()) {
-            state.code.plan.set_history(h);
-        }
+        state.code.plan.set_accounts(load_plan_accounts(&state.db));
         if let Some(r) = state.db.get_setting(PLAN_RESUME_KEY).ok().flatten().and_then(|j| serde_json::from_str(&j).ok()) {
             state.code.plan.set_resumes(r);
         }
@@ -800,8 +795,11 @@ fn code_sink(state: &AppState) -> code::acp::Sink {
 fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     use code::acp::CodeEvent;
     if let CodeEvent::PlanLimits { limits } = env.event {
-        state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, serde_json::to_value(&limits).unwrap_or_default());
-        adopt_plan_limits(state, limits, true);
+        // Only sessions on a Claude plan report limits; one that can't be placed counts as the default login's.
+        let (account, name) = plan_account(state, &prefs::load(&state.db), &env.code_session_id).unwrap_or_else(default_plan_account);
+        let tagged = serde_json::json!({ "account": account, "name": name, "limits": limits });
+        state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, tagged);
+        adopt_plan_limits(state, &account, name, limits, true);
         return;
     }
     track_titles(state, &env);
@@ -879,27 +877,24 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     }
 }
 
-/// The Claude plan usage Claude Code last reported, saved so the panel and the guard have it
-/// after a restart; its reset times say when it goes stale.
+/// Each Claude account's last reported plan usage and its distinct reports of the last eight
+/// days, saved so the panel and the guard have them after a restart; reset times say when they go stale.
+const PLAN_ACCOUNTS_KEY: &str = "claude.planByAccount";
+/// Before accounts were told apart: the one account's limits and history, read once to migrate.
 const PLAN_LIMITS_KEY: &str = "claude.planLimits";
-const PLAN_LIMITS_EVENT: &str = "code://plan-limits";
-/// Every distinct report of the last eight days, for the panel's view of busy periods.
 const PLAN_HISTORY_KEY: &str = "claude.planHistory";
-/// A report one member saw, shared with the others: they run on the same Claude account.
+const PLAN_LIMITS_EVENT: &str = "code://plan-limits";
+/// A report one member saw, shared with the others, tagged with its account (`claude_auth::account`).
 const MESH_PLAN_LIMITS_EVENT: &str = "mesh://plan-limits";
 
-/// Take a plan report seen here, or one from another member that is newer than ours.
-fn adopt_plan_limits(state: &AppState, limits: code::plan_limits::PlanLimits, seen_here: bool) {
-    if !seen_here && state.code.plan.latest().is_some_and(|old| old.observed_at >= limits.observed_at) {
+/// Take a plan report seen here, or one from another member that is newer than ours for its account.
+fn adopt_plan_limits(state: &AppState, account: &str, name: Option<String>, limits: code::plan_limits::PlanLimits, seen_here: bool) {
+    if !seen_here && state.code.plan.account(account).latest.is_some_and(|old| old.observed_at >= limits.observed_at) {
         return;
     }
-    let v = serde_json::to_value(&limits).unwrap_or_default();
-    let _ = state.db.set_setting(PLAN_LIMITS_KEY, &v.to_string());
-    if state.code.plan.record_history(&limits) {
-        let _ = state.db.set_setting(PLAN_HISTORY_KEY, &serde_json::to_string(&state.code.plan.history()).unwrap_or_default());
-    }
-    state.code.plan.record(limits);
-    (state.emit)(PLAN_LIMITS_EVENT, v);
+    state.code.plan.record(account, name, limits);
+    let _ = state.db.set_setting(PLAN_ACCOUNTS_KEY, &serde_json::to_string(&state.code.plan.accounts()).unwrap_or_default());
+    (state.emit)(PLAN_LIMITS_EVENT, serde_json::to_value(plan_views(state)).unwrap_or_default());
     enforce_plan_limit(state);
 }
 
@@ -911,12 +906,72 @@ fn save_resumes(state: &AppState) {
     let _ = state.db.set_setting(PLAN_RESUME_KEY, &serde_json::to_string(&state.code.plan.resumes()).unwrap_or_default());
 }
 
-async fn plan_history(state: &AppState) -> CmdResult<Vec<code::plan_limits::Sample>> {
-    Ok(state.code.plan.history())
+fn load_plan_accounts(db: &Db) -> std::collections::BTreeMap<String, code::plan_limits::Account> {
+    let get = |k| db.get_setting(k).ok().flatten();
+    if let Some(m) = get(PLAN_ACCOUNTS_KEY).and_then(|j| serde_json::from_str(&j).ok()) {
+        return m;
+    }
+    let old = code::plan_limits::Account {
+        latest: get(PLAN_LIMITS_KEY).and_then(|j| serde_json::from_str(&j).ok()),
+        history: get(PLAN_HISTORY_KEY).and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+        name: None,
+    };
+    if old == Default::default() {
+        return Default::default();
+    }
+    let (account, name) = default_plan_account();
+    [(account, code::plan_limits::Account { name, ..old })].into()
 }
 
-async fn plan_limits(state: &AppState) -> CmdResult<Option<code::plan_limits::PlanLimits>> {
-    Ok(state.code.plan.latest())
+/// The account Claude Code itself signs in with, and its organization's name.
+fn default_plan_account() -> (String, Option<String>) {
+    claude_auth::resolve_dir(None).map(|d| claude_auth::account(&d)).unwrap_or_default()
+}
+
+/// One Claude account's usage, named for the panel.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlanView {
+    account: String,
+    /// "Claude Code login" for the default account, else the Claude login providers that use it,
+    /// else its organization's name.
+    label: String,
+    #[serde(flatten)]
+    usage: code::plan_limits::Account,
+}
+
+fn plan_views(state: &AppState) -> Vec<PlanView> {
+    let (default, _) = default_plan_account();
+    let providers = state.db.list_providers().unwrap_or_default();
+    state
+        .code
+        .plan
+        .accounts()
+        .into_iter()
+        .map(|(account, usage)| {
+            let names: Vec<_> = providers
+                .iter()
+                .filter(|(p, _)| p.auth_mode == db::AuthMode::ClaudeLogin && provider_plan_account(p).as_deref() == Some(account.as_str()))
+                .map(|(p, _)| p.name.as_str())
+                .collect();
+            let label = if account == default {
+                "Claude Code login".to_owned()
+            } else if names.is_empty() {
+                usage.name.clone().unwrap_or_else(|| account.clone())
+            } else {
+                names.join(", ")
+            };
+            PlanView { account, label, usage }
+        })
+        .collect()
+}
+
+async fn plan_accounts(state: &AppState) -> CmdResult<Vec<PlanView>> {
+    Ok(plan_views(state))
+}
+
+fn provider_plan_account(p: &Provider) -> Option<String> {
+    claude_auth::resolve_dir(p.claude_config_dir.as_deref()).ok().map(|d| claude_auth::account(&d).0)
 }
 
 // The ACP wire log (Settings > Diagnostics): this computer's agents only, kept in memory.
@@ -949,35 +1004,37 @@ async fn wire_log_save(state: &AppState) -> CmdResult<String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// Whether the session may run on a Claude plan with usage limits: Claude Code on its own
-/// sign-in (not on a Patchbay provider, which bills by the token), or Patchbay's agent on a
-/// model whose provider uses the Claude login.
-fn on_claude_plan(state: &AppState, prefs: &prefs::Preferences, id: &str) -> bool {
+/// The Claude plan account the session runs on, if it runs on one with usage limits: Claude
+/// Code on its own sign-in (not on a Patchbay provider, which bills by the token), or Patchbay's
+/// agent on a model whose provider uses a Claude login. Accounts are `claude_auth::account`s.
+fn plan_account(state: &AppState, prefs: &prefs::Preferences, id: &str) -> Option<(String, Option<String>)> {
     use code::agents::AgentKind;
-    let Some(session) = state.db.get_code_session(id).ok().flatten() else {
-        return false;
-    };
+    let session = state.db.get_code_session(id).ok().flatten()?;
     match AgentKind::parse(&session.agent) {
-        Some(AgentKind::ClaudeCode) => !prefs.agent_providers.contains_key(AgentKind::ClaudeCode.id()),
+        Some(AgentKind::ClaudeCode) if !prefs.agent_providers.contains_key(AgentKind::ClaudeCode.id()) => {
+            Some(default_plan_account())
+        }
         Some(AgentKind::Patchbay) => session
             .model_ref
             .and_then(|r| state.db.get_model(&r).ok().flatten())
             .and_then(|m| state.db.get_provider(&m.provider_id).ok().flatten())
-            .is_some_and(|(p, _)| p.auth_mode == db::AuthMode::ClaudeLogin),
-        _ => false,
+            .filter(|(p, _)| p.auth_mode == db::AuthMode::ClaudeLogin)
+            .and_then(|(p, _)| claude_auth::resolve_dir(p.claude_config_dir.as_deref()).ok())
+            .map(|d| claude_auth::account(&d)),
+        _ => None,
     }
 }
 
-/// Past the usage limit, cancel every running Claude Code turn on the plan. The agent stops
+/// Cancel every running turn on a Claude plan account past its usage limit. The agent stops
 /// cleanly, its session stays resumable, and queued prompts go back to their composers.
 fn enforce_plan_limit(state: &AppState) {
     let prefs = prefs::load(&state.db);
     let now = code::plan_limits::now();
-    let Some(hit) = state.code.plan.hit(&prefs.usage_limit, now) else {
-        return;
-    };
     for id in state.code.busy_sessions() {
-        if !on_claude_plan(state, &prefs, &id) || !state.code.plan.start_stopping(&id) {
+        let Some(hit) = plan_account(state, &prefs, &id).and_then(|(a, _)| state.code.plan.hit(&a, &prefs.usage_limit, now)) else {
+            continue;
+        };
+        if !state.code.plan.start_stopping(&id) {
             continue;
         }
         tracing::info!("usage limit: stopping {id} ({} at {}%)", hit.what, hit.percent);
@@ -1015,13 +1072,15 @@ async fn resume_after_limit(state: &AppState) {
         return;
     }
     let now = code::plan_limits::now();
-    if state.code.plan.hit(&prefs.usage_limit, now).is_some() {
-        return;
-    }
-    let due = state.code.plan.take_due(now - RESUME_GRACE_SECS);
+    let mut due = state.code.plan.take_due(now - RESUME_GRACE_SECS);
     if due.is_empty() {
         return;
     }
+    // A session waits on its own account: another of its windows may still hold.
+    due.retain(|id| {
+        let hit = plan_account(state, &prefs, id).and_then(|(a, _)| state.code.plan.hit(&a, &prefs.usage_limit, now));
+        hit.inspect(|h| state.code.plan.schedule_resume(id, h.resets_at)).is_none()
+    });
     save_resumes(state);
     for id in due {
         if let Err(e) = resume_session(state, &id).await {
@@ -1213,8 +1272,8 @@ async fn code_prompt_local(
 ) -> anyhow::Result<code::acp::Delivery> {
     ensure_local_host(state, &id)?;
     let prefs = prefs::load(&state.db);
-    if on_claude_plan(state, &prefs, &id)
-        && let Some(hit) = state.code.plan.hit(&prefs.usage_limit, code::plan_limits::now())
+    if let Some(hit) =
+        plan_account(state, &prefs, &id).and_then(|(a, _)| state.code.plan.hit(&a, &prefs.usage_limit, code::plan_limits::now()))
     {
         anyhow::bail!("Not sent. {}", hit.message(prefs.usage_limit.percent, code::plan_limits::now()));
     }
@@ -2085,10 +2144,20 @@ impl mesh::RpcHandler for MeshRpc {
             return;
         }
         if name == MESH_PLAN_LIMITS_EVENT {
-            let Ok(mut l) = serde_json::from_value::<code::plan_limits::PlanLimits>(payload.clone()) else { return };
+            use code::plan_limits::PlanLimits;
+            let tagged = payload["account"].as_str().zip(serde_json::from_value::<PlanLimits>(payload["limits"].clone()).ok());
+            let (account, name, mut l) = match tagged {
+                Some((a, l)) => (a.to_owned(), payload["name"].as_str().map(str::to_owned), l),
+                // Untagged, from a member before accounts were told apart: the default login's.
+                None => {
+                    let Ok(l) = serde_json::from_value::<PlanLimits>(payload.clone()) else { return };
+                    let (a, n) = default_plan_account();
+                    (a, n, l)
+                }
+            };
             // Their clock may run ahead of ours; a later report seen here must still win.
             l.observed_at = l.observed_at.min(code::plan_limits::now());
-            adopt_plan_limits(&self.state, l, false);
+            adopt_plan_limits(&self.state, &account, name, l, false);
             return;
         }
         if name != "mesh://checkpoint" {
@@ -2099,8 +2168,13 @@ impl mesh::RpcHandler for MeshRpc {
     }
 
     fn greeting(&self) -> Vec<(String, serde_json::Value)> {
-        let limits = self.state.code.plan.latest();
-        limits.map(|l| (MESH_PLAN_LIMITS_EVENT.to_owned(), serde_json::to_value(&l).unwrap_or_default())).into_iter().collect()
+        let accounts = self.state.code.plan.accounts().into_iter();
+        accounts
+            .filter_map(|(account, a)| {
+                let payload = serde_json::json!({ "account": account, "name": a.name, "limits": a.latest? });
+                Some((MESH_PLAN_LIMITS_EVENT.to_owned(), payload))
+            })
+            .collect()
     }
 
     fn synced(&self, applied: &mesh::sync::Applied) {

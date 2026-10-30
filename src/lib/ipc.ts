@@ -134,6 +134,16 @@ export interface PlanSample {
   sevenDay: PlanWindow | null;
 }
 
+/** One Claude account's plan usage: each account has its own limits and its own stop. */
+export interface PlanAccount {
+  /** Its Claude Code config directory. */
+  account: string;
+  /** "Claude Code login", or the Claude login providers that use it. */
+  label: string;
+  latest: PlanLimits | null;
+  history: PlanSample[];
+}
+
 /** The ACP wire log's state (see `code/wire.rs`). */
 export interface WireLogStatus {
   on: boolean;
@@ -987,8 +997,7 @@ export const api = {
   codeRewind: (id: string, ordinal: number, preview: string, revertFiles: boolean) =>
     invoke<void>("code_rewind", { id, ordinal, preview, revertFiles }),
   codeUsage: (id: string) => invoke<UsageView>("code_usage", { id }),
-  planLimits: () => invoke<PlanLimits | null>("plan_limits"),
-  planHistory: () => invoke<PlanSample[]>("plan_history"),
+  planAccounts: () => invoke<PlanAccount[]>("plan_accounts"),
   wireLogStatus: () => invoke<WireLogStatus>("wire_log_status"),
   /** Turn the wire log on (for 30 minutes) or off. */
   wireLogSet: (on: boolean) => invoke<WireLogStatus>("wire_log_set", { on }),

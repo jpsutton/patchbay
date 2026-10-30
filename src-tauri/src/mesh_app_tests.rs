@@ -765,6 +765,42 @@ async fn usage_limit_stops_claude_turns() {
     let text = ev.1["event"]["message"].as_str().unwrap().to_owned();
     assert!(text.starts_with("Stopped. You have used 96% of your Claude plan's 5-hour limit"), "{text}");
 
+    // A session on another Claude account runs on: that account's usage is its own.
+    let teams = db::Provider {
+        id: "teams".into(),
+        name: "Claude (Teams)".into(),
+        kind: db::ProviderKind::Anthropic,
+        base_url: "https://api.anthropic.com/v1".into(),
+        has_key: false,
+        auth_mode: db::AuthMode::ClaudeLogin,
+        claude_config_dir: Some("/tmp/pb-other-claude".into()),
+    };
+    a.state.db.upsert_provider(&teams, None).unwrap();
+    let model = db::Model {
+        id: "tm".into(),
+        provider_id: "teams".into(),
+        model_id: "claude-x".into(),
+        display_name: "x".into(),
+        vision: false,
+        context_window: None,
+        params: Default::default(),
+    };
+    a.state.db.upsert_model(&model).unwrap();
+    let other = a.state.db.create_code_session(&cwd, Some("tm"), "patchbay", "default").unwrap();
+    let mut other_rx = a.state.code.attach_test_agent(&other.id);
+    emit(&a, &other.id, CodeEvent::UserPrompt {
+        prompt_id: db::new_id(),
+        text: "go".into(),
+        origin: String::new(),
+        attachments: json!([]),
+        delivery: Delivery::Sent,
+    });
+    emit(&a, &other.id, CodeEvent::PlanLimits { limits: limits(0.2) });
+    assert!(other_rx.try_recv().is_err(), "the other account is under its limit");
+    assert_eq!(notices(), 1);
+    let usable = a.state.code.plan.hit("/tmp/pb-other-claude", &prefs::load(&a.state.db).usage_limit, code::plan_limits::now());
+    assert!(usable.is_none());
+
     emit(&a, &claude.id, CodeEvent::PromptDone { stop_reason: json!("cancelled") });
     let err = prompt(claude.id.clone()).await.unwrap_err();
     assert!(err.0.starts_with("Not sent. You have used 97%"), "{}", err.0);
@@ -773,7 +809,7 @@ async fn usage_limit_stops_claude_turns() {
     let mut prefs = prefs::load(&a.state.db);
     prefs.usage_limit.enabled = false;
     crate::api::call(&a.state, "set_preferences", json!({ "prefs": prefs }), &chans).await.unwrap();
-    assert!(a.state.code.plan.hit(&prefs::load(&a.state.db).usage_limit, code::plan_limits::now()).is_none());
+    assert!(a.state.code.plan.hit(&crate::default_plan_account().0, &prefs::load(&a.state.db).usage_limit, code::plan_limits::now()).is_none());
 
     // Lowering the limit below current usage stops a running turn right away.
     emit(&a, &claude.id, CodeEvent::UserPrompt {
@@ -792,12 +828,16 @@ async fn usage_limit_stops_claude_turns() {
     assert!(matches!(claude_rx.try_recv(), Ok(AgentCmd::Cancel)));
     assert_eq!(notices(), 2);
 
-    // The panel reads the last report, which a restart keeps.
-    let v = crate::api::call(&a.state, "plan_limits", json!({}), &chans).await.unwrap();
-    assert_eq!(v["fiveHour"]["utilization"], 0.97);
-    assert!(a.events.lock().unwrap().iter().any(|(n, p)| n == "code://plan-limits" && p["sevenDay"]["utilization"] == 0.3));
+    // The panel reads each account's last report, named, and a restart keeps them.
+    let v = crate::api::call(&a.state, "plan_accounts", json!({}), &chans).await.unwrap();
+    let by = |label: &str| v.as_array().unwrap().iter().find(|x| x["label"] == label).cloned().unwrap();
+    assert_eq!(by("Claude Code login")["latest"]["fiveHour"]["utilization"], 0.97);
+    assert_eq!(by("Claude (Teams)")["latest"]["fiveHour"]["utilization"], 0.2);
+    assert!(a.events.lock().unwrap().iter().any(|(n, p)| n == "code://plan-limits" && p[0]["latest"]["sevenDay"]["utilization"] == 0.3));
     let again = AppState::new(a.state.db.clone(), a.dir.clone(), a.state.mesh.clone(), Arc::new(|_: &str, _: Value| {}));
-    assert_eq!(again.code.plan.latest().and_then(|l| l.five_hour).map(|w| w.utilization), Some(0.97));
+    let latest = |acct: &str| again.code.plan.account(acct).latest.and_then(|l| l.five_hour).map(|w| w.utilization);
+    assert_eq!(latest(&crate::default_plan_account().0), Some(0.97));
+    assert_eq!(latest("/tmp/pb-other-claude"), Some(0.2));
 }
 
 /// Plan usage one member sees reaches the others, a member that was away catches up when it
@@ -814,12 +854,19 @@ async fn plan_limits_reach_every_member() {
         observed_at: now() - ago,
         ..Default::default()
     };
-    let five = |n: &Node| n.state.code.plan.latest().and_then(|l| l.five_hour).map(|w| w.utilization);
+    // Sessions the nodes don't know count as the default login's, the same account on both here.
+    let (me, _) = crate::default_plan_account();
+    let five_of = |n: &Node, acct: &str| n.state.code.plan.account(acct).latest.and_then(|l| l.five_hour).map(|w| w.utilization);
+    let five = |n: &Node| five_of(n, &me);
 
     emit(&a, "s", CodeEvent::PlanLimits { limits: report(0.4, 60) });
     until("B has A's report", 10, || five(&b) == Some(0.4)).await;
-    assert!(b.events.lock().unwrap().iter().any(|(n, p)| n == "code://plan-limits" && p["fiveHour"]["utilization"] == 0.4));
-    assert!(b.state.db.get_setting("claude.planLimits").unwrap().is_some());
+    // The panel event follows the record, so wait for it too.
+    until("B's panel hears of it", 10, || {
+        b.events.lock().unwrap().iter().any(|(n, p)| n == "code://plan-limits" && p[0]["latest"]["fiveHour"]["utilization"] == 0.4)
+    })
+    .await;
+    assert!(b.state.db.get_setting("claude.planByAccount").unwrap().is_some());
 
     b.state.mesh.stop();
     until("A notices B is gone", 40, || !a.state.mesh.connected(&bn)).await;
@@ -829,8 +876,14 @@ async fn plan_limits_reach_every_member() {
     // B's older report, sent to A on reconnect, didn't replace A's.
     assert_eq!(five(&a), Some(0.5));
 
+    // An untagged report, from a member before accounts were told apart, is the default login's.
     mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &json!(report(0.1, 120)));
     assert_eq!(five(&b), Some(0.5));
+    // Another account's report is kept apart, under its own name.
+    let other = json!({ "account": "u2:o2", "name": "Team", "limits": report(0.9, 10) });
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &other);
+    assert_eq!((five(&b), five_of(&b, "u2:o2")), (Some(0.5), Some(0.9)));
+    assert_eq!(b.state.code.plan.account("u2:o2").name.as_deref(), Some("Team"));
 }
 
 /// A phone can decide a join request that waits on any computer, with its own signature.

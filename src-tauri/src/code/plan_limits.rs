@@ -150,11 +150,21 @@ pub fn now() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-/// The account's latest limits, shared by every session on a Claude plan on this node.
+/// One Claude account's latest limits and their history.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Account {
+    pub latest: Option<PlanLimits>,
+    pub history: Vec<Sample>,
+    /// The organization's name, when known: names an account no provider here uses.
+    pub name: Option<String>,
+}
+
+/// Each Claude account's limits, keyed by `claude_auth::account`, shared by every session on
+/// that account on this node. Accounts never count against each other.
 #[derive(Default)]
 pub struct PlanGuard {
-    latest: Mutex<Option<PlanLimits>>,
-    history: Mutex<Vec<Sample>>,
+    accounts: Mutex<BTreeMap<String, Account>>,
     /// Sessions cancelled for the limit whose turn hasn't ended yet.
     stopping: Mutex<HashSet<String>>,
     /// Sessions the guard stopped, to prompt again once the limit lifts: id -> when it resets.
@@ -162,33 +172,35 @@ pub struct PlanGuard {
 }
 
 impl PlanGuard {
-    pub fn record(&self, limits: PlanLimits) {
-        *self.latest.lock().unwrap() = Some(limits);
+    /// Records a report for `account`; true if it changed the account's history.
+    pub fn record(&self, account: &str, name: Option<String>, limits: PlanLimits) -> bool {
+        let mut accounts = self.accounts.lock().unwrap();
+        let a = accounts.entry(account.to_owned()).or_default();
+        if name.is_some() {
+            a.name = name;
+        }
+        let changed = push_sample(&mut a.history, &limits);
+        a.latest = Some(limits);
+        changed
     }
 
-    /// Adds the report to the history; true if that changed it.
-    pub fn record_history(&self, limits: &PlanLimits) -> bool {
-        push_sample(&mut self.history.lock().unwrap(), limits)
+    pub fn accounts(&self) -> BTreeMap<String, Account> {
+        self.accounts.lock().unwrap().clone()
     }
 
-    pub fn set_history(&self, history: Vec<Sample>) {
-        *self.history.lock().unwrap() = history;
+    pub fn set_accounts(&self, accounts: BTreeMap<String, Account>) {
+        *self.accounts.lock().unwrap() = accounts;
     }
 
-    pub fn history(&self) -> Vec<Sample> {
-        self.history.lock().unwrap().clone()
+    pub fn account(&self, account: &str) -> Account {
+        self.accounts.lock().unwrap().get(account).cloned().unwrap_or_default()
     }
 
-    /// The last limits Claude Code reported, kept for the usage panel and across restarts.
-    pub fn latest(&self) -> Option<PlanLimits> {
-        self.latest.lock().unwrap().clone()
-    }
-
-    pub fn hit(&self, limit: &UsageLimit, now: i64) -> Option<Hit> {
+    pub fn hit(&self, account: &str, limit: &UsageLimit, now: i64) -> Option<Hit> {
         if !limit.enabled {
             return None;
         }
-        self.latest.lock().unwrap().as_ref()?.hit(limit.percent, now)
+        self.accounts.lock().unwrap().get(account)?.latest.as_ref()?.hit(limit.percent, now)
     }
 
     /// True the first time; the guard stops a turn once.
@@ -320,10 +332,11 @@ mod tests {
     #[test]
     fn guard_respects_the_switch_and_stops_once() {
         let g = PlanGuard::default();
-        g.record(PlanLimits::from_update(&update(0.97, 0.1, false)).unwrap());
+        g.record("/a", None, PlanLimits::from_update(&update(0.97, 0.1, false)).unwrap());
         let on = UsageLimit { enabled: true, percent: 95, auto_resume: false };
-        assert!(g.hit(&on, 1000).is_some());
-        assert!(g.hit(&UsageLimit { enabled: false, ..on }, 1000).is_none());
+        assert!(g.hit("/a", &on, 1000).is_some());
+        assert!(g.hit("/b", &on, 1000).is_none(), "another account's usage doesn't count");
+        assert!(g.hit("/a", &UsageLimit { enabled: false, ..on }, 1000).is_none());
         assert!(g.start_stopping("s1"));
         assert!(!g.start_stopping("s1"));
         g.turn_ended("s1");

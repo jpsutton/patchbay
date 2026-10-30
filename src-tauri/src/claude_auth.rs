@@ -74,6 +74,35 @@ pub fn resolve_dir(dir: Option<&str>) -> Result<PathBuf> {
     }
 }
 
+/// The Claude account a config directory is signed in to, as a key that is the same on every
+/// computer (`<accountUuid>:<organizationUuid>`, from Claude Code's `.claude.json`), and the
+/// organization's name. Falls back to the directory's path when Claude Code hasn't recorded one.
+pub fn account(dir: &Path) -> (String, Option<String>) {
+    static SEEN: std::sync::Mutex<BTreeMap<PathBuf, (SystemTime, String, Option<String>)>> =
+        std::sync::Mutex::new(BTreeMap::new());
+    let fallback = || (dir.to_string_lossy().into_owned(), None);
+    // `~/.claude` keeps it beside the directory; any other directory, inside it.
+    let file = match home() {
+        Ok(h) if dir == h.join(".claude") => h.join(".claude.json"),
+        _ => dir.join(".claude.json"),
+    };
+    let Ok(modified) = std::fs::metadata(&file).and_then(|m| m.modified()) else { return fallback() };
+    // The file can run to megabytes, so read it again only when it changes.
+    if let Some((at, key, name)) = SEEN.lock().unwrap().get(&file)
+        && *at == modified
+    {
+        return (key.clone(), name.clone());
+    }
+    let Some(v) = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else {
+        return fallback();
+    };
+    let a = &v["oauthAccount"];
+    let (Some(user), Some(org)) = (a["accountUuid"].as_str(), a["organizationUuid"].as_str()) else { return fallback() };
+    let (key, name) = (format!("{user}:{org}"), a["organizationName"].as_str().map(str::to_owned));
+    SEEN.lock().unwrap().insert(file, (modified, key.clone(), name.clone()));
+    (key, name)
+}
+
 /// Where a config directory's login lives.
 enum Store {
     File(PathBuf),
@@ -360,6 +389,17 @@ mod tests {
             keychain_service(Path::new("/Users/dfrazer/.claudetvg"), home),
             "Claude Code-credentials-986364fc"
         );
+    }
+
+    #[test]
+    fn account_comes_from_claude_json() {
+        let dir = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(account(&dir), (dir.to_string_lossy().into_owned(), None), "no record: the path");
+        let v = serde_json::json!({ "oauthAccount": { "accountUuid": "u1", "organizationUuid": "o1", "organizationName": "Team" } });
+        std::fs::write(dir.join(".claude.json"), v.to_string()).unwrap();
+        assert_eq!(account(&dir), ("u1:o1".into(), Some("Team".into())));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
