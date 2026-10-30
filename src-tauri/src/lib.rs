@@ -125,6 +125,10 @@ struct LiveAgent {
     usage: Option<serde_json::Value>,
     /// The agent's `authRequired` event while it waits for a sign-in.
     auth: Option<serde_json::Value>,
+    /// The agent's latest `plan` update (its to-do list). A window that attaches after the plan
+    /// was written has no other way to get it: the saved transcript doesn't hold it, and the
+    /// event ring only reaches back to the last finished turn.
+    plan: Option<serde_json::Value>,
 }
 
 /// Errors cross the IPC boundary as plain strings.
@@ -823,6 +827,9 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
                     }
                 }
                 CodeEvent::Usage { .. } => live.entry(id).or_default().usage = Some(ev),
+                CodeEvent::Update { update } if update["sessionUpdate"] == "plan" => {
+                    live.entry(id).or_default().plan = Some(ev)
+                }
                 CodeEvent::Permission { request_id, .. } => {
                     live.entry(id).or_default().permissions.push((request_id.clone(), ev))
                 }
@@ -1044,7 +1051,8 @@ async fn code_start(state: &AppState, id: String) -> CmdResult<()> {
 }
 
 /// Catch-up for a window opening a running session: whether it runs and is mid-turn, plus the
-/// events that set up its controls (session ready, open permission requests, usage).
+/// events that set up its controls (session ready, open permission requests, usage) and the
+/// agent's plan.
 fn code_attach_local(state: &AppState, id: &str) -> serde_json::Value {
     let running = state.code.is_running(id);
     let live = state.live.lock().unwrap();
@@ -1054,6 +1062,7 @@ fn code_attach_local(state: &AppState, id: &str) -> serde_json::Value {
         events.extend(l.auth.clone());
         events.extend(l.permissions.iter().map(|(_, e)| e.clone()));
         events.extend(l.usage.clone());
+        events.extend(l.plan.clone());
     }
     serde_json::json!({ "running": running, "busy": state.code.is_busy(id), "events": events })
 }
