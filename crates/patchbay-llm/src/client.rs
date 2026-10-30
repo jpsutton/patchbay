@@ -23,6 +23,10 @@ pub struct Config {
     pub top_p: Option<f32>,
     pub effort: Option<Effort>,
     pub summary: Option<Summary>,
+    /// Chat Completions: send earlier turns' reasoning back as `reasoning_content`, so models
+    /// with interleaved thinking (Qwen3.x, DeepSeek, GLM) keep it across tool calls. Other
+    /// formats ignore it; they always return reasoning the way their API requires.
+    pub send_reasoning: bool,
     /// Retries after the first attempt, for failures before any output arrived.
     pub max_retries: u32,
     /// Give up when the stream is silent this long.
@@ -49,6 +53,7 @@ impl Config {
             top_p: None,
             effort: None,
             summary: None,
+            send_reasoning: true,
             max_retries: 2,
             idle_timeout: Duration::from_secs(180),
             cache_ttl: CacheTtl::Default,

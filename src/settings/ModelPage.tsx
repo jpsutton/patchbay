@@ -27,6 +27,7 @@ interface Draft {
   topP: string;
   reasoningEffort: ReasoningEffort | "";
   reasoningSummary: ReasoningSummary | "";
+  sendReasoning: boolean;
   priceInput: string;
   priceCached: string;
   priceCacheWrite: string;
@@ -48,6 +49,7 @@ function toDraft(m: Model): Draft {
     topP: str(p.topP),
     reasoningEffort: p.reasoningEffort ?? "",
     reasoningSummary: p.reasoningSummary ?? "",
+    sendReasoning: p.sendReasoning ?? true,
     priceInput: str(p.pricing.input),
     priceCached: str(p.pricing.cachedInput),
     priceCacheWrite: str(p.pricing.cacheWrite),
@@ -84,6 +86,8 @@ function fromDraft(d: Draft): { model: Partial<Model>; params: ModelParams } {
       reasoningEffort: d.reasoningEffort || null,
       reasoningSummary: d.reasoningSummary || null,
       autoCompactPercent: num(d.autoCompactPercent, "Auto-compact threshold", true, 10, 99),
+      // On is the default, so it's stored as null; only the opt-out is saved.
+      sendReasoning: d.sendReasoning ? null : false,
       pricing: {
         input: num(d.priceInput, "Input price"),
         cachedInput: num(d.priceCached, "Cached input price"),
@@ -213,6 +217,7 @@ export function ModelPage({
   };
 
   const isResponses = provider?.kind === "openai_responses";
+  const isChat = provider?.kind === "openai_chat";
 
   return (
     <div className="flex max-w-xl flex-col gap-6">
@@ -311,6 +316,22 @@ export function ModelPage({
               ))}
             </select>
           </Field>
+        )}
+        {isChat && (
+          <label className="col-span-2 flex flex-col gap-1 text-xs">
+            <span className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={draft.sendReasoning}
+                onChange={(e) => set("sendReasoning")(e.target.checked)}
+              />
+              Send reasoning back to the model
+            </span>
+            <span className="text-[12px] text-muted/80">
+              Returns earlier thinking as <code>reasoning_content</code>, so models like Qwen, DeepSeek and GLM keep
+              it across tool calls. Turn off if the server rejects the field.
+            </span>
+          </label>
         )}
       </Section>
 
