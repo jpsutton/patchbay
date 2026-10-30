@@ -5,9 +5,10 @@ import { mergeToolCall, useStore } from "../lib/store";
 import { DiffView, diffStats } from "./DiffView";
 import { hunkStarts } from "./hunkStarts";
 import { toolDescription } from "./toolLabel";
+import { readImagePath } from "./readImage";
 import { Markdown } from "../components/Markdown";
 import { CopyButton } from "../components/CopyButton";
-import { AgentImage } from "../components/AgentImage";
+import { AgentImage, SessionImage } from "../components/AgentImage";
 import { Dot } from "../components/Dot";
 import {
   ArrowRightIcon,
@@ -242,6 +243,9 @@ export function ToolCallCard({ tc, autoApproved }: { tc: AcpToolCall; autoApprov
   const Icon = KIND_ICON[tc.kind ?? "other"] ?? DotIcon;
   // Images show without opening the row: they're usually what the agent wanted you to see.
   const images = imagesOf(tc);
+  // A read of an image file shows the file when the row opens, unless the agent sent the image itself.
+  const sessionId = useStore((s) => s.activeCodeSessionId);
+  const fileImage = images.length === 0 && sessionId ? readImagePath(tc) : null;
   const stats = (tc.content ?? [])
     .filter((c): c is Extract<AcpToolCallContent, { type: "diff" }> => c.type === "diff")
     .map((d) => diffStats(d.oldText, d.newText ?? ""))
@@ -289,6 +293,9 @@ export function ToolCallCard({ tc, autoApproved }: { tc: AcpToolCall; autoApprov
       )}
       {open && (
         <div className="border-t border-line px-3 py-2.5">
+          {fileImage && sessionId && (
+            <SessionImage sessionId={sessionId} src={fileImage} alt={fileImage.split(/[\\/]/).pop()} />
+          )}
           <ToolCallBody tc={tc} withImages={false} />
         </div>
       )}
