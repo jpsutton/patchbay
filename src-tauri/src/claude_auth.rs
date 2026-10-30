@@ -86,7 +86,9 @@ pub fn account(dir: &Path) -> (String, Option<String>) {
         Ok(h) if dir == h.join(".claude") => h.join(".claude.json"),
         _ => dir.join(".claude.json"),
     };
-    let Ok(modified) = std::fs::metadata(&file).and_then(|m| m.modified()) else { return fallback() };
+    // Claude Code rewrites the file often: a read that lands mid-write keeps the last account seen.
+    let last = || SEEN.lock().unwrap().get(&file).map(|(_, key, name)| (key.clone(), name.clone()));
+    let Ok(modified) = std::fs::metadata(&file).and_then(|m| m.modified()) else { return last().unwrap_or_else(fallback) };
     // The file can run to megabytes, so read it again only when it changes.
     if let Some((at, key, name)) = SEEN.lock().unwrap().get(&file)
         && *at == modified
@@ -94,7 +96,7 @@ pub fn account(dir: &Path) -> (String, Option<String>) {
         return (key.clone(), name.clone());
     }
     let Some(v) = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else {
-        return fallback();
+        return last().unwrap_or_else(fallback);
     };
     let a = &v["oauthAccount"];
     let (Some(user), Some(org)) = (a["accountUuid"].as_str(), a["organizationUuid"].as_str()) else { return fallback() };
@@ -398,6 +400,11 @@ mod tests {
         assert_eq!(account(&dir), (dir.to_string_lossy().into_owned(), None), "no record: the path");
         let v = serde_json::json!({ "oauthAccount": { "accountUuid": "u1", "organizationUuid": "o1", "organizationName": "Team" } });
         std::fs::write(dir.join(".claude.json"), v.to_string()).unwrap();
+        assert_eq!(account(&dir), ("u1:o1".into(), Some("Team".into())));
+        // Caught mid-write: still the same account.
+        std::fs::write(dir.join(".claude.json"), "{\"oauthAcc").unwrap();
+        let later = SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(dir.join(".claude.json")).unwrap().set_modified(later).unwrap();
         assert_eq!(account(&dir), ("u1:o1".into(), Some("Team".into())));
         let _ = std::fs::remove_dir_all(&dir);
     }
