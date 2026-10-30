@@ -764,7 +764,9 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
           ? "Cancelled"
           : e.stopReason === "max_tokens"
             ? "Stopped: the reply hit the output token limit. Raise Max output tokens in the model's settings, or ask the agent to continue."
-            : null;
+            : e.stopReason === "max_turn_requests"
+              ? "Stopped: the agent reached its step limit for one prompt. Send Continue to go on, or raise Steps per prompt in Settings → Agents."
+              : null;
       // The turn is over: a steered message was read, or went out as a prompt of its own.
       const entries = noPending(s.entries);
       next = {
