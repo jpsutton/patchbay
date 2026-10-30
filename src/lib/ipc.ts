@@ -585,6 +585,27 @@ export interface AcpPlanEntry {
   status: "pending" | "in_progress" | "completed" | "cancelled";
 }
 
+/** One subagent of Patchbay's own agent, as its `subagents_update` reports it. */
+export interface Subagent {
+  id: string;
+  name: string | null;
+  kind: string;
+  description: string;
+  status: "running" | "completed" | "failed" | "stopped";
+  error: string | null;
+  background: boolean;
+  elapsed_secs: number;
+  /** Seconds since it last did something, when the update was sent. */
+  idle_secs: number;
+  /** Model requests it has made. */
+  steps: number;
+  /** What it is doing now: a model call, a tool, or waiting for the user to approve one. */
+  current: string;
+  /** Waiting for the user, not for the model or a tool. */
+  blocked: boolean;
+  worktree: { path: string; branch: string } | null;
+}
+
 export type AcpUpdate =
   | { sessionUpdate: "user_message_chunk"; content: AcpContentBlock }
   | { sessionUpdate: "agent_message_chunk"; content: AcpContentBlock }

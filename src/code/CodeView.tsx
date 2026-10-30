@@ -38,6 +38,7 @@ import { PermissionCard, PlanDocCard, planDocOf, StopButton, ToolCallCard, ToolG
 import { toolDescription } from "./toolLabel";
 import { SignInCard } from "./SignInCard";
 import { WorkingIndicator } from "./WorkingIndicator";
+import { SubagentsPanel } from "./SubagentsPanel";
 import { TranscriptRows, type TranscriptRow } from "./TranscriptRows";
 import { DiffView, diffStats } from "./DiffView";
 import { changesKey, collectChanges, normalizePath, type FileChange } from "./changes";
@@ -1623,6 +1624,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                   />
                 )}
                 {working && s?.permissions.length === 0 && <WorkingIndicator s={s} onStop={stopTurn} />}
+                <SubagentsPanel sessionId={session.id} />
                 {background.length > 0 && (
                   <div className="flex items-center gap-2 text-xs text-muted" title={background.map(backgroundLabel).join("\n")}>
                     <Dot size={6} className="signal-pulse text-live" />

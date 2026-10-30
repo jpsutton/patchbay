@@ -465,9 +465,8 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
                             }
                             _ = session.agents.wait() => {}
                             _ = session.steered.notified() => {}
-                            // Wake now and then, to look for subagents that have gone quiet and to
-                            // keep their status file fresh.
-                            _ = tokio::time::sleep(AGENT_CHECK_EVERY) => session.agents.write_status(&session.agents_status_path()),
+                            // Wake now and then, to look for subagents that have gone quiet.
+                            _ = tokio::time::sleep(AGENT_CHECK_EVERY) => {}
                         }
                         continue;
                     }

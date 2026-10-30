@@ -22,6 +22,7 @@ import {
   type Conversation,
   type Model,
   type Provider,
+  type Subagent,
   type UsageView,
   type PlanLimits,
   type PlanSample,
@@ -135,6 +136,10 @@ export interface CodeState {
   turnStartedAt: number | null;
   /** Characters of text and thoughts streamed this turn, for a rough token count. */
   turnChars: number;
+  /** Patchbay's agent: its subagents, as of the last `subagents_update`. */
+  subagents: Subagent[];
+  /** When that update arrived, to count idle time on from it. */
+  subagentsAt: number | null;
 }
 
 export interface ChatStream {
@@ -177,6 +182,8 @@ const emptyCode = (): CodeState => ({
   lastPhase: null,
   turnStartedAt: null,
   turnChars: 0,
+  subagents: [],
+  subagentsAt: null,
 });
 
 /** `next` with the turn clock started or cleared when `busy` flipped between `prev` and it. */
@@ -615,6 +622,10 @@ function reduceUpdate(s: CodeState, u: AcpUpdate, agent: AgentId | undefined): C
     }
     case "plan":
       return stamp({ ...s, plan: (u as { entries: AcpPlanEntry[] }).entries });
+    case "subagents_update": {
+      const agents = (u as { agents?: Subagent[] }).agents;
+      return Array.isArray(agents) ? { ...s, subagents: agents, subagentsAt: Date.now() } : s;
+    }
     case "available_commands_update": {
       const cmds = (u as { availableCommands?: AcpCommand[] }).availableCommands;
       return Array.isArray(cmds) ? { ...s, commands: cmds } : s;
@@ -643,8 +654,9 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
         // The agent's queue goes with it; this window gets back what it wrote.
         queued: e.state === "exited" ? [] : s.queued,
         restore: e.state === "exited" ? handBack(s.restore, s.queued, useStore.getState().mesh?.nodeId) : s.restore,
-        // Commands an agent backgrounded end with it.
+        // Commands an agent backgrounded end with it, and so do its subagents.
         toolCalls: e.state === "exited" ? endBackground(s.toolCalls) : s.toolCalls,
+        subagents: e.state === "exited" ? [] : s.subagents,
       };
       break;
     case "sessionReady": {

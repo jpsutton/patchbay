@@ -353,6 +353,15 @@ impl Session {
         crate::store::subagents_dir(&self.host.data_dir(), &self.id).join("status.json")
     }
 
+    /// Show the subagents' state: to the client, as a `subagents_update`, and in `status.json`.
+    pub fn publish_agents(&self) {
+        self.agents.write_status(&self.agents_status_path());
+        let agents = self.agents.status();
+        if !agents.is_empty() {
+            self.update(json!({"sessionUpdate": "subagents_update", "agents": agents}));
+        }
+    }
+
     /// Send a `session/update`.
     pub fn update(&self, update: Value) {
         self.peer.notify("session/update", json!({"sessionId": self.id, "update": update}));

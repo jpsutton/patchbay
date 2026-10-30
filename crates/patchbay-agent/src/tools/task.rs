@@ -59,7 +59,17 @@ fn panic_text(e: tokio::task::JoinError) -> String {
 fn spawn_background(parent: Arc<Session>, agent: Arc<SubAgent>) {
     agent.background.store(true, Ordering::SeqCst);
     tracing::info!(agent = %agent.id, description = %agent.description, "subagent started in the background");
-    parent.agents.write_status(&parent.agents_status_path());
+    parent.publish_agents();
+    // Keeps the client's view of the agent moving (idle time, current action) while it runs.
+    let ticker = {
+        let parent = parent.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                parent.publish_agents();
+            }
+        })
+    };
     tokio::spawn(async move {
         let token = agent.cancel.lock().unwrap().clone();
         // The run is a task of its own, so a panic in it comes back here as an error. Left alone,
@@ -76,7 +86,8 @@ fn spawn_background(parent: Arc<Session>, agent: Arc<SubAgent>) {
         };
         let (status, text) = conclude(&parent, &agent, result).await;
         tracing::info!(agent = %agent.id, status = status.label(), "subagent finished");
-        parent.agents.write_status(&parent.agents_status_path());
+        ticker.abort();
+        parent.publish_agents();
         parent.agents.push_note(Note {
             agent_id: agent.name.clone().unwrap_or_else(|| agent.id.clone()),
             description: agent.description.clone(),

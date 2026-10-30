@@ -306,9 +306,25 @@ impl Agents {
         Some(Part::Text(prompt::reminder(&p.msg("stalled_agents", &[("body", &lines.join("\n"))]))))
     }
 
+    /// Every subagent's state, as the client and `status.json` show it.
+    pub fn status(&self) -> Vec<serde_json::Value> {
+        self.list.lock().unwrap().iter().map(|a| a.status_json()).collect()
+    }
+
+    /// Stop a running subagent, by id or name. Whether there was one to stop.
+    pub fn stop(&self, key: &str) -> bool {
+        match self.find(key) {
+            Some(a) if *a.status.lock().unwrap() == Status::Running => {
+                a.cancel.lock().unwrap().cancel();
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Write every subagent's state to `path`, for anyone looking from outside the app.
     pub fn write_status(&self, path: &Path) {
-        let agents: Vec<serde_json::Value> = self.list.lock().unwrap().iter().map(|a| a.status_json()).collect();
+        let agents = self.status();
         if agents.is_empty() {
             return;
         }
@@ -533,6 +549,7 @@ mod tests {
         let a = Agents::default();
         assert!(a.report(None).is_none() && a.report(Some("agent_1")).is_none());
         assert!(a.stalled_note(Prompts::new(false)).is_none());
+        assert!(!a.stop("agent_1") && a.status().is_empty());
         let path = std::env::temp_dir().join(format!("pb-status-{}", uuid::Uuid::new_v4())).join("status.json");
         a.write_status(&path);
         assert!(!path.exists(), "no agents, no file");

@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 const USAGE: &str = "\
 Usage: patchbayd [options]
        patchbayd token [--rotate] [options]
+       patchbayd agents [options]
 
 Runs Patchbay headless: chats, Code sessions and the mesh, without a window.
 
@@ -22,6 +23,7 @@ Options:
 Commands:
   token              Print the web UI's address with its access token
   token --rotate     Replace the token (open tabs must sign in again)
+  agents             Show the subagents of Patchbay's agent sessions: state, idle time, what each is doing
 
 Environment:
   PATCHBAY_LOG       Log filter (default: info)
@@ -35,6 +37,7 @@ struct Args {
     no_web: bool,
     token: bool,
     rotate: bool,
+    agents: bool,
 }
 
 fn parse_args() -> Result<Args> {
@@ -49,6 +52,7 @@ fn parse_args() -> Result<Args> {
             "--no-web" => a.no_web = true,
             "--rotate" => a.rotate = true,
             "token" => a.token = true,
+            "agents" => a.agents = true,
             "-h" | "--help" => {
                 print!("{USAGE}");
                 std::process::exit(0);
@@ -100,6 +104,63 @@ fn find_ui_dir(given: Option<PathBuf>) -> Option<PathBuf> {
     candidates.into_iter().find(has_index)
 }
 
+/// `45s`, `3m 05s`, `1h 02m`.
+fn span(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m {:02}s", secs / 60, secs % 60),
+        _ => format!("{}h {:02}m", secs / 3600, secs % 3600 / 60),
+    }
+}
+
+/// What the agent wrote to `agent/subagents/<session>/status.json`: one block per session. It
+/// needs no running daemon, so it also works when the app is stuck or gone; the file's age says
+/// which. Idle time is counted on from when the file was written.
+fn print_agents(data_dir: &std::path::Path) -> Result<()> {
+    let root = data_dir.join("agent").join("subagents");
+    let mut sessions: Vec<_> = std::fs::read_dir(&root).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+    sessions.sort();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64;
+    let mut any = false;
+    for dir in sessions {
+        let Ok(text) = std::fs::read_to_string(dir.join("status.json")) else { continue };
+        let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+        let Some(agents) = doc["agents"].as_array().filter(|a| !a.is_empty()) else { continue };
+        any = true;
+        let age = now.saturating_sub(doc["updated_at_ms"].as_u64().unwrap_or(0)) / 1000;
+        let running = agents.iter().any(|a| a["status"] == "running");
+        let id = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let note = match (running, age > 60) {
+            (true, true) => ", not updated since: the app may have exited or hung",
+            _ => "",
+        };
+        println!("session {id} (state written {} ago{note})", span(age));
+        for a in agents {
+            let s = |k: &str| a[k].as_str().unwrap_or("").to_owned();
+            let n = |k: &str| a[k].as_u64().unwrap_or(0);
+            let name = a["name"].as_str().map(|n| format!(" \"{n}\"")).unwrap_or_default();
+            if a["status"] == "running" {
+                println!(
+                    "  {}{name} running {}, idle {}, {} steps: {}  [{}]",
+                    s("id"),
+                    span(n("elapsed_secs") + age),
+                    span(n("idle_secs") + age),
+                    n("steps"),
+                    s("current"),
+                    s("description")
+                );
+            } else {
+                let err = a["error"].as_str().map(|e| format!(": {}", e.lines().next().unwrap_or(""))).unwrap_or_default();
+                println!("  {}{name} {}{err}  [{}]", s("id"), s("status"), s("description"));
+            }
+        }
+    }
+    if !any {
+        println!("No subagent state under {}", root.display());
+    }
+    Ok(())
+}
+
 fn url_for(listen: &str, token: &str) -> String {
     let shown = listen.replace("0.0.0.0", "127.0.0.1").replace("[::]", "[::1]");
     format!("http://{shown}/#token={token}")
@@ -116,6 +177,9 @@ fn main() -> Result<()> {
     };
     let listen = args.listen.clone().unwrap_or_else(|| "127.0.0.1:4420".into());
 
+    if args.agents {
+        return print_agents(&data_dir);
+    }
     if args.token {
         let token = load_token(&data_dir, args.rotate)?;
         println!("{}", url_for(&listen, &token));

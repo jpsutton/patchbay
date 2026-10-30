@@ -17,6 +17,7 @@ import type {
   ChatEvent,
   CodeEnvelope,
   CodeSession,
+  Subagent,
   Conversation,
   Message,
   Model,
@@ -205,6 +206,7 @@ const fakeCut = new Set<string>();
 const fakeStopped = new Set<string>();
 /** Background jobs the `/jobs` demo started: shell id -> the call that started it. */
 const fakeJobs = new Map<string, { csid: string; toolId: string }>();
+const fakeAgents = new Map<string, Subagent[]>();
 /** Running calls the `/jobs` demo can stop: tool call id -> session. */
 const fakeSlowCalls = new Map<string, string>();
 
@@ -523,6 +525,20 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
     await say("Build is clean. Now checking the remaining modules, one at a time. ");
     if (await nap(40_000)) return stop();
     await say("Done after a long wait.");
+    turnEmit({ type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
+  // `/agents`: three background subagents, one busy, one quiet for 6 minutes, one waiting on a
+  // permission prompt, for the subagent rows. Stop on a row stops that subagent.
+  if (text.startsWith("/agents")) {
+    const base = { kind: "general-purpose", error: null, background: true, worktree: null, status: "running" as const };
+    fakeAgents.set(csid, [
+      { ...base, id: "agent_1", name: "agentP", description: "End-to-end tests", elapsed_secs: 1320, idle_secs: 3, steps: 14, current: "running Bash", blocked: false },
+      { ...base, id: "agent_2", name: "agentQ", description: "Street adapter", elapsed_secs: 1320, idle_secs: 360, steps: 9, current: "waiting for the model", blocked: false },
+      { ...base, id: "agent_3", name: "agentS", description: "Docs and CI", elapsed_secs: 1320, idle_secs: 150, steps: 6, current: "waiting for the user to approve: Bash `git push`", blocked: true },
+    ]);
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "subagents_update", agents: fakeAgents.get(csid) } });
+    await say("Three subagents are running in the background.");
     turnEmit({ type: "promptDone", stopReason: "end_turn" });
     return;
   }
@@ -1452,6 +1468,15 @@ export function install() {
           return null;
         }
         case "code_cancel_tool": {
+          const stopId = (a.toolCallId as string).startsWith("subagent:") ? (a.toolCallId as string).slice(9) : null;
+          if (stopId) {
+            const list = fakeAgents.get(a.id as string);
+            if (list) {
+              fakeAgents.set(a.id as string, list.map((x) => (x.id === stopId ? { ...x, status: "stopped" as const } : x)));
+              codeEmit(a.id as string, { type: "update", update: { sessionUpdate: "subagents_update", agents: fakeAgents.get(a.id as string) } });
+            }
+            return null;
+          }
           const csid = fakeSlowCalls.get(a.toolCallId as string);
           if (csid) {
             fakeSlowCalls.delete(a.toolCallId as string);
