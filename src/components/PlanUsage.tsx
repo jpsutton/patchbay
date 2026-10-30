@@ -100,13 +100,16 @@ const fmtClock = (secs: number, weekday: boolean) =>
 
 const paceClass = (pace: number) => (pace > 2 ? "bg-danger" : pace > 1 ? "bg-warn" : "bg-ok");
 
-/** What the pace means for a window: usage projected at its reset, and when it would run out first, if it would. */
+/**
+ * What the pace means for a window: usage projected at its reset, and when it would run out first, if it would.
+ * Null once the window is used up: usage can't grow past full, so there is nothing left to project.
+ */
 function burnOutlook(w: PlanWindow | null, span: number, now: number) {
   const pace = burnPace(w, span, now);
   const current = live(w, now);
-  if (pace == null || !current || current.utilization <= 0) return null;
+  if (pace == null || !current || current.utilization <= 0 || current.utilization >= 1) return null;
   const runOutIn = ((1 - current.utilization) / current.utilization) * (span - (current.resetsAt - now));
-  return { pace, projected: Math.round(pace * 100), runOutIn: pace > 1 && current.utilization < 1 ? runOutIn : null };
+  return { pace, projected: Math.round(pace * 100), runOutIn: pace > 1 ? runOutIn : null };
 }
 
 /** The faster of the two windows' paces. */
