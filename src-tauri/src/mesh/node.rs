@@ -53,6 +53,10 @@ pub trait RpcHandler: Send + Sync {
     fn synced(&self, _applied: &Applied) {}
     /// A live event arrived from another node (before it goes to the UI).
     fn event(&self, _name: &str, _payload: &Value) {}
+    /// Live events (name, payload) for a member that just connected, to catch it up.
+    fn greeting(&self) -> Vec<(String, Value)> {
+        Vec::new()
+    }
 }
 
 #[derive(Clone)]
@@ -1685,6 +1689,10 @@ impl Inner {
         // Nodes already waiting here may be decided there too.
         for req in self.local_requests() {
             send(&mut sec, &link, &Msg::Event { name: EV_JOIN_REQUEST.into(), payload: json!(req) })?;
+        }
+        let greeting = self.handler.read().unwrap().clone().map(|h| h.greeting()).unwrap_or_default();
+        for (name, payload) in greeting {
+            send(&mut sec, &link, &Msg::Event { name, payload })?;
         }
         let mut peer_vv: Option<VersionVector> = None;
         let mut changed = self.changed.subscribe();

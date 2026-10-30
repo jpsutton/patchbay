@@ -167,6 +167,8 @@ The node making a reply's LLM call is that reply's **streamer** while it generat
 
 The target folder is chosen by the user and defaults to the host's path.
 
+Claude plan usage (the 5-hour and weekly windows, see `code/plan_limits.rs`) arrives only with a node's own turns. Each node broadcasts what it sees (`mesh://plan-limits`) and sends its latest to a member as soon as that member connects. A member keeps a received report only if it is newer than the one it holds, with the sender's timestamp capped at the receiver's clock. Every member's usage panel and usage guard work from the same numbers, which assumes the members share one Claude account.
+
 ## 5. Surviving a dead host
 
 - **Transcript:** synced continuously.

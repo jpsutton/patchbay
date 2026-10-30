@@ -781,14 +781,8 @@ fn code_sink(state: &AppState) -> code::acp::Sink {
 fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     use code::acp::CodeEvent;
     if let CodeEvent::PlanLimits { limits } = env.event {
-        let v = serde_json::to_value(&limits).unwrap_or_default();
-        let _ = state.db.set_setting(PLAN_LIMITS_KEY, &v.to_string());
-        if state.code.plan.record_history(&limits) {
-            let _ = state.db.set_setting(PLAN_HISTORY_KEY, &serde_json::to_string(&state.code.plan.history()).unwrap_or_default());
-        }
-        state.code.plan.record(limits);
-        (state.emit)(PLAN_LIMITS_EVENT, v);
-        enforce_plan_limit(state);
+        state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, serde_json::to_value(&limits).unwrap_or_default());
+        adopt_plan_limits(state, limits, true);
         return;
     }
     track_titles(state, &env);
@@ -853,6 +847,23 @@ const PLAN_LIMITS_KEY: &str = "claude.planLimits";
 const PLAN_LIMITS_EVENT: &str = "code://plan-limits";
 /// Every distinct report of the last eight days, for the panel's view of busy periods.
 const PLAN_HISTORY_KEY: &str = "claude.planHistory";
+/// A report one member saw, shared with the others: they run on the same Claude account.
+const MESH_PLAN_LIMITS_EVENT: &str = "mesh://plan-limits";
+
+/// Take a plan report seen here, or one from another member that is newer than ours.
+fn adopt_plan_limits(state: &AppState, limits: code::plan_limits::PlanLimits, seen_here: bool) {
+    if !seen_here && state.code.plan.latest().is_some_and(|old| old.observed_at >= limits.observed_at) {
+        return;
+    }
+    let v = serde_json::to_value(&limits).unwrap_or_default();
+    let _ = state.db.set_setting(PLAN_LIMITS_KEY, &v.to_string());
+    if state.code.plan.record_history(&limits) {
+        let _ = state.db.set_setting(PLAN_HISTORY_KEY, &serde_json::to_string(&state.code.plan.history()).unwrap_or_default());
+    }
+    state.code.plan.record(limits);
+    (state.emit)(PLAN_LIMITS_EVENT, v);
+    enforce_plan_limit(state);
+}
 
 async fn plan_history(state: &AppState) -> CmdResult<Vec<code::plan_limits::Sample>> {
     Ok(state.code.plan.history())
@@ -1972,11 +1983,23 @@ impl mesh::RpcHandler for MeshRpc {
             }
             return;
         }
+        if name == MESH_PLAN_LIMITS_EVENT {
+            let Ok(mut l) = serde_json::from_value::<code::plan_limits::PlanLimits>(payload.clone()) else { return };
+            // Their clock may run ahead of ours; a later report seen here must still win.
+            l.observed_at = l.observed_at.min(code::plan_limits::now());
+            adopt_plan_limits(&self.state, l, false);
+            return;
+        }
         if name != "mesh://checkpoint" {
             return;
         }
         let (Some(id), Some(host)) = (payload["id"].as_str(), payload["host"].as_str()) else { return };
         tokio::spawn(pull_checkpoint(self.state.clone(), id.to_owned(), host.to_owned()));
+    }
+
+    fn greeting(&self) -> Vec<(String, serde_json::Value)> {
+        let limits = self.state.code.plan.latest();
+        limits.map(|l| (MESH_PLAN_LIMITS_EVENT.to_owned(), serde_json::to_value(&l).unwrap_or_default())).into_iter().collect()
     }
 
     fn synced(&self, applied: &mesh::sync::Applied) {

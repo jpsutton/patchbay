@@ -772,6 +772,39 @@ async fn usage_limit_stops_claude_turns() {
     assert_eq!(again.code.plan.latest().and_then(|l| l.five_hour).map(|w| w.utilization), Some(0.97));
 }
 
+/// Plan usage one member sees reaches the others, a member that was away catches up when it
+/// reconnects, and an older report never replaces a newer one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plan_limits_reach_every_member() {
+    use code::acp::CodeEvent;
+    use code::plan_limits::{PlanLimits, Window, now};
+    let (a, b) = (node("alpha-plan"), node("bravo-plan"));
+    link(&a, &b).await;
+    let bn = b.state.mesh.node_id().to_owned();
+    let report = |five: f64, ago: i64| PlanLimits {
+        five_hour: Some(Window { utilization: five, resets_at: now() + 3600 }),
+        observed_at: now() - ago,
+        ..Default::default()
+    };
+    let five = |n: &Node| n.state.code.plan.latest().and_then(|l| l.five_hour).map(|w| w.utilization);
+
+    emit(&a, "s", CodeEvent::PlanLimits { limits: report(0.4, 60) });
+    until("B has A's report", 10, || five(&b) == Some(0.4)).await;
+    assert!(b.events.lock().unwrap().iter().any(|(n, p)| n == "code://plan-limits" && p["fiveHour"]["utilization"] == 0.4));
+    assert!(b.state.db.get_setting("claude.planLimits").unwrap().is_some());
+
+    b.state.mesh.stop();
+    until("A notices B is gone", 40, || !a.state.mesh.connected(&bn)).await;
+    emit(&a, "s", CodeEvent::PlanLimits { limits: report(0.5, 30) });
+    b.state.mesh.start();
+    until("B catches up on reconnect", 30, || five(&b) == Some(0.5)).await;
+    // B's older report, sent to A on reconnect, didn't replace A's.
+    assert_eq!(five(&a), Some(0.5));
+
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &json!(report(0.1, 120)));
+    assert_eq!(five(&b), Some(0.5));
+}
+
 /// A phone can decide a join request that waits on any computer, with its own signature.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn phone_decides_join_requests_waiting_on_any_computer() {
