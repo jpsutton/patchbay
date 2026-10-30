@@ -456,12 +456,75 @@ pub fn restore(entries: &[Entry]) -> Restored {
             Entry::Tool { .. } | Entry::Truncate { .. } | Entry::Req(_) => {}
         }
     }
+    answer_dangling_calls(&mut r.messages);
     r
+}
+
+/// A turn cut off between its tool calls and their results (the app quit or crashed) leaves
+/// calls no message answers, and providers refuse the whole conversation after that. Answer
+/// each with an error, at the front of the next user message as the APIs require.
+fn answer_dangling_calls(messages: &mut Vec<Message>) {
+    let mut i = 0;
+    while i < messages.len() {
+        let missing: Vec<Part> = {
+            let answered: Vec<&str> = messages
+                .get(i + 1)
+                .filter(|m| m.role == Role::User)
+                .map(|m| m.parts.iter().filter_map(|p| if let Part::ToolResult(r) = p { Some(r.call_id.as_str()) } else { None }).collect())
+                .unwrap_or_default();
+            messages[i]
+                .tool_calls()
+                .filter(|c| messages[i].role == Role::Assistant && !answered.contains(&c.id.as_str()))
+                .map(|c| Part::ToolResult(patchbay_llm::ToolResult::text(c, "Interrupted: Patchbay stopped before this call finished.", true)))
+                .collect()
+        };
+        if !missing.is_empty() {
+            match messages.get_mut(i + 1).filter(|m| m.role == Role::User) {
+                Some(next) => {
+                    let at = next.parts.iter().take_while(|p| matches!(p, Part::ToolResult(_))).count();
+                    next.parts.splice(at..at, missing);
+                }
+                None => messages.insert(i + 1, Message::with_parts(Role::User, missing)),
+            }
+        }
+        i += 1;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restore_answers_calls_a_crash_left_open() {
+        let call = |id: &str| Part::ToolCall(patchbay_llm::ToolCall { id: id.into(), name: "Read".into(), arguments: json!({}), signature: None });
+        let results = |m: &Message| -> Vec<(String, bool)> {
+            m.parts.iter().filter_map(|p| if let Part::ToolResult(r) = p { Some((r.call_id.clone(), r.is_error)) } else { None }).collect()
+        };
+        // Cut off, then the user typed on: the results go before their text.
+        let entries = vec![
+            Entry::Msg { m: Message::user("go") },
+            Entry::Msg { m: Message::with_parts(Role::Assistant, vec![call("a"), call("b")]) },
+            Entry::Msg { m: Message::user("continue") },
+        ];
+        let r = restore(&entries);
+        assert_eq!(r.messages.len(), 3);
+        assert_eq!(results(&r.messages[2]), vec![("a".into(), true), ("b".into(), true)]);
+        assert!(matches!(r.messages[2].parts[2], Part::Text(ref t) if t == "continue"));
+        // Cut off at the very end: a message of results follows.
+        let r = restore(&entries[..2]);
+        assert_eq!(r.messages.len(), 3);
+        assert_eq!(results(&r.messages[2]).len(), 2);
+        // A finished turn is left alone.
+        let done = Message::with_parts(Role::User, vec![Part::ToolResult(patchbay_llm::ToolResult {
+            call_id: "a".into(),
+            name: "Read".into(),
+            content: vec![Part::Text("ok".into())],
+            is_error: false,
+        })]);
+        let entries = vec![Entry::Msg { m: Message::with_parts(Role::Assistant, vec![call("a")]) }, Entry::Msg { m: done.clone() }];
+        assert_eq!(restore(&entries).messages[1], done);
+    }
 
     #[test]
     fn compaction_replaces_history_on_restore() {
