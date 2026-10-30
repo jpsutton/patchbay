@@ -328,8 +328,7 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
     let mut stop_rounds = 0;
     // Replies in a row cut off by the output token limit.
     let mut cut_offs = 0;
-    let max_steps = session.host.settings().limits.max_steps.max(1);
-    'steps: for step in 0..max_steps {
+    'steps: for step in 0usize.. {
         if cancel.is_cancelled() {
             return Ok(TurnResult { stop_reason: "cancelled", usage: totals });
         }
@@ -339,6 +338,11 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
         };
         let settings = session.host.settings();
         let mc = session.model_client(&model_id).await?;
+        // Checked at the top so every way of going on (tool results, a cut-off reply, a Stop hook)
+        // counts. The cap follows the model in use: a plan-guarded one has none unless set.
+        if step >= settings.limits.steps(mc.plan_guarded) {
+            return Ok(TurnResult { stop_reason: "max_turn_requests", usage: totals });
+        }
         let percent = mc
             .auto_compact_percent
             .or((settings.auto_compact_percent > 0).then_some(settings.auto_compact_percent))
@@ -500,11 +504,8 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
         if cancel.is_cancelled() {
             return Ok(TurnResult { stop_reason: "cancelled", usage: totals });
         }
-        if step + 1 == max_steps {
-            return Ok(TurnResult { stop_reason: "max_turn_requests", usage: totals });
-        }
     }
-    Ok(TurnResult { stop_reason: "max_turn_requests", usage: totals })
+    unreachable!("the step loop only ends by returning")
 }
 
 /// Claude subscription usage in the shape claude-agent-acp reports it (`_claude/rateLimit`), so

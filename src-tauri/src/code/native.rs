@@ -43,7 +43,10 @@ impl Host for AppHost {
         let model_ref = model_ref_from_key(model_id).ok_or_else(|| format!("unknown model {model_id}"))?;
         let mut resolved = providers::resolve(&self.db, model_ref).map_err(|e| format!("{e:#}"))?;
         providers::ensure_token(&mut resolved).await.map_err(|e| format!("{e:#}"))?;
-        let engine = crate::prefs::load(&self.db).agent_engine;
+        let prefs = crate::prefs::load(&self.db);
+        let engine = prefs.agent_engine;
+        // The plan's usage limit only guards a turn while "Stop at plan limit" is on.
+        let plan_guarded = resolved.auth == providers::Auth::ClaudeLogin && prefs.usage_limit.enabled;
         let mut cfg = providers::llm_config(&resolved);
         cfg.cache_ttl = providers::agent_cache_ttl(&resolved);
         if let Some(n) = engine.request_retries {
@@ -57,6 +60,7 @@ impl Host for AppHost {
             system_prefix: providers::system_prefix(&resolved),
             context_window: resolved.model.context_window.and_then(|c| u64::try_from(c).ok()),
             auto_compact_percent: resolved.model.params.auto_compact_percent,
+            plan_guarded,
         })
     }
 
@@ -77,7 +81,7 @@ impl Host for AppHost {
             auto_compact_percent: prefs.auto_compact_percent.unwrap_or(0),
             instructions: prefs.agent_instructions,
             limits: Limits {
-                max_steps: e.max_steps.map_or(d.max_steps, |n| n.clamp(1, 10_000) as usize),
+                max_steps: e.max_steps.map(|n| n.clamp(1, 10_000) as usize),
                 subagent_max_steps: e.subagent_max_steps.map_or(d.subagent_max_steps, |n| n.clamp(1, 10_000) as usize),
                 shell_timeout_ms: e.shell_timeout_secs.map_or(d.shell_timeout_ms, |s| u64::from(s.clamp(1, 600)) * 1000),
             },
