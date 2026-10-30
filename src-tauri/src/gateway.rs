@@ -243,7 +243,8 @@ pub(crate) fn create_local(state: &AppState, p: &Value) -> Result<crate::db::Cod
     crate::create_code_session_local(state, cwd, p["modelRef"].as_str(), agent)
 }
 
-/// Conversations, Code sessions with what each is doing now, and the replies streaming.
+/// Conversations, Code sessions with what each is doing now, the Code sidebar's layout of groups
+/// and folders, and the replies streaming.
 fn index(state: &AppState) -> Result<Value> {
     let sessions = state.db.list_code_sessions()?;
     let mut live = state.mesh.live();
@@ -268,6 +269,7 @@ fn index(state: &AppState) -> Result<Value> {
     Ok(json!({
         "conversations": state.db.list_conversations()?,
         "codeSessions": sessions,
+        "sidebarLayout": state.db.list_sidebar_layout()?,
         "live": live,
         "streams": state.mesh.all_streams(),
     }))

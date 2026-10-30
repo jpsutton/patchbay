@@ -233,6 +233,7 @@ pub fn llm_config(r: &Resolved) -> patchbay_llm::Config {
     cfg.top_p = p.top_p;
     cfg.effort = p.reasoning_effort();
     cfg.summary = p.reasoning_summary();
+    cfg.send_reasoning = p.send_reasoning.unwrap_or(true);
     cfg
 }
 

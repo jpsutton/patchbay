@@ -106,6 +106,9 @@ impl AppState {
         if let Some(h) = state.db.get_setting(PLAN_HISTORY_KEY).ok().flatten().and_then(|j| serde_json::from_str(&j).ok()) {
             state.code.plan.set_history(h);
         }
+        if let Some(r) = state.db.get_setting(PLAN_RESUME_KEY).ok().flatten().and_then(|j| serde_json::from_str(&j).ok()) {
+            state.code.plan.set_resumes(r);
+        }
         mesh.set_ui(emit);
         mesh.set_handler(Arc::new(MeshRpc { state: state.clone() }));
         state
@@ -125,6 +128,10 @@ struct LiveAgent {
     usage: Option<serde_json::Value>,
     /// The agent's `authRequired` event while it waits for a sign-in.
     auth: Option<serde_json::Value>,
+    /// The agent's latest `plan` update (its to-do list). A window that attaches after the plan
+    /// was written has no other way to get it: the saved transcript doesn't hold it, and the
+    /// event ring only reaches back to the last finished turn.
+    plan: Option<serde_json::Value>,
 }
 
 /// Errors cross the IPC boundary as plain strings.
@@ -799,6 +806,9 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
         }
         if matches!(env.event, CodeEvent::UserPrompt { delivery: code::acp::Delivery::Sent, .. }) {
             state.code.set_busy(&env.code_session_id, true);
+            if state.code.plan.cancel_resume(&env.code_session_id) {
+                save_resumes(state);
+            }
         }
         {
             let mut live = state.live.lock().unwrap();
@@ -810,6 +820,19 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
                     l.ready = Some(ev);
                     l.auth = None;
                 }
+                CodeEvent::Config { .. } => {
+                    // A window attaching later replays `ready`, so it has to carry the model, modes
+                    // and options as they are now, not as the agent started. Same merge as the
+                    // front end's `config` event: models and modes stay when absent.
+                    if let Some(r) = live.get_mut(&id).and_then(|l| l.ready.as_mut()) {
+                        for key in ["models", "modes"] {
+                            if !ev[key].is_null() {
+                                r[key] = ev[key].clone();
+                            }
+                        }
+                        r["configOptions"] = ev["configOptions"].clone();
+                    }
+                }
                 CodeEvent::AuthRequired { .. } => live.entry(id).or_default().auth = Some(ev),
                 CodeEvent::AuthResolved => {
                     if let Some(l) = live.get_mut(&id) {
@@ -817,6 +840,9 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
                     }
                 }
                 CodeEvent::Usage { .. } => live.entry(id).or_default().usage = Some(ev),
+                CodeEvent::Update { update } if update["sessionUpdate"] == "plan" => {
+                    live.entry(id).or_default().plan = Some(ev)
+                }
                 CodeEvent::Permission { request_id, .. } => {
                     live.entry(id).or_default().permissions.push((request_id.clone(), ev))
                 }
@@ -863,6 +889,14 @@ fn adopt_plan_limits(state: &AppState, limits: code::plan_limits::PlanLimits, se
     state.code.plan.record(limits);
     (state.emit)(PLAN_LIMITS_EVENT, v);
     enforce_plan_limit(state);
+}
+
+/// Sessions the usage guard stopped that get prompted again when the limit lifts
+/// (`UsageLimit::auto_resume`), kept across restarts.
+const PLAN_RESUME_KEY: &str = "claude.planResume";
+
+fn save_resumes(state: &AppState) {
+    let _ = state.db.set_setting(PLAN_RESUME_KEY, &serde_json::to_string(&state.code.plan.resumes()).unwrap_or_default());
 }
 
 async fn plan_history(state: &AppState) -> CmdResult<Vec<code::plan_limits::Sample>> {
@@ -939,12 +973,65 @@ fn enforce_plan_limit(state: &AppState) {
             state.code.plan.turn_ended(&id);
             continue;
         }
-        let message = format!("Stopped. {}", hit.message(prefs.usage_limit.percent, now));
+        let mut message = format!("Stopped. {}", hit.message(prefs.usage_limit.percent, now));
+        if prefs.usage_limit.auto_resume {
+            state.code.plan.schedule_resume(&id, hit.resets_at);
+            save_resumes(state);
+            message.push_str(" Patchbay will tell the agent to continue once the limit resets.");
+        }
         on_code_event(
             state,
             code::acp::Envelope { code_session_id: id, event: code::acp::CodeEvent::Notice { message } },
         );
     }
+}
+
+/// How often sessions waiting on the usage limit are checked for resuming.
+const RESUME_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+/// Waits this long past a window's reset before prompting, so the plan has really lifted.
+const RESUME_GRACE_SECS: i64 = 60;
+const RESUME_PROMPT: &str = "Patchbay stopped your last turn at the Claude plan's usage limit. The limit has reset, so continue where you left off.";
+
+/// Prompt the sessions the usage guard stopped, once their limit has reset and no other window
+/// holds. Does nothing, and forgets them, while `UsageLimit::auto_resume` is off.
+async fn resume_after_limit(state: &AppState) {
+    let prefs = prefs::load(&state.db);
+    if !prefs.usage_limit.enabled || !prefs.usage_limit.auto_resume {
+        if state.code.plan.clear_resumes() {
+            save_resumes(state);
+        }
+        return;
+    }
+    let now = code::plan_limits::now();
+    if state.code.plan.hit(&prefs.usage_limit, now).is_some() {
+        return;
+    }
+    let due = state.code.plan.take_due(now - RESUME_GRACE_SECS);
+    if due.is_empty() {
+        return;
+    }
+    save_resumes(state);
+    for id in due {
+        if let Err(e) = resume_session(state, &id).await {
+            tracing::warn!("usage limit: resuming {id}: {e:#}");
+        }
+    }
+}
+
+async fn resume_session(state: &AppState, id: &str) -> anyhow::Result<()> {
+    let Some(session) = state.db.get_code_session(id)? else {
+        return Ok(());
+    };
+    if session.archived_at.is_some() || state.code.is_busy(id) || state.code.is_moving(id) {
+        return Ok(());
+    }
+    if !state.code.is_running(id) {
+        code_start_local(state, id.to_owned()).await?;
+    }
+    tracing::info!("usage limit: resuming {id}");
+    let me = state.mesh.node_id().to_owned();
+    code_prompt_local(state, id.to_owned(), RESUME_PROMPT.to_owned(), Vec::new(), Vec::new(), me, None, false, false).await?;
+    Ok(())
 }
 
 /// Feeds a session's automatic title from its agent's events (see `code::titles`).
@@ -1055,7 +1142,8 @@ async fn code_start(state: &AppState, id: String) -> CmdResult<()> {
 }
 
 /// Catch-up for a window opening a running session: whether it runs and is mid-turn, plus the
-/// events that set up its controls (session ready, open permission requests, usage).
+/// events that set up its controls (session ready, open permission requests, usage) and the
+/// agent's plan.
 fn code_attach_local(state: &AppState, id: &str) -> serde_json::Value {
     let running = state.code.is_running(id);
     let live = state.live.lock().unwrap();
@@ -1065,6 +1153,7 @@ fn code_attach_local(state: &AppState, id: &str) -> serde_json::Value {
         events.extend(l.auth.clone());
         events.extend(l.permissions.iter().map(|(_, e)| e.clone()));
         events.extend(l.usage.clone());
+        events.extend(l.plan.clone());
     }
     serde_json::json!({ "running": running, "busy": state.code.is_busy(id), "events": events })
 }
@@ -2473,6 +2562,13 @@ pub fn open_locked_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow:
                 tracing::warn!("auto-archive: {e:#}");
             }
             tokio::time::sleep(AUTO_ARCHIVE_EVERY).await;
+        }
+    });
+    let resumer = state.clone();
+    api::spawn(async move {
+        loop {
+            tokio::time::sleep(RESUME_EVERY).await;
+            resume_after_limit(&resumer).await;
         }
     });
     Ok(state)

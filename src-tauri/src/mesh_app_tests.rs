@@ -335,6 +335,8 @@ async fn phone_joins_follows_resumes_and_switches_gateway() {
     // Lists come from the gateway; the phone learns B's address for later.
     let idx = p.client.rpc("remote.index", Value::Null).await.unwrap();
     assert!(idx["codeSessions"].as_array().unwrap().iter().any(|c| c["id"] == s.id));
+    // The sidebar layout comes with the lists, for the phone's groups.
+    assert!(idx["sidebarLayout"].is_array());
     until("phone knows two computers", 10, || {
         p.client.status()["members"].as_array().unwrap().iter().filter(|m| m["role"].is_null()).count() == 2
     })
@@ -687,6 +689,30 @@ async fn sign_in_command_and_pending_auth() {
     assert!(auth().is_none(), "signed in: nothing left to replay");
 }
 
+/// A window (or phone) that attaches to a running session gets the agent's latest plan, even
+/// when it was written turns ago.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attach_replays_latest_plan() {
+    use code::acp::CodeEvent;
+    let a = node("alpha-plan");
+    let s = a.state.db.create_code_session(&a.dir.to_string_lossy(), None, "patchbay", "default").unwrap();
+    let _rx = a.state.code.attach_test_agent(&s.id);
+    let plan = |step: &str| CodeEvent::Update {
+        update: json!({ "sessionUpdate": "plan", "entries": [{ "content": step, "status": "pending", "priority": "medium" }] }),
+    };
+    let plans = || -> Vec<Value> {
+        let events = code_attach_local(&a.state, &s.id)["events"].as_array().cloned().unwrap_or_default();
+        events.into_iter().filter(|e| e["update"]["sessionUpdate"] == "plan").collect()
+    };
+    assert!(plans().is_empty(), "no plan yet");
+    emit(&a, &s.id, plan("map the installer"));
+    emit(&a, &s.id, plan("decode the archive"));
+    emit(&a, &s.id, chunk("working"));
+    let got = plans();
+    assert_eq!(got.len(), 1, "only the latest plan is kept");
+    assert_eq!(got[0]["update"]["entries"][0]["content"], "decode the archive");
+}
+
 /// The usage guard: a Claude Code turn past the plan limit is cancelled once, with a notice, and
 /// new prompts are refused until the window resets. Sessions on other agents run on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -755,7 +781,7 @@ async fn usage_limit_stops_claude_turns() {
         attachments: json!([]),
         delivery: Delivery::Sent,
     });
-    prefs.usage_limit = prefs::UsageLimit { enabled: true, percent: 50 };
+    prefs.usage_limit = prefs::UsageLimit { enabled: true, percent: 50, ..Default::default() };
     crate::api::call(&a.state, "set_preferences", json!({ "prefs": prefs }), &chans).await.unwrap();
     // Other windows on this backend hear about the change.
     assert!(

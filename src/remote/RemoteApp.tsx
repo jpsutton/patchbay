@@ -316,6 +316,8 @@ function Main({
     const refresh = () => {
       const s = useStore.getState();
       Promise.all([s.refreshCatalog(), s.refreshConversations(), s.refreshCodeSessions()]).catch((e) => s.setToast(errorText(e)));
+      // Groups are a nicety: a failed load is not worth a toast.
+      s.refreshSidebarLayout().catch(() => {});
       remote.live().then(setLive, () => {});
     };
     refresh();
@@ -872,7 +874,7 @@ function SettingsSheet({
           />
           <Toggle
             label="Group code sessions by project"
-            sub="Under each computer. Drag a project to put it where you want it."
+            sub="Under each folder, in the groups and order set on your computers."
             on={groupProjects}
             onChange={onGroupProjects}
           />

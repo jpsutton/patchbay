@@ -146,11 +146,13 @@ pub struct AgentEngine {
 pub struct UsageLimit {
     pub enabled: bool,
     pub percent: u8,
+    /// Once the limit lifts, prompt the sessions it stopped to carry on.
+    pub auto_resume: bool,
 }
 
 impl Default for UsageLimit {
     fn default() -> Self {
-        Self { enabled: true, percent: 95 }
+        Self { enabled: true, percent: 95, auto_resume: false }
     }
 }
 
@@ -311,7 +313,9 @@ mod tests {
         assert!(p.generate_titles);
         assert!(!p.group_by_project);
         assert!(p.claude_config.skills && p.claude_config.hooks);
-        assert_eq!(p.usage_limit, super::UsageLimit { enabled: true, percent: 95 });
+        assert_eq!(p.usage_limit, super::UsageLimit { enabled: true, percent: 95, auto_resume: false });
+        let p: Preferences = serde_json::from_str(r#"{"usageLimit":{"enabled":true,"percent":90}}"#).unwrap();
+        assert!(!p.usage_limit.auto_resume);
     }
 
     #[test]

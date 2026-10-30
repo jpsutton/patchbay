@@ -927,8 +927,16 @@ export function install() {
     (window as unknown as Record<string, unknown>).__fakeMissing = ["HKLM\\Software\\nulamp"];
   }
   seed("/home/demo/Projects/nulamp", "Release to staging", 5000, "pr");
-  // A second folder on the phone's laptop, so project drag has two rows to swap.
+  // A second folder on the phone's laptop, so a group on the phone has two folders to hold.
   if (phoneApp) seed("/home/demo/Projects/patchbay", "Gatekeeper quarantine", 2000, "edit");
+  // The phone shows the layout set on the computers: here one group, "Mine", with two folders.
+  if (phoneApp) {
+    db.sidebarLayout = [
+      { key: "group:mine", kind: "group", name: "Mine", parent: "", pos: 1024 },
+      { key: `${ME}:/home/demo/Projects/patchbay`, kind: "folder", name: "", parent: "group:mine", pos: 1024 },
+      { key: `${ME}:/home/demo/Projects/nulamp`, kind: "folder", name: "", parent: "group:mine", pos: 2048 },
+    ];
+  }
   seed("/home/demo/Projects/omnimark", "Interactive document controls", 3000, "branch", meshDemo ? "n-studio" : ME);
   seed("/home/demo/Work/omnimark", "Session overview", 9000, null, meshDemo ? "n-old" : ME);
   if (longTurns > 0) {

@@ -33,6 +33,8 @@ export interface ModelParams {
   reasoningEffort: ReasoningEffort | null;
   reasoningSummary: ReasoningSummary | null;
   autoCompactPercent: number | null;
+  /** Chat Completions only: send earlier reasoning back as `reasoning_content`. null = on. */
+  sendReasoning: boolean | null;
   pricing: Pricing;
 }
 
@@ -53,6 +55,7 @@ export const emptyParams = (): ModelParams => ({
   reasoningEffort: null,
   reasoningSummary: null,
   autoCompactPercent: null,
+  sendReasoning: null,
   pricing: { input: null, cachedInput: null, cacheWrite: null, output: null },
 });
 
@@ -675,7 +678,7 @@ export interface Preferences {
   /** Agents set to run on Patchbay's providers: agent id -> Patchbay model ref. */
   agentProviders: Partial<Record<AgentId, string>>;
   /** Stop turns on a Claude plan (Claude Code, or Patchbay's agent on a Claude login) at `percent`. */
-  usageLimit: { enabled: boolean; percent: number };
+  usageLimit: { enabled: boolean; percent: number; autoResume: boolean };
   /** Archive Code sessions this many days after their last prompt, unless pinned; null = never. */
   autoArchiveDays: number | null;
   permissionMode: "default" | "auto" | "always-approve";
@@ -723,7 +726,7 @@ export const defaultPreferences: Preferences = {
   defaultAgent: "patchbay",
   agentPaths: {},
   agentProviders: {},
-  usageLimit: { enabled: true, percent: 95 },
+  usageLimit: { enabled: true, percent: 95, autoResume: false },
   autoArchiveDays: null,
   permissionMode: "default",
   agentInstructions: "",
