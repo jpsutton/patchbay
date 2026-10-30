@@ -157,12 +157,22 @@ impl Client {
         }
         let resp = tokio::select! {
             _ = cancel.cancelled() => return Err(Error::cancelled()),
-            r = rb.send() => r.map_err(|e| Error {
-                message: format!("request failed: {e}"),
-                status: None,
-                retryable: e.is_connect() || e.is_timeout() || e.is_request(),
-                cancelled: false,
-            })?,
+            // The connect timeout covers the handshake only; a server that takes the request and
+            // never answers would otherwise hold the call open for good.
+            r = tokio::time::timeout(cfg.idle_timeout, rb.send()) => match r {
+                Err(_) => return Err(Error {
+                    message: format!("no response for {}s", cfg.idle_timeout.as_secs()),
+                    status: None,
+                    retryable: true,
+                    cancelled: false,
+                }),
+                Ok(r) => r.map_err(|e| Error {
+                    message: format!("request failed: {e}"),
+                    status: None,
+                    retryable: e.is_connect() || e.is_timeout() || e.is_request(),
+                    cancelled: false,
+                })?,
+            },
         };
         let status = resp.status();
         if !status.is_success() {

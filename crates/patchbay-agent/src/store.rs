@@ -114,7 +114,7 @@ pub fn effective(entries: &[Entry]) -> Vec<Entry> {
 pub struct Store {
     path: PathBuf,
     file: Mutex<Option<std::fs::File>>,
-    /// A store that keeps nothing (subagents live in memory).
+    /// A store that keeps nothing.
     disabled: bool,
 }
 
@@ -122,9 +122,20 @@ pub fn sessions_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("agent").join("sessions")
 }
 
+/// Where a session's subagents keep their transcripts (`<agent id>.jsonl`) and `status.json`.
+/// Apart from `sessions/`, so they never show up as sessions of their own.
+pub fn subagents_dir(data_dir: &Path, session_id: &str) -> PathBuf {
+    data_dir.join("agent").join("subagents").join(session_id)
+}
+
 impl Store {
     pub fn new(data_dir: &Path, id: &str) -> Store {
         Store { path: sessions_dir(data_dir).join(format!("{id}.jsonl")), file: Mutex::new(None), disabled: false }
+    }
+
+    /// A store in the file at `path`.
+    pub fn at(path: PathBuf) -> Store {
+        Store { path, file: Mutex::new(None), disabled: false }
     }
 
     pub fn disabled() -> Store {

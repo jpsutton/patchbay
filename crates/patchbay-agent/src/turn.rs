@@ -21,6 +21,8 @@ use crate::tools::{Registry, Tool, ToolCtx, ToolOutput, clip_middle};
 const MAX_RESULT_CHARS: usize = 100_000;
 /// Longest tool result text shown on the card.
 const MAX_CARD_CHARS: usize = 20_000;
+/// How often a turn that waits on background subagents looks at how they are doing.
+const AGENT_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 /// Replies in a row cut off by the output token limit that a turn picks up again before it stops.
 pub(crate) const MAX_CUT_OFF_CONTINUES: usize = 3;
 
@@ -304,6 +306,7 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
         parts.push(r);
     }
     parts.extend(notes_part(&session.agents.drain_notes(), session.prompts()));
+    parts.extend(session.agents.stalled_note(session.prompts()));
     if let Some(nudge) = session.prompts().terse_nudge() {
         parts.push(Part::Text(prompt::reminder(nudge)));
     }
@@ -448,6 +451,7 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
                 // the prompt open for the rest.
                 loop {
                     let mut next: Vec<Part> = notes_part(&session.agents.drain_notes(), session.prompts()).into_iter().collect();
+                    next.extend(session.agents.stalled_note(session.prompts()));
                     next.extend(session.take_steered(false));
                     if !next.is_empty() {
                         push_user(&session, next).await;
@@ -461,6 +465,9 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
                             }
                             _ = session.agents.wait() => {}
                             _ = session.steered.notified() => {}
+                            // Wake now and then, to look for subagents that have gone quiet and to
+                            // keep their status file fresh.
+                            _ = tokio::time::sleep(AGENT_CHECK_EVERY) => session.agents.write_status(&session.agents_status_path()),
                         }
                         continue;
                     }
@@ -495,6 +502,7 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
             parts.push(r);
         }
         parts.extend(notes_part(&session.agents.drain_notes(), session.prompts()));
+        parts.extend(session.agents.stalled_note(session.prompts()));
         parts.extend(session.take_steered(false));
         push_user(&session, parts).await;
         if cancel.is_cancelled() {
@@ -701,7 +709,12 @@ async fn run_call(
         _ => tool.needs_permission(&call.arguments, &session),
     };
     if must_ask {
-        match ask(&session, &card, &tool, &call, &cancel).await {
+        // A subagent stuck here is waiting on the user, not on anything of its own.
+        let what = card["title"].as_str().unwrap_or(&call.name).lines().next().unwrap_or("").chars().take(80).collect::<String>();
+        session.live.block(format!("waiting for the user to approve: {what}"));
+        let verdict = ask(&session, &card, &tool, &call, &cancel).await;
+        session.live.set(format!("running {}", call.name));
+        match verdict {
             Verdict::Allow => {}
             Verdict::Reject => {
                 return fail(&session, session.prompts().msg("declined", &[]));
