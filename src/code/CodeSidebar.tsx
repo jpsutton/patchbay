@@ -16,6 +16,7 @@ import {
   locate,
   planMove,
   planNewGroup,
+  planProjectsToFolders,
   planRename,
   planUngroup,
   recordFresh,
@@ -42,6 +43,24 @@ function basename(p: string): string {
   return p.split(/[\\/]/).filter(Boolean).pop() ?? p;
 }
 
+/** A session's folder. `/a/b` and `/a/b/` are one folder. */
+function dirOf(s: CodeSession): string {
+  return s.cwd.length > 1 ? s.cwd.replace(/[\\/]+$/, "") || s.cwd : s.cwd;
+}
+
+/** A session's folder's key in the synced layout. It names the computer, so it is the same on every one. */
+function folderLayoutKey(s: CodeSession): string {
+  return s.hostNode ? `${s.hostNode}:${dirOf(s)}` : dirOf(s);
+}
+
+/** A session's project's key. The prefix keeps it apart from a folder's. */
+function projectLayoutKey(s: CodeSession): string {
+  return `project:${basename(dirOf(s))}`;
+}
+
+/** Set once this computer has moved projects back to their folders' places (`planProjectsToFolders`). */
+const PROJECTS_PLACED_KEY = "patchbay.codeSidebar.projectsPlaced";
+
 function parentLabel(p: string): string {
   const parts = p.split(/[\\/]/).filter(Boolean);
   parts.pop();
@@ -54,6 +73,8 @@ interface Group {
   key: string;
   /** The key in the synced layout: the same on every computer, so it always names the computer. */
   layoutKey: string;
+  /** Layout keys whose place this one takes while it has none: a project's folders, newest first, or a folder's project. */
+  inherit: string[];
   cwd: string;
   /** The computer the folder is on, when that isn't this one. */
   host: string | null;
@@ -106,8 +127,6 @@ export function CodeSidebar() {
   const pinned = useMemo(() => hits.filter((s) => s.pinned), [hits]);
 
   const byRecency = useMemo<Group[]>(() => {
-    // `/a/b` and `/a/b/` are one folder.
-    const dirOf = (s: CodeSession) => (s.cwd.length > 1 ? s.cwd.replace(/[\\/]+$/, "") || s.cwd : s.cwd);
     // Normally the same path on two computers is two folders. Grouping by project name makes
     // every folder with the same name one group, wherever it lives.
     const by = new Map<string, CodeSession[]>();
@@ -116,9 +135,8 @@ export function CodeSidebar() {
       if (s.pinned) continue;
       const host = remoteHost(s, mesh);
       const dir = dirOf(s);
-      // The prefix keeps a project's key apart from a folder's.
-      const key = prefs.groupByProject ? `project:${basename(dir)}` : host ? `${host}:${dir}` : dir;
-      layoutKeys.set(key, prefs.groupByProject ? key : s.hostNode ? `${s.hostNode}:${dir}` : dir);
+      const key = prefs.groupByProject ? projectLayoutKey(s) : host ? `${host}:${dir}` : dir;
+      layoutKeys.set(key, prefs.groupByProject ? key : folderLayoutKey(s));
       const list = by.get(key);
       if (list) list.push(s);
       else by.set(key, [s]);
@@ -133,6 +151,7 @@ export function CodeSidebar() {
         return {
           key,
           layoutKey: layoutKeys.get(key) ?? key,
+          inherit: prefs.groupByProject ? [...new Set(sorted.map(folderLayoutKey))] : [projectLayoutKey(top)],
           cwd,
           host,
           label: basename(cwd),
@@ -152,7 +171,10 @@ export function CodeSidebar() {
   // Folders and groups keep the layout the user gave them, which syncs across the mesh. A folder
   // seen for the first time goes on top, and one that drops out of view keeps its place.
   const byLayoutKey = useMemo(() => new Map(byRecency.map((g) => [g.layoutKey, g])), [byRecency]);
-  const arranged = useMemo(() => arrange(byRecency.map((g) => g.layoutKey), layout ?? []), [byRecency, layout]);
+  const arranged = useMemo(
+    () => arrange(byRecency.map((g) => g.layoutKey), layout ?? [], new Map(byRecency.map((g) => [g.layoutKey, g.inherit]))),
+    [byRecency, layout],
+  );
   const searching = query.trim() !== "";
   // While searching, a group with no match is left out.
   const top = useMemo<TopItem[]>(
@@ -187,6 +209,22 @@ export function CodeSidebar() {
       changeLayout({ put: recordFresh(layout, fresh), remove: [] });
     }
   }, [layout, arranged.fresh, byRecency, searching, changeLayout]);
+
+  // Once per computer: projects recorded at the top level by builds that didn't place them with
+  // their folders go back to their folders' places, in or out of a group.
+  useEffect(() => {
+    if (layout == null || !prefs.groupByProject || sessions.length === 0) return;
+    if (localStorage.getItem(PROJECTS_PLACED_KEY)) return;
+    localStorage.setItem(PROJECTS_PLACED_KEY, "1");
+    const sources = new Map<string, string[]>();
+    for (const s of [...sessions].sort((a, b) => b.updatedAt - a.updatedAt)) {
+      const list = sources.get(projectLayoutKey(s)) ?? [];
+      const f = folderLayoutKey(s);
+      if (!list.includes(f)) sources.set(projectLayoutKey(s), [...list, f]);
+    }
+    const change = planProjectsToFolders(layout, sources);
+    if (change) changeLayout(change);
+  }, [layout, prefs.groupByProject, sessions, changeLayout]);
 
   // The drag handlers outlive the render that started them, so they read the latest of these.
   const live = useRef({ top, layout });

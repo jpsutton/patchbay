@@ -227,6 +227,13 @@ CREATE TABLE sidebar_layout (
     parent TEXT NOT NULL DEFAULT '',
     pos INTEGER NOT NULL DEFAULT 0
 );
+"#, r#"
+-- Preferences that follow the user across the mesh (`prefs::SYNCED`): one row per preference,
+-- its value as JSON. The rest stay in the `preferences` setting, on each node.
+CREATE TABLE ui_prefs (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 "#];
 
 pub fn now_ms() -> i64 {
@@ -568,11 +575,18 @@ impl Db {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let had_ui_prefs = conn
+            .query_row("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ui_prefs'", [], |_| Ok(()))
+            .optional()?
+            .is_some();
         for (i, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
             conn.execute_batch(sql)?;
             conn.pragma_update(None, "user_version", (i + 1) as i64)?;
         }
         crate::mesh::sync::install(&conn)?;
+        if !had_ui_prefs {
+            crate::prefs::seed_synced(&conn)?;
+        }
         Ok(Self(Mutex::new(conn)))
     }
 
@@ -1376,6 +1390,25 @@ impl Db {
             tx.execute("DELETE FROM sidebar_layout WHERE id = ?1", [key])?;
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    // ---- synced preferences ----
+
+    /// (key, JSON value) for every preference the mesh has a value for.
+    pub fn list_ui_prefs(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT key, value FROM ui_prefs")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn set_ui_pref(&self, key: &str, value: &str) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO ui_prefs (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = ?2",
+            params![key, value],
+        )?;
         Ok(())
     }
 
