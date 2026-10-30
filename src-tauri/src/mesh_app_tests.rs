@@ -335,6 +335,8 @@ async fn phone_joins_follows_resumes_and_switches_gateway() {
     // Lists come from the gateway; the phone learns B's address for later.
     let idx = p.client.rpc("remote.index", Value::Null).await.unwrap();
     assert!(idx["codeSessions"].as_array().unwrap().iter().any(|c| c["id"] == s.id));
+    // The sidebar layout comes with the lists, for the phone's groups.
+    assert!(idx["sidebarLayout"].is_array());
     until("phone knows two computers", 10, || {
         p.client.status()["members"].as_array().unwrap().iter().filter(|m| m["role"].is_null()).count() == 2
     })
@@ -687,6 +689,30 @@ async fn sign_in_command_and_pending_auth() {
     assert!(auth().is_none(), "signed in: nothing left to replay");
 }
 
+/// A window (or phone) that attaches to a running session gets the agent's latest plan, even
+/// when it was written turns ago.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attach_replays_latest_plan() {
+    use code::acp::CodeEvent;
+    let a = node("alpha-plan");
+    let s = a.state.db.create_code_session(&a.dir.to_string_lossy(), None, "patchbay", "default").unwrap();
+    let _rx = a.state.code.attach_test_agent(&s.id);
+    let plan = |step: &str| CodeEvent::Update {
+        update: json!({ "sessionUpdate": "plan", "entries": [{ "content": step, "status": "pending", "priority": "medium" }] }),
+    };
+    let plans = || -> Vec<Value> {
+        let events = code_attach_local(&a.state, &s.id)["events"].as_array().cloned().unwrap_or_default();
+        events.into_iter().filter(|e| e["update"]["sessionUpdate"] == "plan").collect()
+    };
+    assert!(plans().is_empty(), "no plan yet");
+    emit(&a, &s.id, plan("map the installer"));
+    emit(&a, &s.id, plan("decode the archive"));
+    emit(&a, &s.id, chunk("working"));
+    let got = plans();
+    assert_eq!(got.len(), 1, "only the latest plan is kept");
+    assert_eq!(got[0]["update"]["entries"][0]["content"], "decode the archive");
+}
+
 /// The usage guard: a Claude Code turn past the plan limit is cancelled once, with a notice, and
 /// new prompts are refused until the window resets. Sessions on other agents run on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -755,7 +781,7 @@ async fn usage_limit_stops_claude_turns() {
         attachments: json!([]),
         delivery: Delivery::Sent,
     });
-    prefs.usage_limit = prefs::UsageLimit { enabled: true, percent: 50 };
+    prefs.usage_limit = prefs::UsageLimit { enabled: true, percent: 50, ..Default::default() };
     crate::api::call(&a.state, "set_preferences", json!({ "prefs": prefs }), &chans).await.unwrap();
     // Other windows on this backend hear about the change.
     assert!(
@@ -770,6 +796,39 @@ async fn usage_limit_stops_claude_turns() {
     assert!(a.events.lock().unwrap().iter().any(|(n, p)| n == "code://plan-limits" && p["sevenDay"]["utilization"] == 0.3));
     let again = AppState::new(a.state.db.clone(), a.dir.clone(), a.state.mesh.clone(), Arc::new(|_: &str, _: Value| {}));
     assert_eq!(again.code.plan.latest().and_then(|l| l.five_hour).map(|w| w.utilization), Some(0.97));
+}
+
+/// Plan usage one member sees reaches the others, a member that was away catches up when it
+/// reconnects, and an older report never replaces a newer one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plan_limits_reach_every_member() {
+    use code::acp::CodeEvent;
+    use code::plan_limits::{PlanLimits, Window, now};
+    let (a, b) = (node("alpha-plan"), node("bravo-plan"));
+    link(&a, &b).await;
+    let bn = b.state.mesh.node_id().to_owned();
+    let report = |five: f64, ago: i64| PlanLimits {
+        five_hour: Some(Window { utilization: five, resets_at: now() + 3600 }),
+        observed_at: now() - ago,
+        ..Default::default()
+    };
+    let five = |n: &Node| n.state.code.plan.latest().and_then(|l| l.five_hour).map(|w| w.utilization);
+
+    emit(&a, "s", CodeEvent::PlanLimits { limits: report(0.4, 60) });
+    until("B has A's report", 10, || five(&b) == Some(0.4)).await;
+    assert!(b.events.lock().unwrap().iter().any(|(n, p)| n == "code://plan-limits" && p["fiveHour"]["utilization"] == 0.4));
+    assert!(b.state.db.get_setting("claude.planLimits").unwrap().is_some());
+
+    b.state.mesh.stop();
+    until("A notices B is gone", 40, || !a.state.mesh.connected(&bn)).await;
+    emit(&a, "s", CodeEvent::PlanLimits { limits: report(0.5, 30) });
+    b.state.mesh.start();
+    until("B catches up on reconnect", 30, || five(&b) == Some(0.5)).await;
+    // B's older report, sent to A on reconnect, didn't replace A's.
+    assert_eq!(five(&a), Some(0.5));
+
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &json!(report(0.1, 120)));
+    assert_eq!(five(&b), Some(0.5));
 }
 
 /// A phone can decide a join request that waits on any computer, with its own signature.

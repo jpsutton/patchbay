@@ -47,13 +47,24 @@ function groupOf(e: SidebarEntry | undefined, groups: Map<string, SidebarEntry>)
 }
 
 /**
- * The sidebar as a tree. `folders` are the folder keys on screen, newest first. A folder the
- * layout has never seen goes first at the top level, in that order. A group stays even when
- * it holds no folder on screen; the caller decides whether to show it.
+ * The sidebar as a tree. `folders` are the folder keys on screen, newest first. One with no entry
+ * of its own takes the place of the first key in `inherit` that has one: a project sits where its
+ * folders are, and a folder where its project is. A folder with no place at all is fresh: it goes
+ * first at the top level, in that order. A group stays even when it holds no folder on screen;
+ * the caller decides whether to show it.
  */
-export function arrange(folders: string[], layout: SidebarEntry[]): { top: TopItem[]; fresh: string[] } {
+export function arrange(
+  folders: string[],
+  layout: SidebarEntry[],
+  inherit?: Map<string, string[]>,
+): { top: TopItem[]; fresh: string[] } {
   const groups = new Map(layout.filter((e) => e.kind === "group").map((e) => [e.key, e]));
-  const placed = new Map(layout.filter((e) => e.kind === "folder").map((e) => [e.key, e]));
+  const own = new Map(layout.filter((e) => e.kind === "folder").map((e) => [e.key, e]));
+  const placed = new Map<string, SidebarEntry>();
+  for (const k of folders) {
+    const e = own.get(k) ?? inherit?.get(k)?.map((f) => own.get(f)).find((f) => f != null);
+    if (e) placed.set(k, { ...e, key: k });
+  }
   const fresh = folders.filter((k) => !placed.has(k));
 
   const children = new Map<string, SidebarEntry[]>();
@@ -76,6 +87,27 @@ export function arrange(folders: string[], layout: SidebarEntry[]): { top: TopIt
     ),
   ];
   return { top, fresh };
+}
+
+/**
+ * Put projects back where their folders are. Before projects took their folders' place, grouping
+ * by project recorded every project as new: at the top level, outside its folders' groups. Each
+ * project at the top level whose folders (`sources`, newest first) have a place moves to it. A
+ * project someone put in a group stays there.
+ */
+export function planProjectsToFolders(layout: SidebarEntry[], sources: Map<string, string[]>): LayoutChange | null {
+  const groups = new Map(layout.filter((e) => e.kind === "group").map((e) => [e.key, e]));
+  const own = new Map(layout.filter((e) => e.kind === "folder").map((e) => [e.key, e]));
+  const put: SidebarEntry[] = [];
+  for (const [key, from] of sources) {
+    const e = own.get(key);
+    if (!e || groupOf(e, groups) !== "") continue;
+    const f = from.map((k) => own.get(k)).find((x) => x != null);
+    if (!f) continue;
+    const parent = groupOf(f, groups);
+    if (e.parent !== parent || e.pos !== f.pos) put.push({ ...e, parent, pos: f.pos });
+  }
+  return put.length ? { put, remove: [] } : null;
 }
 
 /** Entries that record folders the layout has never seen, so later activity doesn't move them. */

@@ -1,12 +1,28 @@
-//! App preferences, stored as one JSON document in the `settings` table.
+//! App preferences, stored as one JSON document in the `settings` table, on each node. The ones
+//! in [`SYNCED`] follow the user across the mesh: their values in `ui_prefs` win over the document.
 //! UI-only fields are opaque here; Rust reads the ones that shape the agent and terminal.
 
 use anyhow::Result;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::db::Db;
 
 const KEY: &str = "preferences";
+
+/// Preferences that are the same on every node of the mesh, by their JSON name. The rest belong to
+/// the machine (its shortcut, shell, title bar, agent paths) or the screen (theme, text size).
+pub const SYNCED: &[&str] = &[
+    "groupByProject",
+    "sendKey",
+    "launchTab",
+    "expandReasoning",
+    "generateTitles",
+    "chatWebSearch",
+    "defaultAgent",
+    "autoArchiveDays",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -41,7 +57,7 @@ pub struct Preferences {
     /// Let the model search the web in chat: through the provider's own search where it has one,
     /// else through Brave Search when a key is set. Off by default; searches can cost money.
     pub chat_web_search: bool,
-    /// auto | system | builtin | server. Stored on this device; preferences are not synced.
+    /// auto | system | builtin | server. Stored on this device; read-aloud settings are not synced.
     pub read_aloud_engine: String,
     /// Voice id for the engine in use. Empty means that engine's default.
     pub read_aloud_voice: String,
@@ -146,11 +162,13 @@ pub struct AgentEngine {
 pub struct UsageLimit {
     pub enabled: bool,
     pub percent: u8,
+    /// Once the limit lifts, prompt the sessions it stopped to carry on.
+    pub auto_resume: bool,
 }
 
 impl Default for UsageLimit {
     fn default() -> Self {
-        Self { enabled: true, percent: 95 }
+        Self { enabled: true, percent: 95, auto_resume: false }
     }
 }
 
@@ -230,11 +248,25 @@ fn one_of(field: &str, v: &str, allowed: &[&str]) -> std::result::Result<(), Str
 }
 
 impl Preferences {
-    pub fn validate(&self) -> std::result::Result<(), String> {
-        one_of("theme", &self.theme, &["system", "light", "dark"])?;
-        one_of("text size", &self.text_size, &["small", "default", "large"])?;
+    /// The checks on [`SYNCED`] fields, which another node may have set.
+    fn validate_synced(&self) -> std::result::Result<(), String> {
         one_of("send key", &self.send_key, &["enter", "mod-enter"])?;
         one_of("launch tab", &self.launch_tab, &["chat", "code", "last"])?;
+        if crate::code::agents::AgentKind::parse(&self.default_agent).is_none() {
+            return Err(format!("unknown coding agent {}", self.default_agent));
+        }
+        if let Some(d) = self.auto_archive_days
+            && !(1..=3650).contains(&d)
+        {
+            return Err("auto-archive age must be between 1 and 3650 days".into());
+        }
+        Ok(())
+    }
+
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        self.validate_synced()?;
+        one_of("theme", &self.theme, &["system", "light", "dark"])?;
+        one_of("text size", &self.text_size, &["small", "default", "large"])?;
         one_of("title bar", &self.title_bar, &["system", "app"])?;
         one_of("terminal local echo", &self.terminal_local_echo, &["auto", "on", "off"])?;
         one_of(
@@ -255,9 +287,6 @@ impl Preferences {
                 return Err("speech server URL must be an http or https URL".into());
             }
         }
-        if crate::code::agents::AgentKind::parse(&self.default_agent).is_none() {
-            return Err(format!("unknown coding agent {}", self.default_agent));
-        }
         if let Some(p) = self.auto_compact_percent
             && !(10..=99).contains(&p)
         {
@@ -265,11 +294,6 @@ impl Preferences {
         }
         if !(1..=100).contains(&self.usage_limit.percent) {
             return Err("usage limit must be between 1 and 100%".into());
-        }
-        if let Some(d) = self.auto_archive_days
-            && !(1..=3650).contains(&d)
-        {
-            return Err("auto-archive age must be between 1 and 3650 days".into());
         }
         if !(8..=32).contains(&self.terminal_font_size) {
             return Err("terminal font size must be between 8 and 32".into());
@@ -283,15 +307,72 @@ impl Preferences {
 }
 
 pub fn load(db: &Db) -> Preferences {
-    db.get_setting(KEY)
+    let local = db
+        .get_setting(KEY)
         .ok()
         .flatten()
         .and_then(|j| serde_json::from_str(&j).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    overlay(local, &db.list_ui_prefs().unwrap_or_default())
 }
 
+/// `p` with the mesh's values of [`SYNCED`] preferences. One this build can't read or doesn't
+/// accept (an agent a newer node knows) keeps this node's value.
+fn overlay(mut p: Preferences, synced: &[(String, String)]) -> Preferences {
+    for (k, v) in synced {
+        if !SYNCED.contains(&k.as_str()) {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(v) else { continue };
+        let Ok(Value::Object(mut fields)) = serde_json::to_value(&p) else { break };
+        fields.insert(k.clone(), v);
+        if let Ok(next) = serde_json::from_value::<Preferences>(Value::Object(fields))
+            && next.validate_synced().is_ok()
+        {
+            p = next;
+        }
+    }
+    p
+}
+
+/// Save `p`. Of the [`SYNCED`] preferences, only those it changes are written to the mesh, so
+/// saving one setting doesn't stamp the others over a newer value from another node.
 pub fn save(db: &Db, p: &Preferences) -> Result<()> {
-    db.set_setting(KEY, &serde_json::to_string(p)?)
+    let before = serde_json::to_value(load(db))?;
+    db.set_setting(KEY, &serde_json::to_string(p)?)?;
+    let after = serde_json::to_value(p)?;
+    for k in SYNCED {
+        if let Some(v) = after.get(*k)
+            && before.get(*k) != Some(v)
+        {
+            db.set_ui_pref(k, &v.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// Bring this node's [`SYNCED`] preferences into the mesh when `ui_prefs` first appears. Only
+/// values changed from the default go in, under the oldest clock: on a mesh whose nodes disagree,
+/// a setting someone changed beats one left at its default, and any change made after the upgrade
+/// beats both. Two nodes that changed the same one to different values settle on one of them.
+pub fn seed_synced(conn: &Connection) -> Result<()> {
+    let Some(saved) = conn
+        .query_row("SELECT value FROM settings WHERE key = ?1", [KEY], |r| r.get::<_, String>(0))
+        .optional()?
+    else {
+        return Ok(());
+    };
+    let Ok(Value::Object(saved)) = serde_json::from_str::<Value>(&saved) else { return Ok(()) };
+    let defaults = serde_json::to_value(Preferences::default())?;
+    for k in SYNCED {
+        if let Some(v) = saved.get(*k)
+            && defaults.get(*k) != Some(v)
+        {
+            let value = v.to_string();
+            crate::mesh::sync::seed_oldest(conn, "ui_prefs", k, &[("value", value.as_str())])?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -311,7 +392,9 @@ mod tests {
         assert!(p.generate_titles);
         assert!(!p.group_by_project);
         assert!(p.claude_config.skills && p.claude_config.hooks);
-        assert_eq!(p.usage_limit, super::UsageLimit { enabled: true, percent: 95 });
+        assert_eq!(p.usage_limit, super::UsageLimit { enabled: true, percent: 95, auto_resume: false });
+        let p: Preferences = serde_json::from_str(r#"{"usageLimit":{"enabled":true,"percent":90}}"#).unwrap();
+        assert!(!p.usage_limit.auto_resume);
     }
 
     #[test]

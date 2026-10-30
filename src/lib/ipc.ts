@@ -33,6 +33,8 @@ export interface ModelParams {
   reasoningEffort: ReasoningEffort | null;
   reasoningSummary: ReasoningSummary | null;
   autoCompactPercent: number | null;
+  /** Chat Completions only: send earlier reasoning back as `reasoning_content`. null = on. */
+  sendReasoning: boolean | null;
   pricing: Pricing;
 }
 
@@ -53,6 +55,7 @@ export const emptyParams = (): ModelParams => ({
   reasoningEffort: null,
   reasoningSummary: null,
   autoCompactPercent: null,
+  sendReasoning: null,
   pricing: { input: null, cachedInput: null, cacheWrite: null, output: null },
 });
 
@@ -653,6 +656,11 @@ export interface AgentEngine {
   shellTimeoutSecs: number | null;
 }
 
+/**
+ * Most preferences belong to one computer. The ones in `prefs::SYNCED` (Rust) are the same on
+ * every node of the mesh: group by project, send key, launch tab, reasoning, titles, chat web
+ * search, default agent and auto-archive.
+ */
 export interface Preferences {
   theme: "system" | "light" | "dark";
   textSize: "small" | "default" | "large";
@@ -675,7 +683,7 @@ export interface Preferences {
   /** Agents set to run on Patchbay's providers: agent id -> Patchbay model ref. */
   agentProviders: Partial<Record<AgentId, string>>;
   /** Stop turns on a Claude plan (Claude Code, or Patchbay's agent on a Claude login) at `percent`. */
-  usageLimit: { enabled: boolean; percent: number };
+  usageLimit: { enabled: boolean; percent: number; autoResume: boolean };
   /** Archive Code sessions this many days after their last prompt, unless pinned; null = never. */
   autoArchiveDays: number | null;
   permissionMode: "default" | "auto" | "always-approve";
@@ -690,7 +698,7 @@ export interface Preferences {
   terminalFontSize: number;
   /** Draw typed characters before a slow shell echoes them: auto = when echo lags. */
   terminalLocalEcho: "auto" | "on" | "off";
-  /** auto | system | builtin | server. This device only; preferences are not synced. */
+  /** auto | system | builtin | server. This device only. */
   readAloudEngine: "auto" | "system" | "builtin" | "server";
   /** Voice id for the engine in use. Empty means that engine's default. */
   readAloudVoice: string;
@@ -723,7 +731,7 @@ export const defaultPreferences: Preferences = {
   defaultAgent: "patchbay",
   agentPaths: {},
   agentProviders: {},
-  usageLimit: { enabled: true, percent: 95 },
+  usageLimit: { enabled: true, percent: 95, autoResume: false },
   autoArchiveDays: null,
   permissionMode: "default",
   agentInstructions: "",

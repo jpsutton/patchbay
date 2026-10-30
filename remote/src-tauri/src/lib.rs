@@ -226,7 +226,7 @@ impl Remote {
             }
             rmt::EV_INDEX => {
                 self.forget_index();
-                self.emit("mesh://changed", json!({ "tables": ["conversations", "messages", "code_sessions"] }));
+                self.emit("mesh://changed", json!({ "tables": ["conversations", "messages", "code_sessions", "sidebar_layout"] }));
             }
             EV_JOIN_REQUEST => self.notify_join(&payload),
             EV_JOIN_RESOLVED => {
@@ -690,6 +690,14 @@ async fn list_code_sessions(r: Shared<'_>) -> CmdResult<Value> {
     Ok(r.index().await?["codeSessions"].clone())
 }
 
+/// The Code sidebar's groups and folders, as set on the computers. A gateway from before
+/// groups sends none: that reads as no layout.
+#[tauri::command]
+async fn list_sidebar_layout(r: Shared<'_>) -> CmdResult<Value> {
+    let layout = r.index().await?["sidebarLayout"].clone();
+    Ok(if layout.is_null() { json!([]) } else { layout })
+}
+
 /// Live state of every Code session (status, mid-turn, open permission requests).
 #[tauri::command]
 async fn remote_live(r: Shared<'_>) -> CmdResult<Value> {
@@ -1019,6 +1027,7 @@ pub fn run() {
             add_attachment_path,
             attachment_thumbnail,
             list_code_sessions,
+            list_sidebar_layout,
             update_code_session,
             code_auto_title,
             list_agents,
