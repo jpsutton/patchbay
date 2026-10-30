@@ -653,6 +653,11 @@ export interface AgentEngine {
   shellTimeoutSecs: number | null;
 }
 
+/**
+ * Most preferences belong to one computer. The ones in `prefs::SYNCED` (Rust) are the same on
+ * every node of the mesh: group by project, send key, launch tab, reasoning, titles, chat web
+ * search, default agent and auto-archive.
+ */
 export interface Preferences {
   theme: "system" | "light" | "dark";
   textSize: "small" | "default" | "large";
@@ -690,7 +695,7 @@ export interface Preferences {
   terminalFontSize: number;
   /** Draw typed characters before a slow shell echoes them: auto = when echo lags. */
   terminalLocalEcho: "auto" | "on" | "off";
-  /** auto | system | builtin | server. This device only; preferences are not synced. */
+  /** auto | system | builtin | server. This device only. */
   readAloudEngine: "auto" | "system" | "builtin" | "server";
   /** Voice id for the engine in use. Empty means that engine's default. */
   readAloudVoice: string;

@@ -89,10 +89,11 @@ Sync doesn't need relaying: a change from A reaches B through C as ordinary sync
 | Attachment records | The bytes are fetched on demand from any connected peer (`mesh.file` RPC) and checked against their SHA-256. `attachments.path` stays local. |
 | Code sessions | Including the cached transcript, usage, `host_node` and `epoch`. |
 | Code sidebar layout | `sidebar_layout`: the user's folder groups, which group each folder is in, and the manual order of groups and folders. A folder's id names its computer (`<node_id>:<path>`), so the same path on two computers stays two entries. |
+| Synced preferences | `ui_prefs`: one row per preference in `prefs::SYNCED` (group by project, send key, launch tab, reasoning, titles, chat web search, default agent, auto-archive), the value as JSON. It wins over the node's own copy. A value this build can't use (an agent only a newer node knows) leaves the node's own in place. Saving preferences writes only the synced ones that changed. |
 | Prompts, MCP servers, permission rules | Permission rules keep their absolute folder, so they apply only where paths match. |
 | Providers and models | `providers.inline_key` stays local. Keys travel sealed in `mesh_secrets`. |
 | `mesh_members`, `mesh_secrets` | Membership and sealed secrets. |
-| Not synced | The `settings` table: preferences, default model, mesh configuration. Agent state, which moves only with a session. |
+| Not synced | The `settings` table: the other preferences (theme, text size, shortcuts, terminal, read aloud, agent paths and providers), default model, mesh configuration. Agent state, which moves only with a session. |
 
 ### Mechanism (`mesh/sync.rs`)
 
@@ -102,6 +103,8 @@ Sync doesn't need relaying: a change from A reaches B through C as ordinary sync
 - The receiver applies each cell only if its `(hlc, origin)` is newer than the local clock: last writer wins, per column. A row that can't be inserted yet, such as a message whose conversation hasn't arrived, is parked in `sync_parked` and retried after later batches.
 - Changes go out as they happen: a watcher notices local writes within 150 ms, and received changes are forwarded to the other peers.
 - Rows written before sync existed get clocks when the database opens.
+- A build that doesn't know a table skips its changes but still counts them as received. So when a build syncs a table its predecessor didn't (`settings` key `sync.tables`), the node forgets its version vector and gets everything from its peers once. Changes it already has are no-ops. On a mesh of three or more full nodes where one is still on an older build, changes relayed through that node can still go missing until their writer changes them again.
+- When `ui_prefs` first appears, a node brings in its synced preferences that differ from the default, under the oldest clock (`sync::seed_oldest`). Where nodes disagree, a changed setting beats a default one, and any change made after the upgrade beats both.
 
 Every change goes to every member. There is no partial replication.
 

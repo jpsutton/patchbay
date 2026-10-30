@@ -1143,6 +1143,7 @@ export const useStore = create<Store>((set, get) => ({
     if (has("conversations", "messages")) get().refreshConversations().catch(() => {});
     if (has("code_sessions")) get().refreshCodeSessions().catch(() => {});
     if (has("sidebar_layout")) get().refreshSidebarLayout().catch(() => {});
+    if (has("ui_prefs")) api.getPreferences().then(get().prefsSaved).catch(() => {});
     if (has("providers", "models", "mesh_secrets")) get().refreshCatalog().catch(() => {});
     if (has("mesh_members")) get().refreshMesh();
   },

@@ -79,6 +79,7 @@ pub const TABLES: &[Table] = &[
     Table { name: "permission_rules", pk: &["id"], cols: &["cwd", "tool_kind", "pattern", "created_at"] },
     Table { name: "prompts", pk: &["id"], cols: &["name", "content", "created_at", "updated_at"] },
     Table { name: "sidebar_layout", pk: &["id"], cols: &["kind", "name", "parent", "pos"] },
+    Table { name: "ui_prefs", pk: &["key"], cols: &["value"] },
     Table {
         name: "mesh_members",
         pk: &["node_id"],
@@ -178,6 +179,71 @@ pub fn install(conn: &Connection) -> Result<()> {
     }
     conn.execute_batch(&sql)?;
     backfill(conn)?;
+    resync_new_tables(conn)?;
+    Ok(())
+}
+
+/// Ask peers for everything again when this build syncs a table the previous one didn't. A build
+/// that doesn't know a table skips its changes but still counts them as received, so without this
+/// a node that upgrades would never get the rows its peers wrote before it did. Applying a change
+/// this node already has is a no-op, so the cost is one full transfer.
+fn resync_new_tables(conn: &Connection) -> Result<()> {
+    const KEY: &str = "sync.tables";
+    let names: Vec<&str> = TABLES.iter().map(|t| t.name).collect();
+    let stored: Option<String> =
+        conn.query_row("SELECT value FROM settings WHERE key = ?1", [KEY], |r| r.get(0)).optional()?;
+    let known: HashSet<&str> = stored.as_deref().map(|s| s.split(',').collect()).unwrap_or_default();
+    if names.iter().all(|n| known.contains(n)) {
+        return Ok(());
+    }
+    conn.execute("DELETE FROM sync_vv", [])?;
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2",
+        params![KEY, names.join(",")],
+    )?;
+    Ok(())
+}
+
+/// Write a row of a one-key table under the oldest possible clock, so a write of the same row by
+/// any node at any time wins over it. For values a node held before their table synced. A row
+/// that is already there is left alone.
+pub fn seed_oldest(conn: &Connection, tbl: &str, key: &str, cells: &[(&str, &str)]) -> Result<()> {
+    let Some(t) = table(tbl).filter(|t| t.pk.len() == 1) else {
+        anyhow::bail!("{tbl} is not a synced one-key table");
+    };
+    let cols: Vec<&str> = cells.iter().map(|c| c.0).collect();
+    if cols.iter().any(|c| !t.cols.contains(c)) {
+        anyhow::bail!("{tbl} doesn't sync all of {}", cols.join(", "));
+    }
+    let ph: Vec<String> = (2..=cells.len() + 1).map(|i| format!("?{i}")).collect();
+    let mut vals: Vec<SqlValue> = vec![SqlValue::Text(key.to_owned())];
+    vals.extend(cells.iter().map(|c| SqlValue::Text(c.1.to_owned())));
+    conn.execute_batch("SAVEPOINT seed; UPDATE sync_meta SET applying = 1")?;
+    let res = (|| -> Result<()> {
+        let added = conn.execute(
+            &format!("INSERT OR IGNORE INTO {tbl} ({}, {}) VALUES (?1, {})", t.pk[0], cols.join(", "), ph.join(", ")),
+            params_from_iter(vals.iter()),
+        )?;
+        if added == 0 {
+            return Ok(());
+        }
+        conn.execute("UPDATE sync_meta SET seq = seq + 1", [])?;
+        for c in t.cols {
+            conn.execute(
+                "INSERT OR IGNORE INTO sync_clock (tbl, pk, col, hlc, origin, seq)
+                 SELECT ?1, ?2, ?3, 1, node_id, seq FROM sync_meta",
+                params![tbl, key, c],
+            )?;
+        }
+        Ok(())
+    })();
+    match res {
+        Ok(()) => conn.execute_batch("UPDATE sync_meta SET applying = 0; RELEASE seed")?,
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK TO seed; RELEASE seed");
+            return Err(e);
+        }
+    }
     Ok(())
 }
 
@@ -823,6 +889,86 @@ mod tests {
         let got = a.list_sidebar_layout().unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!((got[0].parent.as_str(), got[0].pos), ("", 2048));
+    }
+
+    #[test]
+    fn synced_prefs_follow_the_mesh_and_the_rest_stay() {
+        use crate::prefs::{load, save};
+        let (a, b) = (temp_db(), temp_db());
+        let mut p = load(&a);
+        p.group_by_project = true;
+        p.theme = "dark".into();
+        save(&a, &p).unwrap();
+        sync(&a, &b);
+        let got = load(&b);
+        assert!(got.group_by_project);
+        assert_eq!(got.theme, "system");
+        // Saving an unrelated setting doesn't write the synced ones again.
+        let mut q = got.clone();
+        q.terminal_font_size = 15;
+        save(&b, &q).unwrap();
+        let back = sync(&b, &a);
+        assert!(back.rows.is_empty(), "{:?}", back.rows);
+        assert_eq!(b.list_ui_prefs().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn seeded_prefs_lose_to_changes_made_later() {
+        use crate::prefs::{load, save, seed_synced};
+        let (a, b) = (temp_db(), temp_db());
+        // Both nodes had preferences before they synced. A changed two; B left both at their defaults.
+        a.set_setting("preferences", r#"{"groupByProject":true,"sendKey":"mod-enter","theme":"dark"}"#).unwrap();
+        b.set_setting("preferences", r#"{"sendKey":"enter"}"#).unwrap();
+        for db in [&a, &b] {
+            db.with_conn(|c| seed_synced(c)).unwrap();
+        }
+        assert_eq!(b.list_ui_prefs().unwrap().len(), 0);
+        both(&a, &b);
+        for db in [&a, &b] {
+            let p = load(db);
+            assert!(p.group_by_project);
+            assert_eq!(p.send_key, "mod-enter");
+        }
+        assert_eq!(load(&b).theme, "system");
+        let mut p = load(&b);
+        p.group_by_project = false;
+        save(&b, &p).unwrap();
+        // A later seed (A upgrading after B, say) doesn't take it back.
+        a.with_conn(|c| c.execute("DELETE FROM ui_prefs", [])).unwrap();
+        a.with_conn(|c| c.execute("DELETE FROM sync_clock WHERE tbl = 'ui_prefs'", [])).unwrap();
+        a.with_conn(|c| seed_synced(c)).unwrap();
+        both(&a, &b);
+        assert!(!load(&a).group_by_project);
+        assert!(!load(&b).group_by_project);
+    }
+
+    #[test]
+    fn mesh_value_a_node_cant_use_keeps_its_own() {
+        let a = temp_db();
+        a.set_ui_pref("defaultAgent", r#""agent-from-the-future""#).unwrap();
+        a.set_ui_pref("sendKey", "not json").unwrap();
+        let p = crate::prefs::load(&a);
+        assert_eq!(p.default_agent, "patchbay");
+        assert_eq!(p.send_key, "enter");
+    }
+
+    #[test]
+    fn a_newly_synced_table_asks_peers_for_everything_again() {
+        let (a, b) = (temp_db(), temp_db());
+        a.save_prompt(None, "p", "x").unwrap();
+        sync(&a, &b);
+        let a_id = a.node_id();
+        let seen = || b.with_conn(|c| version_vector(c)).unwrap().get(&a_id).copied();
+        assert!(seen().is_some());
+        // B's previous build synced fewer tables.
+        b.with_conn(|c| c.execute("UPDATE settings SET value = 'providers' WHERE key = 'sync.tables'", [])).unwrap();
+        b.with_conn(|c| install(c)).unwrap();
+        assert_eq!(seen(), None);
+        // The same build starting again keeps what it has.
+        sync(&a, &b);
+        b.with_conn(|c| install(c)).unwrap();
+        assert!(seen().is_some());
+        assert_eq!(b.list_prompts().unwrap().len(), 1);
     }
 
     struct AttDefaults;
