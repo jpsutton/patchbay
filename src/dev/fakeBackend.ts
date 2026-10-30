@@ -992,6 +992,7 @@ export function install() {
             baseUrl: string;
             apiKey?: string;
             authMode?: Provider["authMode"];
+            claudeConfigDir?: string;
           };
           let x = db.providers.find((q) => q.id === i.id);
           if (!x) {
@@ -999,7 +1000,8 @@ export function install() {
             db.providers.push(x);
           }
           const authMode = i.kind === "anthropic" && i.authMode === "claude_login" ? "claude_login" : "api_key";
-          Object.assign(x, { name: i.name, kind: i.kind, baseUrl: i.baseUrl, authMode });
+          const claudeConfigDir = authMode === "claude_login" ? i.claudeConfigDir?.trim() || null : null;
+          Object.assign(x, { name: i.name, kind: i.kind, baseUrl: i.baseUrl, authMode, claudeConfigDir });
           if (authMode === "claude_login") x.hasKey = false;
           else if (i.apiKey !== undefined) x.hasKey = i.apiKey !== "";
           return { ...x };

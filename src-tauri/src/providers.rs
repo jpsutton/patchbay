@@ -177,7 +177,7 @@ pub async fn ensure_token(resolved: &mut Resolved) -> Result<()> {
     if resolved.auth != Auth::ClaudeLogin {
         return Ok(());
     }
-    resolved.key = Some(crate::claude_auth::access_token().await?);
+    resolved.key = Some(crate::claude_auth::access_token(resolved.provider.claude_config_dir.as_deref()).await?);
     Ok(())
 }
 
@@ -415,6 +415,7 @@ mod tests {
                 base_url: "https://api.anthropic.com/v1".into(),
                 has_key: false,
                 auth_mode: AuthMode::ClaudeLogin,
+                claude_config_dir: None,
             },
             model: Model {
                 id: "m".into(),
@@ -451,7 +452,7 @@ mod tests {
     fn only_vendor_endpoints_have_native_search() {
         use super::*;
         let on = |kind, url: &str, auth| Resolved {
-            provider: Provider { id: "p".into(), name: "n".into(), kind, base_url: url.into(), has_key: false, auth_mode: Default::default() },
+            provider: Provider { id: "p".into(), name: "n".into(), kind, base_url: url.into(), has_key: false, auth_mode: Default::default(), claude_config_dir: None },
             model: Model {
                 id: "m".into(),
                 provider_id: "p".into(),

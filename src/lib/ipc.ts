@@ -13,6 +13,8 @@ export interface Provider {
   baseUrl: string;
   hasKey: boolean;
   authMode: AuthMode;
+  /** For Claude login: the Claude Code config directory whose login to use (null: ~/.claude). */
+  claudeConfigDir?: string | null;
 }
 
 /** USD per 1M tokens. */
@@ -814,6 +816,7 @@ export const api = {
     baseUrl: string;
     apiKey?: string;
     authMode?: AuthMode;
+    claudeConfigDir?: string;
   }) => invoke<Provider>("save_provider", { input }),
   deleteProvider: (id: string) => invoke<void>("delete_provider", { id }),
   discoverModels: (providerId: string) => invoke<DiscoveredModel[]>("discover_models", { providerId }),

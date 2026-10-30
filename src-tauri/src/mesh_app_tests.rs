@@ -527,6 +527,7 @@ async fn phone_chat_runs_on_the_picked_computer() {
         base_url: "http://127.0.0.1:9/v1".into(),
         has_key: true,
             auth_mode: Default::default(),
+            claude_config_dir: None,
         };
     db.upsert_provider(&prov, Some("k")).unwrap();
     let model = db::Model {
@@ -599,6 +600,7 @@ async fn manual_phone_gateway() {
         base_url: std::env::var("PATCHBAY_MOCK_URL").unwrap_or_else(|_| "http://127.0.0.1:8765/v1".into()),
         has_key: true,
             auth_mode: Default::default(),
+            claude_config_dir: None,
         };
     db.upsert_provider(&p, Some("mock-key")).unwrap();
     for (id, model) in [("m-echo", "mock-echo"), ("m-agent", "mock-agent")] {

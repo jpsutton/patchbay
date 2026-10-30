@@ -165,6 +165,9 @@ struct ProviderInput {
     api_key: Option<String>,
     #[serde(default)]
     auth_mode: db::AuthMode,
+    /// For Claude login: another Claude Code config directory (`CLAUDE_CONFIG_DIR`) to sign in with.
+    #[serde(default)]
+    claude_config_dir: Option<String>,
 }
 
 async fn list_providers(state: &AppState) -> CmdResult<Vec<Provider>> {
@@ -182,10 +185,19 @@ async fn save_provider(state: &AppState, input: ProviderInput) -> CmdResult<Prov
         kind: input.kind,
         base_url: providers::normalize_base_url(&input.base_url),
         has_key: false,
+        claude_config_dir: input
+            .claude_config_dir
+            .map(|d| d.trim().to_owned())
+            .filter(|d| !d.is_empty() && auth_mode == db::AuthMode::ClaudeLogin),
         auth_mode,
     };
     if p.name.is_empty() || p.base_url.is_empty() {
         return Err(CmdError("name and base URL are required".into()));
+    }
+    if let Some(d) = &p.claude_config_dir {
+        if !claude_auth::resolve_dir(Some(d))?.is_dir() {
+            return Err(CmdError(format!("Claude config directory {d} does not exist")));
+        }
     }
     state.db.upsert_provider(&p, None)?;
     if p.auth_mode == db::AuthMode::ClaudeLogin {
@@ -229,7 +241,7 @@ async fn discover_models(
         db::AuthMode::ApiKey => providers::Auth::Key,
     };
     let key = match auth {
-        providers::Auth::ClaudeLogin => Some(claude_auth::access_token().await?),
+        providers::Auth::ClaudeLogin => Some(claude_auth::access_token(p.claude_config_dir.as_deref()).await?),
         providers::Auth::Key => providers::load_key(&p.id, inline.as_deref()),
     };
     Ok(providers::discover_models(&p.kind, &p.base_url, key.as_deref(), auth).await?)

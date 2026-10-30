@@ -27,6 +27,7 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
   const [baseUrl, setBaseUrl] = useState(provider?.baseUrl ?? "");
   const [key, setKey] = useState("");
   const [authMode, setAuthMode] = useState<AuthMode>(provider?.authMode ?? "api_key");
+  const [claudeDir, setClaudeDir] = useState(provider?.claudeConfigDir ?? "");
   const [busy, setBusy] = useState(false);
   const setToast = useStore((s) => s.setToast);
   const useClaudeLogin = kind === "anthropic" && authMode === "claude_login";
@@ -36,6 +37,7 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
     setKind(provider?.kind ?? "openai_chat");
     setBaseUrl(provider?.baseUrl ?? "");
     setAuthMode(provider?.authMode ?? "api_key");
+    setClaudeDir(provider?.claudeConfigDir ?? "");
     setKey("");
   }, [provider?.id]);
 
@@ -107,7 +109,22 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
         </label>
       )}
       {useClaudeLogin ? (
-        <p className="text-xs text-ok">Signed in via Claude Code on this machine — no API key stored.</p>
+        <>
+          <label className="flex flex-col gap-1 text-xs text-muted">
+            Claude config directory
+            <input
+              className={`${input} font-mono`}
+              value={claudeDir}
+              onChange={(e) => setClaudeDir(e.target.value)}
+              placeholder="~/.claude (default)"
+            />
+            <span>
+              To use another Claude account, enter the CLAUDE_CONFIG_DIR you signed in to it with, e.g.
+              ~/.claude-team. Add one provider per account.
+            </span>
+          </label>
+          <p className="text-xs text-ok">Signed in via Claude Code on this machine — no API key stored.</p>
+        </>
       ) : (
         <label className="flex flex-col gap-1 text-xs text-muted">
           API key {provider?.hasKey && <span className="text-ok">(stored — leave blank to keep)</span>}
@@ -134,6 +151,7 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
                 kind,
                 baseUrl,
                 authMode: kind === "anthropic" ? authMode : "api_key",
+                claudeConfigDir: useClaudeLogin ? claudeDir : undefined,
                 apiKey: useClaudeLogin ? "" : key ? key : undefined,
               });
               setKey("");
