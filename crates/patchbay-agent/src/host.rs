@@ -22,6 +22,9 @@ pub struct ModelClient {
     pub context_window: Option<u64>,
     /// Compact when the context reaches this percentage of the window; `None` = the host default.
     pub auto_compact_percent: Option<u8>,
+    /// A Claude plan's usage limit stops runaway turns on this model, so a prompt needs no step cap
+    /// of its own unless the user sets one.
+    pub plan_guarded: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -56,17 +59,33 @@ impl Default for Settings {
 /// How far the agent may go on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
-    /// Model requests one prompt may make.
-    pub max_steps: usize,
+    /// Model requests one prompt may make; `None` = [`DEFAULT_MAX_STEPS`], or no cap on a model
+    /// whose plan usage limit already guards it.
+    pub max_steps: Option<usize>,
     /// Model requests one subagent run may make.
     pub subagent_max_steps: usize,
     /// Shell commands time out after this long unless the model asks for another timeout.
     pub shell_timeout_ms: u64,
 }
 
+/// Model requests one prompt may make when the user sets no limit and nothing else guards the turn.
+pub const DEFAULT_MAX_STEPS: usize = 100;
+
 impl Default for Limits {
     fn default() -> Self {
-        Limits { max_steps: 100, subagent_max_steps: 40, shell_timeout_ms: 120_000 }
+        Limits { max_steps: None, subagent_max_steps: 40, shell_timeout_ms: 120_000 }
+    }
+}
+
+impl Limits {
+    /// Model requests one prompt may make on a model that is (`plan_guarded`) or is not guarded by
+    /// a plan usage limit.
+    pub fn steps(&self, plan_guarded: bool) -> usize {
+        match self.max_steps {
+            Some(n) => n.max(1),
+            None if plan_guarded => usize::MAX,
+            None => DEFAULT_MAX_STEPS,
+        }
     }
 }
 
@@ -134,5 +153,21 @@ pub trait Host: Send + Sync + 'static {
     /// Text of a PDF (`pages` like "1-5"), for the Read tool.
     fn read_pdf(&self, _path: &std::path::Path, _pages: Option<&str>) -> Result<String, String> {
         Err("reading PDFs is not available in this build".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn steps_follow_the_setting_then_the_guard() {
+        let unset = Limits::default();
+        assert_eq!(unset.steps(false), DEFAULT_MAX_STEPS);
+        assert_eq!(unset.steps(true), usize::MAX);
+        let set = Limits { max_steps: Some(7), ..Limits::default() };
+        assert_eq!(set.steps(false), 7);
+        assert_eq!(set.steps(true), 7);
+        assert_eq!(Limits { max_steps: Some(0), ..Limits::default() }.steps(true), 1);
     }
 }

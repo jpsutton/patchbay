@@ -143,7 +143,7 @@ pub struct ClaudeConfig {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AgentEngine {
-    /// Model requests one prompt may make (default 100).
+    /// Model requests one prompt may make (default 100; none on a Claude plan with "Stop at plan limit" on).
     pub max_steps: Option<u32>,
     /// Model requests one subagent run may make (default 40).
     pub subagent_max_steps: Option<u32>,

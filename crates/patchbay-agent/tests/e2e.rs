@@ -27,7 +27,7 @@ impl Host for TestHost {
         let base = std::env::var("PATCHBAY_MOCK_URL").unwrap_or_else(|_| "http://127.0.0.1:8765/v1".into());
         let mut cfg = Config::new(self.format, base, "mock-agent");
         cfg.key = Some("test-key".into());
-        Ok(ModelClient { client: Client::new(cfg), system_prefix: Vec::new(), context_window: self.window, auto_compact_percent: self.percent })
+        Ok(ModelClient { client: Client::new(cfg), system_prefix: Vec::new(), context_window: self.window, auto_compact_percent: self.percent, plan_guarded: false })
     }
 
     fn data_dir(&self) -> PathBuf {
