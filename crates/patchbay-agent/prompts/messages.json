@@ -91,6 +91,10 @@
     "full": "Background subagents have finished. Their results are below; read them and carry on. Do not repeat them verbatim to the user unless asked.\n\n{body}",
     "min": "Background subagents finished. Results below; read, carry on. Don't repeat verbatim to user unless asked.\n\n{body}"
   },
+  "stalled_agents": {
+    "full": "Background subagents have gone quiet. Their state is below. One that is waiting for the user is held up by a permission prompt the user has not answered: tell the user. For one that is stuck, look again with TaskStatus; if it has not moved, stop it with TaskStop and start it again if its work is still needed.\n\n{body}",
+    "min": "Background subagents gone quiet. State below. One waiting for user is held by permission prompt user hasn't answered: tell user. For stuck one, check TaskStatus; if still not moving, TaskStop, restart if work still needed.\n\n{body}"
+  },
   "inbox": {
     "full": "Message from the main agent:\n{text}",
     "min": "Message from main agent:\n{text}"

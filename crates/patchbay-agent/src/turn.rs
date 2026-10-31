@@ -21,6 +21,8 @@ use crate::tools::{Registry, Tool, ToolCtx, ToolOutput, clip_middle};
 const MAX_RESULT_CHARS: usize = 100_000;
 /// Longest tool result text shown on the card.
 const MAX_CARD_CHARS: usize = 20_000;
+/// How often a turn that waits on background subagents looks at how they are doing.
+const AGENT_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 /// Replies in a row cut off by the output token limit that a turn picks up again before it stops.
 pub(crate) const MAX_CUT_OFF_CONTINUES: usize = 3;
 
@@ -304,6 +306,7 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
         parts.push(r);
     }
     parts.extend(notes_part(&session.agents.drain_notes(), session.prompts()));
+    parts.extend(session.agents.stalled_note(session.prompts()));
     if let Some(nudge) = session.prompts().terse_nudge() {
         parts.push(Part::Text(prompt::reminder(nudge)));
     }
@@ -328,8 +331,7 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
     let mut stop_rounds = 0;
     // Replies in a row cut off by the output token limit.
     let mut cut_offs = 0;
-    let max_steps = session.host.settings().limits.max_steps.max(1);
-    'steps: for step in 0..max_steps {
+    'steps: for step in 0usize.. {
         if cancel.is_cancelled() {
             return Ok(TurnResult { stop_reason: "cancelled", usage: totals });
         }
@@ -339,6 +341,11 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
         };
         let settings = session.host.settings();
         let mc = session.model_client(&model_id).await?;
+        // Checked at the top so every way of going on (tool results, a cut-off reply, a Stop hook)
+        // counts. The cap follows the model in use: a plan-guarded one has none unless set.
+        if step >= settings.limits.steps(mc.plan_guarded) {
+            return Ok(TurnResult { stop_reason: "max_turn_requests", usage: totals });
+        }
         let percent = mc
             .auto_compact_percent
             .or((settings.auto_compact_percent > 0).then_some(settings.auto_compact_percent))
@@ -448,6 +455,7 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
                 // the prompt open for the rest.
                 loop {
                     let mut next: Vec<Part> = notes_part(&session.agents.drain_notes(), session.prompts()).into_iter().collect();
+                    next.extend(session.agents.stalled_note(session.prompts()));
                     next.extend(session.take_steered(false));
                     if !next.is_empty() {
                         push_user(&session, next).await;
@@ -461,6 +469,8 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
                             }
                             _ = session.agents.wait() => {}
                             _ = session.steered.notified() => {}
+                            // Wake now and then, to look for subagents that have gone quiet.
+                            _ = tokio::time::sleep(AGENT_CHECK_EVERY) => {}
                         }
                         continue;
                     }
@@ -495,16 +505,14 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
             parts.push(r);
         }
         parts.extend(notes_part(&session.agents.drain_notes(), session.prompts()));
+        parts.extend(session.agents.stalled_note(session.prompts()));
         parts.extend(session.take_steered(false));
         push_user(&session, parts).await;
         if cancel.is_cancelled() {
             return Ok(TurnResult { stop_reason: "cancelled", usage: totals });
         }
-        if step + 1 == max_steps {
-            return Ok(TurnResult { stop_reason: "max_turn_requests", usage: totals });
-        }
     }
-    Ok(TurnResult { stop_reason: "max_turn_requests", usage: totals })
+    unreachable!("the step loop only ends by returning")
 }
 
 /// Claude subscription usage in the shape claude-agent-acp reports it (`_claude/rateLimit`), so
@@ -701,7 +709,12 @@ async fn run_call(
         _ => tool.needs_permission(&call.arguments, &session),
     };
     if must_ask {
-        match ask(&session, &card, &tool, &call, &cancel).await {
+        // A subagent stuck here is waiting on the user, not on anything of its own.
+        let what = card["title"].as_str().unwrap_or(&call.name).lines().next().unwrap_or("").chars().take(80).collect::<String>();
+        session.live.block(format!("waiting for the user to approve: {what}"));
+        let verdict = ask(&session, &card, &tool, &call, &cancel).await;
+        session.live.set(format!("running {}", call.name));
+        match verdict {
             Verdict::Allow => {}
             Verdict::Reject => {
                 return fail(&session, session.prompts().msg("declined", &[]));

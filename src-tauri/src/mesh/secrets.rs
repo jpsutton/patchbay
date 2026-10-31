@@ -225,6 +225,7 @@ mod tests {
             base_url: "http://x".into(),
             has_key: false,
             auth_mode: Default::default(),
+            claude_config_dir: None,
         };
         a.upsert_provider(&p, None).unwrap();
         ka.set("prov1", "sk-secret");

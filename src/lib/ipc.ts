@@ -13,6 +13,8 @@ export interface Provider {
   baseUrl: string;
   hasKey: boolean;
   authMode: AuthMode;
+  /** For Claude login: the Claude Code config directory whose login to use (null: ~/.claude). */
+  claudeConfigDir?: string | null;
 }
 
 /** USD per 1M tokens. */
@@ -130,6 +132,16 @@ export interface PlanSample {
   at: number;
   fiveHour: PlanWindow | null;
   sevenDay: PlanWindow | null;
+}
+
+/** One Claude account's plan usage: each account has its own limits and its own stop. */
+export interface PlanAccount {
+  /** Its Claude Code config directory. */
+  account: string;
+  /** "Claude Code login", or the Claude login providers that use it. */
+  label: string;
+  latest: PlanLimits | null;
+  history: PlanSample[];
 }
 
 /** The ACP wire log's state (see `code/wire.rs`). */
@@ -585,6 +597,27 @@ export interface AcpPlanEntry {
   status: "pending" | "in_progress" | "completed" | "cancelled";
 }
 
+/** One subagent of Patchbay's own agent, as its `subagents_update` reports it. */
+export interface Subagent {
+  id: string;
+  name: string | null;
+  kind: string;
+  description: string;
+  status: "running" | "completed" | "failed" | "stopped";
+  error: string | null;
+  background: boolean;
+  elapsed_secs: number;
+  /** Seconds since it last did something, when the update was sent. */
+  idle_secs: number;
+  /** Model requests it has made. */
+  steps: number;
+  /** What it is doing now: a model call, a tool, or waiting for the user to approve one. */
+  current: string;
+  /** Waiting for the user, not for the model or a tool. */
+  blocked: boolean;
+  worktree: { path: string; branch: string } | null;
+}
+
 export type AcpUpdate =
   | { sessionUpdate: "user_message_chunk"; content: AcpContentBlock }
   | { sessionUpdate: "agent_message_chunk"; content: AcpContentBlock }
@@ -814,6 +847,7 @@ export const api = {
     baseUrl: string;
     apiKey?: string;
     authMode?: AuthMode;
+    claudeConfigDir?: string;
   }) => invoke<Provider>("save_provider", { input }),
   deleteProvider: (id: string) => invoke<void>("delete_provider", { id }),
   discoverModels: (providerId: string) => invoke<DiscoveredModel[]>("discover_models", { providerId }),
@@ -984,8 +1018,7 @@ export const api = {
   codeRewind: (id: string, ordinal: number, preview: string, revertFiles: boolean) =>
     invoke<void>("code_rewind", { id, ordinal, preview, revertFiles }),
   codeUsage: (id: string) => invoke<UsageView>("code_usage", { id }),
-  planLimits: () => invoke<PlanLimits | null>("plan_limits"),
-  planHistory: () => invoke<PlanSample[]>("plan_history"),
+  planAccounts: () => invoke<PlanAccount[]>("plan_accounts"),
   wireLogStatus: () => invoke<WireLogStatus>("wire_log_status"),
   /** Turn the wire log on (for 30 minutes) or off. */
   wireLogSet: (on: boolean) => invoke<WireLogStatus>("wire_log_set", { on }),

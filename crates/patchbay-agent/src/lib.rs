@@ -25,4 +25,4 @@ pub mod claude;
 pub use agent::serve;
 pub use store::sessions_dir;
 pub use tools::web::{brave_search, web_search_spec};
-pub use host::{ClaudeConfig, Host, Limits, ModelClient, ModelInfo, Settings};
+pub use host::{ClaudeConfig, DEFAULT_MAX_STEPS, Host, Limits, ModelClient, ModelInfo, Settings};

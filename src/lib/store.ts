@@ -22,9 +22,9 @@ import {
   type Conversation,
   type Model,
   type Provider,
+  type Subagent,
   type UsageView,
-  type PlanLimits,
-  type PlanSample,
+  type PlanAccount,
   type Preferences,
   type MeshStatus,
   type MeshChatEvent,
@@ -135,6 +135,10 @@ export interface CodeState {
   turnStartedAt: number | null;
   /** Characters of text and thoughts streamed this turn, for a rough token count. */
   turnChars: number;
+  /** Patchbay's agent: its subagents, as of the last `subagents_update`. */
+  subagents: Subagent[];
+  /** When that update arrived, to count idle time on from it. */
+  subagentsAt: number | null;
 }
 
 export interface ChatStream {
@@ -177,6 +181,8 @@ const emptyCode = (): CodeState => ({
   lastPhase: null,
   turnStartedAt: null,
   turnChars: 0,
+  subagents: [],
+  subagentsAt: null,
 });
 
 /** `next` with the turn clock started or cleared when `busy` flipped between `prev` and it. */
@@ -372,9 +378,8 @@ interface Store {
   /** A problem toast: stays until dismissed or fixed. */
   alert: Alert | null;
   meshPopoverOpen: boolean;
-  /** The Claude plan usage Claude Code last reported; null until a Claude Code turn reports it. */
-  planLimits: PlanLimits | null;
-  planHistory: PlanSample[];
+  /** Each Claude account's last reported plan usage; empty until a turn on a Claude plan reports one. */
+  planAccounts: PlanAccount[];
   planOpen: boolean;
   prefs: Preferences;
   loadPrefs: () => Promise<void>;
@@ -397,8 +402,7 @@ interface Store {
   setToast: (t: string | null) => void;
   setAlert: (a: Alert | null) => void;
   setMeshPopoverOpen: (o: boolean) => void;
-  setPlanLimits: (l: PlanLimits | null) => void;
-  setPlanHistory: (h: PlanSample[]) => void;
+  setPlanAccounts: (a: PlanAccount[]) => void;
   setPlanOpen: (o: boolean) => void;
   refreshCatalog: () => Promise<void>;
   setDefaultModel: (ref: string) => Promise<void>;
@@ -615,6 +619,10 @@ function reduceUpdate(s: CodeState, u: AcpUpdate, agent: AgentId | undefined): C
     }
     case "plan":
       return stamp({ ...s, plan: (u as { entries: AcpPlanEntry[] }).entries });
+    case "subagents_update": {
+      const agents = (u as { agents?: Subagent[] }).agents;
+      return Array.isArray(agents) ? { ...s, subagents: agents, subagentsAt: Date.now() } : s;
+    }
     case "available_commands_update": {
       const cmds = (u as { availableCommands?: AcpCommand[] }).availableCommands;
       return Array.isArray(cmds) ? { ...s, commands: cmds } : s;
@@ -643,8 +651,9 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
         // The agent's queue goes with it; this window gets back what it wrote.
         queued: e.state === "exited" ? [] : s.queued,
         restore: e.state === "exited" ? handBack(s.restore, s.queued, useStore.getState().mesh?.nodeId) : s.restore,
-        // Commands an agent backgrounded end with it.
+        // Commands an agent backgrounded end with it, and so do its subagents.
         toolCalls: e.state === "exited" ? endBackground(s.toolCalls) : s.toolCalls,
+        subagents: e.state === "exited" ? [] : s.subagents,
       };
       break;
     case "sessionReady": {
@@ -764,7 +773,9 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
           ? "Cancelled"
           : e.stopReason === "max_tokens"
             ? "Stopped: the reply hit the output token limit. Raise Max output tokens in the model's settings, or ask the agent to continue."
-            : null;
+            : e.stopReason === "max_turn_requests"
+              ? "Stopped: the agent reached its step limit for one prompt. Send Continue to go on, or raise Steps per prompt in Settings → Agents."
+              : null;
       // The turn is over: a steered message was read, or went out as a prompt of its own.
       const entries = noPending(s.entries);
       next = {
@@ -950,8 +961,7 @@ export const useStore = create<Store>((set, get) => ({
   toast: null,
   alert: null,
   meshPopoverOpen: false,
-  planLimits: null,
-  planHistory: [],
+  planAccounts: [],
   planOpen: false,
   confirm: null,
   prefs: defaultPreferences,
@@ -1011,8 +1021,7 @@ export const useStore = create<Store>((set, get) => ({
   setToast: (toast) => set({ toast }),
   setAlert: (alert) => set({ alert }),
   setMeshPopoverOpen: (meshPopoverOpen) => set({ meshPopoverOpen }),
-  setPlanLimits: (planLimits) => set({ planLimits }),
-  setPlanHistory: (planHistory) => set({ planHistory }),
+  setPlanAccounts: (planAccounts) => set({ planAccounts }),
   setPlanOpen: (planOpen) => set({ planOpen }),
 
   refreshCatalog: async () => {

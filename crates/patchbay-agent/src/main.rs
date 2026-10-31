@@ -40,7 +40,7 @@ impl Host for FileHost {
         let m = self.models.iter().find(|m| m.id == model_id).ok_or_else(|| format!("unknown model {model_id}"))?;
         let mut cfg = Config::new(m.format, &m.base_url, &m.model);
         cfg.key = m.key.clone();
-        Ok(ModelClient { client: Client::new(cfg), system_prefix: Vec::new(), context_window: None, auto_compact_percent: None })
+        Ok(ModelClient { client: Client::new(cfg), system_prefix: Vec::new(), context_window: None, auto_compact_percent: None, plan_guarded: false })
     }
 
     fn data_dir(&self) -> PathBuf {

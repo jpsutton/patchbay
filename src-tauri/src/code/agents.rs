@@ -697,7 +697,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let db = std::sync::Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
         let url = std::env::var("PB_MOCK_URL").unwrap_or_else(|_| "http://127.0.0.1:8799/v1".into());
-        let p = crate::db::Provider { id: "fw".into(), name: "Fireworks".into(), kind: crate::db::ProviderKind::OpenaiChat, base_url: url, has_key: true, auth_mode: Default::default(), };
+        let p = crate::db::Provider { id: "fw".into(), name: "Fireworks".into(), kind: crate::db::ProviderKind::OpenaiChat, base_url: url, has_key: true, auth_mode: Default::default(), claude_config_dir: None, };
         db.upsert_provider(&p, Some("secret")).unwrap();
         let m = crate::db::Model {
             id: "echo".into(),

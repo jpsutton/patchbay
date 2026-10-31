@@ -17,6 +17,7 @@ import type {
   ChatEvent,
   CodeEnvelope,
   CodeSession,
+  Subagent,
   Conversation,
   Message,
   Model,
@@ -205,6 +206,7 @@ const fakeCut = new Set<string>();
 const fakeStopped = new Set<string>();
 /** Background jobs the `/jobs` demo started: shell id -> the call that started it. */
 const fakeJobs = new Map<string, { csid: string; toolId: string }>();
+const fakeAgents = new Map<string, Subagent[]>();
 /** Running calls the `/jobs` demo can stop: tool call id -> session. */
 const fakeSlowCalls = new Map<string, string>();
 
@@ -219,6 +221,41 @@ function fakeEcho(csid: string, promptId: string, text: string, delivery: Prompt
 }
 
 /** Run turns back to back: this one, then whatever queued up behind it. */
+/** Fake plan usage for the default account. */
+function fakePlanLimits() {
+  // `?plan=none` before any report; `?plan=over` past the limit and on extra usage; `?plan=slow` a light burn.
+  const plan = new URLSearchParams(location.search).get("plan");
+  if (plan === "none") return null;
+  const now = Math.floor(Date.now() / 1000);
+  const over = plan === "over";
+  const slow = plan === "slow";
+  return {
+    fiveHour: { utilization: over ? 1 : slow ? 0.12 : 0.82, resetsAt: fakePlanBase + 72 * 60 },
+    sevenDay: { utilization: over ? 0.96 : slow ? 0.1 : 0.41, resetsAt: fakePlanBase + 3 * 86400 + 7200 },
+    overageUntil: over ? now + 72 * 60 : null,
+    observedAt: now - 240,
+  };
+}
+
+/** Bursts and lulls across the fake windows, matching `fakePlanLimits` (not for `?plan=none|over`). */
+function fakePlanHistory() {
+  const plan = new URLSearchParams(location.search).get("plan");
+  if (plan === "none" || plan === "over") return [];
+  const slow = plan === "slow";
+  const five = fakePlanBase + 72 * 60;
+  const seven = fakePlanBase + 3 * 86400 + 7200;
+  const mix = (span: number, resetsAt: number, k: number, pts: [number, number][]) =>
+    pts.map(([f, u]) => ({
+      at: resetsAt - span + Math.round(f * span),
+      fiveHour: k === 5 ? { utilization: slow ? u / 7 : u, resetsAt } : null,
+      sevenDay: k === 7 ? { utilization: slow ? u / 4 : u, resetsAt } : null,
+    }));
+  return [
+    ...mix(5 * 3600, five, 5, [[0.08, 0.05], [0.2, 0.12], [0.3, 0.14], [0.45, 0.4], [0.55, 0.55], [0.7, 0.6], [0.76, 0.82]]),
+    ...mix(7 * 86400, seven, 7, [[0.1, 0.06], [0.25, 0.14], [0.4, 0.2], [0.5, 0.36], [0.57, 0.41]]),
+  ].sort((a, b) => a.at - b.at);
+}
+
 async function runFakeTurns(csid: string, promptId: string, text: string, mentions: string[]) {
   fakeEcho(csid, promptId, text, "sent");
   fakeTurns.add(csid);
@@ -523,6 +560,20 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
     await say("Build is clean. Now checking the remaining modules, one at a time. ");
     if (await nap(40_000)) return stop();
     await say("Done after a long wait.");
+    turnEmit({ type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
+  // `/agents`: three background subagents, one busy, one quiet for 6 minutes, one waiting on a
+  // permission prompt, for the subagent rows. Stop on a row stops that subagent.
+  if (text.startsWith("/agents")) {
+    const base = { kind: "general-purpose", error: null, background: true, worktree: null, status: "running" as const };
+    fakeAgents.set(csid, [
+      { ...base, id: "agent_1", name: "agentP", description: "End-to-end tests", elapsed_secs: 1320, idle_secs: 3, steps: 14, current: "running Bash", blocked: false },
+      { ...base, id: "agent_2", name: "agentQ", description: "Street adapter", elapsed_secs: 1320, idle_secs: 360, steps: 9, current: "waiting for the model", blocked: false },
+      { ...base, id: "agent_3", name: "agentS", description: "Docs and CI", elapsed_secs: 1320, idle_secs: 150, steps: 6, current: "waiting for the user to approve: Bash `git push`", blocked: true },
+    ]);
+    codeEmit(csid, { type: "update", update: { sessionUpdate: "subagents_update", agents: fakeAgents.get(csid) } });
+    await say("Three subagents are running in the background.");
     turnEmit({ type: "promptDone", stopReason: "end_turn" });
     return;
   }
@@ -992,6 +1043,7 @@ export function install() {
             baseUrl: string;
             apiKey?: string;
             authMode?: Provider["authMode"];
+            claudeConfigDir?: string;
           };
           let x = db.providers.find((q) => q.id === i.id);
           if (!x) {
@@ -999,7 +1051,8 @@ export function install() {
             db.providers.push(x);
           }
           const authMode = i.kind === "anthropic" && i.authMode === "claude_login" ? "claude_login" : "api_key";
-          Object.assign(x, { name: i.name, kind: i.kind, baseUrl: i.baseUrl, authMode });
+          const claudeConfigDir = authMode === "claude_login" ? i.claudeConfigDir?.trim() || null : null;
+          Object.assign(x, { name: i.name, kind: i.kind, baseUrl: i.baseUrl, authMode, claudeConfigDir });
           if (authMode === "claude_login") x.hasKey = false;
           else if (i.apiKey !== undefined) x.hasKey = i.apiKey !== "";
           return { ...x };
@@ -1452,6 +1505,15 @@ export function install() {
           return null;
         }
         case "code_cancel_tool": {
+          const stopId = (a.toolCallId as string).startsWith("subagent:") ? (a.toolCallId as string).slice(9) : null;
+          if (stopId) {
+            const list = fakeAgents.get(a.id as string);
+            if (list) {
+              fakeAgents.set(a.id as string, list.map((x) => (x.id === stopId ? { ...x, status: "stopped" as const } : x)));
+              codeEmit(a.id as string, { type: "update", update: { sessionUpdate: "subagents_update", agents: fakeAgents.get(a.id as string) } });
+            }
+            return null;
+          }
           const csid = fakeSlowCalls.get(a.toolCallId as string);
           if (csid) {
             fakeSlowCalls.delete(a.toolCallId as string);
@@ -1501,37 +1563,19 @@ export function install() {
         }
         case "code_rewind": await sleep(150); return null;
         case "code_usage": return { totals: { ...fakeUsage }, contextTokens: null, contextWindow: 128000, autoCompactPercent: 85 };
-        case "plan_history": {
-          // Bursts and lulls across the fake windows, matching `plan_limits` (not for `?plan=none|over`).
-          const plan = new URLSearchParams(location.search).get("plan");
-          if (plan === "none" || plan === "over") return [];
-          const slow = plan === "slow";
-          const five = fakePlanBase + 72 * 60;
-          const seven = fakePlanBase + 3 * 86400 + 7200;
-          const mix = (span: number, resetsAt: number, k: number, pts: [number, number][]) =>
-            pts.map(([f, u]) => ({
-              at: resetsAt - span + Math.round(f * span),
-              fiveHour: k === 5 ? { utilization: slow ? u / 7 : u, resetsAt } : null,
-              sevenDay: k === 7 ? { utilization: slow ? u / 4 : u, resetsAt } : null,
-            }));
-          return [
-            ...mix(5 * 3600, five, 5, [[0.08, 0.05], [0.2, 0.12], [0.3, 0.14], [0.45, 0.4], [0.55, 0.55], [0.7, 0.6], [0.76, 0.82]]),
-            ...mix(7 * 86400, seven, 7, [[0.1, 0.06], [0.25, 0.14], [0.4, 0.2], [0.5, 0.36], [0.57, 0.41]]),
-          ].sort((a, b) => a.at - b.at);
-        }
-        case "plan_limits": {
-          // `?plan=none` before any report; `?plan=over` past the limit and on extra usage; `?plan=slow` a light burn.
-          const plan = new URLSearchParams(location.search).get("plan");
-          if (plan === "none") return null;
-          const now = Math.floor(Date.now() / 1000);
-          const over = plan === "over";
-          const slow = plan === "slow";
-          return {
-            fiveHour: { utilization: over ? 1 : slow ? 0.12 : 0.82, resetsAt: fakePlanBase + 72 * 60 },
-            sevenDay: { utilization: over ? 0.96 : slow ? 0.1 : 0.41, resetsAt: fakePlanBase + 3 * 86400 + 7200 },
-            overageUntil: over ? now + 72 * 60 : null,
-            observedAt: now - 240,
-          };
+        case "plan_accounts": {
+          // `?plan=two` adds a second, lightly used account.
+          const latest = fakePlanLimits();
+          if (!latest) return [];
+          const accounts = [{ account: "/home/demo/.claude", label: "Claude Code login", latest, history: fakePlanHistory() }];
+          if (new URLSearchParams(location.search).get("plan") === "two")
+            accounts.push({
+              account: "/home/demo/.claude-team",
+              label: "Claude (Teams)",
+              latest: { ...latest, fiveHour: { ...latest.fiveHour, utilization: 0.18 }, sevenDay: { ...latest.sevenDay, utilization: 0.07 } },
+              history: [],
+            });
+          return accounts;
         }
         case "wire_log_status":
           return fakeWireStatus();

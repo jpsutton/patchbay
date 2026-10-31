@@ -120,6 +120,7 @@ impl Registry {
             Arc::new(task::Task::default()),
             Arc::new(task::SendMessage),
             Arc::new(task::TaskStop),
+            Arc::new(task::TaskStatus),
         ];
         if web_fetch {
             tools.push(Arc::new(web::WebFetch));

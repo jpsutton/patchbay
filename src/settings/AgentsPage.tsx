@@ -499,8 +499,8 @@ function ClaudeSetup({ label }: { label: string }) {
 function EngineSettings() {
   const engine = useStore((s) => s.prefs.agentEngine);
   const update = useStore((s) => s.updatePrefs);
-  const field = (key: keyof AgentEngine, label: string, hint: string, def: number, max: number) => (
-    <Row key={key} label={label} hint={`${hint} Blank = ${def}.`}>
+  const field = (key: keyof AgentEngine, label: string, hint: string, def: number, max: number, blank = String(def)) => (
+    <Row key={key} label={label} hint={`${hint} Blank = ${blank}.`}>
       <Deferred
         value={engine[key] == null ? "" : String(engine[key])}
         placeholder={String(def)}
@@ -525,7 +525,14 @@ function EngineSettings() {
           are per model under Models; each session can change its thinking effort in the composer.
         </div>
       </div>
-      {field("maxSteps", "Steps per prompt", "Model requests one prompt may make before the turn stops.", 100, 10000)}
+      {field(
+        "maxSteps",
+        "Steps per prompt",
+        "Model requests one prompt may make before the turn stops.",
+        100,
+        10000,
+        "no limit on a Claude plan with Stop at plan limit on, otherwise 100",
+      )}
       {field("subagentMaxSteps", "Steps per subagent", "Model requests one subagent run may make.", 40, 10000)}
       {field("requestRetries", "Request retries", "Retries of a model request that fails before any output.", 2, 10)}
       {field("idleTimeoutSecs", "Stream timeout (s)", "Give up on a reply that sends nothing for this long.", 180, 3600)}

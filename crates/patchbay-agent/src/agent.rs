@@ -235,6 +235,11 @@ impl Agent {
             "patchbay/cancel_tool" => {
                 let s = self.need_session(&params)?;
                 let id = param_str(&params, "toolCallId")?;
+                // `subagent:<id>` stops a background subagent instead (the client's Stop button on
+                // its row), so the client needs no method of its own for it.
+                if let Some(agent) = id.strip_prefix("subagent:") {
+                    return Ok(json!({"cancelled": s.agents.stop(agent)}));
+                }
                 let token = s.calls.lock().unwrap().get(id).cloned();
                 if let Some(t) = &token {
                     t.cancel();
