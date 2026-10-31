@@ -45,8 +45,9 @@ by the Patchbay process. A per-session random token and the source session id ac
 request; Patchbay checks that the source session is hosted on the sending member.
 
 The host routes a message to the target session's current host through the mesh. The receiving
-host starts an idle agent and sends the message as an attributed prompt. A busy agent queues it for
-its next turn; agent messages are never steered into a running turn. The recipient can reply by
+host starts an idle agent and sends the message as an attributed prompt. A busy agent takes it like a
+user's mid-turn message: steered into the running turn when the agent supports steering, else
+queued for its next turn. The recipient can reply by
 calling `send_agent_message` with the sender's session id. Members share the mesh's existing trust
 boundary, so every admitted member can send messages to every unarchived session.
 
