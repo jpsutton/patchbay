@@ -135,7 +135,8 @@ Patchbay gives each running Code agent a built-in MCP tool to discover unarchive
 and message one by session id. The source node routes `code.agent_message` to the target session's
 host, using the same direct or relayed mesh connection as other remote-control RPCs. The target
 host checks that the claimed source session belongs to the authenticated sending member, starts
-the target agent if it is idle, and queues the message behind a running turn without steering it.
+the target agent if it is idle, and otherwise steers the message into the running turn or queues
+it behind that turn, as it does a user's mid-turn message.
 The message appears as an attributed prompt; a reply is a separate message back to the source
 session. Any admitted member can use the tool, consistent with the mesh's existing full-trust
 remote-control model.
