@@ -213,6 +213,8 @@ html.rounded-window #root {
 .prose-chat > :first-child { margin-top: 0; }
 .prose-chat > :last-child { margin-bottom: 0; }
 .prose-chat p { margin: 0.7em 0; }
+/* User-typed text: a single newline stays a line break, as in a plain-text bubble. */
+.prose-chat-breaks p, .prose-chat-breaks li { white-space: pre-wrap; }
 .prose-chat h1, .prose-chat h2, .prose-chat h3 { font-weight: 600; letter-spacing: -0.01em; margin: 1.2em 0 0.5em; }
 .prose-chat h1 { font-size: 1.35em; }
 .prose-chat h2 { font-size: 1.2em; }
