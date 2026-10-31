@@ -927,10 +927,10 @@ async fn phone_decides_join_requests_waiting_on_any_computer() {
     assert!(!d.state.mesh.is_member());
 }
 
-/// Next `AgentMessage` for a stand-in agent: answers it as delivered and returns its message.
+/// Next prompt for a stand-in agent: answers it as delivered and returns its message.
 async fn take_agent_message(rx: &mut tokio::sync::mpsc::UnboundedReceiver<code::acp::AgentCmd>) -> code::acp::UserMessage {
     match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("message arrives").expect("agent open") {
-        code::acp::AgentCmd::AgentMessage { msg, reply } => {
+        code::acp::AgentCmd::Prompt { msg, force: false, reply } => {
             reply.unwrap().send(Ok(code::acp::Delivery::Sent)).unwrap();
             msg
         }
