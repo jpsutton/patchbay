@@ -967,6 +967,9 @@ fn unknown_update(update: &Value) -> Option<String> {
         "plan" if !update["entries"].is_array() => Some("The agent sent a plan Patchbay can't show".into()),
         "tool_call" | "tool_call_update" | "plan" | "current_mode_update" | "available_commands_update"
         | "config_option_update" | "usage_update" | "session_info_update" => None,
+        // Patchbay's own agent: how its subagents are doing (`patchbay-agent`'s `publish_agents`).
+        "subagents_update" if update["agents"].is_array() => None,
+        "subagents_update" => Some("The agent sent a subagent list Patchbay can't show".into()),
         _ => Some(format!("The agent sent an update Patchbay doesn't know (\"{kind}\")")),
     }
 }

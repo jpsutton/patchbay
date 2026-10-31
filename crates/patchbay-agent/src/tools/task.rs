@@ -12,11 +12,12 @@ use super::*;
 use crate::session::{Mode, Session};
 use crate::subagent::{self, Kind, Note, Status, SubAgent};
 use crate::prompt;
+use crate::store::Entry;
 
 const READ_ONLY: [&str; 5] = ["Read", "Glob", "Grep", "WebFetch", "WebSearch"];
 /// What a subagent never gets: it cannot ask the user, plan, track tasks for the main agent or
 /// start subagents of its own.
-const WITHHELD: [&str; 7] = ["Task", "SendMessage", "TaskStop", "TodoWrite", "ExitPlanMode", "AskUserQuestion", "KillShell"];
+const WITHHELD: [&str; 8] = ["Task", "SendMessage", "TaskStop", "TaskStatus", "TodoWrite", "ExitPlanMode", "AskUserQuestion", "KillShell"];
 
 fn valid_name(n: &str) -> bool {
     !n.is_empty() && n.len() <= 40 && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -48,13 +49,45 @@ async fn conclude(parent: &Arc<Session>, agent: &Arc<SubAgent>, result: Result<S
     (status, text)
 }
 
+/// What a panic said, for the failure the main agent reads.
+fn panic_text(e: tokio::task::JoinError) -> String {
+    let p = e.into_panic();
+    p.downcast_ref::<&str>().map(|s| (*s).to_owned()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "no message".into())
+}
+
 /// Run `agent` in the background; its report becomes a notification.
 fn spawn_background(parent: Arc<Session>, agent: Arc<SubAgent>) {
     agent.background.store(true, Ordering::SeqCst);
+    tracing::info!(agent = %agent.id, description = %agent.description, "subagent started in the background");
+    parent.publish_agents();
+    // Keeps the client's view of the agent moving (idle time, current action) while it runs.
+    let ticker = {
+        let parent = parent.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                parent.publish_agents();
+            }
+        })
+    };
     tokio::spawn(async move {
         let token = agent.cancel.lock().unwrap().clone();
-        let result = subagent::run(&parent, &agent, &token).await;
+        // The run is a task of its own, so a panic in it comes back here as an error. Left alone,
+        // it would end the task silently: the agent would stay "running" for good and the main
+        // agent would wait on a report that never comes.
+        let run = tokio::spawn({
+            let (parent, agent) = (parent.clone(), agent.clone());
+            async move { subagent::run(&parent, &agent, &token).await }
+        });
+        let result = match run.await {
+            Ok(r) => r,
+            Err(e) if e.is_panic() => Err(format!("the subagent crashed: {}", panic_text(e))),
+            Err(e) => Err(format!("the subagent's task ended without a report: {e}")),
+        };
         let (status, text) = conclude(&parent, &agent, result).await;
+        tracing::info!(agent = %agent.id, status = status.label(), "subagent finished");
+        ticker.abort();
+        parent.publish_agents();
         parent.agents.push_note(Note {
             agent_id: agent.name.clone().unwrap_or_else(|| agent.id.clone()),
             description: agent.description.clone(),
@@ -214,6 +247,7 @@ do with one Grep or Read."
         } else {
             Message::user(task)
         };
+        let first_rec = first.clone();
         history.push(first);
         let child_mode = if kind == Kind::Explore { Mode::Plan } else { Mode::Default };
         let child = parent.child(cwd, format!("{id}:"), history, child_mode).await;
@@ -225,6 +259,10 @@ do with one Grep or Read."
                 child.state.lock().await.model_id = m.id.clone();
             }
         }
+        // Its transcript on disk, so what it did survives a stall or a crash and can be read.
+        let child_model = child.state.lock().await.model_id.clone();
+        child.save_meta(&child_model, child_mode);
+        child.store.append(&Entry::Msg { m: first_rec });
         let agent = Arc::new(SubAgent {
             id: id.clone(),
             name: name.clone(),
@@ -307,7 +345,8 @@ whole history and the message as its next instruction, and its new report comes 
             return ToolOutput::text(format!("Message queued for {to}; it reads it before its next step."));
         }
         // Continue a finished subagent from where it stopped.
-        agent.child.state.lock().await.messages.push(Message::user(message));
+        subagent::record(&agent.child, Message::user(message)).await;
+        agent.child.live.set("continuing");
         *agent.status.lock().unwrap() = Status::Running;
         *agent.cancel.lock().unwrap() = CancellationToken::new();
         if bool_arg(&input, "run_in_background") {
@@ -363,6 +402,49 @@ impl Tool for TaskStop {
             }
             Some(_) => ToolOutput::text(format!("{id} is not running.")),
             None => ToolOutput::error(format!("No subagent {id}.")),
+        }
+    }
+}
+
+pub struct TaskStatus;
+
+#[async_trait]
+impl Tool for TaskStatus {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "TaskStatus".into(),
+            description: "Show how the subagents you started are doing: each one's state (running, completed, failed \
+or stopped), how long it has run and been idle, how many model requests it made, and what it is doing now (a model \
+call, a tool, or waiting for the user to approve a tool). Use it on a background subagent that has been quiet for a \
+while, before you decide to stop it with TaskStop."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"task_id": {"type": "string", "description": "One subagent's id or name; leave out for all"}}
+            }),
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        "think"
+    }
+
+    fn allowed_in_plan(&self) -> bool {
+        true
+    }
+
+    fn title(&self, input: &Value) -> String {
+        format!("Check {}", str_arg(input, "task_id").unwrap_or("subagents"))
+    }
+
+    async fn run(&self, input: Value, ctx: &ToolCtx) -> ToolOutput {
+        let only = str_arg(&input, "task_id");
+        match ctx.session.agents.report(only) {
+            Some(text) => ToolOutput::text(text),
+            None => match only {
+                Some(id) => ToolOutput::error(format!("No subagent {id}.")),
+                None => ToolOutput::text("No subagents started."),
+            },
         }
     }
 }

@@ -111,6 +111,9 @@ pub struct Session {
     pub store: Store,
     /// Subagents this session started.
     pub agents: crate::subagent::Agents,
+    /// What this session is doing now and when it last did something, for telling a stuck
+    /// subagent from a busy one.
+    pub live: crate::subagent::Liveness,
     /// Prefix of this session's tool-call ids on the client ("" for the main session), so a
     /// subagent's calls never collide with the main agent's.
     pub card_prefix: String,
@@ -184,6 +187,7 @@ impl Session {
             mcp: tokio::sync::Mutex::new(Arc::new(McpSet::default())),
             store,
             agents: Default::default(),
+            live: Default::default(),
             card_prefix: String::new(),
             keep_open: AtomicBool::new(false),
             minify: Mutex::new(None),
@@ -327,8 +331,9 @@ impl Session {
             extra_usage: Mutex::default(),
             shells: shell::Registry::default(),
             mcp: tokio::sync::Mutex::new(self.mcp.lock().await.clone()),
-            store: Store::disabled(),
+            store: Store::at(crate::store::subagents_dir(&self.host.data_dir(), &self.id).join(format!("{}.jsonl", prefix.trim_end_matches(':')))),
             agents: Default::default(),
+            live: Default::default(),
             card_prefix: prefix,
             keep_open: AtomicBool::new(false),
             // A subagent speaks the way its parent does, whatever the setting becomes later.
@@ -341,6 +346,20 @@ impl Session {
             start_context: Mutex::default(),
             cache: Mutex::default(),
         })
+    }
+
+    /// Where the state of this session's subagents is written, for anyone looking from outside.
+    pub fn agents_status_path(&self) -> PathBuf {
+        crate::store::subagents_dir(&self.host.data_dir(), &self.id).join("status.json")
+    }
+
+    /// Show the subagents' state: to the client, as a `subagents_update`, and in `status.json`.
+    pub fn publish_agents(&self) {
+        self.agents.write_status(&self.agents_status_path());
+        let agents = self.agents.status();
+        if !agents.is_empty() {
+            self.update(json!({"sessionUpdate": "subagents_update", "agents": agents}));
+        }
     }
 
     /// Send a `session/update`.
