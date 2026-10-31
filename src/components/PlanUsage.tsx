@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { PlanLimits, PlanSample, PlanWindow } from "../lib/ipc";
+import type { PlanAccount, PlanLimits, PlanSample, PlanWindow } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { GaugeIcon } from "./icons";
 
@@ -144,15 +144,21 @@ function BurnGauge({ pace, className }: { pace: number; className?: string }) {
   );
 }
 
+/** The account nearest its limit: the one the sidebar button shows. */
+const busiest = (accounts: PlanAccount[], now: number) =>
+  accounts.reduce<PlanAccount | null>((best, a) => (best && (peak(best.latest, now) ?? -1) >= (peak(a.latest, now) ?? -1) ? best : a), null);
+
 const barClass = (t: ReturnType<typeof tone>) => (t === "danger" ? "bg-danger" : t === "warn" ? "bg-warn" : "bg-ok");
 
-/** The sidebar footer's toggle for the Claude plan usage blade: one mini bar per window. */
+/** The sidebar footer's toggle for the Claude plan usage blade: one mini bar per window of the busiest account. */
 export function PlanUsageButton() {
-  const limits = useStore((s) => s.planLimits);
+  const accounts = useStore((s) => s.planAccounts);
   const open = useStore((s) => s.planOpen);
   const setOpen = useStore((s) => s.setPlanOpen);
   const guard = useStore((s) => s.prefs.usageLimit);
   const now = useNow(true);
+  const shown = busiest(accounts, now);
+  const limits = shown?.latest ?? null;
   const limit = guard.enabled ? guard.percent : null;
   const rows = [
     { label: "5h", pct: windowPct(limits?.fiveHour ?? null, now) },
@@ -165,7 +171,7 @@ export function PlanUsageButton() {
   const pace = worstPace(limits, now);
   const paceTone = pace == null ? null : tone(Math.round(pace * 100), limit);
   const title = rows.length
-    ? `Claude plan usage: ${rows.map((r) => `${r.label === "5h" ? "5-hour" : "weekly"} ${r.pct}%`).join(", ")}${
+    ? `Claude plan usage${accounts.length > 1 && shown ? ` (${shown.label})` : ""}: ${rows.map((r) => `${r.label === "5h" ? "5-hour" : "weekly"} ${r.pct}%`).join(", ")}${
         pace == null ? "" : `. Burning at ${pace.toFixed(1)}x an even pace`
       }`
     : "Claude plan usage";
@@ -207,11 +213,24 @@ export function PlanUsageButton() {
   );
 }
 
-function WindowRow({ label, w, which, now, limit }: { label: string; w: PlanWindow | null; which: "fiveHour" | "sevenDay"; now: number; limit: number | null }) {
+function WindowRow({
+  label,
+  w,
+  which,
+  history,
+  now,
+  limit,
+}: {
+  label: string;
+  w: PlanWindow | null;
+  which: "fiveHour" | "sevenDay";
+  history: PlanSample[];
+  now: number;
+  limit: number | null;
+}) {
   const span = WINDOW_SECS[which];
   const current = live(w, now);
   const burn = burnOutlook(w, span, now);
-  const history = useStore((s) => s.planHistory);
   const segments = current ? barSegments(history, which, current, span) : [];
   const covered = segments.length ? segments[segments.length - 1].to : 0;
   if (!w) return null;
@@ -259,12 +278,41 @@ function WindowRow({ label, w, which, now, limit }: { label: string; w: PlanWind
   );
 }
 
+const overageOf = (l: PlanLimits | null, now: number) => l?.overageUntil != null && l.overageUntil > now;
+
+/** Whether an account has anything to show. */
+const reported = (a: PlanAccount, now: number) => !!a.latest && (!!a.latest.fiveHour || !!a.latest.sevenDay || overageOf(a.latest, now));
+
+/** One account's windows; named when there is more than one account. */
+function AccountUsage({ a, named, first, now, limit }: { a: PlanAccount; named: boolean; first: boolean; now: number; limit: number | null }) {
+  const limits = a.latest!;
+  return (
+    <section aria-label={named ? a.label : undefined} className={first ? undefined : "mt-1 border-t border-line pt-0.5"}>
+      {named && (
+        <div className="flex items-baseline justify-between px-3 pt-1.5 text-[12px]">
+          <span className="truncate font-medium" title={a.account}>
+            {a.label}
+          </span>
+          <span className="shrink-0 text-[11px] text-faint">updated {fmtSpan(now - limits.observedAt)} ago</span>
+        </div>
+      )}
+      <WindowRow label="5-hour" w={limits.fiveHour} which="fiveHour" history={a.history} now={now} limit={limit} />
+      <WindowRow label="Weekly" w={limits.sevenDay} which="sevenDay" history={a.history} now={now} limit={limit} />
+      {overageOf(limits, now) && (
+        <div className="mx-2 mb-1 mt-1.5 rounded-lg bg-danger/10 px-2.5 py-2 text-[12.5px] leading-[1.4] text-danger" role="alert">
+          Using extra usage, billed past the plan, for {fmtSpan(limits.overageUntil! - now)} more.
+        </div>
+      )}
+    </section>
+  );
+}
+
 /**
- * Claude plan usage from the last report of Claude Code, or of Patchbay's agent on a Claude login. Stays open until its button is clicked
- * again, so it can sit beside a running session.
+ * Claude plan usage from the last reports of Claude Code, or of Patchbay's agent on a Claude login, one section per
+ * account. Stays open until its button is clicked again, so it can sit beside a running session.
  */
 export function PlanUsageBlade({ className }: { className: string }) {
-  const limits = useStore((s) => s.planLimits);
+  const all = useStore((s) => s.planAccounts);
   const open = useStore((s) => s.planOpen);
   const guard = useStore((s) => s.prefs.usageLimit);
   const openSettingsAt = useStore((s) => s.openSettingsAt);
@@ -272,7 +320,8 @@ export function PlanUsageBlade({ className }: { className: string }) {
   const now = useNow(open);
   if (!open) return null;
   const limit = guard.enabled ? guard.percent : null;
-  const overage = limits?.overageUntil != null && limits.overageUntil > now;
+  const accounts = all.filter((a) => reported(a, now));
+  const single = accounts.length === 1 ? accounts[0].latest : null;
   return (
     <div
       role="dialog"
@@ -281,22 +330,14 @@ export function PlanUsageBlade({ className }: { className: string }) {
     >
       <div className="flex items-baseline justify-between px-3 pb-1.5 pt-2">
         <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-faint">Claude plan</span>
-        {limits && <span className="text-[11px] text-faint">updated {fmtSpan(now - limits.observedAt)} ago</span>}
+        {single && <span className="text-[11px] text-faint">updated {fmtSpan(now - single.observedAt)} ago</span>}
       </div>
-      {!limits || (!limits.fiveHour && !limits.sevenDay && !overage) ? (
+      {accounts.length === 0 ? (
         <p className="px-3 py-1.5 text-muted">
           No usage reported yet. It shows up after a turn on a Claude plan: Claude Code signed in with one, or Patchbay's agent on a Claude login provider.
         </p>
       ) : (
-        <>
-          <WindowRow label="5-hour" w={limits.fiveHour} which="fiveHour" now={now} limit={limit} />
-          <WindowRow label="Weekly" w={limits.sevenDay} which="sevenDay" now={now} limit={limit} />
-          {overage && (
-            <div className="mx-2 mb-1 mt-1.5 rounded-lg bg-danger/10 px-2.5 py-2 text-[12.5px] leading-[1.4] text-danger" role="alert">
-              Using extra usage, billed past the plan, for {fmtSpan(limits.overageUntil! - now)} more.
-            </div>
-          )}
-        </>
+        accounts.map((a, i) => <AccountUsage key={a.account} a={a} named={accounts.length > 1} first={i === 0} now={now} limit={limit} />)
       )}
       <div className="mt-1 flex items-baseline justify-between border-t border-line px-3 pb-1 pt-2 text-[12px] text-muted">
         <span>{limit != null ? `Turns stop at ${limit}%` : "Usage limit off"}</span>

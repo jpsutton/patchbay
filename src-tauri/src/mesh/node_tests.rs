@@ -103,6 +103,7 @@ async fn join_sync_relay_and_rpc() {
         base_url: "http://example".into(),
         has_key: false,
             auth_mode: Default::default(),
+            claude_config_dir: None,
         };
     a.db.upsert_provider(&p, None).unwrap();
     a.keys.set("prov-a", "sk-alpha");
