@@ -151,8 +151,8 @@ function MessageRow({
           </div>
         )}
         {m.content && (
-          <div className="max-w-[80%] whitespace-pre-wrap rounded-[16px_16px_4px_16px] border border-line bg-panel-2 px-3.5 py-2.5 leading-6">
-            {m.content}
+          <div className="max-w-[80%] rounded-[16px_16px_4px_16px] border border-line bg-panel-2 px-3.5 py-2.5 leading-6">
+            <Markdown text={m.content} keepBreaks />
           </div>
         )}
         <div

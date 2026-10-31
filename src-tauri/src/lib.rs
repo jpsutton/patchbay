@@ -1101,7 +1101,7 @@ async fn resume_session(state: &AppState, id: &str) -> anyhow::Result<()> {
     }
     tracing::info!("usage limit: resuming {id}");
     let me = state.mesh.node_id().to_owned();
-    code_prompt_local(state, id.to_owned(), RESUME_PROMPT.to_owned(), Vec::new(), Vec::new(), me, None, false, false).await?;
+    code_prompt_local(state, id.to_owned(), RESUME_PROMPT.to_owned(), Vec::new(), Vec::new(), me, None, false).await?;
     Ok(())
 }
 
@@ -1268,7 +1268,6 @@ async fn code_prompt_local(
     origin: String,
     prompt_id: Option<String>,
     force: bool,
-    queue_only: bool,
 ) -> anyhow::Result<code::acp::Delivery> {
     ensure_local_host(state, &id)?;
     let prefs = prefs::load(&state.db);
@@ -1327,11 +1326,7 @@ async fn code_prompt_local(
         origin,
         attachments: serde_json::to_value(&atts)?,
     };
-    let delivery = if queue_only {
-        state.code.agent_message(&id, msg).await?
-    } else {
-        state.code.prompt(&id, msg, force).await?
-    };
+    let delivery = state.code.prompt(&id, msg, force).await?;
     if note.is_some() {
         state.db.with_conn(|c| c.execute("DELETE FROM settings WHERE key = ?1", [&note_key]))?;
     }
@@ -1446,7 +1441,7 @@ async fn deliver_agent_message_local(
     if state.code.is_moving(target_session_id) {
         anyhow::bail!("target session is being moved to another computer");
     }
-    // An idle session may have no live agent process; start it so the queued message can run.
+    // An idle session may have no live agent process; start it so the message can run.
     if !state.code.is_running(target_session_id) {
         code_start_local(state, target_session_id.to_owned()).await?;
     }
@@ -1465,7 +1460,6 @@ async fn deliver_agent_message_local(
         format!("agent:{from_node}:{source_session_id}"),
         Some(prompt_id.clone()),
         false,
-        true,
     )
     .await?;
     Ok(serde_json::json!({
@@ -1543,7 +1537,7 @@ async fn code_prompt(
         return Ok(());
     }
     let me = state.mesh.node_id().to_owned();
-    code_prompt_local(state, id, text, attachment_ids, mentions, me, prompt_id, force, false).await?;
+    code_prompt_local(state, id, text, attachment_ids, mentions, me, prompt_id, force).await?;
     Ok(())
 }
 
@@ -1963,7 +1957,7 @@ impl mesh::RpcHandler for MeshRpc {
                 let origin = p["origin"].as_str().map(str::to_owned).unwrap_or(from);
                 let prompt_id = p["promptId"].as_str().map(str::to_owned);
                 let force = p["force"].as_bool().unwrap_or(false);
-                code_prompt_local(state, id()?, text, atts, mentions, origin, prompt_id, force, false)
+                code_prompt_local(state, id()?, text, atts, mentions, origin, prompt_id, force)
                     .await
                     .map(|_| Value::Null)
             }

@@ -254,13 +254,6 @@ impl CodeManager {
         rx.await.map_err(|_| anyhow!("agent stopped"))?
     }
 
-    /// Deliver an agent-originated message as a fresh or queued turn, never as mid-turn steering.
-    pub async fn agent_message(&self, code_session_id: &str, msg: acp::UserMessage) -> Result<acp::Delivery> {
-        let (reply, rx) = oneshot::channel();
-        self.send(code_session_id, AgentCmd::AgentMessage { msg, reply: Some(reply) })?;
-        rx.await.map_err(|_| anyhow!("agent stopped"))?
-    }
-
     pub async fn set_model(&self, code_session_id: &str, model_id: String) -> Result<()> {
         let (reply, rx) = oneshot::channel();
         self.send(code_session_id, AgentCmd::SetModel { model_id, reply })?;
