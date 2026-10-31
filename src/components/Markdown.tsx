@@ -154,9 +154,9 @@ function isLocalImageSrc(src: string | undefined): src is string {
   return s.length > 0 && !/^(https?:|data:|blob:|\/\/)/i.test(s);
 }
 
-function MarkdownImpl({ text, sessionId }: { text: string; sessionId?: string }) {
+function MarkdownImpl({ text, sessionId, keepBreaks }: { text: string; sessionId?: string; keepBreaks?: boolean }) {
   return (
-    <div className="prose-chat">
+    <div className={keepBreaks ? "prose-chat prose-chat-breaks" : "prose-chat"}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: false }]]}
         rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]}
