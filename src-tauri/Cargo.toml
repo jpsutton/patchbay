@@ -1,6 +1,6 @@
 [package]
 name = "patchbay"
-version = "0.16.0"
+version = "0.16.1"
 # `tauri dev` runs `cargo run`, which can't choose between this and `patchbayd` on its own.
 default-run = "patchbay"
 edition = "2024"
