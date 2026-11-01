@@ -955,7 +955,9 @@ fn save_resumes(state: &AppState) {
 
 fn load_plan_accounts(db: &Db) -> std::collections::BTreeMap<String, code::plan_limits::Account> {
     let get = |k| db.get_setting(k).ok().flatten();
-    let raw = if let Some(m) = get(PLAN_ACCOUNTS_KEY).and_then(|j| serde_json::from_str(&j).ok()) {
+    let raw = if let Some(m) = get(PLAN_ACCOUNTS_KEY)
+        .and_then(|j| serde_json::from_str::<std::collections::BTreeMap<String, code::plan_limits::Account>>(&j).ok())
+    {
         m
     } else {
         let old = code::plan_limits::Account {
@@ -1031,7 +1033,7 @@ fn fold_plan_accounts(
     db: &Db,
     raw: std::collections::BTreeMap<String, code::plan_limits::Account>,
 ) -> std::collections::BTreeMap<String, code::plan_limits::Account> {
-    let mut out = std::collections::BTreeMap::new();
+    let mut out: std::collections::BTreeMap<String, code::plan_limits::Account> = std::collections::BTreeMap::new();
     for (account, usage) in raw {
         let (key, name) = resolve_plan_account(db, &account, usage.name.clone());
         let mut usage = usage;
