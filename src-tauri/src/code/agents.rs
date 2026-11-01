@@ -557,6 +557,7 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
                 env.push(("CODEX_CONFIG".to_owned(), json!({ "developer_instructions": rules }).to_string()));
             }
         }
+        AgentKind::Cursor => env.extend(cursor_preload(data_dir, std::env::var("NODE_OPTIONS").ok())),
         _ => {}
     }
     env.extend(providers.env);
@@ -572,6 +573,44 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
         approvals: ApprovalSetup::for_agent(kind),
         native: None,
     })
+}
+
+/// Preloaded into `cursor-agent acp` so its AwaitShell waits reach the client as tool calls.
+/// Cursor's ACP adapter drops them, which made a turn waiting on a shell look stuck. The file's
+/// header explains how it hooks in without depending on Cursor's exact source.
+const CURSOR_PRELOAD: &str = include_str!("cursor_acp_preload.cjs");
+
+/// Environment that loads [`CURSOR_PRELOAD`] into Cursor's Node process, written under
+/// `data_dir`. `user_opts` (Patchbay's own NODE_OPTIONS) stays in force, and the preload puts it
+/// back for the commands the agent runs. Empty, so Cursor runs unchanged, if the file can't be
+/// written.
+fn cursor_preload(data_dir: &Path, user_opts: Option<String>) -> Vec<(String, String)> {
+    let dir = data_dir.join("cursor");
+    let path = dir.join("acp-preload.cjs");
+    let current = std::fs::read_to_string(&path).is_ok_and(|s| s == CURSOR_PRELOAD);
+    // Through a temporary file, so a Cursor session starting meanwhile never reads half of it.
+    let written = current
+        || std::fs::create_dir_all(&dir)
+            .and_then(|_| {
+                let tmp = dir.join(format!("acp-preload.{}.tmp", crate::db::new_id()));
+                std::fs::write(&tmp, CURSOR_PRELOAD)?;
+                std::fs::rename(&tmp, &path).inspect_err(|_| {
+                    let _ = std::fs::remove_file(&tmp);
+                })
+            })
+            .is_ok();
+    if !written {
+        tracing::warn!("couldn't write {}; Cursor's AwaitShell calls won't show", path.display());
+        return Vec::new();
+    }
+    let user_opts = user_opts.unwrap_or_default();
+    // NODE_OPTIONS takes a double-quoted value with backslash escapes (a path with spaces).
+    let quoted = path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+    let opts = format!("--require \"{quoted}\" {user_opts}").trim_end().to_owned();
+    vec![
+        ("NODE_OPTIONS".to_owned(), opts),
+        ("PATCHBAY_ORIG_NODE_OPTIONS".to_owned(), user_opts),
+    ]
 }
 
 /// Patchbay's own agent: no process, and its models arrive through the host, not a config file.
@@ -788,5 +827,22 @@ mod tests {
         let r = resolve(AgentKind::Opencode, &o).unwrap();
         assert_eq!(r.source, Source::Override);
         assert_eq!(r.args, vec!["acp".to_owned()]);
+    }
+
+    #[test]
+    fn cursor_preload_keeps_the_users_node_options() {
+        let dir = std::env::temp_dir().join(format!("pb ag {}", crate::db::new_id()));
+        let env = cursor_preload(&dir, Some("--max-old-space-size=4096".into()));
+        let path = dir.join("cursor").join("acp-preload.cjs");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), CURSOR_PRELOAD);
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        let quoted = path.to_string_lossy().replace('\\', "\\\\");
+        assert_eq!(get("NODE_OPTIONS").unwrap(), format!("--require \"{quoted}\" --max-old-space-size=4096"));
+        assert_eq!(get("PATCHBAY_ORIG_NODE_OPTIONS").unwrap(), "--max-old-space-size=4096");
+        // Without the user's own options; and again over the file already there.
+        let env = cursor_preload(&dir, None);
+        assert_eq!(env[0].1, format!("--require \"{quoted}\""));
+        assert_eq!(env[1].1, "");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

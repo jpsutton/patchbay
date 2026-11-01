@@ -221,6 +221,27 @@ function fakeEcho(csid: string, promptId: string, text: string, delivery: Prompt
 }
 
 /** Run turns back to back: this one, then whatever queued up behind it. */
+/** Fake Cursor plan usage for the sidebar blade (`?cursorPlan=none` hides it). */
+function fakeCursorPlanLimits() {
+  const mode = new URLSearchParams(location.search).get("cursorPlan");
+  if (mode === "none") return null;
+  const now = Math.floor(Date.now() / 1000);
+  const onBonus = mode !== "noBonus";
+  return {
+    accountId: "298981080",
+    email: "you@example.com",
+    observedAt: now - 90,
+    resetsAt: now + 5 * 86400,
+    auto: 12.5,
+    api: 54,
+    total: 18.3,
+    includedSpendCents: 40000,
+    limitCents: 40000,
+    bonusSpendCents: onBonus ? 24201 : 24201,
+    remainingBonus: onBonus,
+  };
+}
+
 /** Fake plan usage for the default account. */
 function fakePlanLimits() {
   // `?plan=none` before any report; `?plan=over` past the limit and on extra usage; `?plan=slow` a light burn.
@@ -1079,6 +1100,7 @@ export function install() {
             terminalShell?: string;
             autoCompactPercent?: number | null;
             usageLimit?: { percent: number };
+            cursorUsageLimit?: { percent: number };
             autoArchiveDays?: number | null;
             readAloudEngine?: string;
             readAloudRate?: string;
@@ -1577,6 +1599,10 @@ export function install() {
             });
           return accounts;
         }
+        case "cursor_plan_limits":
+          return fakeCursorPlanLimits();
+        case "cursor_plan_watching":
+          return null;
         case "wire_log_status":
           return fakeWireStatus();
         case "wire_log_set":
@@ -1668,6 +1694,8 @@ export function install() {
           setTimeout(() => codeEmit(a.id as string, { type: "status", state: "ready", message: null }), 50);
           return { running: false, busy: false, events: [] };
         }
+        case "code_resume":
+          return { mode: "delta", events: [], point: (a.point as unknown) ?? null };
         case "code_move": {
           await sleep(1200);
           const s = db.code.find((x) => x.id === a.id)!;

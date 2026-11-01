@@ -567,6 +567,45 @@ impl Mesh {
         self.0.st.lock().unwrap().sessions.contains_key(node)
     }
 
+    /// The events of Code session `id` this node recorded after `point`, merged (see
+    /// [`rmt::coalesce`]), with the stream's latest point. `None` when the ring no longer holds
+    /// all of them, or `point` belongs to an earlier stream.
+    pub fn code_events_since(&self, id: &str, point: &rmt::Point) -> Option<(Vec<Value>, Option<rmt::Point>)> {
+        let (events, last) = {
+            let st = self.0.st.lock().unwrap();
+            let (ring, _, _) = st.rings.get(&rmt::session_topic(id))?;
+            (ring.since(point)?, ring.last())
+        };
+        Some((rmt::coalesce(events).into_iter().map(|(_, v)| v).collect(), last))
+    }
+
+    /// The latest point of Code session `id`'s event stream recorded here.
+    pub fn code_point(&self, id: &str) -> Option<rmt::Point> {
+        self.0.st.lock().unwrap().rings.get(&rmt::session_topic(id)).and_then(|(r, _, _)| r.last())
+    }
+
+    /// What a window opening Code session `id` needs besides its saved transcript: the events
+    /// since the last finished turn, or, without a saved transcript, the agent's whole run when
+    /// the ring still holds it. Merged, with whether the span is whole (`covered`) and the
+    /// stream's latest point. The same choice a phone's subscribe makes.
+    pub fn code_catch_up(&self, id: &str, has_transcript: bool) -> (Vec<Value>, bool, Option<rmt::Point>) {
+        let (events, covered, last) = {
+            let st = self.0.st.lock().unwrap();
+            let Some((ring, _, _)) = st.rings.get(&rmt::session_topic(id)) else {
+                return (Vec::new(), true, None);
+            };
+            let (tail, covered) =
+                ring.tail(|_, p| matches!(p["event"]["type"].as_str(), Some("promptDone" | "sessionReady")));
+            let (all, complete) = ring.tail(|_, _| false);
+            if !has_transcript && complete && !all.is_empty() {
+                (all, true, ring.last())
+            } else {
+                (tail, covered, ring.last())
+            }
+        };
+        (rmt::coalesce(events).into_iter().map(|(_, v)| v).collect(), covered, last)
+    }
+
     pub fn member_name(&self, node: &str) -> String {
         self.0.member_name(node)
     }

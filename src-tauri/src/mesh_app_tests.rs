@@ -884,6 +884,102 @@ async fn plan_limits_reach_every_member() {
     mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &other);
     assert_eq!((five(&b), five_of(&b, "u2:o2")), (Some(0.5), Some(0.9)));
     assert_eq!(b.state.code.plan.account("u2:o2").name.as_deref(), Some("Team"));
+
+    // A path-keyed report from another member (Claude Code had no oauthAccount there) is the
+    // same login as the default here — not a second account under that foreign path.
+    let foreign = json!({ "account": "/home/molly/.claude", "limits": report(0.53, 5) });
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &foreign);
+    assert_eq!(five(&b), Some(0.53));
+    assert!(
+        !b.state.code.plan.accounts().contains_key("/home/molly/.claude"),
+        "foreign path fallbacks must not appear as their own account"
+    );
+}
+
+/// Saved path keys from another computer collapse into the default login on load.
+#[test]
+fn load_folds_foreign_path_accounts_into_the_default() {
+    use code::plan_limits::{Account, PlanLimits, Window};
+    let n = node("fold-path-load");
+    let (me, name) = crate::default_plan_account();
+    let mut raw = std::collections::BTreeMap::new();
+    raw.insert(
+        me.clone(),
+        Account {
+            name: name.clone(),
+            latest: Some(PlanLimits {
+                five_hour: Some(Window { utilization: 0.9, resets_at: code::plan_limits::now() + 3600 }),
+                seven_day: Some(Window { utilization: 0.9, resets_at: code::plan_limits::now() + 86400 }),
+                observed_at: code::plan_limits::now(),
+                ..Default::default()
+            }),
+            history: vec![],
+        },
+    );
+    raw.insert(
+        "/home/molly/.claude".into(),
+        Account {
+            name: None,
+            latest: Some(PlanLimits {
+                five_hour: Some(Window { utilization: 0.12, resets_at: code::plan_limits::now() + 3600 }),
+                seven_day: Some(Window { utilization: 0.53, resets_at: code::plan_limits::now() + 86400 }),
+                observed_at: code::plan_limits::now() - 2 * 86400,
+                ..Default::default()
+            }),
+            history: vec![],
+        },
+    );
+    n.state.db.set_setting("claude.planByAccount", &serde_json::to_string(&raw).unwrap()).unwrap();
+    let loaded = crate::load_plan_accounts(&n.state.db);
+    assert_eq!(loaded.len(), 1, "{loaded:?}");
+    assert!(loaded.contains_key(&me));
+    assert!(!loaded.contains_key("/home/molly/.claude"));
+    assert_eq!(loaded[&me].latest.as_ref().unwrap().seven_day.unwrap().utilization, 0.9);
+}
+
+/// Cursor plan usage one member fetched reaches the others; a different account is ignored.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cursor_plan_limits_reach_peers_on_the_same_account() {
+    use code::cursor_plan::CursorPlanLimits;
+    let (a, b) = (node("alpha-cursor-plan"), node("bravo-cursor-plan"));
+    link(&a, &b).await;
+    let report = |auto: f64, ago: i64, account: &str| CursorPlanLimits {
+        account_id: account.into(),
+        email: Some("a@b.c".into()),
+        observed_at: code::cursor_plan::now() - ago,
+        resets_at: Some(code::cursor_plan::now() + 86400),
+        auto: Some(auto),
+        api: Some(10.0),
+        total: Some(auto),
+        included_spend_cents: Some(20000),
+        limit_cents: Some(40000),
+        bonus_spend_cents: Some(500),
+        remaining_bonus: Some(true),
+    };
+    adopt_cursor_plan(&a.state, report(40.0, 60, "42"), true);
+    until("B has A's Cursor report", 10, || {
+        b.state.code.cursor_plan.latest().is_some_and(|l| l.account_id == "42" && l.auto == Some(40.0))
+    })
+    .await;
+    until("B's panel hears of it", 10, || {
+        b.events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(n, p)| n == "code://cursor-plan-limits" && p["auto"] == 40.0)
+    })
+    .await;
+
+    // A newer report for the same account replaces; another account does not.
+    adopt_cursor_plan(&a.state, report(55.0, 10, "42"), true);
+    until("B takes the newer report", 10, || b.state.code.cursor_plan.latest().is_some_and(|l| l.auto == Some(55.0))).await;
+    mesh::RpcHandler::event(
+        &MeshRpc { state: b.state.clone() },
+        MESH_CURSOR_PLAN_EVENT,
+        &json!({ "accountId": "other", "limits": report(99.0, 5, "other") }),
+    );
+    assert_eq!(b.state.code.cursor_plan.latest().unwrap().auto, Some(55.0));
+    assert_eq!(b.state.code.cursor_plan.latest().unwrap().account_id, "42");
 }
 
 /// A phone can decide a join request that waits on any computer, with its own signature.
@@ -969,4 +1065,65 @@ async fn agents_message_each_other_across_the_mesh() {
     // Guards: no self-messages, and a node can't send as a session it doesn't host.
     assert!(send_agent_message(&a.state, &an, &sa.id, &sa.id, "x").await.is_err());
     assert!(send_agent_message(&a.state, &an, &sb.id, &sa.id, "x").await.is_err());
+}
+
+/// A window on B that missed some of A's events for a session catches up through `code_resume`:
+/// the events after its last point while A's ring has them, else a snapshot with the status of
+/// the tool calls it still shows running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn missed_session_events_resume_from_the_host() {
+    let (a, b) = (node("alpha-resume"), node("bravo-resume"));
+    link(&a, &b).await;
+    let proj = a.dir.join("proj");
+    repo(&proj);
+    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok", "default").unwrap();
+    until("session reaches B", 10, || b.state.db.get_code_session(&s.id).unwrap().is_some()).await;
+
+    let update = |u: Value| code::acp::Envelope { code_session_id: s.id.clone(), event: code::acp::CodeEvent::Update { update: u } };
+    on_code_event(&a.state, update(json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Watch CI" })));
+    let first = a.state.mesh.code_point(&s.id).expect("a point for the session");
+    on_code_event(&a.state, update(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "in_progress" })));
+    on_code_event(&a.state, update(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed" })));
+
+    // From the first point: the two later updates, folded into one.
+    let point = serde_json::to_value(&first).unwrap();
+    let r = code_resume(&b.state, s.id.clone(), Some(point), Some(vec!["t1".into()])).await.unwrap();
+    assert_eq!(r["mode"], "delta", "{r}");
+    let events = r["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1, "{r}");
+    assert_eq!(events[0]["event"]["update"]["status"], "completed");
+    assert_eq!(r["point"]["n"], first.n + 2);
+
+    // Without a point A can resume from: a snapshot, with the call's status on A.
+    let r = code_resume(&b.state, s.id.clone(), None, Some(vec!["t1".into(), "gone".into()])).await.unwrap();
+    assert_eq!(r["mode"], "snapshot", "{r}");
+    assert_eq!(r["tools"], json!({ "t1": "completed" }));
+    assert_eq!(r["attach"]["busy"], false);
+}
+
+/// A window on B opening a session A hosts gets the agent's run so far when no transcript is
+/// saved, and its save of the transcript goes to A, the only writer of the cache.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remote_window_catches_up_and_saves_through_the_host() {
+    let (a, b) = (node("alpha-cache"), node("bravo-cache"));
+    link(&a, &b).await;
+    let proj = a.dir.join("proj");
+    repo(&proj);
+    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok", "default").unwrap();
+    until("session reaches B", 10, || b.state.db.get_code_session(&s.id).unwrap().is_some()).await;
+
+    let ev = |e: code::acp::CodeEvent| on_code_event(&a.state, code::acp::Envelope { code_session_id: s.id.clone(), event: e });
+    ev(code::acp::CodeEvent::Status { state: "starting".into(), message: None });
+    ev(code::acp::CodeEvent::Update { update: json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "hello" } }) });
+
+    // No transcript saved: the whole run, held whole by A's ring.
+    let attach = code_attach(&b.state, s.id.clone()).await.unwrap();
+    assert_eq!(attach["partial"], false, "{attach}");
+    let events = attach["events"].as_array().unwrap();
+    assert!(events.iter().any(|e| e["update"]["content"]["text"] == "hello"), "{attach}");
+    assert!(attach["point"]["n"].as_u64().is_some(), "{attach}");
+
+    // B's save lands on A.
+    save_code_transcript(&b.state, s.id.clone(), "{\"v\":1}".into()).await.unwrap();
+    assert_eq!(a.state.db.code_transcript(&s.id).unwrap().as_deref(), Some("{\"v\":1}"));
 }

@@ -8,10 +8,11 @@ import {
   type Conversation,
   type MeshChatEvent,
   type MeshProblem,
+  type CursorPlanLimits,
   type PlanAccount,
   type Preferences,
 } from "./lib/ipc";
-import { codeEventArrived, remoteHost, useStore, type Mode } from "./lib/store";
+import { codeEventArrived, remoteHost, resyncRemoteCode, useStore, type Mode } from "./lib/store";
 import { goBack, goForward, resetHistory, useHistory } from "./lib/history";
 import { initZoom, zoomIn, zoomOut, zoomReset } from "./lib/zoom";
 import { ChatView } from "./chat/ChatView";
@@ -35,6 +36,7 @@ import { useDragRegion, useRoundedWindow } from "./components/WindowControls";
 import { installUpdate, useUpdate, useUpdateChecks } from "./lib/update";
 import { AlertToast, MeshChip, MeshPopover, MeshRailButton } from "./components/MeshStatus";
 import { PlanUsageBlade, PlanUsageButton } from "./components/PlanUsage";
+import { CursorPlanUsageBlade, CursorPlanUsageButton } from "./components/CursorPlanUsage";
 import { Dot } from "./components/Dot";
 import {
   ArrowLeftIcon,
@@ -51,6 +53,8 @@ import {
   SettingsIcon,
 } from "./components/icons";
 
+/** How often a mid-turn session hosted on another computer checks that it missed nothing. */
+const REMOTE_RESYNC_MS = 30_000;
 const LAST_MODE_KEY = "patchbay.lastMode";
 const SIDEBAR_WIDTH_KEY = "patchbay.sidebarWidth";
 const SIDEBAR_DEFAULT = 256;
@@ -575,13 +579,19 @@ export default function App() {
     useStore.getState().refreshSidebarLayout().catch(() => {});
     useStore.getState().refreshMesh();
     api.planAccounts().then((a) => useStore.getState().setPlanAccounts(a), () => {});
+    api.cursorPlanLimits().then((l) => useStore.getState().setCursorPlanLimits(l), () => {});
     const unlisteners = [
       listen<CodeEnvelope>("code://event", (ev) => codeEventArrived(ev.payload)),
       // Preferences saved from another window or browser tab on this backend.
       listen<Preferences>("prefs://changed", (ev) => useStore.getState().prefsSaved(ev.payload)),
       listen<PlanAccount[]>("code://plan-limits", (ev) => useStore.getState().setPlanAccounts(ev.payload)),
+      listen<CursorPlanLimits>("code://cursor-plan-limits", (ev) => useStore.getState().setCursorPlanLimits(ev.payload)),
       // Mesh (see src-tauri/src/mesh): membership changes, other nodes' writes, live streams.
-      listen("mesh://status", () => useStore.getState().refreshMesh()),
+      listen("mesh://status", () => {
+        // A link to another computer may have just come back: events its sessions sent while it
+        // was down never arrive, so catch up the ones shown here.
+        useStore.getState().refreshMesh().then(() => resyncRemoteCode(false), () => {});
+      }),
       listen<{ tables: string[] }>("mesh://changed", (ev) => useStore.getState().onSynced(ev.payload.tables)),
       listen<MeshChatEvent>("mesh://chat", (ev) => useStore.getState().applyMeshChat(ev.payload)),
       listen<{ name: string; code: string }>("mesh://join-request", (ev) => {
@@ -605,7 +615,11 @@ export default function App() {
         s.setPendingQuickPrompt(ev.payload);
       }),
     ];
+    // A link can drop events without a status change (a relay in between): mid-turn, check now
+    // and then that sessions on other computers still match their host.
+    const resync = setInterval(() => resyncRemoteCode(true), REMOTE_RESYNC_MS);
     return () => {
+      clearInterval(resync);
       for (const un of unlisteners) un.then((f) => f());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -703,12 +717,14 @@ export default function App() {
               <span className="@max-[80px]:hidden">Settings</span>
             </button>
             <PlanUsageButton />
+            <CursorPlanUsageButton />
             <MeshChip />
             <IconButton label={`Keyboard shortcuts (${keyLabel("Mod+/")})`} onClick={() => setShortcutsOpen(true)}>
               <KeyboardIcon />
             </IconButton>
           </div>
           <PlanUsageBlade className="absolute bottom-14 left-2" />
+          <CursorPlanUsageBlade className="absolute bottom-14 left-2" />
           <MeshPopover className="absolute bottom-14 left-2" />
         </aside>
       )}

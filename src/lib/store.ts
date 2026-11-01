@@ -16,6 +16,7 @@ import {
   type AuthChoice,
   type CodeEvent,
   type CodeEnvelope,
+  type CodeResume,
   type EventPoint,
   type Attachment,
   type CodeSession,
@@ -25,6 +26,7 @@ import {
   type Subagent,
   type UsageView,
   type PlanAccount,
+  type CursorPlanLimits,
   type Preferences,
   type MeshStatus,
   type MeshChatEvent,
@@ -89,6 +91,11 @@ export interface TranscriptPart {
 export interface CodeState {
   status: "idle" | "starting" | "ready" | "exited";
   busy: boolean;
+  /**
+   * This window's view is known to miss events of a session hosted elsewhere, while a saved
+   * transcript exists: saving the view would replace a fuller one, so it doesn't.
+   */
+  partial: boolean;
   entries: Entry[];
   toolCalls: Record<string, AcpToolCall>;
   plan: AcpPlanEntry[] | null;
@@ -155,6 +162,7 @@ export interface ChatStream {
 const emptyCode = (): CodeState => ({
   status: "idle",
   busy: false,
+  partial: false,
   entries: [],
   toolCalls: {},
   plan: null,
@@ -211,6 +219,7 @@ function withDefaults(loaded: Partial<Preferences> | null | undefined): Preferen
     ...loaded,
     claudeConfig: { ...defaultPreferences.claudeConfig, ...loaded?.claudeConfig },
     usageLimit: { ...defaultPreferences.usageLimit, ...loaded?.usageLimit },
+    cursorUsageLimit: { ...defaultPreferences.cursorUsageLimit, ...loaded?.cursorUsageLimit },
     agentEngine: { ...defaultPreferences.agentEngine, ...loaded?.agentEngine },
   };
 }
@@ -237,7 +246,7 @@ function handBack(prev: ComposerRestore | null, dropped: QueuedPrompt[], me: str
 
 /** Persist what the transcript shows, so the session renders before the agent replays it. */
 function saveTranscript(id: string, s: CodeState) {
-  if (s.entries.length === 0) return;
+  if (s.entries.length === 0 || s.partial) return;
   const earlier = s.earlier ?? undefined;
   let json = JSON.stringify({ v: 1, earlier, entries: s.entries, toolCalls: s.toolCalls });
   if (json.length > 3_500_000) {
@@ -381,6 +390,9 @@ interface Store {
   /** Each Claude account's last reported plan usage; empty until a turn on a Claude plan reports one. */
   planAccounts: PlanAccount[];
   planOpen: boolean;
+  /** Last Cursor plan report from the dashboard poll or a mesh peer. */
+  cursorPlanLimits: CursorPlanLimits | null;
+  cursorPlanOpen: boolean;
   prefs: Preferences;
   loadPrefs: () => Promise<void>;
   /** Preferences someone saved on this backend (another window or browser tab): show them here. */
@@ -404,6 +416,8 @@ interface Store {
   setMeshPopoverOpen: (o: boolean) => void;
   setPlanAccounts: (a: PlanAccount[]) => void;
   setPlanOpen: (o: boolean) => void;
+  setCursorPlanLimits: (l: CursorPlanLimits | null) => void;
+  setCursorPlanOpen: (o: boolean) => void;
   refreshCatalog: () => Promise<void>;
   setDefaultModel: (ref: string) => Promise<void>;
   refreshConversations: () => Promise<void>;
@@ -434,6 +448,8 @@ interface Store {
   applyMeshChat: (p: MeshChatEvent) => void;
   /** Show a session that is already running (here, or on another node) without restarting it. */
   attachAgent: (id: string) => Promise<void>;
+  /** Apply a `code_resume` snapshot: the turn's state and the end of calls no longer running. */
+  applyCodeResume: (id: string, r: Extract<CodeResume, { mode: "snapshot" }>) => void;
 }
 
 /** The node running a session's agent, when that isn't this one. */
@@ -963,6 +979,8 @@ export const useStore = create<Store>((set, get) => ({
   meshPopoverOpen: false,
   planAccounts: [],
   planOpen: false,
+  cursorPlanLimits: null,
+  cursorPlanOpen: false,
   confirm: null,
   prefs: defaultPreferences,
   loadPrefs: async () => {
@@ -1023,6 +1041,8 @@ export const useStore = create<Store>((set, get) => ({
   setMeshPopoverOpen: (meshPopoverOpen) => set({ meshPopoverOpen }),
   setPlanAccounts: (planAccounts) => set({ planAccounts }),
   setPlanOpen: (planOpen) => set({ planOpen }),
+  setCursorPlanLimits: (cursorPlanLimits) => set({ cursorPlanLimits }),
+  setCursorPlanOpen: (cursorPlanOpen) => set({ cursorPlanOpen }),
 
   refreshCatalog: async () => {
     const [providers, models, def] = await Promise.all([
@@ -1193,15 +1213,59 @@ export const useStore = create<Store>((set, get) => ({
         break;
     }
   },
+  applyCodeResume: (id, r) => {
+    flushCodeEvents(id);
+    const s = get().code[id];
+    if (!s) return;
+    const { attach } = r;
+    if (!attach.running) {
+      // The agent stopped meanwhile: its exit is one of the events missed.
+      get().applyCodeEvents(id, [{ type: "status", state: "exited", message: null }]);
+      return;
+    }
+    // Calls this window still shows running: the host's status for each, else (unknown to the
+    // host, so from before the agent's current run) ended once the host is idle.
+    const toolCalls = { ...s.toolCalls };
+    for (const [tid, tc] of Object.entries(s.toolCalls)) {
+      if (tc.background || (tc.status !== "pending" && tc.status !== "in_progress")) continue;
+      const status = r.tools[tid] ?? (attach.busy ? undefined : "completed");
+      if (status && status !== tc.status) toolCalls[tid] = { ...tc, status: status as AcpToolCall["status"] };
+    }
+    // Requests answered meanwhile go; open ones the window hasn't seen arrive below.
+    const open = new Set(attach.events.flatMap((e) => (e.type === "permission" ? [e.requestId] : [])));
+    const permissions = s.permissions.filter((p) => open.has(p.requestId));
+    const busy = attach.busy;
+    set((st) => ({
+      code: {
+        ...st.code,
+        [id]: trackTurn(s, {
+          ...s,
+          toolCalls,
+          permissions,
+          busy,
+          entries: busy ? s.entries : noPending(s.entries),
+          partial: s.partial || !!r.partial,
+        }),
+      },
+    }));
+    const shown = new Set(permissions.map((p) => p.requestId));
+    const replay = attach.events.filter(
+      (e) => (e.type === "permission" && !shown.has(e.requestId)) || e.type === "usage" || e.type === "update",
+    );
+    if (replay.length) get().applyCodeEvents(id, replay);
+  },
   attachAgent: async (id) => {
     flushCodeEvents(id);
     // Live events that arrive while the catch-up is in flight wait, so none is lost or doubled.
     attaching.set(id, []);
+    lastPoint.delete(id);
     const finish = (point?: EventPoint | null) => {
       const held = attaching.get(id) ?? [];
       attaching.delete(id);
       const fresh = held.filter(({ pt }) => !(point && pt && pt.s === point.s && pt.n <= point.n));
       if (fresh.length) get().applyCodeEvents(id, fresh.map(({ e }) => e));
+      const last = fresh.findLast((x) => x.pt)?.pt ?? point;
+      if (last) lastPoint.set(id, last);
     };
     // Both go to the gateway: ask at once rather than one round trip after the other.
     const attached = api.codeAttach(id);
@@ -1228,7 +1292,20 @@ export const useStore = create<Store>((set, get) => ({
     const rev = get().agentConfigRev;
     const catalogRev = get().catalogRev;
     set((st) => ({
-      code: { ...st.code, [id]: { ...emptyCode(), configRev: rev, catalogRev, history, earlier, status: "ready", busy: info.busy, turnStartedAt: info.busy ? Date.now() : null } },
+      code: {
+        ...st.code,
+        [id]: {
+          ...emptyCode(),
+          configRev: rev,
+          catalogRev,
+          history,
+          earlier,
+          status: "ready",
+          busy: info.busy,
+          partial: !!info.partial,
+          turnStartedAt: info.busy ? Date.now() : null,
+        },
+      },
     }));
     get().applyCodeEvents(id, info.events);
     // A replayed "ready" counts as loaded, so the cached transcript becomes the session's.
@@ -1245,6 +1322,73 @@ export const useStore = create<Store>((set, get) => ({
 /** Sessions mid-catch-up, with the live events held back meanwhile. */
 const attaching = new Map<string, { e: CodeEvent; pt?: EventPoint }[]>();
 
+/** The point of the last live event applied, per session. */
+const lastPoint = new Map<string, EventPoint>();
+/** When each session last asked its host to catch up, so a dropped link doesn't flood it. */
+const resyncedAt = new Map<string, number>();
+const RESYNC_GAP_MS = 5_000;
+
+const isRunning = (tc: AcpToolCall) => !tc.background && (tc.status === "pending" || tc.status === "in_progress");
+
+/**
+ * Catch session `id` up with events this window missed: the host sends the ones after `from`
+ * (by default the last applied) or, when it no longer has them, a snapshot of the turn. Live
+ * events wait meanwhile, as for an attach. Desktop and browser windows only: the phone app
+ * resumes through its gateway (`remote://resync`).
+ */
+export async function resyncCode(id: string, from?: EventPoint) {
+  if (isRemoteApp() || attaching.has(id) || !useStore.getState().code[id]) return;
+  const now = Date.now();
+  if (now - (resyncedAt.get(id) ?? 0) < RESYNC_GAP_MS) return;
+  resyncedAt.set(id, now);
+  const start = from ?? lastPoint.get(id) ?? null;
+  flushCodeEvents(id);
+  attaching.set(id, []);
+  const running = Object.values(useStore.getState().code[id]?.toolCalls ?? {})
+    .filter(isRunning)
+    .map((tc) => tc.toolCallId);
+  let r: CodeResume | null = null;
+  try {
+    r = await api.codeResume(id, start, running);
+  } catch {
+    // An older host, or the request failed: try again on the next trigger.
+    resyncedAt.delete(id);
+  }
+  const held = attaching.get(id) ?? [];
+  attaching.delete(id);
+  const st = useStore.getState();
+  let point: EventPoint | null = null;
+  if (r?.mode === "delta") {
+    const after = r.events.filter((e) => !(start && e._pt && e._pt.s === start.s && e._pt.n <= start.n));
+    if (after.length) st.applyCodeEvents(id, after.map((e) => e.event));
+    point = r.point;
+  } else if (r?.mode === "snapshot") {
+    st.applyCodeResume(id, r);
+    point = r.point;
+  } else if (start) {
+    // Nothing caught up: resume from before the gap next time.
+    lastPoint.set(id, start);
+  }
+  const fresh = held.filter(({ pt }) => !(point && pt && pt.s === point.s && pt.n <= point.n));
+  if (fresh.length) st.applyCodeEvents(id, fresh.map(({ e }) => e));
+  const last = fresh.findLast((x) => x.pt)?.pt ?? point;
+  if (last) lastPoint.set(id, last);
+}
+
+/**
+ * Catch up the sessions this window shows that run on other computers: after the mesh
+ * reconnects (events sent while it was down are gone), and now and then during a turn.
+ * `busyOnly` limits it to sessions mid-turn.
+ */
+export function resyncRemoteCode(busyOnly: boolean) {
+  const st = useStore.getState();
+  for (const [id, s] of Object.entries(st.code)) {
+    if (s.status === "idle" || (busyOnly && !s.busy)) continue;
+    const sess = st.codeSessions.find((c) => c.id === id);
+    if (remoteHost(sess, st.mesh)) void resyncCode(id);
+  }
+}
+
 /** Live events not applied yet, per session: they go in together on the next flush. */
 const pendingEvents = new Map<string, CodeEvent[]>();
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1258,9 +1402,21 @@ const EVENT_BATCH_MS = 16;
 /** A live Code event from the backend: applied shortly, or after the catch-up in progress. */
 export function codeEventArrived(env: CodeEnvelope) {
   const id = env.codeSessionId;
+  const pt = env._pt;
+  // Points number each session's events (see docs/design/mobile.md, section 3). The phone app
+  // resumes from them through its gateway; here they show events this window missed, such as
+  // those sent while the connection to the session's host was down.
+  if (pt && !isRemoteApp() && !attaching.has(id)) {
+    const last = lastPoint.get(id);
+    // Already applied: a catch-up brought it.
+    if (last && last.s === pt.s && pt.n <= last.n) return;
+    lastPoint.set(id, pt);
+    const missed = last ? (last.s === pt.s ? pt.n > last.n + 1 : pt.n > 1) : false;
+    if (missed) void resyncCode(id, last);
+  }
   const held = attaching.get(id);
   if (held) {
-    held.push({ e: env.event, pt: env._pt });
+    held.push({ e: env.event, pt });
     return;
   }
   const queue = pendingEvents.get(id);
