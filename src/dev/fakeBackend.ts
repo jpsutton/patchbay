@@ -1603,6 +1603,16 @@ export function install() {
           return fakeCursorPlanLimits();
         case "cursor_plan_watching":
           return null;
+        case "session_plan_usage": {
+          const sess = db.code.find((s) => s.id === a.id);
+          if (!sess) return null;
+          if (sess.agent === "cursor") return { kind: "cursor", limits: fakeCursorPlanLimits() };
+          if (sess.agent === "claude-code") {
+            const latest = fakePlanLimits();
+            return { kind: "claude", label: "Claude Code login", account: "/home/demo/.claude", latest };
+          }
+          return null;
+        }
         case "wire_log_status":
           return fakeWireStatus();
         case "wire_log_set":

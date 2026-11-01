@@ -1139,6 +1139,47 @@ async fn cursor_plan_limits(state: &AppState) -> CmdResult<Option<code::cursor_p
     Ok(state.code.cursor_plan.latest())
 }
 
+/// Claude or Cursor plan usage for one Code session (the account that session runs on), or null
+/// when the session does not consume either plan.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum SessionPlanUsageView {
+    Claude {
+        label: String,
+        account: String,
+        latest: Option<code::plan_limits::PlanLimits>,
+    },
+    Cursor {
+        limits: Option<code::cursor_plan::CursorPlanLimits>,
+    },
+}
+
+async fn session_plan_usage(state: &AppState, id: String) -> CmdResult<Option<SessionPlanUsageView>> {
+    Ok(session_plan_usage_local(state, &id))
+}
+
+pub(crate) fn session_plan_usage_local(state: &AppState, id: &str) -> Option<SessionPlanUsageView> {
+    if on_cursor_session(state, id) {
+        return Some(SessionPlanUsageView::Cursor { limits: state.code.cursor_plan.latest() });
+    }
+    let prefs = prefs::load(&state.db);
+    let (account, _) = plan_account(state, &prefs, id)?;
+    let view = plan_views(state).into_iter().find(|v| v.account == account);
+    let (label, latest) = match view {
+        Some(v) => (v.label, v.usage.latest),
+        None => {
+            let (default, _) = default_plan_account();
+            let label = if account == default {
+                "Claude Code login".to_owned()
+            } else {
+                account.clone()
+            };
+            (label, None)
+        }
+    };
+    Some(SessionPlanUsageView::Claude { label, account, latest })
+}
+
 /// The Cursor plan blade is open: poll while it is, even with no running Cursor session.
 async fn cursor_plan_watching(state: &AppState, open: bool) -> CmdResult<()> {
     state.code.cursor_plan.set_blade_open(open);

@@ -163,6 +163,14 @@ export interface CursorPlanLimits {
   remainingBonus?: boolean | null;
 }
 
+/**
+ * Claude or Cursor plan usage for one Code session (`session_plan_usage`), or null when that
+ * session does not run on either plan.
+ */
+export type SessionPlanUsage =
+  | { kind: "claude"; label: string; account: string; latest: PlanLimits | null }
+  | { kind: "cursor"; limits: CursorPlanLimits | null };
+
 /** The ACP wire log's state (see `code/wire.rs`). */
 export interface WireLogStatus {
   on: boolean;
@@ -1073,6 +1081,8 @@ export const api = {
   cursorPlanLimits: () => invoke<CursorPlanLimits | null>("cursor_plan_limits"),
   /** Keep the Cursor plan poller awake while the blade is open. */
   cursorPlanWatching: (open: boolean) => invoke<void>("cursor_plan_watching", { open }),
+  /** Claude or Cursor plan for this Code session; null when the session uses neither. */
+  sessionPlanUsage: (id: string) => invoke<SessionPlanUsage | null>("session_plan_usage", { id }),
   wireLogStatus: () => invoke<WireLogStatus>("wire_log_status"),
   /** Turn the wire log on (for 30 minutes) or off. */
   wireLogSet: (on: boolean) => invoke<WireLogStatus>("wire_log_set", { on }),
