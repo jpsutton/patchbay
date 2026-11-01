@@ -884,6 +884,102 @@ async fn plan_limits_reach_every_member() {
     mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &other);
     assert_eq!((five(&b), five_of(&b, "u2:o2")), (Some(0.5), Some(0.9)));
     assert_eq!(b.state.code.plan.account("u2:o2").name.as_deref(), Some("Team"));
+
+    // A path-keyed report from another member (Claude Code had no oauthAccount there) is the
+    // same login as the default here — not a second account under that foreign path.
+    let foreign = json!({ "account": "/home/molly/.claude", "limits": report(0.53, 5) });
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &foreign);
+    assert_eq!(five(&b), Some(0.53));
+    assert!(
+        !b.state.code.plan.accounts().contains_key("/home/molly/.claude"),
+        "foreign path fallbacks must not appear as their own account"
+    );
+}
+
+/// Saved path keys from another computer collapse into the default login on load.
+#[test]
+fn load_folds_foreign_path_accounts_into_the_default() {
+    use code::plan_limits::{Account, PlanLimits, Window};
+    let n = node("fold-path-load");
+    let (me, name) = crate::default_plan_account();
+    let mut raw = std::collections::BTreeMap::new();
+    raw.insert(
+        me.clone(),
+        Account {
+            name: name.clone(),
+            latest: Some(PlanLimits {
+                five_hour: Some(Window { utilization: 0.9, resets_at: code::plan_limits::now() + 3600 }),
+                seven_day: Some(Window { utilization: 0.9, resets_at: code::plan_limits::now() + 86400 }),
+                observed_at: code::plan_limits::now(),
+                ..Default::default()
+            }),
+            history: vec![],
+        },
+    );
+    raw.insert(
+        "/home/molly/.claude".into(),
+        Account {
+            name: None,
+            latest: Some(PlanLimits {
+                five_hour: Some(Window { utilization: 0.12, resets_at: code::plan_limits::now() + 3600 }),
+                seven_day: Some(Window { utilization: 0.53, resets_at: code::plan_limits::now() + 86400 }),
+                observed_at: code::plan_limits::now() - 2 * 86400,
+                ..Default::default()
+            }),
+            history: vec![],
+        },
+    );
+    n.state.db.set_setting("claude.planByAccount", &serde_json::to_string(&raw).unwrap()).unwrap();
+    let loaded = crate::load_plan_accounts(&n.state.db);
+    assert_eq!(loaded.len(), 1, "{loaded:?}");
+    assert!(loaded.contains_key(&me));
+    assert!(!loaded.contains_key("/home/molly/.claude"));
+    assert_eq!(loaded[&me].latest.as_ref().unwrap().seven_day.unwrap().utilization, 0.9);
+}
+
+/// Cursor plan usage one member fetched reaches the others; a different account is ignored.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cursor_plan_limits_reach_peers_on_the_same_account() {
+    use code::cursor_plan::CursorPlanLimits;
+    let (a, b) = (node("alpha-cursor-plan"), node("bravo-cursor-plan"));
+    link(&a, &b).await;
+    let report = |auto: f64, ago: i64, account: &str| CursorPlanLimits {
+        account_id: account.into(),
+        email: Some("a@b.c".into()),
+        observed_at: code::cursor_plan::now() - ago,
+        resets_at: Some(code::cursor_plan::now() + 86400),
+        auto: Some(auto),
+        api: Some(10.0),
+        total: Some(auto),
+        included_spend_cents: Some(20000),
+        limit_cents: Some(40000),
+        bonus_spend_cents: Some(500),
+        remaining_bonus: Some(true),
+    };
+    adopt_cursor_plan(&a.state, report(40.0, 60, "42"), true);
+    until("B has A's Cursor report", 10, || {
+        b.state.code.cursor_plan.latest().is_some_and(|l| l.account_id == "42" && l.auto == Some(40.0))
+    })
+    .await;
+    until("B's panel hears of it", 10, || {
+        b.events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(n, p)| n == "code://cursor-plan-limits" && p["auto"] == 40.0)
+    })
+    .await;
+
+    // A newer report for the same account replaces; another account does not.
+    adopt_cursor_plan(&a.state, report(55.0, 10, "42"), true);
+    until("B takes the newer report", 10, || b.state.code.cursor_plan.latest().is_some_and(|l| l.auto == Some(55.0))).await;
+    mesh::RpcHandler::event(
+        &MeshRpc { state: b.state.clone() },
+        MESH_CURSOR_PLAN_EVENT,
+        &json!({ "accountId": "other", "limits": report(99.0, 5, "other") }),
+    );
+    assert_eq!(b.state.code.cursor_plan.latest().unwrap().auto, Some(55.0));
+    assert_eq!(b.state.code.cursor_plan.latest().unwrap().account_id, "42");
 }
 
 /// A phone can decide a join request that waits on any computer, with its own signature.

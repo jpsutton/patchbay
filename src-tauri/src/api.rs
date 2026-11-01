@@ -160,6 +160,8 @@ commands! {
     code_rewind(id, ordinal, preview, revert_files);
     code_usage(id);
     plan_accounts();
+    cursor_plan_limits();
+    cursor_plan_watching(open);
     wire_log_status();
     wire_log_set(on);
     wire_log_frames(session, last);

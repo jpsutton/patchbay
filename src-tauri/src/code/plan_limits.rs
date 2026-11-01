@@ -160,6 +160,35 @@ pub struct Account {
     pub name: Option<String>,
 }
 
+impl Account {
+    /// Fold another report of the same account into this one (newer latest wins; histories merge).
+    pub fn absorb(&mut self, other: Self) {
+        if self.name.is_none() {
+            self.name = other.name;
+        }
+        match (&self.latest, other.latest) {
+            (Some(a), Some(b)) if b.observed_at >= a.observed_at => self.latest = Some(b),
+            (None, Some(b)) => self.latest = Some(b),
+            _ => {}
+        }
+        let mut samples = std::mem::take(&mut self.history);
+        samples.extend(other.history);
+        samples.sort_by_key(|s| s.at);
+        self.history.clear();
+        for s in samples {
+            let _ = push_sample(
+                &mut self.history,
+                &PlanLimits {
+                    five_hour: s.five_hour,
+                    seven_day: s.seven_day,
+                    observed_at: s.at,
+                    ..Default::default()
+                },
+            );
+        }
+    }
+}
+
 /// Each Claude account's limits, keyed by `claude_auth::account`, shared by every session on
 /// that account on this node. Accounts never count against each other.
 #[derive(Default)]
@@ -327,6 +356,28 @@ mod tests {
         let hit = l.hit(100, 1000).unwrap();
         assert_eq!((hit.what, hit.resets_at), ("extra usage", 5000));
         assert!(hit.message(100, 1000).contains("extra usage"));
+    }
+
+    #[test]
+    fn absorb_keeps_the_newer_report_and_merges_history() {
+        let older = PlanLimits {
+            five_hour: Some(Window { utilization: 0.5, resets_at: 5000 }),
+            observed_at: 1000,
+            ..Default::default()
+        };
+        let newer = PlanLimits {
+            five_hour: Some(Window { utilization: 0.9, resets_at: 5000 }),
+            observed_at: 2000,
+            ..Default::default()
+        };
+        let mut a = Account { name: None, latest: Some(older.clone()), history: vec![] };
+        push_sample(&mut a.history, &older);
+        let mut b = Account { name: Some("Vizius".into()), latest: Some(newer.clone()), history: vec![] };
+        push_sample(&mut b.history, &newer);
+        a.absorb(b);
+        assert_eq!(a.name.as_deref(), Some("Vizius"));
+        assert_eq!(a.latest.unwrap().five_hour.unwrap().utilization, 0.9);
+        assert_eq!(a.history.len(), 2);
     }
 
     #[test]

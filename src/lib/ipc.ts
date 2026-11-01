@@ -144,6 +144,25 @@ export interface PlanAccount {
   history: PlanSample[];
 }
 
+/** Cursor plan usage from the dashboard poll (see `code/cursor_plan.rs`). Percentages are 0–100. */
+export interface CursorPlanLimits {
+  accountId: string;
+  email?: string | null;
+  observedAt: number;
+  resetsAt?: number | null;
+  auto?: number | null;
+  api?: number | null;
+  total?: number | null;
+  /** Included-plan spend so far, in cents. */
+  includedSpendCents?: number | null;
+  /** Included-plan allowance, in cents. */
+  limitCents?: number | null;
+  /** "Free usage on us" already consumed, in cents. */
+  bonusSpendCents?: number | null;
+  /** Whether Cursor still has bonus / free-on-us capacity. */
+  remainingBonus?: boolean | null;
+}
+
 /** The ACP wire log's state (see `code/wire.rs`). */
 export interface WireLogStatus {
   on: boolean;
@@ -606,6 +625,11 @@ export interface AcpToolCall {
    * `done` once it ended; `exitCode` is -1 when it was stopped.
    */
   shell?: { id: string; done: boolean; exitCode?: number | null };
+  /**
+   * Patchbay's own: the text a shell command's permission request carried, which says why the
+   * agent asked (Cursor: "Not in allowlist: gh, sleep"). Kept apart from `content`, the output.
+   */
+  askReason?: string;
 }
 
 export interface AcpCommand {
@@ -741,6 +765,8 @@ export interface Preferences {
   agentProviders: Partial<Record<AgentId, string>>;
   /** Stop turns on a Claude plan (Claude Code, or Patchbay's agent on a Claude login) at `percent`. */
   usageLimit: { enabled: boolean; percent: number; autoResume: boolean };
+  /** Stop Cursor CLI turns when Auto / API usage reaches `percent`. Off by default. */
+  cursorUsageLimit: { enabled: boolean; percent: number; autoResume: boolean };
   /** Archive Code sessions this many days after their last prompt, unless pinned; null = never. */
   autoArchiveDays: number | null;
   permissionMode: "default" | "auto" | "always-approve";
@@ -789,6 +815,7 @@ export const defaultPreferences: Preferences = {
   agentPaths: {},
   agentProviders: {},
   usageLimit: { enabled: true, percent: 95, autoResume: false },
+  cursorUsageLimit: { enabled: false, percent: 95, autoResume: false },
   autoArchiveDays: null,
   permissionMode: "default",
   agentInstructions: "",
@@ -1043,6 +1070,9 @@ export const api = {
     invoke<void>("code_rewind", { id, ordinal, preview, revertFiles }),
   codeUsage: (id: string) => invoke<UsageView>("code_usage", { id }),
   planAccounts: () => invoke<PlanAccount[]>("plan_accounts"),
+  cursorPlanLimits: () => invoke<CursorPlanLimits | null>("cursor_plan_limits"),
+  /** Keep the Cursor plan poller awake while the blade is open. */
+  cursorPlanWatching: (open: boolean) => invoke<void>("cursor_plan_watching", { open }),
   wireLogStatus: () => invoke<WireLogStatus>("wire_log_status"),
   /** Turn the wire log on (for 30 minutes) or off. */
   wireLogSet: (on: boolean) => invoke<WireLogStatus>("wire_log_set", { on }),
