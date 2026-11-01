@@ -74,6 +74,13 @@ pub fn resolve_dir(dir: Option<&str>) -> Result<PathBuf> {
     }
 }
 
+/// True when `key` is a config-directory path fallback, not Claude Code's portable
+/// `<accountUuid>:<organizationUuid>`. Path keys are machine-local: the same login on another
+/// computer has a different path, so the mesh must not keep them as separate accounts.
+pub fn is_path_account_key(key: &str) -> bool {
+    key.starts_with("~/") || Path::new(key).is_absolute()
+}
+
 /// The Claude account a config directory is signed in to, as a key that is the same on every
 /// computer (`<accountUuid>:<organizationUuid>`, from Claude Code's `.claude.json`), and the
 /// organization's name. Falls back to the directory's path when Claude Code hasn't recorded one.
@@ -407,6 +414,14 @@ mod tests {
         std::fs::File::options().write(true).open(dir.join(".claude.json")).unwrap().set_modified(later).unwrap();
         assert_eq!(account(&dir), ("u1:o1".into(), Some("Team".into())));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn path_account_key_detects_config_dir_fallbacks() {
+        assert!(is_path_account_key("/home/molly/.claude"));
+        assert!(is_path_account_key("~/foo/.claude"));
+        assert!(!is_path_account_key("d6f72690-3451-4e35-afa6-d653c2ce62ad:25c4ff7e-72e8-4c05-b845-c761306a53cc"));
+        assert!(!is_path_account_key("u2:o2"));
     }
 
     #[test]

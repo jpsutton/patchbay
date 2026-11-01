@@ -884,6 +884,57 @@ async fn plan_limits_reach_every_member() {
     mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &other);
     assert_eq!((five(&b), five_of(&b, "u2:o2")), (Some(0.5), Some(0.9)));
     assert_eq!(b.state.code.plan.account("u2:o2").name.as_deref(), Some("Team"));
+
+    // A path-keyed report from another member (Claude Code had no oauthAccount there) is the
+    // same login as the default here — not a second account under that foreign path.
+    let foreign = json!({ "account": "/home/molly/.claude", "limits": report(0.53, 5) });
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &foreign);
+    assert_eq!(five(&b), Some(0.53));
+    assert!(
+        !b.state.code.plan.accounts().contains_key("/home/molly/.claude"),
+        "foreign path fallbacks must not appear as their own account"
+    );
+}
+
+/// Saved path keys from another computer collapse into the default login on load.
+#[test]
+fn load_folds_foreign_path_accounts_into_the_default() {
+    use code::plan_limits::{Account, PlanLimits, Window};
+    let n = node("fold-path-load");
+    let (me, name) = crate::default_plan_account();
+    let mut raw = std::collections::BTreeMap::new();
+    raw.insert(
+        me.clone(),
+        Account {
+            name: name.clone(),
+            latest: Some(PlanLimits {
+                five_hour: Some(Window { utilization: 0.9, resets_at: code::plan_limits::now() + 3600 }),
+                seven_day: Some(Window { utilization: 0.9, resets_at: code::plan_limits::now() + 86400 }),
+                observed_at: code::plan_limits::now(),
+                ..Default::default()
+            }),
+            history: vec![],
+        },
+    );
+    raw.insert(
+        "/home/molly/.claude".into(),
+        Account {
+            name: None,
+            latest: Some(PlanLimits {
+                five_hour: Some(Window { utilization: 0.12, resets_at: code::plan_limits::now() + 3600 }),
+                seven_day: Some(Window { utilization: 0.53, resets_at: code::plan_limits::now() + 86400 }),
+                observed_at: code::plan_limits::now() - 2 * 86400,
+                ..Default::default()
+            }),
+            history: vec![],
+        },
+    );
+    n.state.db.set_setting("claude.planByAccount", &serde_json::to_string(&raw).unwrap()).unwrap();
+    let loaded = crate::load_plan_accounts(&n.state.db);
+    assert_eq!(loaded.len(), 1, "{loaded:?}");
+    assert!(loaded.contains_key(&me));
+    assert!(!loaded.contains_key("/home/molly/.claude"));
+    assert_eq!(loaded[&me].latest.as_ref().unwrap().seven_day.unwrap().utilization, 0.9);
 }
 
 /// Cursor plan usage one member fetched reaches the others; a different account is ignored.
