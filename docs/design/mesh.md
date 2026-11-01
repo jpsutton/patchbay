@@ -129,6 +129,14 @@ On the host, every agent event goes to the local window and to every member as a
 
 A window that opens a session already running, here or elsewhere, calls `code_attach` instead of restarting the agent. The host keeps each running session's last `sessionReady`, open permission requests and latest usage, and replays them. The window shows the synced transcript cache until live events extend it.
 
+Mesh events are sent once: those a member misses while its link to the host is down never arrive. A window that misses the end of a turn would show it running for good, with a tool call that never ends and a Stop button that does nothing. So windows catch up with `code_resume`. Each event carries its point (`_pt`, numbered per session by the host, the same points phones resume from). A window remembers the last point it applied and calls `code_resume` when:
+
+- an event skips points;
+- the mesh status changes (a link may have come back), for each shown session hosted elsewhere;
+- every 30 s, for each such session mid-turn, since a relay can drop events with no status change.
+
+The host answers with the events after the window's point while its event ring still holds them, merged as for a phone. Otherwise it sends a snapshot: the `code_attach` answer, plus the current status of each tool call the window still shows running. The host keeps those statuses for the agent's current run (`LiveAgent::tools`). A call the host doesn't know ends once the host is idle. The window holds live events back while it asks, as it does when attaching, and drops any it already has.
+
 ### Agent-to-agent messages
 
 Patchbay gives each running Code agent a built-in MCP tool to discover unarchived Code sessions

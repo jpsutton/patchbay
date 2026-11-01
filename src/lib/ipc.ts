@@ -376,6 +376,18 @@ export interface CodeAttach {
   point?: EventPoint | null;
 }
 
+/** What `code_resume` answers. */
+export type CodeResume =
+  /** The events after the window's point, in order; `point` is where they end. */
+  | { mode: "delta"; events: CodeEnvelope[]; point: EventPoint | null }
+  /**
+   * The window's point is gone from the host's ring: the attach answer, plus the current status
+   * of the tool calls the window asked about (absent: the host doesn't know the call).
+   */
+  | { mode: "snapshot"; attach: CodeAttach; tools: Record<string, string>; point: EventPoint | null }
+  /** The host isn't connected. */
+  | { mode: "offline" };
+
 export type AgentId = "patchbay" | "grok" | "claude-code" | "opencode" | "cursor" | "kilo" | "codex" | "antigravity";
 
 /** One coding agent backend, as the Agents settings page lists it. */
@@ -1031,6 +1043,12 @@ export const api = {
   codePermissionRespond: (requestId: string, optionId: string | null, sessionId?: string) =>
     invoke<void>("code_permission_respond", { requestId, optionId, id: sessionId }),
   codeAttach: (id: string) => invoke<CodeAttach>("code_attach", { id }),
+  /**
+   * Catch up on events this window missed (see `code_resume` in lib.rs): from `point`, or a fresh
+   * snapshot with the status of the tool calls in `running`.
+   */
+  codeResume: (id: string, point: EventPoint | null, running: string[]) =>
+    invoke<CodeResume>("code_resume", { id, point, running }),
   /** Move a session to `target` into folder `cwd` there; resolves to a note for the user, if any. */
   codeMove: (id: string, target: string, cwd: string) => invoke<string | null>("code_move", { id, target, cwd }),
   codeTakeOver: (id: string, cwd: string) => invoke<string | null>("code_take_over", { id, cwd }),

@@ -11,7 +11,7 @@ import {
   type PlanAccount,
   type Preferences,
 } from "./lib/ipc";
-import { codeEventArrived, remoteHost, useStore, type Mode } from "./lib/store";
+import { codeEventArrived, remoteHost, resyncRemoteCode, useStore, type Mode } from "./lib/store";
 import { goBack, goForward, resetHistory, useHistory } from "./lib/history";
 import { initZoom, zoomIn, zoomOut, zoomReset } from "./lib/zoom";
 import { ChatView } from "./chat/ChatView";
@@ -51,6 +51,8 @@ import {
   SettingsIcon,
 } from "./components/icons";
 
+/** How often a mid-turn session hosted on another computer checks that it missed nothing. */
+const REMOTE_RESYNC_MS = 30_000;
 const LAST_MODE_KEY = "patchbay.lastMode";
 const SIDEBAR_WIDTH_KEY = "patchbay.sidebarWidth";
 const SIDEBAR_DEFAULT = 256;
@@ -581,7 +583,11 @@ export default function App() {
       listen<Preferences>("prefs://changed", (ev) => useStore.getState().prefsSaved(ev.payload)),
       listen<PlanAccount[]>("code://plan-limits", (ev) => useStore.getState().setPlanAccounts(ev.payload)),
       // Mesh (see src-tauri/src/mesh): membership changes, other nodes' writes, live streams.
-      listen("mesh://status", () => useStore.getState().refreshMesh()),
+      listen("mesh://status", () => {
+        // A link to another computer may have just come back: events its sessions sent while it
+        // was down never arrive, so catch up the ones shown here.
+        useStore.getState().refreshMesh().then(() => resyncRemoteCode(false), () => {});
+      }),
       listen<{ tables: string[] }>("mesh://changed", (ev) => useStore.getState().onSynced(ev.payload.tables)),
       listen<MeshChatEvent>("mesh://chat", (ev) => useStore.getState().applyMeshChat(ev.payload)),
       listen<{ name: string; code: string }>("mesh://join-request", (ev) => {
@@ -605,7 +611,11 @@ export default function App() {
         s.setPendingQuickPrompt(ev.payload);
       }),
     ];
+    // A link can drop events without a status change (a relay in between): mid-turn, check now
+    // and then that sessions on other computers still match their host.
+    const resync = setInterval(() => resyncRemoteCode(true), REMOTE_RESYNC_MS);
     return () => {
+      clearInterval(resync);
       for (const un of unlisteners) un.then((f) => f());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

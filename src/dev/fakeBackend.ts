@@ -1668,6 +1668,8 @@ export function install() {
           setTimeout(() => codeEmit(a.id as string, { type: "status", state: "ready", message: null }), 50);
           return { running: false, busy: false, events: [] };
         }
+        case "code_resume":
+          return { mode: "delta", events: [], point: (a.point as unknown) ?? null };
         case "code_move": {
           await sleep(1200);
           const s = db.code.find((x) => x.id === a.id)!;
