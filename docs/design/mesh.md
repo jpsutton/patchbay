@@ -129,6 +129,8 @@ On the host, every agent event goes to the local window and to every member as a
 
 A window that opens a session already running, here or elsewhere, calls `code_attach` instead of restarting the agent. The host keeps each running session's last `sessionReady`, open permission requests and latest usage, and replays them. The window shows the synced transcript cache until live events extend it.
 
+The transcript cache (`code_sessions.transcript_json`) is one synced cell, and only the host writes it. A window on another computer hands its saves to the host (`code.save_transcript`), so a session watched only from elsewhere still gets a cache. For its view to be worth saving, that window's `code_attach` also asks the host for what the cache doesn't hold yet (`catchUp`): the events since the last finished turn from the host's event ring, or, with no cache at all, the agent's whole run while the ring holds it. These are the same as a phone's subscribe gets. When part of the turn is gone from the ring and a cache exists, the answer says `partial`. The window then keeps its view to itself rather than replace a fuller transcript. A `code_resume` snapshot (events lost) does the same.
+
 Mesh events are sent once: those a member misses while its link to the host is down never arrive. A window that misses the end of a turn would show it running for good, with a tool call that never ends and a Stop button that does nothing. So windows catch up with `code_resume`. Each event carries its point (`_pt`, numbered per session by the host, the same points phones resume from). A window remembers the last point it applied and calls `code_resume` when:
 
 - an event skips points;

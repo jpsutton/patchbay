@@ -391,8 +391,13 @@ export interface CodeAttach {
   events: CodeEvent[];
   /** The host isn't connected. */
   offline?: boolean;
-  /** The last live event the catch-up covers (phone app); later ones continue from here. */
+  /** The last live event the catch-up covers; later ones continue from here. */
   point?: EventPoint | null;
+  /**
+   * The catch-up misses part of the turn while a saved transcript exists: this window's view
+   * must not be saved over it.
+   */
+  partial?: boolean;
 }
 
 /** What `code_resume` answers. */
@@ -403,7 +408,14 @@ export type CodeResume =
    * The window's point is gone from the host's ring: the attach answer, plus the current status
    * of the tool calls the window asked about (absent: the host doesn't know the call).
    */
-  | { mode: "snapshot"; attach: CodeAttach; tools: Record<string, string>; point: EventPoint | null }
+  | {
+      mode: "snapshot";
+      attach: CodeAttach;
+      tools: Record<string, string>;
+      point: EventPoint | null;
+      /** Events were lost while a saved transcript exists (see `CodeAttach.partial`). */
+      partial?: boolean;
+    }
   /** The host isn't connected. */
   | { mode: "offline" };
 

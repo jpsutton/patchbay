@@ -1543,9 +1543,55 @@ async fn code_attach(state: &AppState, id: String) -> CmdResult<serde_json::Valu
         if !state.mesh.connected(&host) {
             return Ok(serde_json::json!({ "running": false, "busy": false, "events": [], "offline": true }));
         }
-        return Ok(state.mesh.rpc(&host, "code.attach", serde_json::json!({ "id": id })).await?);
+        let p = serde_json::json!({ "id": id, "catchUp": true });
+        return Ok(state.mesh.rpc(&host, "code.attach", p).await?);
     }
     Ok(code_attach_local(state, &id))
+}
+
+fn has_transcript(state: &AppState, id: &str) -> bool {
+    state.db.code_transcript(id).ok().flatten().is_some_and(|t| !t.is_empty())
+}
+
+/// `code_attach` for a window on another computer: the attach answer plus what happened since
+/// the session's last finished turn, which its saved transcript doesn't hold yet (all of the
+/// agent's run when there is no saved transcript and the event ring holds it whole), as a
+/// phone's subscribe gets it. Without this, such a window showed only what arrived after it
+/// opened, and its view was too partial to save.
+///
+/// `partial`: part of the turn is gone from the ring, so the window must not save its view over
+/// the saved transcript. With no saved transcript there is nothing to lose, and it may.
+fn code_attach_catch_up(state: &AppState, id: &str) -> serde_json::Value {
+    use serde_json::{Value, json};
+    let mut answer = code_attach_local(state, id);
+    let has = has_transcript(state, id);
+    let (tail, covered, point) = state.mesh.code_catch_up(id, has);
+    // The attach events already bring the ready state, usage and open requests.
+    let open: std::collections::HashSet<String> = answer["events"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|e| e["requestId"].as_str().map(str::to_owned)).collect())
+        .unwrap_or_default();
+    let mut events: Vec<Value> = answer["events"].as_array().cloned().unwrap_or_default();
+    if !covered && !tail.is_empty() {
+        events.push(json!({ "type": "notice", "message": "Earlier output from this turn isn't available here" }));
+    }
+    for env in tail {
+        let mut ev = env["event"].clone();
+        let kind = ev["type"].as_str().unwrap_or_default();
+        if matches!(kind, "sessionReady" | "usage")
+            || (kind == "permission" && ev["requestId"].as_str().is_some_and(|r| open.contains(r)))
+        {
+            continue;
+        }
+        if kind == "userPrompt" {
+            ev["replay"] = Value::Bool(true);
+        }
+        events.push(ev);
+    }
+    answer["events"] = Value::Array(events);
+    answer["point"] = json!(point);
+    answer["partial"] = json!(!covered && has);
+    answer
 }
 
 /// Catch-up for a window that missed events of a session it shows: a gap in the events' points,
@@ -1573,6 +1619,8 @@ fn code_resume_local(state: &AppState, id: &str, point: Option<mesh::remote::Poi
         "attach": code_attach_local(state, id),
         "tools": tools,
         "point": state.mesh.code_point(id),
+        // Events were lost: the window's view must not replace a saved transcript.
+        "partial": has_transcript(state, id),
     })
 }
 
@@ -2304,7 +2352,18 @@ impl mesh::RpcHandler for MeshRpc {
         match method.as_str() {
             "code.start" => code_start_local(state, id()?).await.map(|_| Value::Null),
             "code.is_running" => Ok(json!(state.code.is_running(&id()?))),
+            "code.attach" if p["catchUp"] == true => Ok(code_attach_catch_up(state, &id()?)),
             "code.attach" => Ok(code_attach_local(state, &id()?)),
+            "code.save_transcript" => {
+                let id = id()?;
+                ensure_local_host(state, &id)?;
+                let json = param(&p, "json")?;
+                if json.len() > TRANSCRIPT_MAX {
+                    anyhow::bail!("transcript too large to cache");
+                }
+                state.db.set_code_transcript(&id, json)?;
+                Ok(Value::Null)
+            }
             "code.resume" => {
                 let point = serde_json::from_value(p["point"].clone()).ok();
                 let running: Vec<String> = serde_json::from_value(p["running"].clone()).unwrap_or_default();
@@ -2821,15 +2880,21 @@ async fn get_code_transcript(state: &AppState, id: String) -> CmdResult<Option<S
 
 /// Cache of the rendered transcript, so a session shows its history before (or without) the
 /// agent replaying it.
+/// Largest transcript cache kept, in bytes.
+const TRANSCRIPT_MAX: usize = 4 * 1024 * 1024;
+
 async fn save_code_transcript(state: &AppState, id: String, json: String) -> CmdResult<()> {
-    const MAX: usize = 4 * 1024 * 1024;
-    if json.len() > MAX {
+    if json.len() > TRANSCRIPT_MAX {
         return Err(CmdError("transcript too large to cache".into()));
     }
-    // Only the node hosting the session writes the cache. A window viewing a session hosted
-    // elsewhere holds a partial view (stale cache plus the live tail), and the cache is a single
-    // synced cell, so its save would overwrite the host's complete one on every node.
-    if remote_host(state, &id)?.is_some() {
+    // The cache is a single synced cell, and only the node hosting the session writes it: a
+    // window on another computer hands its save to the host. Such a window doesn't save a view
+    // known to be missing events (`partial`, see `code_attach_catch_up` and `code_resume`).
+    if let Some(host) = remote_host(state, &id)? {
+        if state.mesh.connected(&host) {
+            let p = serde_json::json!({ "id": id, "json": json });
+            state.mesh.rpc(&host, "code.save_transcript", p).await?;
+        }
         return Ok(());
     }
     Ok(state.db.set_code_transcript(&id, &json)?)

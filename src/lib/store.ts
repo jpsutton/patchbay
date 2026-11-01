@@ -91,6 +91,11 @@ export interface TranscriptPart {
 export interface CodeState {
   status: "idle" | "starting" | "ready" | "exited";
   busy: boolean;
+  /**
+   * This window's view is known to miss events of a session hosted elsewhere, while a saved
+   * transcript exists: saving the view would replace a fuller one, so it doesn't.
+   */
+  partial: boolean;
   entries: Entry[];
   toolCalls: Record<string, AcpToolCall>;
   plan: AcpPlanEntry[] | null;
@@ -157,6 +162,7 @@ export interface ChatStream {
 const emptyCode = (): CodeState => ({
   status: "idle",
   busy: false,
+  partial: false,
   entries: [],
   toolCalls: {},
   plan: null,
@@ -240,7 +246,7 @@ function handBack(prev: ComposerRestore | null, dropped: QueuedPrompt[], me: str
 
 /** Persist what the transcript shows, so the session renders before the agent replays it. */
 function saveTranscript(id: string, s: CodeState) {
-  if (s.entries.length === 0) return;
+  if (s.entries.length === 0 || s.partial) return;
   const earlier = s.earlier ?? undefined;
   let json = JSON.stringify({ v: 1, earlier, entries: s.entries, toolCalls: s.toolCalls });
   if (json.length > 3_500_000) {
@@ -1232,7 +1238,14 @@ export const useStore = create<Store>((set, get) => ({
     set((st) => ({
       code: {
         ...st.code,
-        [id]: trackTurn(s, { ...s, toolCalls, permissions, busy, entries: busy ? s.entries : noPending(s.entries) }),
+        [id]: trackTurn(s, {
+          ...s,
+          toolCalls,
+          permissions,
+          busy,
+          entries: busy ? s.entries : noPending(s.entries),
+          partial: s.partial || !!r.partial,
+        }),
       },
     }));
     const shown = new Set(permissions.map((p) => p.requestId));
@@ -1279,7 +1292,20 @@ export const useStore = create<Store>((set, get) => ({
     const rev = get().agentConfigRev;
     const catalogRev = get().catalogRev;
     set((st) => ({
-      code: { ...st.code, [id]: { ...emptyCode(), configRev: rev, catalogRev, history, earlier, status: "ready", busy: info.busy, turnStartedAt: info.busy ? Date.now() : null } },
+      code: {
+        ...st.code,
+        [id]: {
+          ...emptyCode(),
+          configRev: rev,
+          catalogRev,
+          history,
+          earlier,
+          status: "ready",
+          busy: info.busy,
+          partial: !!info.partial,
+          turnStartedAt: info.busy ? Date.now() : null,
+        },
+      },
     }));
     get().applyCodeEvents(id, info.events);
     // A replayed "ready" counts as loaded, so the cached transcript becomes the session's.
