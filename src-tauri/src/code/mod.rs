@@ -9,6 +9,7 @@ pub mod grok_config;
 pub mod import_claude;
 pub mod mcp;
 pub mod native;
+pub mod cursor_plan;
 pub mod permissions;
 pub mod plan_limits;
 pub mod titles;
@@ -43,6 +44,7 @@ pub struct CodeManager {
     next_generation: std::sync::atomic::AtomicU64,
     pub titles: titles::Titles,
     pub plan: plan_limits::PlanGuard,
+    pub cursor_plan: cursor_plan::CursorPlanGuard,
 }
 
 impl CodeManager {

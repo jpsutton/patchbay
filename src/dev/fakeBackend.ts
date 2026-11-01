@@ -221,6 +221,21 @@ function fakeEcho(csid: string, promptId: string, text: string, delivery: Prompt
 }
 
 /** Run turns back to back: this one, then whatever queued up behind it. */
+/** Fake Cursor plan usage for the sidebar blade (`?cursorPlan=none` hides it). */
+function fakeCursorPlanLimits() {
+  if (new URLSearchParams(location.search).get("cursorPlan") === "none") return null;
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    accountId: "298981080",
+    email: "you@example.com",
+    observedAt: now - 90,
+    resetsAt: now + 5 * 86400,
+    auto: 12.5,
+    api: 54,
+    total: 18.3,
+  };
+}
+
 /** Fake plan usage for the default account. */
 function fakePlanLimits() {
   // `?plan=none` before any report; `?plan=over` past the limit and on extra usage; `?plan=slow` a light burn.
@@ -1079,6 +1094,7 @@ export function install() {
             terminalShell?: string;
             autoCompactPercent?: number | null;
             usageLimit?: { percent: number };
+            cursorUsageLimit?: { percent: number };
             autoArchiveDays?: number | null;
             readAloudEngine?: string;
             readAloudRate?: string;
@@ -1087,6 +1103,8 @@ export function install() {
           if (p.terminalShell && !p.terminalShell.startsWith("/")) throw `terminal shell ${p.terminalShell} does not exist`;
           if (p.autoCompactPercent != null && (p.autoCompactPercent < 10 || p.autoCompactPercent > 99)) throw "auto-compact threshold must be between 10 and 99%";
           if (p.usageLimit && (p.usageLimit.percent < 1 || p.usageLimit.percent > 100)) throw "usage limit must be between 1 and 100%";
+          if (p.cursorUsageLimit && (p.cursorUsageLimit.percent < 1 || p.cursorUsageLimit.percent > 100))
+            throw "Cursor usage limit must be between 1 and 100%";
           if (p.autoArchiveDays != null && (p.autoArchiveDays < 1 || p.autoArchiveDays > 3650)) throw "auto-archive age must be between 1 and 3650 days";
           if (p.readAloudEngine && !["auto", "system", "builtin", "server"].includes(p.readAloudEngine)) throw "read aloud engine must be one of auto, system, builtin, server";
           if (p.readAloudRate && !["slower", "normal", "faster"].includes(p.readAloudRate)) throw "read aloud speed must be one of slower, normal, faster";
@@ -1577,6 +1595,10 @@ export function install() {
             });
           return accounts;
         }
+        case "cursor_plan_limits":
+          return fakeCursorPlanLimits();
+        case "cursor_plan_watching":
+          return null;
         case "wire_log_status":
           return fakeWireStatus();
         case "wire_log_set":

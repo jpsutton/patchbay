@@ -25,6 +25,7 @@ import {
   type Subagent,
   type UsageView,
   type PlanAccount,
+  type CursorPlanLimits,
   type Preferences,
   type MeshStatus,
   type MeshChatEvent,
@@ -211,6 +212,7 @@ function withDefaults(loaded: Partial<Preferences> | null | undefined): Preferen
     ...loaded,
     claudeConfig: { ...defaultPreferences.claudeConfig, ...loaded?.claudeConfig },
     usageLimit: { ...defaultPreferences.usageLimit, ...loaded?.usageLimit },
+    cursorUsageLimit: { ...defaultPreferences.cursorUsageLimit, ...loaded?.cursorUsageLimit },
     agentEngine: { ...defaultPreferences.agentEngine, ...loaded?.agentEngine },
   };
 }
@@ -381,6 +383,9 @@ interface Store {
   /** Each Claude account's last reported plan usage; empty until a turn on a Claude plan reports one. */
   planAccounts: PlanAccount[];
   planOpen: boolean;
+  /** Last Cursor plan report from the dashboard poll or a mesh peer. */
+  cursorPlanLimits: CursorPlanLimits | null;
+  cursorPlanOpen: boolean;
   prefs: Preferences;
   loadPrefs: () => Promise<void>;
   /** Preferences someone saved on this backend (another window or browser tab): show them here. */
@@ -404,6 +409,8 @@ interface Store {
   setMeshPopoverOpen: (o: boolean) => void;
   setPlanAccounts: (a: PlanAccount[]) => void;
   setPlanOpen: (o: boolean) => void;
+  setCursorPlanLimits: (l: CursorPlanLimits | null) => void;
+  setCursorPlanOpen: (o: boolean) => void;
   refreshCatalog: () => Promise<void>;
   setDefaultModel: (ref: string) => Promise<void>;
   refreshConversations: () => Promise<void>;
@@ -963,6 +970,8 @@ export const useStore = create<Store>((set, get) => ({
   meshPopoverOpen: false,
   planAccounts: [],
   planOpen: false,
+  cursorPlanLimits: null,
+  cursorPlanOpen: false,
   confirm: null,
   prefs: defaultPreferences,
   loadPrefs: async () => {
@@ -1023,6 +1032,8 @@ export const useStore = create<Store>((set, get) => ({
   setMeshPopoverOpen: (meshPopoverOpen) => set({ meshPopoverOpen }),
   setPlanAccounts: (planAccounts) => set({ planAccounts }),
   setPlanOpen: (planOpen) => set({ planOpen }),
+  setCursorPlanLimits: (cursorPlanLimits) => set({ cursorPlanLimits }),
+  setCursorPlanOpen: (cursorPlanOpen) => set({ cursorPlanOpen }),
 
   refreshCatalog: async () => {
     const [providers, models, def] = await Promise.all([

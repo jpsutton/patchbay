@@ -165,6 +165,53 @@ function UsageLimit({ agent }: { agent: string }) {
   );
 }
 
+/** Stop Cursor CLI turns when Auto / API plan usage reaches a threshold. Off by default. */
+function CursorUsageLimit() {
+  const limit = useStore((s) => s.prefs.cursorUsageLimit);
+  const update = useStore((s) => s.updatePrefs);
+  return (
+    <>
+      <Row
+        label="Stop at plan limit"
+        hint="Cancel running Cursor turns and hold new prompts when Auto or API usage on your Cursor plan reaches the limit. Usage is polled from Cursor's dashboard about every five minutes while a Cursor session is active. Off by default."
+      >
+        <Toggle
+          label="Stop at plan limit"
+          checked={limit.enabled}
+          onChange={(enabled) => update({ cursorUsageLimit: { ...limit, enabled } })}
+        />
+      </Row>
+      {limit.enabled && (
+        <Row label="Limit (%)" hint="Of the Auto or API pool, whichever is higher.">
+          <Deferred
+            value={String(limit.percent)}
+            placeholder="95"
+            mono
+            width="w-24"
+            onCommit={(v) => {
+              const t = v.trim() || "95";
+              if (!/^\d+$/.test(t)) return Promise.resolve("Enter a whole number");
+              return update({ cursorUsageLimit: { ...limit, percent: Number(t) } });
+            }}
+          />
+        </Row>
+      )}
+      {limit.enabled && (
+        <Row
+          label="Continue after reset"
+          hint="When the billing cycle resets, tell each Cursor session it stopped to continue where it left off."
+        >
+          <Toggle
+            label="Continue after reset"
+            checked={limit.autoResume}
+            onChange={(autoResume) => update({ cursorUsageLimit: { ...limit, autoResume } })}
+          />
+        </Row>
+      )}
+    </>
+  );
+}
+
 /** Settings for the agents that run on Patchbay's providers and models (Patchbay's own, Grok Build). */
 function PatchbayModelSettings() {
   const prefs = useStore((s) => s.prefs);
@@ -725,6 +772,7 @@ export function AgentPage({ id, list }: { id: AgentId; list: AgentList }) {
       {((a.id === "claude-code" && !prefs.agentProviders[a.id]) || (a.id === "patchbay" && onClaudeLogin)) && (
         <UsageLimit agent={a.id} />
       )}
+      {a.id === "cursor" && <CursorUsageLimit />}
       {(a.id !== "grok" && a.id !== "patchbay") || prefs.agentPaths[a.id] ? (
         <Row label="Executable" hint="Absolute path. Blank looks it up on PATH.">
           <Deferred

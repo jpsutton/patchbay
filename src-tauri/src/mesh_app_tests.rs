@@ -886,6 +886,47 @@ async fn plan_limits_reach_every_member() {
     assert_eq!(b.state.code.plan.account("u2:o2").name.as_deref(), Some("Team"));
 }
 
+/// Cursor plan usage one member fetched reaches the others; a different account is ignored.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cursor_plan_limits_reach_peers_on_the_same_account() {
+    use code::cursor_plan::CursorPlanLimits;
+    let (a, b) = (node("alpha-cursor-plan"), node("bravo-cursor-plan"));
+    link(&a, &b).await;
+    let report = |auto: f64, ago: i64, account: &str| CursorPlanLimits {
+        account_id: account.into(),
+        email: Some("a@b.c".into()),
+        observed_at: code::cursor_plan::now() - ago,
+        resets_at: Some(code::cursor_plan::now() + 86400),
+        auto: Some(auto),
+        api: Some(10.0),
+        total: Some(auto),
+    };
+    adopt_cursor_plan(&a.state, report(40.0, 60, "42"), true);
+    until("B has A's Cursor report", 10, || {
+        b.state.code.cursor_plan.latest().is_some_and(|l| l.account_id == "42" && l.auto == Some(40.0))
+    })
+    .await;
+    until("B's panel hears of it", 10, || {
+        b.events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(n, p)| n == "code://cursor-plan-limits" && p["auto"] == 40.0)
+    })
+    .await;
+
+    // A newer report for the same account replaces; another account does not.
+    adopt_cursor_plan(&a.state, report(55.0, 10, "42"), true);
+    until("B takes the newer report", 10, || b.state.code.cursor_plan.latest().is_some_and(|l| l.auto == Some(55.0))).await;
+    mesh::RpcHandler::event(
+        &MeshRpc { state: b.state.clone() },
+        MESH_CURSOR_PLAN_EVENT,
+        &json!({ "accountId": "other", "limits": report(99.0, 5, "other") }),
+    );
+    assert_eq!(b.state.code.cursor_plan.latest().unwrap().auto, Some(55.0));
+    assert_eq!(b.state.code.cursor_plan.latest().unwrap().account_id, "42");
+}
+
 /// A phone can decide a join request that waits on any computer, with its own signature.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn phone_decides_join_requests_waiting_on_any_computer() {
