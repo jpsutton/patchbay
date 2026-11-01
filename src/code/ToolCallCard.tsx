@@ -163,6 +163,23 @@ function rawOutputText(raw: unknown): string | null {
   return json === "{}" ? null : json;
 }
 
+/**
+ * Why the agent asked to run a command, from its permission request; null when it said nothing
+ * beyond the description the row already shows (Claude Code sends that).
+ */
+function askReasonOf(tc: AcpToolCall): string | null {
+  const reason = tc.askReason?.trim();
+  return reason && reason !== toolDescription(tc)?.trim() ? reason : null;
+}
+
+function AskReason({ text }: { text: string }) {
+  return (
+    <div className="break-words text-[12px] text-faint" title="What the agent said when it asked to run this">
+      Asked because: {text}
+    </div>
+  );
+}
+
 /** A shell command in full, selectable and with a copy button: the row above truncates it. */
 function CommandBlock({ cmd }: { cmd: string }) {
   return (
@@ -183,6 +200,7 @@ export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withI
   const cmd = tc.kind === "execute" ? commandOf(tc) : null;
   // The row shows the agent's plain-English line, so the raw title (usually the call itself) moves here.
   const rawTitle = !cmd && toolDescription(tc) ? tc.title : null;
+  const askReason = askReasonOf(tc);
   const images = imagesOf(tc);
   const diffs = content.filter((c): c is Extract<AcpToolCallContent, { type: "diff" }> => c.type === "diff");
   const starts = hunkStarts(diffs, tc.locations);
@@ -194,6 +212,7 @@ export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withI
   return (
     <div className="flex flex-col gap-2">
       {cmd && <CommandBlock cmd={cmd} />}
+      {askReason && <AskReason text={askReason} />}
       {rawTitle && <div className="break-words font-mono text-[12px] text-faint">{rawTitle}</div>}
       {withImages && images.length > 0 && <ToolImages images={images} label={tc.title || "Tool output"} />}
       {diffs.map((d, i) => (
@@ -454,6 +473,7 @@ export function PermissionCard({
         <>
           {description && <div className="text-sm font-medium">{description}</div>}
           <CommandBlock cmd={cmd} />
+          {askReasonOf(tc) && <AskReason text={askReasonOf(tc)!} />}
         </>
       ) : plan ? (
         // A plan waiting for approval reads the same as it does once answered.
