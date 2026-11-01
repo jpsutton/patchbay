@@ -1004,3 +1004,30 @@ async fn missed_session_events_resume_from_the_host() {
     assert_eq!(r["tools"], json!({ "t1": "completed" }));
     assert_eq!(r["attach"]["busy"], false);
 }
+
+/// A window on B opening a session A hosts gets the agent's run so far when no transcript is
+/// saved, and its save of the transcript goes to A, the only writer of the cache.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remote_window_catches_up_and_saves_through_the_host() {
+    let (a, b) = (node("alpha-cache"), node("bravo-cache"));
+    link(&a, &b).await;
+    let proj = a.dir.join("proj");
+    repo(&proj);
+    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok", "default").unwrap();
+    until("session reaches B", 10, || b.state.db.get_code_session(&s.id).unwrap().is_some()).await;
+
+    let ev = |e: code::acp::CodeEvent| on_code_event(&a.state, code::acp::Envelope { code_session_id: s.id.clone(), event: e });
+    ev(code::acp::CodeEvent::Status { state: "starting".into(), message: None });
+    ev(code::acp::CodeEvent::Update { update: json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "hello" } }) });
+
+    // No transcript saved: the whole run, held whole by A's ring.
+    let attach = code_attach(&b.state, s.id.clone()).await.unwrap();
+    assert_eq!(attach["partial"], false, "{attach}");
+    let events = attach["events"].as_array().unwrap();
+    assert!(events.iter().any(|e| e["update"]["content"]["text"] == "hello"), "{attach}");
+    assert!(attach["point"]["n"].as_u64().is_some(), "{attach}");
+
+    // B's save lands on A.
+    save_code_transcript(&b.state, s.id.clone(), "{\"v\":1}".into()).await.unwrap();
+    assert_eq!(a.state.db.code_transcript(&s.id).unwrap().as_deref(), Some("{\"v\":1}"));
+}
