@@ -1,6 +1,6 @@
 [package]
 name = "patchbay-llm"
-version = "0.16.1"
+version = "0.17.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Patchbay's provider-agnostic LLM client: one conversation model over OpenAI Chat Completions, OpenAI Responses, Anthropic Messages and Gemini"
