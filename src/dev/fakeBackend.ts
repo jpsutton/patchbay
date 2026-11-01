@@ -223,8 +223,10 @@ function fakeEcho(csid: string, promptId: string, text: string, delivery: Prompt
 /** Run turns back to back: this one, then whatever queued up behind it. */
 /** Fake Cursor plan usage for the sidebar blade (`?cursorPlan=none` hides it). */
 function fakeCursorPlanLimits() {
-  if (new URLSearchParams(location.search).get("cursorPlan") === "none") return null;
+  const mode = new URLSearchParams(location.search).get("cursorPlan");
+  if (mode === "none") return null;
   const now = Math.floor(Date.now() / 1000);
+  const onBonus = mode !== "noBonus";
   return {
     accountId: "298981080",
     email: "you@example.com",
@@ -233,6 +235,10 @@ function fakeCursorPlanLimits() {
     auto: 12.5,
     api: 54,
     total: 18.3,
+    includedSpendCents: 40000,
+    limitCents: 40000,
+    bonusSpendCents: onBonus ? 24201 : 24201,
+    remainingBonus: onBonus,
   };
 }
 
@@ -1103,8 +1109,6 @@ export function install() {
           if (p.terminalShell && !p.terminalShell.startsWith("/")) throw `terminal shell ${p.terminalShell} does not exist`;
           if (p.autoCompactPercent != null && (p.autoCompactPercent < 10 || p.autoCompactPercent > 99)) throw "auto-compact threshold must be between 10 and 99%";
           if (p.usageLimit && (p.usageLimit.percent < 1 || p.usageLimit.percent > 100)) throw "usage limit must be between 1 and 100%";
-          if (p.cursorUsageLimit && (p.cursorUsageLimit.percent < 1 || p.cursorUsageLimit.percent > 100))
-            throw "Cursor usage limit must be between 1 and 100%";
           if (p.autoArchiveDays != null && (p.autoArchiveDays < 1 || p.autoArchiveDays > 3650)) throw "auto-archive age must be between 1 and 3650 days";
           if (p.readAloudEngine && !["auto", "system", "builtin", "server"].includes(p.readAloudEngine)) throw "read aloud engine must be one of auto, system, builtin, server";
           if (p.readAloudRate && !["slower", "normal", "faster"].includes(p.readAloudRate)) throw "read aloud speed must be one of slower, normal, faster";

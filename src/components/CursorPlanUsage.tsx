@@ -40,21 +40,38 @@ function peak(rows: { pct: number }[]) {
   return rows.length ? Math.round(Math.max(...rows.map((r) => r.pct))) : null;
 }
 
+function fmtUsdCents(cents: number) {
+  return `$${(cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function bonusLabel(limits: CursorPlanLimits | null): string | null {
+  if (!limits) return null;
+  const used = limits.bonusSpendCents;
+  if (used != null && used > 0) {
+    return limits.remainingBonus
+      ? `${fmtUsdCents(used)} free on us · still available`
+      : `${fmtUsdCents(used)} free on us · used up`;
+  }
+  if (limits.remainingBonus) return "Free on us available";
+  if (limits.remainingBonus === false && (used == null || used === 0)) return "No free-on-us left";
+  return null;
+}
+
 /** Sidebar footer toggle for Cursor plan usage: Auto / API mini bars. */
 export function CursorPlanUsageButton() {
   const limits = useStore((s) => s.cursorPlanLimits);
   const open = useStore((s) => s.cursorPlanOpen);
   const setOpen = useStore((s) => s.setCursorPlanOpen);
-  const guard = useStore((s) => s.prefs.cursorUsageLimit);
   const now = useNow(true);
-  const limit = guard.enabled ? guard.percent : null;
   const rows = livePct(limits, now);
   const pct = peak(rows);
-  const t = pct == null ? null : tone(pct, limit);
-  const title =
-    rows.length > 0
-      ? `Cursor plan usage: ${rows.map((r) => `${r.label} ${Math.round(r.pct)}%`).join(", ")}`
-      : "Cursor plan usage";
+  const t = pct == null ? null : tone(pct, null);
+  const bonus = bonusLabel(limits);
+  const titleParts = [
+    rows.length > 0 ? `Cursor plan usage: ${rows.map((r) => `${r.label} ${Math.round(r.pct)}%`).join(", ")}` : "Cursor plan usage",
+    bonus,
+  ].filter(Boolean);
+  const title = titleParts.join(". ");
   return (
     <button
       className={`flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-2 text-[13px] hover:bg-panel-2 hover:text-fg ${
@@ -65,7 +82,18 @@ export function CursorPlanUsageButton() {
       aria-expanded={open}
       onClick={() => setOpen(!open)}
     >
-      <GaugeIcon size={16} className={t === "danger" ? "text-danger" : t === "warn" ? "text-warn" : undefined} />
+      <GaugeIcon
+        size={16}
+        className={
+          limits?.remainingBonus
+            ? "text-ok"
+            : t === "danger"
+              ? "text-danger"
+              : t === "warn"
+                ? "text-warn"
+                : undefined
+        }
+      />
       {rows.length > 0 && (
         <span className="flex flex-col gap-[3px]" aria-hidden="true">
           {rows.map((r) => (
@@ -73,7 +101,7 @@ export function CursorPlanUsageButton() {
               <span className="w-5 text-faint @max-[300px]/footer:hidden">{r.label === "Auto" ? "au" : r.label === "API" ? "api" : "tot"}</span>
               <span className="h-1 w-[30px] overflow-hidden rounded-full bg-border">
                 <span
-                  className={`block h-full rounded-full ${barClass(tone(Math.round(r.pct), limit))}`}
+                  className={`block h-full rounded-full ${barClass(tone(Math.round(r.pct), null))}`}
                   style={{ width: `${Math.min(100, Math.round(r.pct))}%` }}
                 />
               </span>
@@ -89,9 +117,9 @@ export function CursorPlanUsageButton() {
   );
 }
 
-function PoolRow({ label, pct, now, resetsAt, limit }: { label: string; pct: number; now: number; resetsAt: number | null; limit: number | null }) {
+function PoolRow({ label, pct, now, resetsAt }: { label: string; pct: number; now: number; resetsAt: number | null }) {
   const rounded = Math.round(pct);
-  const t = tone(rounded, limit);
+  const t = tone(rounded, null);
   return (
     <div className="px-3 py-1.5">
       <div className="flex items-baseline justify-between">
@@ -103,9 +131,6 @@ function PoolRow({ label, pct, now, resetsAt, limit }: { label: string; pct: num
       </div>
       <div className="relative mt-1.5 h-1.5 overflow-hidden rounded-full bg-panel-2" aria-hidden="true">
         <div className={`h-full rounded-full ${barClass(t)}`} style={{ width: `${Math.min(100, rounded)}%` }} />
-        {limit != null && limit < 100 && (
-          <div className="absolute inset-y-0 w-px bg-fg/50" style={{ left: `${limit}%` }} title={`Stops at ${limit}%`} />
-        )}
       </div>
     </div>
   );
@@ -125,9 +150,11 @@ export function CursorPlanUsageBlade({ className }: { className: string }) {
     api.cursorPlanWatching(open).catch(() => {});
   }, [open]);
   if (!open) return null;
-  const limit = guard.enabled ? guard.percent : null;
   const rows = livePct(limits, now);
   const reset = limits?.resetsAt ?? null;
+  const bonusUsed = limits?.bonusSpendCents;
+  const onBonus = limits?.remainingBonus === true;
+  const bonusGone = limits?.remainingBonus === false;
   return (
     <div
       role="dialog"
@@ -139,15 +166,36 @@ export function CursorPlanUsageBlade({ className }: { className: string }) {
         {limits && <span className="text-[11px] text-faint">updated {fmtSpan(now - limits.observedAt)} ago</span>}
       </div>
       {limits?.email && <p className="px-3 pb-1 text-[11px] text-faint">{limits.email}</p>}
-      {rows.length === 0 ? (
+      {rows.length === 0 && bonusUsed == null ? (
         <p className="px-3 py-1.5 text-muted">
           No usage yet. It appears while a Cursor session is active here, or when a mesh peer on the same Cursor account reports.
         </p>
       ) : (
-        rows.map((r) => <PoolRow key={r.label} label={r.label} pct={r.pct} now={now} resetsAt={reset} limit={limit} />)
+        <>
+          {rows.map((r) => <PoolRow key={r.label} label={r.label} pct={r.pct} now={now} resetsAt={reset} />)}
+          {(bonusUsed != null || onBonus || bonusGone) && (
+            <div
+              className={`mx-2 mb-1 mt-1.5 rounded-lg px-2.5 py-2 text-[12.5px] leading-[1.4] ${
+                onBonus ? "bg-ok/10 text-ok" : "bg-panel-2 text-muted"
+              }`}
+              role="status"
+            >
+              {bonusUsed != null && bonusUsed > 0 ? (
+                <>
+                  <span className="text-fg">{fmtUsdCents(bonusUsed)}</span> free usage on us used
+                  {onBonus ? " · still available" : bonusGone ? " · no longer available" : ""}
+                </>
+              ) : onBonus ? (
+                "Free usage on us is still available"
+              ) : (
+                "Free usage on us is no longer available"
+              )}
+            </div>
+          )}
+        </>
       )}
       <div className="mt-1 flex items-baseline justify-between border-t border-line px-3 pb-1 pt-2 text-[12px] text-muted">
-        <span>{limit != null ? `Turns stop at ${limit}%` : "Usage limit off"}</span>
+        <span>{guard.enabled ? "Stops when plan and bonus are used up" : "Usage limit off"}</span>
         <button className="text-accent-ink hover:underline" onClick={() => openSettingsAt("agent:cursor")}>
           Change
         </button>

@@ -3,7 +3,8 @@
 //! `cursor-agent acp` does not emit `usage_update` or plan limits. The interactive TUI and the
 //! web dashboard get them from `GetCurrentPeriodUsage` on `api2.cursor.sh`. Patchbay polls that
 //! endpoint with the local Cursor login, shows Auto / API / total percentages, and can stop
-//! Cursor ACP turns once a threshold is crossed (`prefs.cursor_usage_limit`, off by default).
+//! Cursor ACP turns once included plan spend is exhausted and free-on-us bonus is gone
+//! (`prefs.cursor_usage_limit`, off by default).
 //!
 //! Reports are tagged with the Cursor account id and fan out over the mesh so peers on the same
 //! account can skip re-polling. A peer on a different account ignores the report.
@@ -50,13 +51,24 @@ pub struct CursorPlanLimits {
     /// Combined included usage, 0–100.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<f64>,
+    /// Included-plan spend so far, in cents (`planUsage.includedSpend`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub included_spend_cents: Option<i64>,
+    /// Included-plan allowance, in cents (`planUsage.limit`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_cents: Option<i64>,
+    /// "Free usage on us" already consumed, in cents (`planUsage.bonusSpend`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bonus_spend_cents: Option<i64>,
+    /// Whether Cursor still has bonus / free-on-us capacity (`planUsage.remainingBonus`).
+    /// Absent on older mesh reports; the guard only treats an explicit `true` as still available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_bonus: Option<bool>,
 }
 
-/// Which window crossed the threshold.
+/// Included plan and free-on-us bonus are both spent; turns should stop.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hit {
-    pub what: &'static str,
-    pub percent: u32,
     pub resets_at: i64,
 }
 
@@ -69,14 +81,42 @@ impl CursorPlanLimits {
             return None;
         }
         let pct = |k: &str| plan.get(k).and_then(|v| v.as_f64()).filter(|n| n.is_finite());
+        let cents = |k: &str| {
+            plan.get(k).and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_f64().map(|n| n.round() as i64))
+                    .or_else(|| v.as_str()?.parse().ok())
+            })
+        };
         let auto = pct("autoPercentUsed");
         let api = pct("apiPercentUsed");
         let total = pct("totalPercentUsed");
-        if auto.is_none() && api.is_none() && total.is_none() {
+        let included_spend_cents = cents("includedSpend");
+        let limit_cents = cents("limit");
+        let bonus_spend_cents = cents("bonusSpend");
+        let remaining_bonus = plan.get("remainingBonus").and_then(Value::as_bool);
+        if auto.is_none()
+            && api.is_none()
+            && total.is_none()
+            && included_spend_cents.is_none()
+            && bonus_spend_cents.is_none()
+        {
             return None;
         }
         let resets_at = ms_to_secs(body.get("billingCycleEnd"));
-        Some(Self { account_id, email, observed_at, resets_at, auto, api, total })
+        Some(Self {
+            account_id,
+            email,
+            observed_at,
+            resets_at,
+            auto,
+            api,
+            total,
+            included_spend_cents,
+            limit_cents,
+            bonus_spend_cents,
+            remaining_bonus,
+        })
     }
 
     /// True when this report is new enough that another poll would be wasteful.
@@ -84,34 +124,41 @@ impl CursorPlanLimits {
         now.saturating_sub(self.observed_at) < FRESH_SECS
     }
 
-    /// Highest live pool at or past `percent`. After `resets_at`, nothing hits.
-    pub fn hit(&self, percent: u8, now: i64) -> Option<Hit> {
+    /// Included plan allowance is used up (`includedSpend >= limit`).
+    pub fn plan_exhausted(&self) -> bool {
+        match (self.included_spend_cents, self.limit_cents) {
+            (Some(used), Some(limit)) if limit > 0 => used >= limit,
+            // No dollar fields: treat a pool at 100% as the included plan being done.
+            _ => [self.auto, self.api, self.total]
+                .into_iter()
+                .flatten()
+                .any(|p| p >= 100.0 - 1e-9),
+        }
+    }
+
+    /// Cursor still has "free usage on us" capacity. Only an explicit `true` counts; absent means unknown.
+    pub fn bonus_available(&self) -> bool {
+        self.remaining_bonus == Some(true)
+    }
+
+    /// Stop once the included plan is exhausted **and** free-on-us bonus is no longer available.
+    /// While `remainingBonus` is true, turns keep going even past the included limit.
+    /// After `resets_at`, nothing hits. No percent threshold — Cursor's pools are not request caps.
+    pub fn hit(&self, now: i64) -> Option<Hit> {
         if self.resets_at.is_some_and(|t| t <= now) {
             return None;
         }
-        let resets_at = self.resets_at.unwrap_or(now + 7 * 86400);
-        let thresh = f64::from(percent);
-        let candidates = [
-            ("Auto", self.auto),
-            ("API", self.api),
-            ("total", self.total),
-        ];
-        candidates
-            .into_iter()
-            .filter_map(|(what, p)| {
-                let p = p.filter(|n| *n >= thresh - 1e-9)?;
-                Some(Hit { what, percent: p.round() as u32, resets_at })
-            })
-            .max_by_key(|h| h.percent)
+        if self.bonus_available() || !self.plan_exhausted() {
+            return None;
+        }
+        Some(Hit { resets_at: self.resets_at.unwrap_or(now + 7 * 86400) })
     }
 }
 
 impl Hit {
-    pub fn message(&self, limit: u8, now: i64) -> String {
+    pub fn message(&self, now: i64) -> String {
         format!(
-            "You have used {}% of your Cursor plan's {} usage, so Patchbay stops its Cursor turns at {limit}%. The cycle resets in {}. Change this under Settings › Coding agents › Cursor CLI.",
-            self.percent,
-            self.what,
+            "Your Cursor plan's included usage and free-on-us bonus are used up, so Patchbay stops its Cursor turns. The cycle resets in {}. Change this under Settings › Coding agents › Cursor CLI.",
             fmt_wait(self.resets_at - now)
         )
     }
@@ -170,7 +217,7 @@ impl CursorPlanGuard {
         if !limit.enabled {
             return None;
         }
-        self.latest.lock().unwrap().as_ref()?.hit(limit.percent, now)
+        self.latest.lock().unwrap().as_ref()?.hit(now)
     }
 
     /// Adopt a peer's report when it is for the same account and newer than ours.
@@ -436,6 +483,11 @@ mod tests {
             auto: Some(auto),
             api: Some(api),
             total: Some(total),
+            // Exhausted included plan, no bonus left: the guard may apply the percent threshold.
+            included_spend_cents: Some(40000),
+            limit_cents: Some(40000),
+            bonus_spend_cents: Some(1200),
+            remaining_bonus: Some(false),
         }
     }
 
@@ -446,23 +498,53 @@ mod tests {
             "planUsage": {
                 "autoPercentUsed": 0.91,
                 "apiPercentUsed": 100,
-                "totalPercentUsed": 16.7
+                "totalPercentUsed": 16.7,
+                "includedSpend": 40000,
+                "limit": 40000,
+                "bonusSpend": 24201,
+                "remainingBonus": false
             }
         });
         let l = CursorPlanLimits::from_response("42".into(), Some("a@b.c".into()), &body, 50).unwrap();
         assert_eq!(l.auto, Some(0.91));
         assert_eq!(l.api, Some(100.0));
         assert_eq!(l.resets_at, Some(1795191155));
+        assert_eq!(l.bonus_spend_cents, Some(24201));
+        assert_eq!(l.remaining_bonus, Some(false));
+        assert!(l.plan_exhausted());
+        assert!(!l.bonus_available());
         assert!(CursorPlanLimits::from_response("42".into(), None, &json!({}), 1).is_none());
     }
 
     #[test]
-    fn hits_highest_pool_until_reset() {
+    fn hits_only_when_plan_and_bonus_are_gone() {
         let l = sample(12.0, 96.0, 40.0, 5000);
-        let hit = l.hit(95, 1000).unwrap();
-        assert_eq!((hit.what, hit.percent), ("API", 96));
-        assert!(l.hit(97, 1000).is_none());
-        assert!(l.hit(95, 5000).is_none());
+        assert!(l.hit(1000).is_some());
+        assert!(l.hit(5000).is_none(), "past reset");
+        let mut early = l.clone();
+        early.included_spend_cents = Some(20000);
+        assert!(early.hit(1000).is_none(), "included plan still has room");
+    }
+
+    #[test]
+    fn guard_waits_while_bonus_remains() {
+        let mut l = sample(12.0, 99.0, 50.0, 9000);
+        l.remaining_bonus = Some(true);
+        assert!(l.hit(1000).is_none(), "bonus still available");
+        l.remaining_bonus = Some(false);
+        assert!(l.hit(1000).is_some());
+    }
+
+    #[test]
+    fn without_dollars_falls_back_to_full_pools() {
+        let mut l = sample(12.0, 100.0, 40.0, 9000);
+        l.included_spend_cents = None;
+        l.limit_cents = None;
+        assert!(l.hit(1000).is_some());
+        l.api = Some(50.0);
+        l.auto = Some(12.0);
+        l.total = Some(20.0);
+        assert!(l.hit(1000).is_none(), "no pool at 100%");
     }
 
     #[test]
@@ -496,9 +578,9 @@ mod tests {
     }
 
     #[test]
-    fn message_names_the_pool() {
-        let hit = Hit { what: "API", percent: 100, resets_at: 1000 + 3600 };
-        assert!(hit.message(95, 1000).contains("API"));
-        assert!(hit.message(95, 1000).contains("1h"));
+    fn message_says_when_it_resets() {
+        let hit = Hit { resets_at: 1000 + 3600 };
+        assert!(hit.message(1000).contains("1h"));
+        assert!(hit.message(1000).contains("free-on-us"));
     }
 }

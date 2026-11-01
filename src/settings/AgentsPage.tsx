@@ -165,37 +165,22 @@ function UsageLimit({ agent }: { agent: string }) {
   );
 }
 
-/** Stop Cursor CLI turns when Auto / API plan usage reaches a threshold. Off by default. */
+/** Stop Cursor CLI turns once included plan and free-on-us bonus are both gone. Off by default. */
 function CursorUsageLimit() {
   const limit = useStore((s) => s.prefs.cursorUsageLimit);
   const update = useStore((s) => s.updatePrefs);
   return (
     <>
       <Row
-        label="Stop at plan limit"
-        hint="Cancel running Cursor turns and hold new prompts when Auto or API usage on your Cursor plan reaches the limit. Usage is polled from Cursor's dashboard about every five minutes while a Cursor session is active. Off by default."
+        label="Stop when plan is used up"
+        hint="Cancel running Cursor turns and hold new prompts once included plan spend is exhausted and Cursor's free-on-us bonus is gone. While bonus remains, turns keep going. There is no percent threshold. Usage is polled from Cursor's dashboard about every five minutes while a Cursor session is active. Off by default."
       >
         <Toggle
-          label="Stop at plan limit"
+          label="Stop when plan is used up"
           checked={limit.enabled}
           onChange={(enabled) => update({ cursorUsageLimit: { ...limit, enabled } })}
         />
       </Row>
-      {limit.enabled && (
-        <Row label="Limit (%)" hint="Of the Auto or API pool, whichever is higher.">
-          <Deferred
-            value={String(limit.percent)}
-            placeholder="95"
-            mono
-            width="w-24"
-            onCommit={(v) => {
-              const t = v.trim() || "95";
-              if (!/^\d+$/.test(t)) return Promise.resolve("Enter a whole number");
-              return update({ cursorUsageLimit: { ...limit, percent: Number(t) } });
-            }}
-          />
-        </Row>
-      )}
       {limit.enabled && (
         <Row
           label="Continue after reset"

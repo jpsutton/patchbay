@@ -1078,12 +1078,12 @@ fn enforce_cursor_plan_limit(state: &AppState) {
         if !on_cursor_session(state, &id) || !state.code.cursor_plan.start_stopping(&id) {
             continue;
         }
-        tracing::info!("cursor usage limit: stopping {id} ({} at {}%)", hit.what, hit.percent);
+        tracing::info!("cursor usage limit: stopping {id}");
         if state.code.send(&id, AgentCmd::Cancel).is_err() {
             state.code.cursor_plan.turn_ended(&id);
             continue;
         }
-        let mut message = format!("Stopped. {}", hit.message(prefs.cursor_usage_limit.percent, now));
+        let mut message = format!("Stopped. {}", hit.message(now));
         if prefs.cursor_usage_limit.auto_resume {
             state.code.cursor_plan.schedule_resume(&id, hit.resets_at);
             save_cursor_resumes(state);
@@ -1491,7 +1491,7 @@ async fn code_prompt_local(
     if on_cursor_session(state, &id)
         && let Some(hit) = state.code.cursor_plan.hit(&prefs.cursor_usage_limit, code::cursor_plan::now())
     {
-        anyhow::bail!("Not sent. {}", hit.message(prefs.cursor_usage_limit.percent, code::cursor_plan::now()));
+        anyhow::bail!("Not sent. {}", hit.message(code::cursor_plan::now()));
     }
     let mut blocks = Vec::new();
     // @-mentioned project files go as standard ACP resource links; the agent reads them itself.

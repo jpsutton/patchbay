@@ -153,6 +153,14 @@ export interface CursorPlanLimits {
   auto?: number | null;
   api?: number | null;
   total?: number | null;
+  /** Included-plan spend so far, in cents. */
+  includedSpendCents?: number | null;
+  /** Included-plan allowance, in cents. */
+  limitCents?: number | null;
+  /** "Free usage on us" already consumed, in cents. */
+  bonusSpendCents?: number | null;
+  /** Whether Cursor still has bonus / free-on-us capacity. */
+  remainingBonus?: boolean | null;
 }
 
 /** The ACP wire log's state (see `code/wire.rs`). */

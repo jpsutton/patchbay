@@ -900,6 +900,10 @@ async fn cursor_plan_limits_reach_peers_on_the_same_account() {
         auto: Some(auto),
         api: Some(10.0),
         total: Some(auto),
+        included_spend_cents: Some(20000),
+        limit_cents: Some(40000),
+        bonus_spend_cents: Some(500),
+        remaining_bonus: Some(true),
     };
     adopt_cursor_plan(&a.state, report(40.0, 60, "42"), true);
     until("B has A's Cursor report", 10, || {
