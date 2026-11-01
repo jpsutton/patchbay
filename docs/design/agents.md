@@ -184,6 +184,7 @@ Observed quirks:
 
 - Cursor and Claude Code can't `session/load` a session that never got a prompt. Patchbay falls back to a new session and shows a notice.
 - Cursor sends no usage. Claude sends `usage_update` with context size and cumulative cost.
+- Cursor's ACP adapter (2026.10.01) drops AwaitShell calls (`awaitToolCall`): its `summarizeToolCall` has no case for them, so no `tool_call` is sent, and a turn waiting on a background shell, or just sleeping, looked stuck. Patchbay preloads `src-tauri/src/code/cursor_acp_preload.cjs` into `cursor-agent acp` (`NODE_OPTIONS=--require`, written to `<data dir>/cursor/`). It wraps Cursor's tool presentation object at run time, found by its `summarizeToolCall` method in the webpack chunks as they load, and fills in a title, input and output only where Cursor returns nothing. A Cursor release that handles AwaitShell itself wins, and one that moves the code leaves Cursor unchanged. The preload restores the user's own `NODE_OPTIONS` so the commands the agent runs don't load it. Set `PATCHBAY_CURSOR_PRELOAD_DEBUG=1` for its log on stderr.
 - Each agent writes its sessions to its own store (`~/.claude`, `~/.local/share/opencode`, `~/.cursor`, Kilo's data dir). Patchbay keeps only the ACP session id.
 
 ## Codex and Antigravity (2026-10-19)
