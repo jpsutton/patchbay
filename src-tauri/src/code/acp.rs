@@ -707,6 +707,45 @@ fn fill_tool_call_defaults(update: &mut Value) {
     }
 }
 
+/// Text in a shell command's permission request says why the agent asks (Cursor sends "Not in
+/// allowlist: gh, sleep"), not what the command printed. Merged in as content, it would sit on
+/// the call's card as if it were output (and hide the real output, which the card shows only
+/// when there is no text content). Move it to Patchbay's own `askReason` field instead.
+fn take_ask_reason(tool_call: &mut Value, kind: Option<&str>) {
+    if kind != Some("execute") {
+        return;
+    }
+    let mut reasons = Vec::new();
+    let now_empty = {
+        let Some(content) = tool_call.get_mut("content").and_then(Value::as_array_mut) else { return };
+        content.retain(|c| {
+            let text = if c["type"] == "content" && c["content"]["type"] == "text" {
+                c["content"]["text"].as_str()
+            } else {
+                None
+            };
+            match text {
+                Some(t) => {
+                    if !t.trim().is_empty() {
+                        reasons.push(t.trim().to_owned());
+                    }
+                    false
+                }
+                None => true,
+            }
+        });
+        content.is_empty()
+    };
+    if let Some(o) = tool_call.as_object_mut() {
+        if now_empty {
+            o.remove("content");
+        }
+        if !reasons.is_empty() {
+            o.insert("askReason".into(), json!(reasons.join("\n")));
+        }
+    }
+}
+
 fn merge_fields(into: &mut Value, from: &Value) {
     if let (Some(dst), Some(src)) = (into.as_object_mut(), from.as_object()) {
         for (k, v) in src {
@@ -834,6 +873,46 @@ mod tool_call_tests {
         });
         assert_eq!(upd.expect("a tool_call_update")["content"][0]["newText"], "b");
     }
+
+    #[test]
+    fn shell_permission_text_is_the_reason_not_output() {
+        let (c, events, _tx) = client();
+        notify(&c, json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "`gh pr checks`", "kind": "execute" }));
+        let req = serde_json::from_value(json!({
+            "sessionId": "s",
+            "toolCall": {
+                "toolCallId": "t1",
+                "content": [{ "type": "content", "content": { "type": "text", "text": "Not in allowlist: gh, sleep" } }]
+            },
+            "options": [{ "optionId": "allow", "name": "Yes", "kind": "allow_once" }]
+        }))
+        .unwrap();
+        block_on(c.request_permission(req)).unwrap();
+
+        let stored = c.tool_calls.borrow()["t1"].clone();
+        assert_eq!(stored["askReason"], "Not in allowlist: gh, sleep");
+        assert!(stored.get("content").is_none());
+        let evs = events.lock().unwrap();
+        let upd = evs.iter().find_map(|e| match e {
+            CodeEvent::Update { update } if update["sessionUpdate"] == "tool_call_update" => Some(update.clone()),
+            _ => None,
+        });
+        let upd = upd.expect("a tool_call_update");
+        assert_eq!(upd["askReason"], "Not in allowlist: gh, sleep");
+        assert!(upd.get("content").is_none());
+    }
+
+    #[test]
+    fn ask_reason_leaves_other_kinds_and_non_text_alone() {
+        let diff = json!({ "type": "diff", "path": "/w/a.rs", "newText": "b" });
+        let text = json!({ "type": "content", "content": { "type": "text", "text": "why" } });
+        let mut edit = json!({ "content": [text.clone()] });
+        take_ask_reason(&mut edit, Some("edit"));
+        assert_eq!(edit, json!({ "content": [text.clone()] }));
+        let mut shell = json!({ "content": [diff.clone(), text] });
+        take_ask_reason(&mut shell, Some("execute"));
+        assert_eq!(shell, json!({ "content": [diff], "askReason": "why" }));
+    }
 }
 
 impl UiClient {
@@ -846,6 +925,11 @@ impl UiClient {
         let known = raw["toolCall"]["toolCallId"]
             .as_str()
             .is_some_and(|id| self.tool_calls.borrow().contains_key(id));
+        let kind = raw["toolCall"]["kind"].as_str().map(str::to_owned).or_else(|| {
+            let id = raw["toolCall"]["toolCallId"].as_str()?;
+            self.tool_calls.borrow().get(id)?["kind"].as_str().map(str::to_owned)
+        });
+        take_ask_reason(&mut raw["toolCall"], kind.as_deref());
         let tool_call = self.merge_tool_call(&raw["toolCall"]);
         if known {
             let mut update = raw["toolCall"].clone();

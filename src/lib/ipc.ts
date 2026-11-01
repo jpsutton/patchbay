@@ -582,6 +582,11 @@ export interface AcpToolCall {
    * `done` once it ended; `exitCode` is -1 when it was stopped.
    */
   shell?: { id: string; done: boolean; exitCode?: number | null };
+  /**
+   * Patchbay's own: the text a shell command's permission request carried, which says why the
+   * agent asked (Cursor: "Not in allowlist: gh, sleep"). Kept apart from `content`, the output.
+   */
+  askReason?: string;
 }
 
 export interface AcpCommand {
