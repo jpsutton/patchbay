@@ -1066,3 +1066,37 @@ async fn agents_message_each_other_across_the_mesh() {
     assert!(send_agent_message(&a.state, &an, &sa.id, &sa.id, "x").await.is_err());
     assert!(send_agent_message(&a.state, &an, &sb.id, &sa.id, "x").await.is_err());
 }
+
+/// A window on B that missed some of A's events for a session catches up through `code_resume`:
+/// the events after its last point while A's ring has them, else a snapshot with the status of
+/// the tool calls it still shows running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn missed_session_events_resume_from_the_host() {
+    let (a, b) = (node("alpha-resume"), node("bravo-resume"));
+    link(&a, &b).await;
+    let proj = a.dir.join("proj");
+    repo(&proj);
+    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok", "default").unwrap();
+    until("session reaches B", 10, || b.state.db.get_code_session(&s.id).unwrap().is_some()).await;
+
+    let update = |u: Value| code::acp::Envelope { code_session_id: s.id.clone(), event: code::acp::CodeEvent::Update { update: u } };
+    on_code_event(&a.state, update(json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Watch CI" })));
+    let first = a.state.mesh.code_point(&s.id).expect("a point for the session");
+    on_code_event(&a.state, update(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "in_progress" })));
+    on_code_event(&a.state, update(json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed" })));
+
+    // From the first point: the two later updates, folded into one.
+    let point = serde_json::to_value(&first).unwrap();
+    let r = code_resume(&b.state, s.id.clone(), Some(point), Some(vec!["t1".into()])).await.unwrap();
+    assert_eq!(r["mode"], "delta", "{r}");
+    let events = r["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1, "{r}");
+    assert_eq!(events[0]["event"]["update"]["status"], "completed");
+    assert_eq!(r["point"]["n"], first.n + 2);
+
+    // Without a point A can resume from: a snapshot, with the call's status on A.
+    let r = code_resume(&b.state, s.id.clone(), None, Some(vec!["t1".into(), "gone".into()])).await.unwrap();
+    assert_eq!(r["mode"], "snapshot", "{r}");
+    assert_eq!(r["tools"], json!({ "t1": "completed" }));
+    assert_eq!(r["attach"]["busy"], false);
+}

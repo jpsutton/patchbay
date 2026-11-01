@@ -145,6 +145,9 @@ struct LiveAgent {
     /// was written has no other way to get it: the saved transcript doesn't hold it, and the
     /// event ring only reaches back to the last finished turn.
     plan: Option<serde_json::Value>,
+    /// Each tool call's latest status in this run of the agent. A window that missed events
+    /// (see `code_resume`) learns from it which of the calls it still shows running have ended.
+    tools: std::collections::HashMap<String, String>,
 }
 
 /// Errors cross the IPC boundary as plain strings.
@@ -878,6 +881,24 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
                 CodeEvent::Update { update } if update["sessionUpdate"] == "plan" => {
                     live.entry(id).or_default().plan = Some(ev)
                 }
+                CodeEvent::Update { update }
+                    if matches!(update["sessionUpdate"].as_str(), Some("tool_call" | "tool_call_update")) =>
+                {
+                    if let Some(call) = update["toolCallId"].as_str() {
+                        let tools = &mut live.entry(id).or_default().tools;
+                        match update["status"].as_str() {
+                            Some(status) => {
+                                tools.insert(call.to_owned(), status.to_owned());
+                            }
+                            // A new call without a status is pending (ACP's default); a known one
+                            // left it out because it didn't change.
+                            None if update["sessionUpdate"] == "tool_call" => {
+                                tools.entry(call.to_owned()).or_insert_with(|| "pending".to_owned());
+                            }
+                            None => {}
+                        }
+                    }
+                }
                 CodeEvent::Permission { request_id, .. } => {
                     live.entry(id).or_default().permissions.push((request_id.clone(), ev))
                 }
@@ -1525,6 +1546,52 @@ async fn code_attach(state: &AppState, id: String) -> CmdResult<serde_json::Valu
         return Ok(state.mesh.rpc(&host, "code.attach", serde_json::json!({ "id": id })).await?);
     }
     Ok(code_attach_local(state, &id))
+}
+
+/// Catch-up for a window that missed events of a session it shows: a gap in the events' points,
+/// or the connection to the host dropped meanwhile (events sent then are gone for good). With
+/// the window's last point still in this node's event ring, the events after it (`delta`).
+/// Otherwise a `snapshot`: the attach answer, plus the current status of the tool calls in
+/// `running`, the ones the window still shows running.
+fn code_resume_local(state: &AppState, id: &str, point: Option<mesh::remote::Point>, running: &[String]) -> serde_json::Value {
+    use serde_json::json;
+    if let Some(p) = &point
+        && let Some((events, last)) = state.mesh.code_events_since(id, p)
+    {
+        return json!({ "mode": "delta", "events": events, "point": last.or_else(|| point.clone()) });
+    }
+    let tools: serde_json::Map<String, serde_json::Value> = {
+        let live = state.live.lock().unwrap();
+        let known = live.get(id).map(|l| &l.tools);
+        running
+            .iter()
+            .filter_map(|call| Some((call.clone(), json!(known?.get(call)?))))
+            .collect()
+    };
+    json!({
+        "mode": "snapshot",
+        "attach": code_attach_local(state, id),
+        "tools": tools,
+        "point": state.mesh.code_point(id),
+    })
+}
+
+async fn code_resume(
+    state: &AppState,
+    id: String,
+    point: Option<serde_json::Value>,
+    running: Option<Vec<String>>,
+) -> CmdResult<serde_json::Value> {
+    let running = running.unwrap_or_default();
+    if let Some(host) = remote_host(state, &id)? {
+        if !state.mesh.connected(&host) {
+            return Ok(serde_json::json!({ "mode": "offline" }));
+        }
+        let p = serde_json::json!({ "id": id, "point": point, "running": running });
+        return Ok(state.mesh.rpc(&host, "code.resume", p).await?);
+    }
+    let point = point.and_then(|p| serde_json::from_value(p).ok());
+    Ok(code_resume_local(state, &id, point, &running))
 }
 
 async fn code_is_running(state: &AppState, id: String) -> CmdResult<bool> {
@@ -2238,6 +2305,11 @@ impl mesh::RpcHandler for MeshRpc {
             "code.start" => code_start_local(state, id()?).await.map(|_| Value::Null),
             "code.is_running" => Ok(json!(state.code.is_running(&id()?))),
             "code.attach" => Ok(code_attach_local(state, &id()?)),
+            "code.resume" => {
+                let point = serde_json::from_value(p["point"].clone()).ok();
+                let running: Vec<String> = serde_json::from_value(p["running"].clone()).unwrap_or_default();
+                Ok(code_resume_local(state, &id()?, point, &running))
+            }
             "code.stop" => {
                 state.code.stop(&id()?);
                 Ok(Value::Null)
