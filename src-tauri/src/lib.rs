@@ -797,6 +797,8 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     if let CodeEvent::PlanLimits { limits } = env.event {
         // Only sessions on a Claude plan report limits; one that can't be placed counts as the default login's.
         let (account, name) = plan_account(state, &prefs::load(&state.db), &env.code_session_id).unwrap_or_else(default_plan_account);
+        // Upgrade a local path fallback to the portable account id when `.claude.json` has it.
+        let (account, name) = resolve_plan_account(&state.db, &account, name);
         let tagged = serde_json::json!({ "account": account, "name": name, "limits": limits });
         state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, tagged);
         adopt_plan_limits(state, &account, name, limits, true);
@@ -889,10 +891,11 @@ const MESH_PLAN_LIMITS_EVENT: &str = "mesh://plan-limits";
 
 /// Take a plan report seen here, or one from another member that is newer than ours for its account.
 fn adopt_plan_limits(state: &AppState, account: &str, name: Option<String>, limits: code::plan_limits::PlanLimits, seen_here: bool) {
-    if !seen_here && state.code.plan.account(account).latest.is_some_and(|old| old.observed_at >= limits.observed_at) {
+    let (account, name) = resolve_plan_account(&state.db, account, name);
+    if !seen_here && state.code.plan.account(&account).latest.is_some_and(|old| old.observed_at >= limits.observed_at) {
         return;
     }
-    state.code.plan.record(account, name, limits);
+    state.code.plan.record(&account, name, limits);
     let _ = state.db.set_setting(PLAN_ACCOUNTS_KEY, &serde_json::to_string(&state.code.plan.accounts()).unwrap_or_default());
     (state.emit)(PLAN_LIMITS_EVENT, serde_json::to_value(plan_views(state)).unwrap_or_default());
     enforce_plan_limit(state);
@@ -908,19 +911,92 @@ fn save_resumes(state: &AppState) {
 
 fn load_plan_accounts(db: &Db) -> std::collections::BTreeMap<String, code::plan_limits::Account> {
     let get = |k| db.get_setting(k).ok().flatten();
-    if let Some(m) = get(PLAN_ACCOUNTS_KEY).and_then(|j| serde_json::from_str(&j).ok()) {
-        return m;
-    }
-    let old = code::plan_limits::Account {
-        latest: get(PLAN_LIMITS_KEY).and_then(|j| serde_json::from_str(&j).ok()),
-        history: get(PLAN_HISTORY_KEY).and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
-        name: None,
+    let raw = if let Some(m) = get(PLAN_ACCOUNTS_KEY).and_then(|j| serde_json::from_str(&j).ok()) {
+        m
+    } else {
+        let old = code::plan_limits::Account {
+            latest: get(PLAN_LIMITS_KEY).and_then(|j| serde_json::from_str(&j).ok()),
+            history: get(PLAN_HISTORY_KEY).and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+            name: None,
+        };
+        if old == Default::default() {
+            return Default::default();
+        }
+        let (account, name) = default_plan_account();
+        [(account, code::plan_limits::Account { name, ..old })].into()
     };
-    if old == Default::default() {
-        return Default::default();
+    let folded = fold_plan_accounts(db, raw.clone());
+    // Persist the fold so a foreign path key (e.g. another member's `~/.claude`) doesn't return.
+    if folded != raw {
+        let _ = db.set_setting(PLAN_ACCOUNTS_KEY, &serde_json::to_string(&folded).unwrap_or_default());
     }
-    let (account, name) = default_plan_account();
-    [(account, code::plan_limits::Account { name, ..old })].into()
+    folded
+}
+
+/// Config-directory paths this computer uses for a Claude login (default + providers).
+fn local_claude_dir_paths(db: &Db) -> std::collections::HashSet<String> {
+    let mut dirs = std::collections::HashSet::new();
+    if let Ok(d) = claude_auth::resolve_dir(None) {
+        dirs.insert(d.to_string_lossy().into_owned());
+    }
+    for (p, _) in db.list_providers().unwrap_or_default() {
+        if p.auth_mode == db::AuthMode::ClaudeLogin
+            && let Ok(d) = claude_auth::resolve_dir(p.claude_config_dir.as_deref())
+        {
+            dirs.insert(d.to_string_lossy().into_owned());
+        }
+    }
+    dirs
+}
+
+/// Map a reported account key onto the id this computer should store it under.
+///
+/// Path fallbacks are only meaningful on the machine that owns that directory. A path from
+/// another member (or an old local path once Claude Code has recorded the real account id)
+/// collapses onto that login's portable id, or onto this computer's default login.
+fn resolve_plan_account(db: &Db, account: &str, name: Option<String>) -> (String, Option<String>) {
+    if !claude_auth::is_path_account_key(account) {
+        return (account.to_owned(), name);
+    }
+    // Path → portable id when this directory's `.claude.json` now has oauthAccount.
+    if let Ok(dir) = claude_auth::resolve_dir(Some(account)) {
+        let (key, n) = claude_auth::account(&dir);
+        if !claude_auth::is_path_account_key(&key) {
+            return (key, name.or(n));
+        }
+    }
+    let local = local_claude_dir_paths(db);
+    if local.contains(account) {
+        // Default dir still on a path key: prefer the portable default when known.
+        if let Ok(def) = claude_auth::resolve_dir(None)
+            && account == def.to_string_lossy()
+        {
+            let (d, n) = default_plan_account();
+            if !claude_auth::is_path_account_key(&d) {
+                return (d, name.or(n));
+            }
+        }
+        return (account.to_owned(), name);
+    }
+    // Foreign path (another member's config dir): same as an untagged report.
+    let (d, n) = default_plan_account();
+    (d, name.or(n))
+}
+
+fn fold_plan_accounts(
+    db: &Db,
+    raw: std::collections::BTreeMap<String, code::plan_limits::Account>,
+) -> std::collections::BTreeMap<String, code::plan_limits::Account> {
+    let mut out = std::collections::BTreeMap::new();
+    for (account, usage) in raw {
+        let (key, name) = resolve_plan_account(db, &account, usage.name.clone());
+        let mut usage = usage;
+        if name.is_some() {
+            usage.name = name;
+        }
+        out.entry(key).or_default().absorb(usage);
+    }
+    out
 }
 
 /// The account Claude Code itself signs in with, and its organization's name.
