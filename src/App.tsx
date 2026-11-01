@@ -8,6 +8,7 @@ import {
   type Conversation,
   type MeshChatEvent,
   type MeshProblem,
+  type CursorPlanLimits,
   type PlanAccount,
   type Preferences,
 } from "./lib/ipc";
@@ -35,6 +36,7 @@ import { useDragRegion, useRoundedWindow } from "./components/WindowControls";
 import { installUpdate, useUpdate, useUpdateChecks } from "./lib/update";
 import { AlertToast, MeshChip, MeshPopover, MeshRailButton } from "./components/MeshStatus";
 import { PlanUsageBlade, PlanUsageButton } from "./components/PlanUsage";
+import { CursorPlanUsageBlade, CursorPlanUsageButton } from "./components/CursorPlanUsage";
 import { Dot } from "./components/Dot";
 import {
   ArrowLeftIcon,
@@ -575,11 +577,13 @@ export default function App() {
     useStore.getState().refreshSidebarLayout().catch(() => {});
     useStore.getState().refreshMesh();
     api.planAccounts().then((a) => useStore.getState().setPlanAccounts(a), () => {});
+    api.cursorPlanLimits().then((l) => useStore.getState().setCursorPlanLimits(l), () => {});
     const unlisteners = [
       listen<CodeEnvelope>("code://event", (ev) => codeEventArrived(ev.payload)),
       // Preferences saved from another window or browser tab on this backend.
       listen<Preferences>("prefs://changed", (ev) => useStore.getState().prefsSaved(ev.payload)),
       listen<PlanAccount[]>("code://plan-limits", (ev) => useStore.getState().setPlanAccounts(ev.payload)),
+      listen<CursorPlanLimits>("code://cursor-plan-limits", (ev) => useStore.getState().setCursorPlanLimits(ev.payload)),
       // Mesh (see src-tauri/src/mesh): membership changes, other nodes' writes, live streams.
       listen("mesh://status", () => useStore.getState().refreshMesh()),
       listen<{ tables: string[] }>("mesh://changed", (ev) => useStore.getState().onSynced(ev.payload.tables)),
@@ -703,12 +707,14 @@ export default function App() {
               <span className="@max-[80px]:hidden">Settings</span>
             </button>
             <PlanUsageButton />
+            <CursorPlanUsageButton />
             <MeshChip />
             <IconButton label={`Keyboard shortcuts (${keyLabel("Mod+/")})`} onClick={() => setShortcutsOpen(true)}>
               <KeyboardIcon />
             </IconButton>
           </div>
           <PlanUsageBlade className="absolute bottom-14 left-2" />
+          <CursorPlanUsageBlade className="absolute bottom-14 left-2" />
           <MeshPopover className="absolute bottom-14 left-2" />
         </aside>
       )}

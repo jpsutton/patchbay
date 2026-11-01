@@ -183,7 +183,8 @@ Not verified against the real agents yet: a live `_session/steering` turn on Cla
 Observed quirks:
 
 - Cursor and Claude Code can't `session/load` a session that never got a prompt. Patchbay falls back to a new session and shows a notice.
-- Cursor sends no usage. Claude sends `usage_update` with context size and cumulative cost.
+- Cursor sends no ACP usage. Claude sends `usage_update` with context size and cumulative cost, and `_meta["_claude/rateLimit"]` for plan windows.
+- **Cursor plan usage** is polled out of band from `GetCurrentPeriodUsage` on `api2.cursor.sh` (same undocumented dashboard API other ACP clients use), about every five minutes while a Cursor session is running or the Cursor plan blade is open. Reports are tagged with the Cursor account id and fan out as `mesh://cursor-plan-limits` so peers on the same account can skip re-polling. The sidebar has a separate Cursor gauge/blade (Auto / API %, plus free-on-us bonus used / still available from `bonusSpend` and `remainingBonus`). Stopping Cursor turns when the plan is used up is off by default (`cursorUsageLimit`); when on, it waits until included plan spend is exhausted **and** `remainingBonus` is false (no percent threshold). Team seats that omit `planUsage` are not covered yet.
 - Each agent writes its sessions to its own store (`~/.claude`, `~/.local/share/opencode`, `~/.cursor`, Kilo's data dir). Patchbay keeps only the ACP session id.
 
 ## Codex and Antigravity (2026-10-19)
