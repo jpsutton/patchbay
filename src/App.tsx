@@ -8,9 +8,11 @@ import {
   type Conversation,
   type MeshChatEvent,
   type MeshProblem,
+  type CodeSession,
   type CursorPlanLimits,
   type PlanAccount,
   type Preferences,
+  type Provider,
 } from "./lib/ipc";
 import { codeEventArrived, remoteHost, useStore, type Mode } from "./lib/store";
 import { goBack, goForward, resetHistory, useHistory } from "./lib/history";
@@ -435,6 +437,65 @@ function AppMenu() {
   );
 }
 
+/** Which plan meter belongs with the session the user is looking at. */
+type PlanKind = "claude" | "cursor";
+
+function planKindForSession(
+  mode: Mode,
+  session: CodeSession | undefined,
+  prefs: Preferences,
+  providers: Provider[],
+  models: { id: string; providerId: string }[],
+): PlanKind | null {
+  if (mode !== "code" || !session) return null;
+  if (session.agent === "cursor") return "cursor";
+  if (session.agent === "claude-code" && !prefs.agentProviders["claude-code"]) return "claude";
+  if (session.agent === "patchbay" && session.modelRef) {
+    const model = models.find((m) => m.id === session.modelRef);
+    const provider = model && providers.find((p) => p.id === model.providerId);
+    if (provider?.authMode === "claude_login") return "claude";
+  }
+  return null;
+}
+
+/** Claude or Cursor plan gauge for the open Code session — never both. */
+function SessionPlanUsage() {
+  const mode = useStore((s) => s.mode);
+  const sessionId = useStore((s) => s.activeCodeSessionId);
+  const session = useStore((s) => s.codeSessions.find((x) => x.id === sessionId));
+  const prefs = useStore((s) => s.prefs);
+  const providers = useStore((s) => s.providers);
+  const models = useStore((s) => s.models);
+  const planOpen = useStore((s) => s.planOpen);
+  const cursorPlanOpen = useStore((s) => s.cursorPlanOpen);
+  const setPlanOpen = useStore((s) => s.setPlanOpen);
+  const setCursorPlanOpen = useStore((s) => s.setCursorPlanOpen);
+  const kind = planKindForSession(mode, session, prefs, providers, models);
+
+  useEffect(() => {
+    if (kind !== "claude" && planOpen) setPlanOpen(false);
+    if (kind !== "cursor" && cursorPlanOpen) setCursorPlanOpen(false);
+  }, [kind, planOpen, cursorPlanOpen, setPlanOpen, setCursorPlanOpen]);
+
+  if (kind === "claude") {
+    return (
+      <>
+        <PlanUsageButton />
+        <PlanUsageBlade className="absolute bottom-14 left-2" />
+      </>
+    );
+  }
+  if (kind === "cursor") {
+    return (
+      <>
+        <CursorPlanUsageButton />
+        <CursorPlanUsageBlade className="absolute bottom-14 left-2" />
+      </>
+    );
+  }
+  return null;
+}
+
 /**
  * Chat and Code both stay mounted, so switching tabs doesn't reload messages or flash an empty
  * view. The hidden one keeps its layout (and scroll position) but is invisible and inert.
@@ -706,15 +767,12 @@ export default function App() {
               <SettingsIcon size={17} className="shrink-0" />
               <span className="@max-[80px]:hidden">Settings</span>
             </button>
-            <PlanUsageButton />
-            <CursorPlanUsageButton />
+            <SessionPlanUsage />
             <MeshChip />
             <IconButton label={`Keyboard shortcuts (${keyLabel("Mod+/")})`} onClick={() => setShortcutsOpen(true)}>
               <KeyboardIcon />
             </IconButton>
           </div>
-          <PlanUsageBlade className="absolute bottom-14 left-2" />
-          <CursorPlanUsageBlade className="absolute bottom-14 left-2" />
           <MeshPopover className="absolute bottom-14 left-2" />
         </aside>
       )}
