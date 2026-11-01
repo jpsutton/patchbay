@@ -104,6 +104,24 @@ impl AppState {
         if let Some(r) = state.db.get_setting(PLAN_RESUME_KEY).ok().flatten().and_then(|j| serde_json::from_str(&j).ok()) {
             state.code.plan.set_resumes(r);
         }
+        if let Some(l) = state
+            .db
+            .get_setting(CURSOR_PLAN_KEY)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str(&j).ok())
+        {
+            state.code.cursor_plan.record(l);
+        }
+        if let Some(r) = state
+            .db
+            .get_setting(CURSOR_PLAN_RESUME_KEY)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str(&j).ok())
+        {
+            state.code.cursor_plan.set_resumes(r);
+        }
         mesh.set_ui(emit);
         mesh.set_handler(Arc::new(MeshRpc { state: state.clone() }));
         state
@@ -127,6 +145,9 @@ struct LiveAgent {
     /// was written has no other way to get it: the saved transcript doesn't hold it, and the
     /// event ring only reaches back to the last finished turn.
     plan: Option<serde_json::Value>,
+    /// Each tool call's latest status in this run of the agent. A window that missed events
+    /// (see `code_resume`) learns from it which of the calls it still shows running have ended.
+    tools: std::collections::HashMap<String, String>,
 }
 
 /// Errors cross the IPC boundary as plain strings.
@@ -350,6 +371,9 @@ async fn set_preferences(state: &AppState, prefs: prefs::Preferences) -> CmdResu
     // A lower limit applies to turns already running.
     if old.usage_limit != prefs.usage_limit {
         enforce_plan_limit(state);
+    }
+    if old.cursor_usage_limit != prefs.cursor_usage_limit {
+        enforce_cursor_plan_limit(state);
     }
     // Other windows on this backend (browser tabs, a desktop app attached to patchbayd) show them.
     (state.emit)(PREFS_CHANGED_EVENT, serde_json::to_value(&prefs).unwrap_or_default());
@@ -797,6 +821,8 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     if let CodeEvent::PlanLimits { limits } = env.event {
         // Only sessions on a Claude plan report limits; one that can't be placed counts as the default login's.
         let (account, name) = plan_account(state, &prefs::load(&state.db), &env.code_session_id).unwrap_or_else(default_plan_account);
+        // Upgrade a local path fallback to the portable account id when `.claude.json` has it.
+        let (account, name) = resolve_plan_account(&state.db, &account, name);
         let tagged = serde_json::json!({ "account": account, "name": name, "limits": limits });
         state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, tagged);
         adopt_plan_limits(state, &account, name, limits, true);
@@ -813,9 +839,11 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
         if turn_over {
             state.code.set_busy(&env.code_session_id, false);
             state.code.plan.turn_ended(&env.code_session_id);
+            state.code.cursor_plan.turn_ended(&env.code_session_id);
         }
         if matches!(env.event, CodeEvent::UserPrompt { delivery: code::acp::Delivery::Sent, .. }) {
             state.code.set_busy(&env.code_session_id, true);
+            let _ = state.code.cursor_plan.cancel_resume(&env.code_session_id);
             if state.code.plan.cancel_resume(&env.code_session_id) {
                 save_resumes(state);
             }
@@ -853,6 +881,24 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
                 CodeEvent::Update { update } if update["sessionUpdate"] == "plan" => {
                     live.entry(id).or_default().plan = Some(ev)
                 }
+                CodeEvent::Update { update }
+                    if matches!(update["sessionUpdate"].as_str(), Some("tool_call" | "tool_call_update")) =>
+                {
+                    if let Some(call) = update["toolCallId"].as_str() {
+                        let tools = &mut live.entry(id).or_default().tools;
+                        match update["status"].as_str() {
+                            Some(status) => {
+                                tools.insert(call.to_owned(), status.to_owned());
+                            }
+                            // A new call without a status is pending (ACP's default); a known one
+                            // left it out because it didn't change.
+                            None if update["sessionUpdate"] == "tool_call" => {
+                                tools.entry(call.to_owned()).or_insert_with(|| "pending".to_owned());
+                            }
+                            None => {}
+                        }
+                    }
+                }
                 CodeEvent::Permission { request_id, .. } => {
                     live.entry(id).or_default().permissions.push((request_id.clone(), ev))
                 }
@@ -889,10 +935,11 @@ const MESH_PLAN_LIMITS_EVENT: &str = "mesh://plan-limits";
 
 /// Take a plan report seen here, or one from another member that is newer than ours for its account.
 fn adopt_plan_limits(state: &AppState, account: &str, name: Option<String>, limits: code::plan_limits::PlanLimits, seen_here: bool) {
-    if !seen_here && state.code.plan.account(account).latest.is_some_and(|old| old.observed_at >= limits.observed_at) {
+    let (account, name) = resolve_plan_account(&state.db, account, name);
+    if !seen_here && state.code.plan.account(&account).latest.is_some_and(|old| old.observed_at >= limits.observed_at) {
         return;
     }
-    state.code.plan.record(account, name, limits);
+    state.code.plan.record(&account, name, limits);
     let _ = state.db.set_setting(PLAN_ACCOUNTS_KEY, &serde_json::to_string(&state.code.plan.accounts()).unwrap_or_default());
     (state.emit)(PLAN_LIMITS_EVENT, serde_json::to_value(plan_views(state)).unwrap_or_default());
     enforce_plan_limit(state);
@@ -908,19 +955,92 @@ fn save_resumes(state: &AppState) {
 
 fn load_plan_accounts(db: &Db) -> std::collections::BTreeMap<String, code::plan_limits::Account> {
     let get = |k| db.get_setting(k).ok().flatten();
-    if let Some(m) = get(PLAN_ACCOUNTS_KEY).and_then(|j| serde_json::from_str(&j).ok()) {
-        return m;
-    }
-    let old = code::plan_limits::Account {
-        latest: get(PLAN_LIMITS_KEY).and_then(|j| serde_json::from_str(&j).ok()),
-        history: get(PLAN_HISTORY_KEY).and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
-        name: None,
+    let raw = if let Some(m) = get(PLAN_ACCOUNTS_KEY).and_then(|j| serde_json::from_str(&j).ok()) {
+        m
+    } else {
+        let old = code::plan_limits::Account {
+            latest: get(PLAN_LIMITS_KEY).and_then(|j| serde_json::from_str(&j).ok()),
+            history: get(PLAN_HISTORY_KEY).and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+            name: None,
+        };
+        if old == Default::default() {
+            return Default::default();
+        }
+        let (account, name) = default_plan_account();
+        [(account, code::plan_limits::Account { name, ..old })].into()
     };
-    if old == Default::default() {
-        return Default::default();
+    let folded = fold_plan_accounts(db, raw.clone());
+    // Persist the fold so a foreign path key (e.g. another member's `~/.claude`) doesn't return.
+    if folded != raw {
+        let _ = db.set_setting(PLAN_ACCOUNTS_KEY, &serde_json::to_string(&folded).unwrap_or_default());
     }
-    let (account, name) = default_plan_account();
-    [(account, code::plan_limits::Account { name, ..old })].into()
+    folded
+}
+
+/// Config-directory paths this computer uses for a Claude login (default + providers).
+fn local_claude_dir_paths(db: &Db) -> std::collections::HashSet<String> {
+    let mut dirs = std::collections::HashSet::new();
+    if let Ok(d) = claude_auth::resolve_dir(None) {
+        dirs.insert(d.to_string_lossy().into_owned());
+    }
+    for (p, _) in db.list_providers().unwrap_or_default() {
+        if p.auth_mode == db::AuthMode::ClaudeLogin
+            && let Ok(d) = claude_auth::resolve_dir(p.claude_config_dir.as_deref())
+        {
+            dirs.insert(d.to_string_lossy().into_owned());
+        }
+    }
+    dirs
+}
+
+/// Map a reported account key onto the id this computer should store it under.
+///
+/// Path fallbacks are only meaningful on the machine that owns that directory. A path from
+/// another member (or an old local path once Claude Code has recorded the real account id)
+/// collapses onto that login's portable id, or onto this computer's default login.
+fn resolve_plan_account(db: &Db, account: &str, name: Option<String>) -> (String, Option<String>) {
+    if !claude_auth::is_path_account_key(account) {
+        return (account.to_owned(), name);
+    }
+    // Path → portable id when this directory's `.claude.json` now has oauthAccount.
+    if let Ok(dir) = claude_auth::resolve_dir(Some(account)) {
+        let (key, n) = claude_auth::account(&dir);
+        if !claude_auth::is_path_account_key(&key) {
+            return (key, name.or(n));
+        }
+    }
+    let local = local_claude_dir_paths(db);
+    if local.contains(account) {
+        // Default dir still on a path key: prefer the portable default when known.
+        if let Ok(def) = claude_auth::resolve_dir(None)
+            && account == def.to_string_lossy()
+        {
+            let (d, n) = default_plan_account();
+            if !claude_auth::is_path_account_key(&d) {
+                return (d, name.or(n));
+            }
+        }
+        return (account.to_owned(), name);
+    }
+    // Foreign path (another member's config dir): same as an untagged report.
+    let (d, n) = default_plan_account();
+    (d, name.or(n))
+}
+
+fn fold_plan_accounts(
+    db: &Db,
+    raw: std::collections::BTreeMap<String, code::plan_limits::Account>,
+) -> std::collections::BTreeMap<String, code::plan_limits::Account> {
+    let mut out = std::collections::BTreeMap::new();
+    for (account, usage) in raw {
+        let (key, name) = resolve_plan_account(db, &account, usage.name.clone());
+        let mut usage = usage;
+        if name.is_some() {
+            usage.name = name;
+        }
+        out.entry(key).or_default().absorb(usage);
+    }
+    out
 }
 
 /// The account Claude Code itself signs in with, and its organization's name.
@@ -968,6 +1088,195 @@ fn plan_views(state: &AppState) -> Vec<PlanView> {
 
 async fn plan_accounts(state: &AppState) -> CmdResult<Vec<PlanView>> {
     Ok(plan_views(state))
+}
+
+/// Last Cursor plan report saved for the panel and the guard; reset times say when it goes stale.
+const CURSOR_PLAN_KEY: &str = "cursor.planLimits";
+const CURSOR_PLAN_EVENT: &str = "code://cursor-plan-limits";
+/// A report one member fetched, shared with the others, tagged with its Cursor account id.
+const MESH_CURSOR_PLAN_EVENT: &str = "mesh://cursor-plan-limits";
+const CURSOR_PLAN_RESUME_KEY: &str = "cursor.planResume";
+
+fn save_cursor_plan(state: &AppState) {
+    if let Some(l) = state.code.cursor_plan.latest() {
+        let _ = state.db.set_setting(CURSOR_PLAN_KEY, &serde_json::to_string(&l).unwrap_or_default());
+    }
+}
+
+fn save_cursor_resumes(state: &AppState) {
+    let _ = state
+        .db
+        .set_setting(CURSOR_PLAN_RESUME_KEY, &serde_json::to_string(&state.code.cursor_plan.resumes()).unwrap_or_default());
+}
+
+/// Take a Cursor plan report seen here, or a newer one from another member for the same account.
+fn adopt_cursor_plan(state: &AppState, mut limits: code::cursor_plan::CursorPlanLimits, seen_here: bool) {
+    if seen_here {
+        state.code.cursor_plan.record(limits.clone());
+    } else {
+        limits.observed_at = limits.observed_at.min(code::cursor_plan::now());
+        let local = state.code.cursor_plan.latest().map(|l| l.account_id);
+        // Peers with no local Cursor login still show a report; those with a different account ignore it.
+        if local.as_deref().is_some_and(|a| a != limits.account_id) {
+            return;
+        }
+        if !state.code.cursor_plan.adopt_mesh(limits.clone(), local.as_deref()) {
+            return;
+        }
+    }
+    save_cursor_plan(state);
+    (state.emit)(CURSOR_PLAN_EVENT, serde_json::to_value(&limits).unwrap_or_default());
+    if seen_here {
+        let tagged = serde_json::json!({ "accountId": limits.account_id, "limits": limits });
+        state.mesh.broadcast_event(MESH_CURSOR_PLAN_EVENT, tagged);
+    }
+    enforce_cursor_plan_limit(state);
+}
+
+async fn cursor_plan_limits(state: &AppState) -> CmdResult<Option<code::cursor_plan::CursorPlanLimits>> {
+    Ok(state.code.cursor_plan.latest())
+}
+
+/// The Cursor plan blade is open: poll while it is, even with no running Cursor session.
+async fn cursor_plan_watching(state: &AppState, open: bool) -> CmdResult<()> {
+    state.code.cursor_plan.set_blade_open(open);
+    if open {
+        poll_cursor_plan(state).await;
+    }
+    Ok(())
+}
+
+fn on_cursor_session(state: &AppState, id: &str) -> bool {
+    state
+        .db
+        .get_code_session(id)
+        .ok()
+        .flatten()
+        .is_some_and(|s| code::agents::AgentKind::parse(&s.agent) == Some(code::agents::AgentKind::Cursor))
+}
+
+fn any_running_cursor(state: &AppState) -> bool {
+    state
+        .db
+        .list_code_sessions()
+        .ok()
+        .into_iter()
+        .flatten()
+        .any(|s| s.agent == code::agents::AgentKind::Cursor.id() && state.code.is_running(&s.id))
+}
+
+fn enforce_cursor_plan_limit(state: &AppState) {
+    let prefs = prefs::load(&state.db);
+    let now = code::cursor_plan::now();
+    let Some(hit) = state.code.cursor_plan.hit(&prefs.cursor_usage_limit, now) else {
+        return;
+    };
+    for id in state.code.busy_sessions() {
+        if !on_cursor_session(state, &id) || !state.code.cursor_plan.start_stopping(&id) {
+            continue;
+        }
+        tracing::info!("cursor usage limit: stopping {id}");
+        if state.code.send(&id, AgentCmd::Cancel).is_err() {
+            state.code.cursor_plan.turn_ended(&id);
+            continue;
+        }
+        let mut message = format!("Stopped. {}", hit.message(now));
+        if prefs.cursor_usage_limit.auto_resume {
+            state.code.cursor_plan.schedule_resume(&id, hit.resets_at);
+            save_cursor_resumes(state);
+            message.push_str(" Patchbay will tell the agent to continue once the cycle resets.");
+        }
+        on_code_event(
+            state,
+            code::acp::Envelope { code_session_id: id, event: code::acp::CodeEvent::Notice { message } },
+        );
+    }
+}
+
+const CURSOR_RESUME_PROMPT: &str =
+    "Patchbay stopped your last turn at the Cursor plan's usage limit. The cycle has reset, so continue where you left off.";
+
+async fn resume_after_cursor_limit(state: &AppState) {
+    let prefs = prefs::load(&state.db);
+    if !prefs.cursor_usage_limit.enabled || !prefs.cursor_usage_limit.auto_resume {
+        if state.code.cursor_plan.clear_resumes() {
+            save_cursor_resumes(state);
+        }
+        return;
+    }
+    let now = code::cursor_plan::now();
+    let mut due = state.code.cursor_plan.take_due(now - RESUME_GRACE_SECS);
+    if due.is_empty() {
+        return;
+    }
+    due.retain(|id| {
+        let hit = state.code.cursor_plan.hit(&prefs.cursor_usage_limit, now);
+        hit.inspect(|h| state.code.cursor_plan.schedule_resume(id, h.resets_at)).is_none()
+    });
+    save_cursor_resumes(state);
+    for id in due {
+        if !on_cursor_session(state, &id) {
+            continue;
+        }
+        if let Err(e) = resume_cursor_session(state, &id).await {
+            tracing::warn!("cursor usage limit: resuming {id}: {e:#}");
+        }
+    }
+}
+
+async fn resume_cursor_session(state: &AppState, id: &str) -> anyhow::Result<()> {
+    let Some(session) = state.db.get_code_session(id)? else {
+        return Ok(());
+    };
+    if session.archived_at.is_some() || state.code.is_busy(id) || state.code.is_moving(id) {
+        return Ok(());
+    }
+    if !state.code.is_running(id) {
+        code_start_local(state, id.to_owned()).await?;
+    }
+    let _ = code_prompt_local(
+        state,
+        id.to_owned(),
+        CURSOR_RESUME_PROMPT.into(),
+        Vec::new(),
+        Vec::new(),
+        "system".into(),
+        None,
+        false,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Poll Cursor's dashboard when a Cursor session is running here or the blade is open, unless a
+/// fresh report (local or mesh) for this account already covers the window.
+async fn poll_cursor_plan(state: &AppState) {
+    if !state.code.cursor_plan.blade_open() && !any_running_cursor(state) {
+        return;
+    }
+    let now = code::cursor_plan::now();
+    if state.code.cursor_plan.latest().is_some_and(|l| l.is_fresh(now)) {
+        return;
+    }
+    let prefs = prefs::load(&state.db);
+    let bin = code::cursor_plan::cursor_agent_bin(&prefs.agent_paths);
+    let Some(auth) = code::cursor_plan::load_auth(bin.as_deref()) else {
+        tracing::debug!("cursor plan: no local Cursor login");
+        return;
+    };
+    // A mesh peer may have filled in the same account while we resolved auth.
+    if state
+        .code
+        .cursor_plan
+        .latest()
+        .is_some_and(|l| l.account_id == auth.account_id && l.is_fresh(now))
+    {
+        return;
+    }
+    match code::cursor_plan::fetch(&auth).await {
+        Ok(limits) => adopt_cursor_plan(state, limits, true),
+        Err(e) => tracing::debug!("cursor plan: {e:#}"),
+    }
 }
 
 fn provider_plan_account(p: &Provider) -> Option<String> {
@@ -1239,6 +1548,52 @@ async fn code_attach(state: &AppState, id: String) -> CmdResult<serde_json::Valu
     Ok(code_attach_local(state, &id))
 }
 
+/// Catch-up for a window that missed events of a session it shows: a gap in the events' points,
+/// or the connection to the host dropped meanwhile (events sent then are gone for good). With
+/// the window's last point still in this node's event ring, the events after it (`delta`).
+/// Otherwise a `snapshot`: the attach answer, plus the current status of the tool calls in
+/// `running`, the ones the window still shows running.
+fn code_resume_local(state: &AppState, id: &str, point: Option<mesh::remote::Point>, running: &[String]) -> serde_json::Value {
+    use serde_json::json;
+    if let Some(p) = &point
+        && let Some((events, last)) = state.mesh.code_events_since(id, p)
+    {
+        return json!({ "mode": "delta", "events": events, "point": last.or_else(|| point.clone()) });
+    }
+    let tools: serde_json::Map<String, serde_json::Value> = {
+        let live = state.live.lock().unwrap();
+        let known = live.get(id).map(|l| &l.tools);
+        running
+            .iter()
+            .filter_map(|call| Some((call.clone(), json!(known?.get(call)?))))
+            .collect()
+    };
+    json!({
+        "mode": "snapshot",
+        "attach": code_attach_local(state, id),
+        "tools": tools,
+        "point": state.mesh.code_point(id),
+    })
+}
+
+async fn code_resume(
+    state: &AppState,
+    id: String,
+    point: Option<serde_json::Value>,
+    running: Option<Vec<String>>,
+) -> CmdResult<serde_json::Value> {
+    let running = running.unwrap_or_default();
+    if let Some(host) = remote_host(state, &id)? {
+        if !state.mesh.connected(&host) {
+            return Ok(serde_json::json!({ "mode": "offline" }));
+        }
+        let p = serde_json::json!({ "id": id, "point": point, "running": running });
+        return Ok(state.mesh.rpc(&host, "code.resume", p).await?);
+    }
+    let point = point.and_then(|p| serde_json::from_value(p).ok());
+    Ok(code_resume_local(state, &id, point, &running))
+}
+
 async fn code_is_running(state: &AppState, id: String) -> CmdResult<bool> {
     if let Some(host) = remote_host(state, &id)? {
         if !state.mesh.connected(&host) {
@@ -1275,6 +1630,11 @@ async fn code_prompt_local(
         plan_account(state, &prefs, &id).and_then(|(a, _)| state.code.plan.hit(&a, &prefs.usage_limit, code::plan_limits::now()))
     {
         anyhow::bail!("Not sent. {}", hit.message(prefs.usage_limit.percent, code::plan_limits::now()));
+    }
+    if on_cursor_session(state, &id)
+        && let Some(hit) = state.code.cursor_plan.hit(&prefs.cursor_usage_limit, code::cursor_plan::now())
+    {
+        anyhow::bail!("Not sent. {}", hit.message(code::cursor_plan::now()));
     }
     let mut blocks = Vec::new();
     // @-mentioned project files go as standard ACP resource links; the agent reads them itself.
@@ -1945,6 +2305,11 @@ impl mesh::RpcHandler for MeshRpc {
             "code.start" => code_start_local(state, id()?).await.map(|_| Value::Null),
             "code.is_running" => Ok(json!(state.code.is_running(&id()?))),
             "code.attach" => Ok(code_attach_local(state, &id()?)),
+            "code.resume" => {
+                let point = serde_json::from_value(p["point"].clone()).ok();
+                let running: Vec<String> = serde_json::from_value(p["running"].clone()).unwrap_or_default();
+                Ok(code_resume_local(state, &id()?, point, &running))
+            }
             "code.stop" => {
                 state.code.stop(&id()?);
                 Ok(Value::Null)
@@ -2154,6 +2519,19 @@ impl mesh::RpcHandler for MeshRpc {
             adopt_plan_limits(&self.state, &account, name, l, false);
             return;
         }
+        if name == MESH_CURSOR_PLAN_EVENT {
+            use code::cursor_plan::CursorPlanLimits;
+            let Ok(mut l) = serde_json::from_value::<CursorPlanLimits>(
+                payload.get("limits").cloned().unwrap_or_else(|| payload.clone()),
+            ) else {
+                return;
+            };
+            if let Some(id) = payload["accountId"].as_str() {
+                l.account_id = id.to_owned();
+            }
+            adopt_cursor_plan(&self.state, l, false);
+            return;
+        }
         if name != "mesh://checkpoint" {
             return;
         }
@@ -2162,13 +2540,24 @@ impl mesh::RpcHandler for MeshRpc {
     }
 
     fn greeting(&self) -> Vec<(String, serde_json::Value)> {
-        let accounts = self.state.code.plan.accounts().into_iter();
-        accounts
+        let mut out: Vec<(String, serde_json::Value)> = self
+            .state
+            .code
+            .plan
+            .accounts()
+            .into_iter()
             .filter_map(|(account, a)| {
                 let payload = serde_json::json!({ "account": account, "name": a.name, "limits": a.latest? });
                 Some((MESH_PLAN_LIMITS_EVENT.to_owned(), payload))
             })
-            .collect()
+            .collect();
+        if let Some(l) = self.state.code.cursor_plan.latest() {
+            out.push((
+                MESH_CURSOR_PLAN_EVENT.to_owned(),
+                serde_json::json!({ "accountId": l.account_id, "limits": l }),
+            ));
+        }
+        out
     }
 
     fn synced(&self, applied: &mesh::sync::Applied) {
@@ -2649,6 +3038,14 @@ pub fn open_locked_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow:
         loop {
             tokio::time::sleep(RESUME_EVERY).await;
             resume_after_limit(&resumer).await;
+            resume_after_cursor_limit(&resumer).await;
+        }
+    });
+    let cursor_poller = state.clone();
+    api::spawn(async move {
+        loop {
+            tokio::time::sleep(code::cursor_plan::TICK).await;
+            poll_cursor_plan(&cursor_poller).await;
         }
     });
     Ok(state)

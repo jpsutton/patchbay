@@ -88,6 +88,9 @@ pub struct Preferences {
     pub agent_providers: std::collections::BTreeMap<String, String>,
     /// Stop Claude Code turns before its sign-in's plan limits run into extra usage.
     pub usage_limit: UsageLimit,
+    /// Stop Cursor CLI turns before its plan's Auto / API pools run past `percent`. Off by default:
+    /// Cursor usage is polled from the dashboard API, not pushed over ACP.
+    pub cursor_usage_limit: UsageLimit,
     /// Archive Code sessions this many days after their last prompt, unless pinned; `None` = never.
     pub auto_archive_days: Option<u32>,
 
@@ -155,8 +158,8 @@ pub struct AgentEngine {
     pub shell_timeout_secs: Option<u32>,
 }
 
-/// When Claude Code runs on a Claude plan: stop its turns once the 5-hour or weekly window
-/// reaches `percent`, or once it bills extra usage.
+/// Stop agent turns once a plan usage window reaches `percent`. Claude's default is on; Cursor's
+/// (`cursor_usage_limit`) defaults to off.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct UsageLimit {
@@ -169,6 +172,13 @@ pub struct UsageLimit {
 impl Default for UsageLimit {
     fn default() -> Self {
         Self { enabled: true, percent: 95, auto_resume: false }
+    }
+}
+
+impl UsageLimit {
+    /// Cursor's stop-at-limit preference: same shape, off until the user turns it on.
+    pub fn cursor_default() -> Self {
+        Self { enabled: false, percent: 95, auto_resume: false }
     }
 }
 
@@ -215,6 +225,7 @@ impl Default for Preferences {
             agent_paths: Default::default(),
             agent_providers: Default::default(),
             usage_limit: UsageLimit::default(),
+            cursor_usage_limit: UsageLimit::cursor_default(),
             auto_archive_days: None,
             permission_mode: "default".into(),
             agent_instructions: String::new(),
@@ -294,6 +305,9 @@ impl Preferences {
         }
         if !(1..=100).contains(&self.usage_limit.percent) {
             return Err("usage limit must be between 1 and 100%".into());
+        }
+        if !(1..=100).contains(&self.cursor_usage_limit.percent) {
+            return Err("Cursor usage limit must be between 1 and 100%".into());
         }
         if !(8..=32).contains(&self.terminal_font_size) {
             return Err("terminal font size must be between 8 and 32".into());
@@ -393,6 +407,7 @@ mod tests {
         assert!(!p.group_by_project);
         assert!(p.claude_config.skills && p.claude_config.hooks);
         assert_eq!(p.usage_limit, super::UsageLimit { enabled: true, percent: 95, auto_resume: false });
+        assert_eq!(p.cursor_usage_limit, super::UsageLimit::cursor_default());
         let p: Preferences = serde_json::from_str(r#"{"usageLimit":{"enabled":true,"percent":90}}"#).unwrap();
         assert!(!p.usage_limit.auto_resume);
     }
@@ -413,6 +428,7 @@ mod tests {
         assert!(bad(|p| p.auto_archive_days = Some(3651)));
         assert!(bad(|p| p.usage_limit.percent = 0));
         assert!(bad(|p| p.usage_limit.percent = 101));
+        assert!(bad(|p| p.cursor_usage_limit.percent = 0));
         assert!(bad(|p| p.terminal_shell = "/no/such/shell".into()));
         assert!(bad(|p| p.read_aloud_engine = "whisper".into()));
         assert!(bad(|p| p.read_aloud_server_url = "file:///tmp/voice".into()));

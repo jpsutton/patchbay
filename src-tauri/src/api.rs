@@ -142,6 +142,7 @@ commands! {
     code_auto_title(id);
     code_start(id);
     code_attach(id);
+    code_resume(id, point, running);
     code_is_running(id);
     code_stop(id);
     code_prompt(id, text, attachment_ids, mentions, prompt_id, force);
@@ -159,6 +160,8 @@ commands! {
     code_rewind(id, ordinal, preview, revert_files);
     code_usage(id);
     plan_accounts();
+    cursor_plan_limits();
+    cursor_plan_watching(open);
     wire_log_status();
     wire_log_set(on);
     wire_log_frames(session, last);

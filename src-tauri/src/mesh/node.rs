@@ -567,6 +567,23 @@ impl Mesh {
         self.0.st.lock().unwrap().sessions.contains_key(node)
     }
 
+    /// The events of Code session `id` this node recorded after `point`, merged (see
+    /// [`rmt::coalesce`]), with the stream's latest point. `None` when the ring no longer holds
+    /// all of them, or `point` belongs to an earlier stream.
+    pub fn code_events_since(&self, id: &str, point: &rmt::Point) -> Option<(Vec<Value>, Option<rmt::Point>)> {
+        let (events, last) = {
+            let st = self.0.st.lock().unwrap();
+            let (ring, _, _) = st.rings.get(&rmt::session_topic(id))?;
+            (ring.since(point)?, ring.last())
+        };
+        Some((rmt::coalesce(events).into_iter().map(|(_, v)| v).collect(), last))
+    }
+
+    /// The latest point of Code session `id`'s event stream recorded here.
+    pub fn code_point(&self, id: &str) -> Option<rmt::Point> {
+        self.0.st.lock().unwrap().rings.get(&rmt::session_topic(id)).and_then(|(r, _, _)| r.last())
+    }
+
     pub fn member_name(&self, node: &str) -> String {
         self.0.member_name(node)
     }
