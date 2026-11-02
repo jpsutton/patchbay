@@ -162,6 +162,7 @@ commands! {
     plan_accounts();
     cursor_plan_limits();
     cursor_plan_watching(open);
+    session_plan_usage(id);
     wire_log_status();
     wire_log_set(on);
     wire_log_frames(session, last);

@@ -150,6 +150,20 @@ pub fn list_redacted(db: &Db) -> Result<Vec<McpServer>> {
     Ok(db.list_mcp_servers()?.into_iter().map(redact).collect())
 }
 
+/// ACP server names must match `^[a-zA-Z0-9_-]+$` for agents with strict schemas (e.g. Antigravity).
+pub fn acp_server_name(name: &str) -> String {
+    let slug: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '-' })
+        .collect();
+    let trimmed = slug.trim_matches('-');
+    if trimmed.is_empty() {
+        "mcp-server".into()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 /// Enabled servers as ACP `McpServer` values, with secrets filled in. Servers on a transport
 /// the agent doesn't support are returned separately so the UI can say why they're missing.
 pub fn acp_servers(db: &Db, support: McpSupport) -> Result<(Vec<Value>, Vec<String>)> {
@@ -165,9 +179,10 @@ pub fn acp_servers(db: &Db, support: McpSupport) -> Result<(Vec<Value>, Vec<Stri
                 })
                 .collect()
         };
+        let acp_name = acp_server_name(&s.name);
         match cfg.transport.as_str() {
             "stdio" => out.push(json!({
-                "name": s.name,
+                "name": acp_name,
                 "command": cfg.command,
                 "args": cfg.args,
                 "env": pairs("env", &cfg.env),
@@ -179,7 +194,7 @@ pub fn acp_servers(db: &Db, support: McpSupport) -> Result<(Vec<Value>, Vec<Stri
                 }
                 out.push(json!({
                     "type": t,
-                    "name": s.name,
+                    "name": acp_name,
                     "url": cfg.url,
                     "headers": pairs("header", &cfg.headers),
                 }));
@@ -223,6 +238,14 @@ mod tests {
         let (servers, _) = acp_servers(&db, McpSupport { http: true, sse: false }).unwrap();
         assert_eq!(servers.len(), 2);
         assert_eq!(servers[1]["type"], "http");
+    }
+
+    #[test]
+    fn acp_server_name_slugifies_spaces_and_special_chars() {
+        assert_eq!(acp_server_name("Patchbay agent messaging"), "Patchbay-agent-messaging");
+        assert_eq!(acp_server_name("my_server-1"), "my_server-1");
+        assert_eq!(acp_server_name("  spaced  server  "), "spaced--server");
+        assert_eq!(acp_server_name("!@#$%"), "mcp-server");
     }
 
     #[test]
