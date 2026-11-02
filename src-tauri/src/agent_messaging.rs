@@ -540,13 +540,13 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .filter_map(|t| t["name"].as_str())
+                .filter_map(|t| t["name"].as_str().map(str::to_string))
                 .collect::<Vec<_>>()
         };
-        assert!(names(false).contains(&TOOL_LIST_QUEUED));
-        assert!(names(false).contains(&TOOL_ACCEPT_QUEUED));
-        assert!(!names(true).contains(&TOOL_LIST_QUEUED));
-        assert!(!names(true).contains(&TOOL_ACCEPT_QUEUED));
+        assert!(names(false).iter().any(|n| n == TOOL_LIST_QUEUED));
+        assert!(names(false).iter().any(|n| n == TOOL_ACCEPT_QUEUED));
+        assert!(!names(true).iter().any(|n| n == TOOL_LIST_QUEUED));
+        assert!(!names(true).iter().any(|n| n == TOOL_ACCEPT_QUEUED));
     }
 
     #[test]

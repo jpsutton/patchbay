@@ -2379,8 +2379,8 @@ async fn open_session(
 mod tests {
     use super::{
         AgentCmd, AuthChoice, CodeEvent, ConfigIds, Delivery, Envelope, RewindPoint, SessionConfig, SpawnSpec, Steer,
-        Steered, UserMessage, auth_choices, auth_metas, merge_config, pick_rewind_point, steer_outcome,
-        terminal_auth_command,
+        Steered, UserMessage, auth_choices, auth_metas, is_retriable_transport, merge_config, pick_rewind_point,
+        steer_outcome, terminal_auth_command,
     };
     use serde_json::json;
     use std::sync::{Arc, Mutex};
@@ -3019,7 +3019,7 @@ for line in sys.stdin:
 
     #[test]
     fn retriable_transport_matches_cursor_shapes() {
-        let hit = |m: &str| is_retriable_transport(&acp::Error::new(-32603, m));
+        let hit = |m: &str| is_retriable_transport(&super::acp::Error::new(-32603, m));
         assert!(hit("Error: RetriableError: [canceled] http/2 stream closed with error code CANCEL (0x8)"));
         assert!(hit("ConnectError: [unavailable]"));
         assert!(hit("deadline_exceeded: bidi_append_deadline_exceeded"));
