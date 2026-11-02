@@ -176,7 +176,7 @@ impl CodeManager {
         };
         let csid = code_session_id.to_owned();
         let db2 = db.clone();
-        let interject = launch.extensions.interject;
+        let interject = launch.ext.interject;
         let (tx, thread) = acp::spawn(SpawnSpec {
             sink,
             code_session_id: csid.clone(),
