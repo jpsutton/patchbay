@@ -1038,11 +1038,14 @@ export const useStore = create<Store>((set, get) => ({
   setSidebarQuery: (sidebarQuery) => set({ sidebarQuery }),
   setToast: (toast) => set({ toast }),
   setAlert: (alert) => set({ alert }),
-  setMeshPopoverOpen: (meshPopoverOpen) => set({ meshPopoverOpen }),
+  setMeshPopoverOpen: (meshPopoverOpen) =>
+    set(meshPopoverOpen ? { meshPopoverOpen, planOpen: false, cursorPlanOpen: false } : { meshPopoverOpen }),
   setPlanAccounts: (planAccounts) => set({ planAccounts }),
-  setPlanOpen: (planOpen) => set({ planOpen }),
+  setPlanOpen: (planOpen) =>
+    set(planOpen ? { planOpen, meshPopoverOpen: false, cursorPlanOpen: false } : { planOpen }),
   setCursorPlanLimits: (cursorPlanLimits) => set({ cursorPlanLimits }),
-  setCursorPlanOpen: (cursorPlanOpen) => set({ cursorPlanOpen }),
+  setCursorPlanOpen: (cursorPlanOpen) =>
+    set(cursorPlanOpen ? { cursorPlanOpen, meshPopoverOpen: false, planOpen: false } : { cursorPlanOpen }),
 
   refreshCatalog: async () => {
     const [providers, models, def] = await Promise.all([

@@ -53,7 +53,7 @@ import { enqueueSpeech, speakingNow, stopSpeech } from "../lib/speech";
 import { liveCursorNow, takeLiveProse, type LiveCursor } from "../lib/spokenText";
 import { HeaderButton } from "../components/HeaderButton";
 import { useDragRegion, WindowControls } from "../components/WindowControls";
-import { isRemoteApp } from "../lib/platform";
+import { isRemoteApp, uuid } from "../lib/platform";
 import {
   ActivityIcon,
   CheckIcon,
@@ -1201,7 +1201,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   /** `force`: mid-turn, cancel the running turn and send this next. */
   const send = async (text: string, atts: Attachment[], mentions: string[] = [], force = false) => {
     if (!activeId) return;
-    const promptId = crypto.randomUUID();
+    const promptId = uuid();
     // Events still waiting may end the turn: apply them before deciding.
     flushCodeEvents(activeId);
     // Mid-turn the agent steers it in or Patchbay queues it (forced: queued first, behind a

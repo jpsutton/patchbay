@@ -460,42 +460,45 @@ function planKindForSession(
   return null;
 }
 
-/** Claude or Cursor plan gauge for the open Code session — never both. */
-function SessionPlanUsage() {
+/** Which plan gauge the open Code session should show — Claude or Cursor, never both. */
+function useSessionPlanKind() {
   const mode = useStore((s) => s.mode);
   const sessionId = useStore((s) => s.activeCodeSessionId);
   const session = useStore((s) => s.codeSessions.find((x) => x.id === sessionId));
   const prefs = useStore((s) => s.prefs);
   const providers = useStore((s) => s.providers);
   const models = useStore((s) => s.models);
+  return planKindForSession(mode, session, prefs, providers, models);
+}
+
+/** Claude or Cursor plan gauge button for the open Code session — never both. */
+function SessionPlanUsageButton() {
   const planOpen = useStore((s) => s.planOpen);
   const cursorPlanOpen = useStore((s) => s.cursorPlanOpen);
   const setPlanOpen = useStore((s) => s.setPlanOpen);
   const setCursorPlanOpen = useStore((s) => s.setCursorPlanOpen);
-  const kind = planKindForSession(mode, session, prefs, providers, models);
+  const kind = useSessionPlanKind();
 
   useEffect(() => {
     if (kind !== "claude" && planOpen) setPlanOpen(false);
     if (kind !== "cursor" && cursorPlanOpen) setCursorPlanOpen(false);
   }, [kind, planOpen, cursorPlanOpen, setPlanOpen, setCursorPlanOpen]);
 
-  if (kind === "claude") {
-    return (
-      <>
-        <PlanUsageButton />
-        <PlanUsageBlade className="absolute bottom-14 left-2" />
-      </>
-    );
-  }
-  if (kind === "cursor") {
-    return (
-      <>
-        <CursorPlanUsageButton />
-        <CursorPlanUsageBlade className="absolute bottom-14 left-2" />
-      </>
-    );
-  }
+  if (kind === "claude") return <PlanUsageButton />;
+  if (kind === "cursor") return <CursorPlanUsageButton />;
   return null;
+}
+
+/** In-flow mesh / usage pane above the footer; only one open at a time via store mutex. */
+function SidebarStatusPane() {
+  const kind = useSessionPlanKind();
+  return (
+    <>
+      {kind === "claude" && <PlanUsageBlade />}
+      {kind === "cursor" && <CursorPlanUsageBlade />}
+      <MeshPopover />
+    </>
+  );
 }
 
 /**
@@ -584,7 +587,7 @@ function CollapsedRail() {
       <IconButton label="Settings" onClick={() => setSettingsOpen(true)}>
         <SettingsIcon />
       </IconButton>
-      <MeshPopover className="fixed bottom-2 left-16" />
+      <MeshPopover floating className="fixed bottom-2 left-16" />
     </aside>
   );
 }
@@ -635,6 +638,19 @@ export default function App() {
       .then(() => {
         const s = useStore.getState();
         if (s.models.length === 0) s.setSettingsOpen(true);
+        // Fake-backend preview: `?sidebarPane=mesh|plan|cursor` opens that sidebar pane.
+        const pane = new URLSearchParams(location.search).get("sidebarPane");
+        if (pane === "mesh" || pane === "plan" || pane === "cursor") {
+          s.setMode("code");
+          if (pane === "plan" || pane === "cursor") {
+            const want = pane === "plan" ? "claude-code" : "cursor";
+            const match = s.codeSessions.find((x) => x.agent === want);
+            if (match) s.selectCodeSession(match.id);
+          }
+          if (pane === "mesh") s.setMeshPopoverOpen(true);
+          else if (pane === "plan") s.setPlanOpen(true);
+          else s.setCursorPlanOpen(true);
+        }
       })
       .catch((e) => setToast(errorText(e)));
     useStore.getState().refreshSidebarLayout().catch(() => {});
@@ -766,7 +782,8 @@ export default function App() {
               </button>
             </div>
           )}
-          <div className={`@container/footer flex items-center gap-1 p-2 ${update ? "" : "border-t border-line"}`}>
+          <SidebarStatusPane />
+          <div className="@container/footer flex items-center gap-1 border-t border-line p-2">
             {/* Its own container, so the label drops out when the items beside it leave too little room. */}
             <button
               className="@container flex h-9 min-w-9 flex-1 items-center gap-2.5 rounded-lg px-2.5 text-left text-[14px] text-muted hover:bg-panel-2 hover:text-fg"
@@ -777,13 +794,12 @@ export default function App() {
               <SettingsIcon size={17} className="shrink-0" />
               <span className="@max-[80px]:hidden">Settings</span>
             </button>
-            <SessionPlanUsage />
+            <SessionPlanUsageButton />
             <MeshChip />
             <IconButton label={`Keyboard shortcuts (${keyLabel("Mod+/")})`} onClick={() => setShortcutsOpen(true)}>
               <KeyboardIcon />
             </IconButton>
           </div>
-          <MeshPopover className="absolute bottom-14 left-2" />
         </aside>
       )}
       <main className="relative min-w-0 flex-1">

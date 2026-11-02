@@ -137,18 +137,31 @@ function PoolRow({ label, pct, now, resetsAt }: { label: string; pct: number; no
 }
 
 /**
- * Cursor plan usage from the dashboard poll (or a mesh peer on the same account). Stays open until
- * its button is clicked again.
+ * Cursor plan usage from the dashboard poll (or a mesh peer on the same account). Full-width sidebar
+ * pane above the footer; stays open until its button is clicked again.
  */
-export function CursorPlanUsageBlade({ className }: { className: string }) {
+export function CursorPlanUsageBlade({ className }: { className?: string }) {
   const limits = useStore((s) => s.cursorPlanLimits);
   const open = useStore((s) => s.cursorPlanOpen);
+  const setOpen = useStore((s) => s.setCursorPlanOpen);
   const guard = useStore((s) => s.prefs.cursorUsageLimit);
   const openSettingsAt = useStore((s) => s.openSettingsAt);
   const now = useNow(open);
   useEffect(() => {
     api.cursorPlanWatching(open).catch(() => {});
   }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        setOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [open, setOpen]);
   if (!open) return null;
   const rows = livePct(limits, now);
   const reset = limits?.resetsAt ?? null;
@@ -159,7 +172,7 @@ export function CursorPlanUsageBlade({ className }: { className: string }) {
     <div
       role="dialog"
       aria-label="Cursor plan usage"
-      className={`z-30 w-[280px] rounded-xl border border-border bg-raised py-1.5 text-[13px] shadow-float ${className}`}
+      className={`max-h-[40vh] w-full shrink-0 overflow-y-auto border-t border-line bg-panel py-1.5 text-[13px] ${className ?? ""}`}
     >
       <div className="flex items-baseline justify-between px-3 pb-1.5 pt-2">
         <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-faint">Cursor plan</span>
