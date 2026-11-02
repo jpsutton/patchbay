@@ -4,6 +4,7 @@ import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 import type { Channel } from "@tauri-apps/api/core";
 import { emptyParams, usesPatchbayModels } from "../lib/ipc";
+import { uuid } from "../lib/platform";
 import { applyChange, type SidebarEntry } from "../lib/sidebarLayout";
 import type {
   MeshChatEvent,
@@ -120,7 +121,7 @@ const fakeOptionsFor = (csid: string): AcpConfigOption[] => {
   return agent === "patchbay" ? fakePatchbayOptions(csid) : agent === "grok" ? [] : fakeOptions(csid);
 };
 const DEMO_FILES = ["README.md", "Cargo.toml", "src/main.rs", "src/lib.rs", "src/code/acp.rs", "src/code/mcp.rs", "docs/guide.md", "package.json"];
-const id = () => crypto.randomUUID();
+const id = () => uuid();
 const now = () => Date.now();
 
 const db = {
@@ -989,9 +990,34 @@ export function install() {
   db.providers.push(p);
   db.models.push({ id: "m1", providerId: "p1", modelId: "demo-model", displayName: "Demo model", vision: true, contextWindow: 128000, params: { ...emptyParams(), pricing: { input: 3, cachedInput: 0.3, cacheWrite: 3.75, output: 15 } } });
   db.models.push({ id: "m2", providerId: "p1", modelId: "demo-mini", displayName: "Demo mini", vision: false, contextWindow: 32000, params: emptyParams() });
-  const seed = (cwd: string, title: string, ago: number, activity: CodeSession["activity"], hostNode = ME) =>
-    db.code.push({ id: id(), cwd, acpSessionId: null, title, modelRef: "m1", pinned: false, createdAt: now() - ago, updatedAt: now() - ago, activity, hostNode, epoch: 0, agent: "patchbay", agentModel: null, permissionMode: "default" });
+  const seed = (
+    cwd: string,
+    title: string,
+    ago: number,
+    activity: CodeSession["activity"],
+    hostNode = ME,
+    agent: CodeSession["agent"] = "patchbay",
+  ) =>
+    db.code.push({
+      id: id(),
+      cwd,
+      acpSessionId: null,
+      title,
+      modelRef: "m1",
+      pinned: false,
+      createdAt: now() - ago,
+      updatedAt: now() - ago,
+      activity,
+      hostNode,
+      epoch: 0,
+      agent,
+      agentModel: null,
+      permissionMode: "default",
+    });
   seed("/home/demo/Projects/nulamp", "Windows installer testing", 1000, "edit");
+  // Claude Code + Cursor sessions so the sidebar plan panes can be previewed without creating one.
+  seed("/home/demo/Projects/nulamp", "Claude plan preview", 800, null, ME, "claude-code");
+  seed("/home/demo/Projects/nulamp", "Cursor plan preview", 700, null, ME, "cursor");
   if (readmeDemo) {
     readmeSessionId = db.code[db.code.length - 1].id;
     Object.assign(db.models[0], { modelId: "qwen3-coder", displayName: "Qwen3 Coder" });
