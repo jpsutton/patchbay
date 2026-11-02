@@ -51,6 +51,12 @@ queued for its next turn. The recipient can reply by
 calling `send_agent_message` with the sender's session id. Members share the mesh's existing trust
 boundary, so every admitted member can send messages to every unarchived session.
 
+To stop overnight ping-pong, the bridge rate-limits each session (20 / 10 minutes) and each
+source→target pair (25 / hour). The receiving host collapses an identical body from the same
+source within 10 minutes as `delivery: "duplicate"` without re-prompting. Tool results and the
+injected prompt say that `sent` / `steered` / `queued` / `duplicate` all mean accepted — agents
+must not resend because delivery was queued.
+
 ## Models, modes and config options
 
 Agents report these three ways:
