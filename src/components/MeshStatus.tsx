@@ -46,7 +46,7 @@ function useMesh() {
   return mesh?.member ? mesh : null;
 }
 
-/** Status chip in the sidebar footer; opens the mesh popover. */
+/** Status chip in the sidebar footer; opens the mesh pane. */
 export function MeshChip() {
   const mesh = useMesh();
   const open = useStore((s) => s.meshPopoverOpen);
@@ -106,8 +106,11 @@ export function MeshRailButton() {
   );
 }
 
-/** Who's in the mesh and what's wrong with it, above the sidebar footer. */
-export function MeshPopover({ className }: { className: string }) {
+/**
+ * Who's in the mesh and what's wrong with it. `floating` is the collapsed-rail popover;
+ * otherwise it's the full-width sidebar pane above the footer.
+ */
+export function MeshPopover({ className, floating = false }: { className?: string; floating?: boolean }) {
   const mesh = useMesh();
   const open = useStore((s) => s.meshPopoverOpen);
   const setOpen = useStore((s) => s.setMeshPopoverOpen);
@@ -117,11 +120,6 @@ export function MeshPopover({ className }: { className: string }) {
 
   useEffect(() => {
     if (!shown) return;
-    const onDown = (e: MouseEvent) => {
-      const t = e.target as Element;
-      // The toggle closes it itself; closing here too would reopen it.
-      if (!box.current?.contains(t) && !t.closest?.("[data-mesh-toggle]")) setOpen(false);
-    };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -129,13 +127,22 @@ export function MeshPopover({ className }: { className: string }) {
         setOpen(false);
       }
     };
-    window.addEventListener("mousedown", onDown);
+    // Floating: dismiss on outside click. The in-flow pane stays until toggled or Esc —
+    // clicking a session must not close it.
+    const onDown = floating
+      ? (e: MouseEvent) => {
+          const t = e.target as Element;
+          // The toggle closes it itself; closing here too would reopen it.
+          if (!box.current?.contains(t) && !t.closest?.("[data-mesh-toggle]")) setOpen(false);
+        }
+      : null;
+    if (onDown) window.addEventListener("mousedown", onDown);
     window.addEventListener("keydown", onKey, true);
     return () => {
-      window.removeEventListener("mousedown", onDown);
+      if (onDown) window.removeEventListener("mousedown", onDown);
       window.removeEventListener("keydown", onKey, true);
     };
-  }, [shown, setOpen]);
+  }, [shown, setOpen, floating]);
 
   if (!shown) return null;
   const { others } = summary(mesh);
@@ -146,7 +153,11 @@ export function MeshPopover({ className }: { className: string }) {
       ref={box}
       role="dialog"
       aria-label="Mesh status"
-      className={`z-40 w-[280px] rounded-xl border border-border bg-raised py-1.5 text-[13px] shadow-float ${className}`}
+      className={
+        floating
+          ? `z-40 w-[280px] rounded-xl border border-border bg-raised py-1.5 text-[13px] shadow-float ${className ?? ""}`
+          : `max-h-[40vh] w-full shrink-0 overflow-y-auto border-t border-line bg-panel py-1.5 text-[13px] ${className ?? ""}`
+      }
     >
       <div className="flex items-baseline justify-between px-3 pb-1.5 pt-2">
         <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-faint">Mesh</span>

@@ -6,6 +6,8 @@
  * entries that share a parent. A group holds folders only: groups don't nest.
  */
 
+import { uuid } from "./platform";
+
 export interface SidebarEntry {
   /** `group:<id>` for a group, or the folder's key. */
   key: string;
@@ -21,7 +23,7 @@ export const GROUP_PREFIX = "group:";
 /** Gap between neighbours' positions. A move renumbers its lists, so the gap never runs out. */
 export const POS_STEP = 1024;
 
-export const newGroupKey = () => `${GROUP_PREFIX}${crypto.randomUUID()}`;
+export const newGroupKey = () => `${GROUP_PREFIX}${uuid()}`;
 
 /** One item at the top level of the sidebar. */
 export type TopItem =
