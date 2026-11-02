@@ -609,6 +609,47 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
     turnEmit({ type: "promptDone", stopReason: "end_turn" });
     return;
   }
+  // `/cursor-subagents`: Cursor-shaped `subagent_spawned` / `subagent_state_update` announcements
+  // (what the Cursor CLI sends when Task starts children). Rows appear under the transcript, then
+  // clear as each child finishes.
+  if (text.startsWith("/cursor-subagents")) {
+    fakeStopped.delete(csid);
+    const kids = [
+      { id: "30e89cbf-270c-42ec-a8d2-5992d3c00c24", name: "generalPurpose", task: "Investigate issue #234 follow-ups" },
+      { id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890", name: "explore", task: "Scan ACP readers #74/#81" },
+    ];
+    for (const k of kids) {
+      codeEmit(csid, {
+        type: "update",
+        update: {
+          sessionUpdate: "subagent_spawned",
+          subagentSessionId: k.id,
+          name: k.name,
+          task: k.task,
+          capabilities: {},
+          _meta: { cursor: { agentId: k.id, model: "default" } },
+        },
+      });
+    }
+    await say("Two Cursor subagents are running.");
+    for (let t0 = 0; t0 < 4_000 && !fakeStopped.has(csid); t0 += 200) await sleep(200);
+    if (fakeStopped.has(csid)) {
+      fakeStopped.delete(csid);
+      turnEmit({ type: "promptDone", stopReason: "cancelled" });
+      return;
+    }
+    codeEmit(csid, {
+      type: "update",
+      update: { sessionUpdate: "subagent_state_update", subagentSessionId: kids[0].id, state: "completed" },
+    });
+    codeEmit(csid, {
+      type: "update",
+      update: { sessionUpdate: "subagent_state_update", subagentSessionId: kids[1].id, state: "failed" },
+    });
+    await say("The first finished; the second failed.");
+    turnEmit({ type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
   // `/jobs`: a running tool call and two background jobs, for the Jobs panel and the Stop buttons.
   // Stopping the running call ends it and the turn carries on; stopping a job ends just that job.
   if (text.startsWith("/jobs")) {
