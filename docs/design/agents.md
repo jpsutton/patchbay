@@ -51,6 +51,13 @@ queued for its next turn. The recipient can reply by
 calling `send_agent_message` with the sender's session id. Members share the mesh's existing trust
 boundary, so every admitted member can send messages to every unarchived session.
 
+The messaging MCP is assembled after ACP `initialize`, with `PATCHBAY_MESSAGE_STEERING` set from
+whether that agent steers (ACP `_meta.steering.supported` or Grok interject). Steering agents keep
+only the two tools above; peer mail joins the running turn as usual. Agents that cannot steer also
+get `list_queued_agent_messages` and `accept_queued_agent_message`: the tool descriptions tell them
+to accept a waiting peer message as a mid-turn tool result so it does not wait for turn end (and is
+removed from the next-turn queue). User-queued composer prompts are not listed.
+
 ## Models, modes and config options
 
 Agents report these three ways:
@@ -161,7 +168,7 @@ So a message sent mid-turn takes one of two paths:
   - Claude Code and Codex advertise `initialize` `_meta.steering.supported` and take `_session/steering` (`{sessionId, prompt}`). Patchbay sends `_meta.steering.idleBehavior: "promptRequired"`, so Claude hands back a message that arrives just after its turn ended. Patchbay then sends it as a new turn. Codex ignores this field. In that window it starts a turn of its own, and no `session/prompt` reports when that turn ends.
   - Grok Build takes `x.ai/interject` (`{sessionId, text, content}`) and merges the message at its next safe point. Grok doesn't advertise this, so it is `Extensions.interject`. Its interject carries only text and images, so a message with files or @-mentions waits for the next turn instead.
   - Patchbay checks steering support only from what the agent advertises, never from whether a call returns. Antigravity answers any `_` method with `null`.
-- **Queued** otherwise, or when a steer fails. Patchbay sends queued messages one at a time when the running turn ends normally. A stop, or a turn that ends in an error, drops the queue. The window that sent the dropped messages gets their text back in its composer.
+- **Queued** otherwise, or when a steer fails. Patchbay sends queued messages one at a time when the running turn ends normally. A stop, or a turn that ends in an error, drops the queue. The window that sent the dropped messages gets their text back in its composer. For peer agent messages on a non-steering recipient, the messaging MCP also offers `list_queued_agent_messages` / `accept_queued_agent_message` so the busy agent can pull one into the current turn as a tool result (see "Messaging between Code sessions" above).
 
 Every prompt carries a `promptId`, which the UI generates and the backend fills in when it is missing. The agent thread reports each step as a `userPrompt` event with a `delivery`:
 - `sent`: a new turn. This marks the session busy.

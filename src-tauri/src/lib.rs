@@ -1545,13 +1545,9 @@ async fn code_start_local(state: &AppState, id: String) -> anyhow::Result<()> {
     }
     let sink = code_sink(state);
     let (code, db, dir) = (state.code.clone(), state.db.clone(), state.data_dir.clone());
-    let message_server = state
-        .agent_message_bridge
-        .get()
-        .map(|bridge| bridge.server_definition(&id))
-        .transpose()?;
+    let message_bridge = state.agent_message_bridge.get().cloned();
     // `start` may block briefly while a previous agent for this session shuts down.
-    tokio::task::spawn_blocking(move || code.start(sink, db, &dir, &id, message_server)).await??;
+    tokio::task::spawn_blocking(move || code.start(sink, db, &dir, &id, message_bridge)).await??;
     Ok(())
 }
 
@@ -1811,6 +1807,26 @@ pub(crate) fn list_agent_sessions(state: &AppState, source_session_id: &str) -> 
         })
         .collect();
     Ok(serde_json::json!(sessions))
+}
+
+pub(crate) async fn list_queued_agent_messages(
+    state: &AppState,
+    session_id: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let listed = state.code.list_queued_agent_messages(session_id).await?;
+    Ok(serde_json::to_value(listed)?)
+}
+
+pub(crate) async fn accept_queued_agent_message(
+    state: &AppState,
+    session_id: &str,
+    message_id: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let text = state
+        .code
+        .accept_queued_agent_message(session_id, message_id)
+        .await?;
+    Ok(serde_json::json!({ "messageId": message_id, "text": text }))
 }
 
 pub(crate) async fn send_agent_message(

@@ -189,6 +189,30 @@ pub enum Delivery {
     Queued,
 }
 
+/// A peer agent message waiting behind the running turn (`origin` is `agent:…`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueuedAgentMessage {
+    pub message_id: String,
+    /// First part of the prompt text, for listing without shipping the whole body.
+    pub preview: String,
+    pub origin: String,
+}
+
+/// Whether a prompt came from another Code session via agent messaging.
+pub fn is_agent_message_origin(origin: &str) -> bool {
+    origin.starts_with("agent:")
+}
+
+fn agent_message_preview(text: &str) -> String {
+    const MAX: usize = 240;
+    let mut preview: String = text.chars().take(MAX).collect();
+    if text.chars().count() > MAX {
+        preview.push('…');
+    }
+    preview
+}
+
 /// A user prompt: the ACP blocks for the agent, and what the transcript shows for it.
 #[derive(Debug, Clone)]
 pub struct UserMessage {
@@ -225,6 +249,15 @@ pub enum AgentCmd {
     /// Send a queued prompt, or one steered into the running turn, now: cancel the running turn
     /// and send it next.
     SendNow { prompt_id: String },
+    /// Peer agent messages waiting in the queue (`origin` starts with `agent:`).
+    ListQueuedAgent {
+        reply: oneshot::Sender<Result<Vec<QueuedAgentMessage>>>,
+    },
+    /// Take one queued peer agent message out of the queue (for an MCP tool result mid-turn).
+    AcceptQueuedAgent {
+        prompt_id: String,
+        reply: oneshot::Sender<Result<String>>,
+    },
     Cancel,
     /// Stop one running tool call; the turn goes on. Patchbay's own agent only.
     CancelTool { tool_call_id: String },
@@ -1611,6 +1644,40 @@ async fn run(
                             emit(&sink, &csid, CodeEvent::Unqueued { prompt_ids: vec![prompt_id], restore: false });
                         }
                     }
+                    AgentCmd::ListQueuedAgent { reply } => {
+                        let list = queue
+                            .iter()
+                            .filter(|(_, m)| is_agent_message_origin(&m.origin))
+                            .map(|(_, m)| QueuedAgentMessage {
+                                message_id: m.id.clone(),
+                                preview: agent_message_preview(&m.text),
+                                origin: m.origin.clone(),
+                            })
+                            .collect();
+                        let _ = reply.send(Ok(list));
+                    }
+                    AgentCmd::AcceptQueuedAgent { prompt_id, reply } => {
+                        let found = queue.iter().position(|(_, m)| m.id == prompt_id);
+                        let r = match found {
+                            Some(i) if is_agent_message_origin(&queue[i].1.origin) => {
+                                let (_, msg) = queue.remove(i).expect("found above");
+                                emit(
+                                    &sink,
+                                    &csid,
+                                    CodeEvent::Unqueued {
+                                        prompt_ids: vec![prompt_id],
+                                        restore: false,
+                                    },
+                                );
+                                Ok(msg.text)
+                            }
+                            Some(_) => Err(anyhow!(
+                                "that queued prompt is not a peer agent message"
+                            )),
+                            None => Err(anyhow!("no queued peer agent message with that id")),
+                        };
+                        let _ = reply.send(r);
+                    }
                     AgentCmd::SendNow { prompt_id } => {
                         if force_steers {
                             // Nothing is cancelled: a steered message stays steered, once the
@@ -1834,6 +1901,12 @@ fn refuse_until_signed_in(cmd: AgentCmd) {
             let _ = reply.send(Err(anyhow!("a sign-in is already in progress")));
         }
         AgentCmd::Prompt { reply, .. } => answer(reply, Err(anyhow!("the agent isn't signed in yet"))),
+        AgentCmd::ListQueuedAgent { reply } => {
+            let _ = reply.send(Err(anyhow!("the agent isn't signed in yet")));
+        }
+        AgentCmd::AcceptQueuedAgent { reply, .. } => {
+            let _ = reply.send(Err(anyhow!("the agent isn't signed in yet")));
+        }
         AgentCmd::Unqueue { .. }
         | AgentCmd::SendNow { .. }
         | AgentCmd::Cancel
@@ -3025,6 +3098,63 @@ for line in sys.stdin:
         );
         let unqueued = |e: &CodeEvent| matches!(e, CodeEvent::Unqueued { prompt_ids, restore: false } if prompt_ids == &["third"]);
         assert_eq!(count(&events, unqueued), 1);
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A non-steering agent can pull a queued peer message mid-turn so it never becomes the next turn.
+    #[test]
+    fn accept_queued_agent_message_mid_turn() {
+        let dir = std::env::temp_dir().join(format!("pb-accept-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        let peer = UserMessage {
+            id: "peer-1".into(),
+            blocks: vec![json!({ "type": "text", "text": "hello from peer" })],
+            text: "hello from peer".into(),
+            origin: "agent:node-a:session-b".into(),
+            attachments: json!([]),
+        };
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        tx.send(AgentCmd::Prompt { msg: peer, force: false, reply: Some(reply) }).unwrap();
+        assert_eq!(rx.blocking_recv().unwrap().unwrap(), Delivery::Queued);
+
+        // A user-queued prompt is not offered as a peer agent message.
+        assert_eq!(prompt(&tx, "user-queued"), Delivery::Queued);
+
+        let (list_reply, list_rx) = tokio::sync::oneshot::channel();
+        tx.send(AgentCmd::ListQueuedAgent { reply: list_reply }).unwrap();
+        let listed = list_rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].message_id, "peer-1");
+        assert!(listed[0].preview.contains("hello from peer"));
+
+        let (accept_reply, accept_rx) = tokio::sync::oneshot::channel();
+        tx.send(AgentCmd::AcceptQueuedAgent {
+            prompt_id: "peer-1".into(),
+            reply: accept_reply,
+        })
+        .unwrap();
+        assert_eq!(accept_rx.blocking_recv().unwrap().unwrap(), "hello from peer");
+
+        let unqueued =
+            |e: &CodeEvent| matches!(e, CodeEvent::Unqueued { prompt_ids, restore: false } if prompt_ids == &["peer-1"]);
+        wait_for(&events, "accepted", |evs| evs.iter().any(unqueued));
+
+        // Stopping the hold drops the remaining user queue; the accepted peer never starts a turn.
+        tx.send(AgentCmd::Cancel).unwrap();
+        wait_for(&events, "cancelled", |evs| {
+            evs.iter().any(|e| matches!(e, CodeEvent::PromptDone { stop_reason } if stop_reason == "cancelled"))
+        });
+        assert_eq!(agent_heard(&events, 1), ["prompt:hold"]);
+        assert!(!deliveries(&events).iter().any(|(id, d)| id == "peer-1" && *d == Delivery::Sent));
         no_errors(&events);
         tx.send(AgentCmd::Shutdown).unwrap();
         thread.join().unwrap();

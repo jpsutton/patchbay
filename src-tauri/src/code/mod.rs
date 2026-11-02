@@ -121,7 +121,7 @@ impl CodeManager {
         db: Arc<Db>,
         data_dir: &Path,
         code_session_id: &str,
-        message_server: Option<serde_json::Value>,
+        message_bridge: Option<crate::agent_messaging::AgentMessagingBridge>,
     ) -> Result<()> {
         // Let a previous agent for this session flush and exit first, so the new one loads
         // its final state and the old "exited" event can't land after the new "ready".
@@ -176,6 +176,7 @@ impl CodeManager {
         };
         let csid = code_session_id.to_owned();
         let db2 = db.clone();
+        let interject = launch.extensions.interject;
         let (tx, thread) = acp::spawn(SpawnSpec {
             sink,
             code_session_id: csid.clone(),
@@ -210,6 +211,7 @@ impl CodeManager {
             },
             mcp: {
                 let db = db.clone();
+                let session_id = code_session_id.to_owned();
                 Box::new(move |init| {
                     let (mut servers, skipped) = mcp::acp_servers(&db, mcp::McpSupport::from_init(init)).unwrap_or_else(|e| {
                         tracing::warn!("MCP servers: {e:#}");
@@ -218,8 +220,13 @@ impl CodeManager {
                     if !skipped.is_empty() {
                         tracing::warn!("MCP servers skipped for unsupported transports: {}", skipped.join(", "));
                     }
-                    if let Some(server) = message_server {
-                        servers.insert(0, server);
+                    // Built after initialize so the tool list can match this agent's steering.
+                    if let Some(bridge) = message_bridge {
+                        let can_steer = init["_meta"]["steering"]["supported"] == true || interject;
+                        match bridge.server_definition(&session_id, can_steer) {
+                            Ok(server) => servers.insert(0, server),
+                            Err(e) => tracing::warn!("agent-messaging MCP: {e:#}"),
+                        }
                     }
                     (servers, Vec::new())
                 })
@@ -253,6 +260,29 @@ impl CodeManager {
     pub async fn prompt(&self, code_session_id: &str, msg: acp::UserMessage, force: bool) -> Result<acp::Delivery> {
         let (reply, rx) = oneshot::channel();
         self.send(code_session_id, AgentCmd::Prompt { msg, force, reply: Some(reply) })?;
+        rx.await.map_err(|_| anyhow!("agent stopped"))?
+    }
+
+    /// Peer agent messages waiting behind the running turn.
+    pub async fn list_queued_agent_messages(
+        &self,
+        code_session_id: &str,
+    ) -> Result<Vec<acp::QueuedAgentMessage>> {
+        let (reply, rx) = oneshot::channel();
+        self.send(code_session_id, AgentCmd::ListQueuedAgent { reply })?;
+        rx.await.map_err(|_| anyhow!("agent stopped"))?
+    }
+
+    /// Take one queued peer agent message out of the queue (MCP accept mid-turn).
+    pub async fn accept_queued_agent_message(&self, code_session_id: &str, prompt_id: &str) -> Result<String> {
+        let (reply, rx) = oneshot::channel();
+        self.send(
+            code_session_id,
+            AgentCmd::AcceptQueuedAgent {
+                prompt_id: prompt_id.to_owned(),
+                reply,
+            },
+        )?;
         rx.await.map_err(|_| anyhow!("agent stopped"))?
     }
 
