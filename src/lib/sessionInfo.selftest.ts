@@ -113,11 +113,76 @@ const base: SessionInfoInput = { session, agentLabel: "Claude Code", hostName: n
   const usage = rowsOf(i, "Usage");
   assert(usage["Context"].value === "1,000 of 200,000 tokens", "context usage");
   assert(usage["Cost"].value === "$0.5000", "cost");
+  assert(!("Plan" in Object.fromEntries(sessionInfoSections(i).map((s) => [s.title, s]))), "no plan while omitted");
 
   const text = sessionInfoText(sessionInfoSections(i), Date.UTC(2026, 9, 22, 23, 51, 58));
   assert(text.startsWith("Patchbay session info (2026-10-22T23:51:58.000Z)\n\nSession:\n- Title: Fix the thing\n"), "text header");
   assert(text.includes("\n\nEnvironment:\n- Folder: /Users/me/proj\n"), "text sections are separated by a blank line");
   assert(text.includes("- Agent session ID: live-acp\n"), "text carries the raw id");
+}
+
+// Claude plan for this session only; Cursor plan stays out.
+{
+  const now = 1_700_000_000;
+  const plan = rowsOf(
+    {
+      ...base,
+      nowSecs: now,
+      plan: {
+        kind: "claude",
+        label: "Claude Code login",
+        account: "/home/me/.claude",
+        latest: {
+          fiveHour: { utilization: 0.42, resetsAt: now + 3600 },
+          sevenDay: { utilization: 0.11, resetsAt: now + 3 * 86400 },
+          overageUntil: null,
+          observedAt: now - 120,
+        },
+      },
+    },
+    "Plan",
+  );
+  assert(plan["Account"].value === "Claude Code login", "claude account label");
+  assert(plan["5-hour"].value === "42% · resets in 1h 0m", "5-hour window");
+  assert(plan["Weekly"].value.startsWith("11% · resets in 3d"), "weekly window");
+  assert(plan["Updated"].value === "2m ago", "observed age");
+}
+
+{
+  const now = 1_700_000_000;
+  const plan = rowsOf(
+    {
+      ...base,
+      session: { ...session, agent: "cursor" },
+      agentLabel: "Cursor",
+      nowSecs: now,
+      plan: {
+        kind: "cursor",
+        limits: {
+          accountId: "user_1",
+          email: "you@example.com",
+          observedAt: now - 60,
+          resetsAt: now + 86400,
+          auto: 33.2,
+          api: 8,
+          remainingBonus: true,
+          bonusSpendCents: 125,
+        },
+      },
+    },
+    "Plan",
+  );
+  assert(plan["Account"].value === "you@example.com", "cursor email");
+  assert(plan["Auto"].value.startsWith("33%"), "cursor auto pool");
+  assert(plan["API"].value.startsWith("8%"), "cursor api pool");
+  assert(plan["Free on us"].value.includes("still available"), "cursor bonus");
+}
+
+{
+  assert(
+    !("Plan" in Object.fromEntries(sessionInfoSections({ ...base, plan: null }).map((s) => [s.title, s]))),
+    "null plan omits the section",
+  );
 }
 
 console.log("sessionInfo selftest ok");

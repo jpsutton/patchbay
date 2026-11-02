@@ -1,7 +1,17 @@
 // What a Code session is, as plain rows: the raw ids, the agent and its build, the model, where it
 // runs. One list feeds the details dialog and the "copy all" text (modelled on Claude Code's
 // `/status`), so the two can't drift. Pure: the caller gathers the inputs.
-import type { AcpConfigChoice, AcpConfigOption, AgentInfo, CodeSession, HostInfo } from "./ipc";
+import type {
+  AcpConfigChoice,
+  AcpConfigOption,
+  AgentInfo,
+  CodeSession,
+  CursorPlanLimits,
+  HostInfo,
+  PlanLimits,
+  PlanWindow,
+  SessionPlanUsage,
+} from "./ipc";
 import type { CodeState } from "./store";
 
 export interface InfoRow {
@@ -35,6 +45,13 @@ export interface SessionInfoInput {
   hostName: string | null;
   /** True when that computer is the one showing this. */
   isLocalHost: boolean;
+  /**
+   * Claude or Cursor plan for this session. Omit while loading; null when the session uses neither
+   * plan (or an older host can't say).
+   */
+  plan?: SessionPlanUsage | null;
+  /** Unix seconds for live reset countdowns; defaults to now. */
+  nowSecs?: number;
 }
 
 const APPROVALS: Record<CodeSession["permissionMode"], string> = {
@@ -200,7 +217,90 @@ export function sessionInfoSections(i: SessionInfoInput): InfoSection[] {
     if (rows.length > 0) sections.push({ title: "Usage", rows });
   }
 
+  const planRows = planSectionRows(i.plan, i.nowSecs ?? Math.floor(Date.now() / 1000));
+  if (planRows) sections.push({ title: "Plan", rows: planRows });
+
   return sections;
+}
+
+/** `1h 12m`, `3d 2h`, `4m`. */
+function fmtSpan(secs: number): string {
+  const m = Math.max(1, Math.ceil(secs / 60));
+  if (m < 60) return `${m}m`;
+  if (m < 1440) return `${Math.floor(m / 60)}h ${m % 60}m`;
+  return `${Math.floor(m / 1440)}d ${Math.floor(m / 60) % 24}h`;
+}
+
+function windowRow(label: string, w: PlanWindow | null | undefined, now: number): InfoRow | null {
+  if (w == null) return null;
+  if (w.resetsAt <= now) return { label, value: "reset since last report" };
+  return { label, value: `${Math.round(w.utilization * 100)}% · resets in ${fmtSpan(w.resetsAt - now)}` };
+}
+
+function fmtUsdCents(cents: number): string {
+  return `$${(cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function claudePlanRows(label: string, latest: PlanLimits | null, now: number): InfoRow[] {
+  const rows: InfoRow[] = [{ label: "Account", value: label }];
+  if (!latest) {
+    rows.push({ label: "Usage", value: "not reported yet" });
+    return rows;
+  }
+  const five = windowRow("5-hour", latest.fiveHour, now);
+  const week = windowRow("Weekly", latest.sevenDay, now);
+  if (five) rows.push(five);
+  if (week) rows.push(week);
+  if (latest.overageUntil != null && latest.overageUntil > now) {
+    rows.push({ label: "Extra usage", value: `billed past the plan for ${fmtSpan(latest.overageUntil - now)} more` });
+  }
+  if (!five && !week && !(latest.overageUntil != null && latest.overageUntil > now)) {
+    rows.push({ label: "Usage", value: "not reported yet" });
+  } else {
+    rows.push({ label: "Updated", value: `${fmtSpan(Math.max(0, now - latest.observedAt))} ago` });
+  }
+  return rows;
+}
+
+function cursorPlanRows(limits: CursorPlanLimits | null, now: number): InfoRow[] {
+  if (!limits) return [{ label: "Cursor", value: "not reported yet" }];
+  const rows: InfoRow[] = [];
+  if (limits.email) rows.push({ label: "Account", value: limits.email });
+  const live = limits.resetsAt == null || limits.resetsAt > now;
+  const pct = (label: string, n: number | null | undefined) => {
+    if (n == null || !live) return;
+    rows.push({
+      label,
+      value: limits.resetsAt != null && limits.resetsAt > now ? `${Math.round(n)}% · resets in ${fmtSpan(limits.resetsAt - now)}` : `${Math.round(n)}%`,
+    });
+  };
+  pct("Auto", limits.auto);
+  pct("API", limits.api);
+  if (limits.auto == null && limits.api == null) pct("Total", limits.total);
+  if (!live) rows.push({ label: "Usage", value: "reset since last report" });
+  const bonus = limits.bonusSpendCents;
+  if (bonus != null && bonus > 0) {
+    rows.push({
+      label: "Free on us",
+      value: limits.remainingBonus ? `${fmtUsdCents(bonus)} used · still available` : `${fmtUsdCents(bonus)} used · used up`,
+    });
+  } else if (limits.remainingBonus) {
+    rows.push({ label: "Free on us", value: "still available" });
+  } else if (limits.remainingBonus === false) {
+    rows.push({ label: "Free on us", value: "no longer available" });
+  }
+  if (rows.every((r) => r.label === "Account") && live) {
+    rows.push({ label: "Usage", value: "not reported yet" });
+  }
+  rows.push({ label: "Updated", value: `${fmtSpan(Math.max(0, now - limits.observedAt))} ago` });
+  return rows;
+}
+
+/** Plan rows for this session, or null when there is nothing to show. */
+function planSectionRows(plan: SessionPlanUsage | null | undefined, now: number): InfoRow[] | null {
+  if (plan == null) return null;
+  if (plan.kind === "claude") return claudePlanRows(plan.label, plan.latest, now);
+  return cursorPlanRows(plan.limits, now);
 }
 
 /** The sections as text to paste into a bug report or a shell: `/status`'s layout. */

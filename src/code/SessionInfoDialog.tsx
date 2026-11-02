@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { AGENT_LABELS, api, type AgentInfo, type HostInfo } from "../lib/ipc";
+import { AGENT_LABELS, api, type AgentInfo, type HostInfo, type SessionPlanUsage } from "../lib/ipc";
 import { memberName, remoteHost, useStore } from "../lib/store";
 import { sessionInfoSections, sessionInfoText } from "../lib/sessionInfo";
 import { CopyButton } from "../components/CopyButton";
@@ -8,8 +8,9 @@ import { installedAgents } from "./CodeView";
 
 /**
  * The raw ids and settings of one Code session, with copy buttons. Opened from a session's row
- * menu, its header, or the command palette, on the desktop and the phone alike; it reads only
- * what every surface already has (the saved session, its live state, the agent list).
+ * menu, its header, or the command palette, on the desktop and the phone alike. Plan usage is
+ * fetched for this session only (Claude or Cursor), so the phone sees the same Plan section as
+ * the computer.
  */
 export function SessionInfoDialog() {
   const id = useStore((s) => s.sessionInfoId);
@@ -19,6 +20,7 @@ export function SessionInfoDialog() {
   const mesh = useStore((s) => s.mesh);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [hostInfo, setHostInfo] = useState<HostInfo | null>(null);
+  const [plan, setPlan] = useState<SessionPlanUsage | null | undefined>(undefined);
   const host = remoteHost(session, mesh);
 
   useEffect(() => {
@@ -42,6 +44,19 @@ export function SessionInfoDialog() {
     };
   }, [id, host]);
 
+  useEffect(() => {
+    if (!id) return;
+    let live = true;
+    setPlan(undefined);
+    api.sessionPlanUsage(id).then(
+      (p) => live && setPlan(p),
+      () => live && setPlan(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [id]);
+
   const sections = useMemo(
     () =>
       session
@@ -53,9 +68,10 @@ export function SessionInfoDialog() {
             hostInfo,
             hostName: host ? memberName(mesh, host) : null,
             isLocalHost: !host,
+            plan,
           })
         : [],
-    [session, state, agents, hostInfo, host, mesh],
+    [session, state, agents, hostInfo, host, mesh, plan],
   );
 
   if (!id || !session) return null;

@@ -59,7 +59,7 @@ All are `Rpc` messages from the phone to its gateway (`src-tauri/src/gateway.rs`
 | `remote.chat_send`, `remote.chat_regenerate`, `remote.chat_cancel` | Chat turns, run by the gateway or the computer the phone picked (section 4). |
 | `remote.streams` | Replies streaming anywhere, for a chat opened mid-reply. |
 | `remote.code` | A Code command (`code.prompt`, `code.permission`, `code.cancel`, …) run on the session's host. |
-| `remote.transcript`, `remote.usage`, `remote.update_code_session` | The transcript cache, usage, and the title. |
+| `remote.transcript`, `remote.usage`, `remote.session_plan_usage`, `remote.update_code_session` | The transcript cache, turn usage, Claude/Cursor plan usage for that session, and the title. |
 | `remote.attach_put`, `remote.thumbnail` | Upload an attachment in 3 MB chunks; an image's thumbnail. |
 | `remote.subscribe`, `remote.unsubscribe` | Follow topics, each from a point (section 3). |
 | `remote.admit`, `remote.reject` | Decide a join request waiting on any member (section 7, "Join requests"). |

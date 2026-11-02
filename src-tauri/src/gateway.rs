@@ -105,6 +105,7 @@ pub(crate) async fn call(state: &AppState, from: &str, method: &str, p: &Value) 
         }
         "remote.code" => forward_code(state, from, p).await?,
         "remote.usage" => json!(db.code_usage(&s("id")?)?.view()),
+        "remote.session_plan_usage" => json!(crate::session_plan_usage_local(state, &s("id")?)),
         "remote.update_code_session" => {
             let id = s("id")?;
             if let Some(t) = p["title"].as_str() {

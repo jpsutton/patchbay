@@ -879,6 +879,11 @@ async fn code_usage(r: Shared<'_>, id: String) -> CmdResult<Value> {
 }
 
 #[tauri::command]
+async fn session_plan_usage(r: Shared<'_>, id: String) -> CmdResult<Value> {
+    Ok(r.client.rpc("remote.session_plan_usage", json!({ "id": id })).await?)
+}
+
+#[tauri::command]
 async fn code_session_image(r: Shared<'_>, id: String, path: String) -> CmdResult<Value> {
     r.code("code.image", json!({ "id": id, "path": path })).await
 }
@@ -1050,6 +1055,7 @@ pub fn run() {
             code_rewind,
             code_permission_respond,
             code_usage,
+            session_plan_usage,
             list_project_files,
             code_session_image,
         ])
