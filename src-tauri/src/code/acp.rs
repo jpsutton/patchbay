@@ -364,40 +364,88 @@ struct TurnCtx {
     done: mpsc::UnboundedSender<bool>,
 }
 
+/// How many times a transport drop re-sends `session/prompt` after the first failure.
+/// Cursor ACP turns end on the first blip (`enableAgentRetries` is off there); Patchbay retries
+/// the same prompt on the live session so the user doesn't have to.
+const TRANSPORT_RETRIES: u32 = 2;
+
+fn transport_backoff(attempt: u32) -> std::time::Duration {
+    if cfg!(test) {
+        std::time::Duration::from_millis(20)
+    } else {
+        // 1s, then 2s.
+        std::time::Duration::from_secs(1u64 << attempt.min(2))
+    }
+}
+
 /// Start a turn for `msg` with `session/prompt`.
 fn start_turn(ctx: &TurnCtx, msg: UserMessage) -> Result<Delivery> {
-    let req: acp::PromptRequest = from_json(json!({ "sessionId": ctx.session_id, "prompt": msg.blocks }))?;
     emit(&ctx.sink, &ctx.csid, msg.event(Delivery::Sent));
     let ctx = ctx.clone();
     tokio::task::spawn_local(async move {
         let (sink, csid) = (&ctx.sink, ctx.csid.as_str());
-        let go_on = match ctx.conn.prompt(req).await {
-            Ok(resp) => {
-                let v = serde_json::to_value(&resp).unwrap_or_default();
-                if v["usage"].is_object() {
-                    emit(sink, csid, CodeEvent::TurnUsage { usage: v["usage"].clone() });
+        let mut attempt = 0u32;
+        let go_on = loop {
+            let req: acp::PromptRequest = match from_json(json!({
+                "sessionId": ctx.session_id,
+                "prompt": msg.blocks,
+            })) {
+                Ok(r) => r,
+                Err(e) => {
+                    emit(sink, csid, CodeEvent::Error { message: format!("{e:#}") });
+                    emit(sink, csid, CodeEvent::PromptDone { stop_reason: json!("error") });
+                    break false;
                 }
-                let go_on = v["stopReason"] != "cancelled";
-                emit(sink, csid, CodeEvent::PromptDone { stop_reason: v["stopReason"].clone() });
-                go_on
-            }
-            // Signed out mid-session (a logout, an expired token): offer a sign-in when there is
-            // one Patchbay can run, else say how.
-            Err(e) if is_auth_required(&e) => {
-                let message = auth_message(&e, &ctx.init_v, ctx.login_hint, true);
-                if ctx.auth_methods.is_empty() {
+            };
+            match ctx.conn.prompt(req).await {
+                Ok(resp) => {
+                    let v = serde_json::to_value(&resp).unwrap_or_default();
+                    if v["usage"].is_object() {
+                        emit(sink, csid, CodeEvent::TurnUsage { usage: v["usage"].clone() });
+                    }
+                    let go_on = v["stopReason"] != "cancelled";
+                    emit(sink, csid, CodeEvent::PromptDone { stop_reason: v["stopReason"].clone() });
+                    break go_on;
+                }
+                // Signed out mid-session (a logout, an expired token): offer a sign-in when there is
+                // one Patchbay can run, else say how.
+                Err(e) if is_auth_required(&e) => {
+                    let message = auth_message(&e, &ctx.init_v, ctx.login_hint, true);
+                    if ctx.auth_methods.is_empty() {
+                        emit(sink, csid, CodeEvent::Error { message });
+                    } else {
+                        ctx.auth_lost.set(true);
+                        emit(sink, csid, CodeEvent::AuthRequired { message, methods: ctx.auth_methods.clone() });
+                    }
+                    emit(sink, csid, CodeEvent::PromptDone { stop_reason: json!("error") });
+                    break false;
+                }
+                Err(e) if is_retriable_transport(&e) && attempt < TRANSPORT_RETRIES => {
+                    attempt += 1;
+                    emit(
+                        sink,
+                        csid,
+                        CodeEvent::Notice {
+                            message: format!(
+                                "The agent's connection dropped; retrying ({attempt}/{TRANSPORT_RETRIES})…"
+                            ),
+                        },
+                    );
+                    tokio::time::sleep(transport_backoff(attempt - 1)).await;
+                }
+                Err(e) => {
+                    let message = if attempt > 0 {
+                        format!(
+                            "The agent's connection dropped after {} tries. Send your message again.\n{e}",
+                            attempt + 1
+                        )
+                    } else {
+                        e.to_string()
+                    };
                     emit(sink, csid, CodeEvent::Error { message });
-                } else {
-                    ctx.auth_lost.set(true);
-                    emit(sink, csid, CodeEvent::AuthRequired { message, methods: ctx.auth_methods.clone() });
+                    emit(sink, csid, CodeEvent::PromptDone { stop_reason: json!("error") });
+                    break false;
                 }
-                emit(sink, csid, CodeEvent::PromptDone { stop_reason: json!("error") });
-                false
-            }
-            Err(e) => {
-                emit(sink, csid, CodeEvent::Error { message: e.to_string() });
-                emit(sink, csid, CodeEvent::PromptDone { stop_reason: json!("error") });
-                false
             }
         };
         let _ = ctx.done.send(go_on);
@@ -1978,6 +2026,27 @@ fn is_auth_required(e: &acp::Error) -> bool {
     }
 }
 
+/// Cursor (and some other agents) end an ACP turn on a brief transport blip. The error names
+/// itself retriable, but ACP never retries. Match the shapes Cursor staff and users report.
+fn is_retriable_transport(e: &acp::Error) -> bool {
+    let msg = e.message.to_ascii_lowercase();
+    const NEEDLES: &[&str] = &[
+        "retriableerror",
+        "http/2 stream closed",
+        "cancel (0x8)",
+        "[canceled]",
+        "[cancelled]",
+        "[unavailable]",
+        "deadline_exceeded",
+        "bidi_append_deadline_exceeded",
+        "connection stalled",
+        "ping timed out",
+        "econnreset",
+        "socket hang up",
+    ];
+    NEEDLES.iter().any(|n| msg.contains(n))
+}
+
 /// An internal error's message without JSON-RPC's generic "Internal error:" prefix, or `None`
 /// for other errors.
 fn internal_error_reason(e: &acp::Error) -> Option<&str> {
@@ -2426,10 +2495,11 @@ mod tests {
     /// key `sk-test` in codex-acp's shape, so the string shape Patchbay tries first is refused.
     /// The prompt `expire` signs it out again, and prompts fail with `auth_required` until the
     /// next sign-in. `expire-oauth` does the same with claude-agent-acp's `-32603` and
-    /// `errorKind`, and `crash` fails with a `-32603` that isn't about signing in. To clients
-    /// that run terminal sign-ins it also offers `tui`, whose command
-    /// (this script with `--login`) leaves a `signed-in` file that a new process starts with.
-    /// `--no-methods` starts it signed in, with no auth methods.
+    /// `errorKind`, and `crash` fails with a `-32603` that isn't about signing in. `flaky` fails
+    /// the first two prompts with Cursor's HTTP/2 CANCEL RetriableError, then succeeds;
+    /// `always-flaky` always returns that error. To clients that run terminal sign-ins it also
+    /// offers `tui`, whose command (this script with `--login`) leaves a `signed-in` file that a
+    /// new process starts with. `--no-methods` starts it signed in, with no auth methods.
     ///
     /// Turns: a prompt `hold` runs until a `release` steer or a cancel, and `brief` for half a
     /// second. `subagent` streams `child:work` under another session id, as a subagent would,
@@ -2449,6 +2519,8 @@ no_methods = "--no-methods" in sys.argv
 authed = no_methods or os.path.exists("signed-in")
 lock = threading.Lock()
 held = None
+flaky_left = 2
+TRANSPORT = "Error: RetriableError: [canceled] http/2 stream closed with error code CANCEL (0x8)"
 def send(m):
     with lock:
         sys.stdout.write(json.dumps(m) + "\n"); sys.stdout.flush()
@@ -2511,6 +2583,11 @@ for line in sys.stdin:
         if t == "crash":
             send({"jsonrpc": "2.0", "id": i, "error": {"code": -32603, "message": "Internal error: boom",
                   "data": {"errorKind": "unknown"}}})
+            continue
+        if t == "always-flaky" or (t == "flaky" and flaky_left > 0):
+            if t == "flaky":
+                flaky_left -= 1
+            send({"jsonrpc": "2.0", "id": i, "error": {"code": -32603, "message": TRANSPORT}})
             continue
         if not authed and t == "expire-oauth":
             send({"jsonrpc": "2.0", "id": i, "error": {"code": -32603,
@@ -2767,6 +2844,86 @@ for line in sys.stdin:
         tx.send(AgentCmd::Shutdown).unwrap();
         thread.join().unwrap();
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A Cursor-shaped transport drop mid-prompt is retried on the same session; the turn
+    /// succeeds without an error entry once the agent answers.
+    #[test]
+    fn a_retriable_transport_drop_is_retried() {
+        let dir = std::env::temp_dir().join(format!("pb-retry-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        send_prompt(&tx, "flaky");
+        wait_for(&events, "promptDone", |evs| evs.iter().any(prompt_done));
+        let notices: Vec<String> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                CodeEvent::Notice { message } if message.contains("connection dropped") => Some(message.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notices.len(), 2, "{notices:?}");
+        assert!(notices[0].contains("1/2"), "{notices:?}");
+        assert!(notices[1].contains("2/2"), "{notices:?}");
+        assert_eq!(count(&events, |e| matches!(e, CodeEvent::Error { .. })), 0);
+        assert_eq!(agent_heard(&events, 1), ["prompt:flaky"]);
+        assert_eq!(stop_reasons(&events), [json!("end_turn")]);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Exhausted transport retries surface a clear error; the session stays up for a later prompt.
+    #[test]
+    fn exhausted_transport_retries_keep_the_session() {
+        let dir = std::env::temp_dir().join(format!("pb-retry-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        send_prompt(&tx, "always-flaky");
+        wait_for(&events, "promptDone", |evs| evs.iter().any(prompt_done));
+        assert_eq!(
+            count(&events, |e| matches!(e, CodeEvent::Notice { message } if message.contains("connection dropped"))),
+            2
+        );
+        let errors: Vec<String> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                CodeEvent::Error { message } => Some(message.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("after 3 tries"), "{errors:?}");
+        assert!(errors[0].contains("RetriableError"), "{errors:?}");
+
+        send_prompt(&tx, "hello");
+        wait_for(&events, "second promptDone", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 2);
+        assert_eq!(agent_heard(&events, 1), ["prompt:hello"]);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn retriable_transport_matches_cursor_shapes() {
+        let hit = |m: &str| is_retriable_transport(&acp::Error::new(-32603, m));
+        assert!(hit("Error: RetriableError: [canceled] http/2 stream closed with error code CANCEL (0x8)"));
+        assert!(hit("ConnectError: [unavailable]"));
+        assert!(hit("deadline_exceeded: bidi_append_deadline_exceeded"));
+        assert!(hit("Connection stalled"));
+        assert!(hit("PING timed out"));
+        assert!(!hit("Internal error: boom"));
+        assert!(!hit("Authentication required"));
     }
 
     /// claude-agent-acp reports an expired login as an internal error tagged `errorKind`. That
