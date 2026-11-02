@@ -653,7 +653,10 @@ export interface AcpPlanEntry {
   status: "pending" | "in_progress" | "completed" | "cancelled";
 }
 
-/** One subagent of Patchbay's own agent, as its `subagents_update` reports it. */
+/**
+ * One subagent shown under the transcript. Patchbay's agent fills this via `subagents_update`;
+ * Cursor / Grok ACP spawn announcements are normalized into the same shape (`origin: "session"`).
+ */
 export interface Subagent {
   id: string;
   name: string | null;
@@ -672,6 +675,13 @@ export interface Subagent {
   /** Waiting for the user, not for the model or a tool. */
   blocked: boolean;
   worktree: { path: string; branch: string } | null;
+  /**
+   * `session`: announced by ACP (`subagent_spawned` / `subagent_state_update`). Absent or
+   * `agent`: Patchbay's own harness (`subagents_update`).
+   */
+  origin?: "agent" | "session";
+  /** Client clock when a session-origin row last started running; drives elapsed time. */
+  startedAt?: number;
 }
 
 export type AcpUpdate =

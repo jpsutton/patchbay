@@ -1049,6 +1049,36 @@ fn unknown_update(update: &Value) -> Option<String> {
         // Patchbay's own agent: how its subagents are doing (`patchbay-agent`'s `publish_agents`).
         "subagents_update" if update["agents"].is_array() => None,
         "subagents_update" => Some("The agent sent a subagent list Patchbay can't show".into()),
+        // Cursor ACP (and Grok): a child session announced on the parent. The UI folds these into
+        // the subagent rows; child traffic still streams under its own session id and is dropped.
+        "subagent_spawned"
+            if update["subagentSessionId"].is_string()
+                || update["child_session_id"].is_string()
+                || update["subagent_id"].is_string() =>
+        {
+            None
+        }
+        "subagent_spawned" => Some("The agent sent a subagent spawn Patchbay can't show (no id)".into()),
+        "subagent_state_update"
+            if (update["subagentSessionId"].is_string()
+                || update["child_session_id"].is_string()
+                || update["subagent_id"].is_string())
+                && update["state"].is_string() =>
+        {
+            None
+        }
+        "subagent_state_update" => {
+            Some("The agent sent a subagent state Patchbay can't show".into())
+        }
+        "subagent_finished"
+            if (update["subagentSessionId"].is_string()
+                || update["child_session_id"].is_string()
+                || update["subagent_id"].is_string())
+                && (update["state"].is_string() || update["status"].is_string()) =>
+        {
+            None
+        }
+        "subagent_finished" => Some("The agent sent a subagent finish Patchbay can't show".into()),
         _ => Some(format!("The agent sent an update Patchbay doesn't know (\"{kind}\")")),
     }
 }

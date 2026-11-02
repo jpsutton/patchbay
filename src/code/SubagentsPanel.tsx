@@ -3,7 +3,7 @@ import { Dot } from "../components/Dot";
 import { api, errorText } from "../lib/ipc";
 import type { Subagent } from "../lib/ipc";
 import { useStore } from "../lib/store";
-import { health, idleSecs, shown, stoppable, type Health } from "../lib/subagents";
+import { elapsedSecs, health, idleSecs, shown, stoppable, type Health } from "../lib/subagents";
 import { fmtElapsed } from "../lib/workingStatus";
 
 const TONE: Record<Health, string> = {
@@ -29,10 +29,10 @@ function note(a: Subagent, h: Health, idle: number): string {
 }
 
 /**
- * One row per running subagent of Patchbay's own agent: what it is doing, how long it has run
- * and how long since it last did anything, with Stop. A subagent that has gone quiet, or waits
- * on a permission prompt nobody answered, shows in the warning color. Ticks on its own, so the
- * transcript doesn't re-render.
+ * One row per running subagent: Patchbay's own agent (with Stop and idle) and ACP spawn
+ * announcements from Cursor / Grok (name + task, no Stop — Patchbay can't cancel those). A
+ * harness subagent that has gone quiet, or waits on a permission prompt nobody answered, shows
+ * in the warning color. Ticks on its own, so the transcript doesn't re-render.
  */
 export function SubagentsPanel({ sessionId }: { sessionId: string }) {
   const agents = useStore((s) => s.code[sessionId]?.subagents);
@@ -53,8 +53,12 @@ export function SubagentsPanel({ sessionId }: { sessionId: string }) {
       {rows.map((a) => {
         const idle = idleSecs(a, at, now);
         const h = health(a, idle);
-        const ran = a.elapsed_secs + (a.status === "running" && at != null ? Math.max(0, (now - at) / 1000) : 0);
+        const ran = elapsedSecs(a, at, now);
         const warn = h === "quiet" || h === "waiting";
+        const meta =
+          a.origin === "session"
+            ? [fmtElapsed(ran * 1000)]
+            : [fmtElapsed(ran * 1000), a.steps > 0 ? `${a.steps} steps` : null, `idle ${fmtElapsed(idle * 1000)}`];
         return (
           <li key={a.id} className={`flex items-center gap-2 text-xs ${warn ? "text-warn" : "text-muted"}`} data-subagent-health={h}>
             <Dot size={6} className={TONE[h]} />
@@ -63,9 +67,7 @@ export function SubagentsPanel({ sessionId }: { sessionId: string }) {
               {note(a, h, idle)}
             </span>
             <span className="shrink-0 font-mono text-[11px] tabular-nums text-faint">
-              {[fmtElapsed(ran * 1000), a.steps > 0 ? `${a.steps} steps` : null, `idle ${fmtElapsed(idle * 1000)}`]
-                .filter(Boolean)
-                .join(" · ")}
+              {meta.filter(Boolean).join(" · ")}
             </span>
             {canStop && stoppable(a) && (
               <button

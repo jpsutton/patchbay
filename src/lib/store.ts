@@ -41,6 +41,7 @@ import { chunkChars, phaseOf, type Phase } from "./workingStatus";
 import { appendUserChunk } from "./harness";
 import { planUpdateOf } from "./todoPlan";
 import { applyChange, type LayoutChange, type SidebarEntry } from "./sidebarLayout";
+import { applySpawned, applyState } from "./subagents";
 
 export { codeWorking, FOREGROUND_IDLE_MS, hasActiveForegroundTools } from "./codeWorking";
 export { harnessTags } from "./harness";
@@ -142,9 +143,9 @@ export interface CodeState {
   turnStartedAt: number | null;
   /** Characters of text and thoughts streamed this turn, for a rough token count. */
   turnChars: number;
-  /** Patchbay's agent: its subagents, as of the last `subagents_update`. */
+  /** Subagents under this session: harness `subagents_update` and ACP spawn announcements. */
   subagents: Subagent[];
-  /** When that update arrived, to count idle time on from it. */
+  /** When the last harness `subagents_update` arrived, to count idle time on from it. */
   subagentsAt: number | null;
 }
 
@@ -638,6 +639,15 @@ function reduceUpdate(s: CodeState, u: AcpUpdate, agent: AgentId | undefined): C
     case "subagents_update": {
       const agents = (u as { agents?: Subagent[] }).agents;
       return Array.isArray(agents) ? { ...s, subagents: agents, subagentsAt: Date.now() } : s;
+    }
+    case "subagent_spawned": {
+      const next = applySpawned(s.subagents, u as unknown as Record<string, unknown>);
+      return next ? stamp({ ...s, subagents: next }) : s;
+    }
+    case "subagent_state_update":
+    case "subagent_finished": {
+      const next = applyState(s.subagents, u as unknown as Record<string, unknown>);
+      return next ? stamp({ ...s, subagents: next }) : s;
     }
     case "available_commands_update": {
       const cmds = (u as { availableCommands?: AcpCommand[] }).availableCommands;
