@@ -12,7 +12,10 @@ use tokio::sync::Semaphore;
 
 use crate::{AppState, api};
 
-const TOOL_NAME: &str = "send_agent_message";
+const TOOL_SEND: &str = "send_agent_message";
+const TOOL_LIST_SESSIONS: &str = "list_agent_sessions";
+const TOOL_LIST_QUEUED: &str = "list_queued_agent_messages";
+const TOOL_ACCEPT_QUEUED: &str = "accept_queued_agent_message";
 const MAX_LINE: usize = 64 * 1024;
 
 #[derive(Clone)]
@@ -37,7 +40,9 @@ impl AgentMessagingBridge {
         ))
     }
 
-    pub fn server_definition(&self, session_id: &str) -> Result<Value> {
+    /// `can_steer`: this session's agent takes mid-turn prompts (ACP steering or Grok interject).
+    /// Non-steering agents get tools to list and accept queued peer messages mid-turn.
+    pub fn server_definition(&self, session_id: &str, can_steer: bool) -> Result<Value> {
         let command = std::env::current_exe()?.to_string_lossy().into_owned();
         let token = hex::encode(rand::random::<[u8; 32]>());
         self.tokens
@@ -52,6 +57,7 @@ impl AgentMessagingBridge {
                 { "name": "PATCHBAY_MESSAGE_ADDR", "value": self.addr.to_string() },
                 { "name": "PATCHBAY_MESSAGE_TOKEN", "value": token },
                 { "name": "PATCHBAY_MESSAGE_SESSION", "value": session_id },
+                { "name": "PATCHBAY_MESSAGE_STEERING", "value": if can_steer { "1" } else { "0" } },
             ]
         }))
     }
@@ -101,6 +107,8 @@ struct BridgeRequest {
     target_session_id: Option<String>,
     #[serde(default)]
     message: Option<String>,
+    #[serde(default)]
+    message_id: Option<String>,
 }
 
 async fn handle_bridge(
@@ -154,6 +162,18 @@ async fn handle_bridge(
                     &request.source_session_id,
                     target,
                     message,
+                )
+                .await
+            }
+            "list_queued" => crate::list_queued_agent_messages(&state, &request.source_session_id).await,
+            "accept_queued" => {
+                crate::accept_queued_agent_message(
+                    &state,
+                    &request.source_session_id,
+                    request
+                        .message_id
+                        .as_deref()
+                        .ok_or_else(|| anyhow!("messageId is required"))?,
                 )
                 .await
             }
@@ -299,6 +319,65 @@ struct ToolReply {
     is_error: bool,
 }
 
+fn steering_enabled() -> bool {
+    matches!(
+        std::env::var("PATCHBAY_MESSAGE_STEERING").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
+fn tools_list() -> Value {
+    tools_list_for(steering_enabled())
+}
+
+fn tools_list_for(can_steer: bool) -> Value {
+    let send_description = if can_steer {
+        "Send a message to another Patchbay Code session in this mesh. When that session is mid-turn and can take mid-turn messages, it receives yours in the running turn; otherwise the message waits for its next turn. The recipient can reply by sending a message to your session. A result of sent, steered, queued, or duplicate all mean the message was accepted — do not resend because delivery was queued. Only send when you have new information."
+    } else {
+        "Send a message to another Patchbay Code session in this mesh. When that session is mid-turn and cannot take mid-turn messages, the message queues until its turn ends or it calls accept_queued_agent_message. This session also queues peer messages mid-turn: use list_queued_agent_messages and accept_queued_agent_message to read them as a tool step without ending your turn. A result of sent, steered, queued, or duplicate all mean the message was accepted — do not resend because delivery was queued. Only send when you have new information."
+    };
+    let mut tools = vec![
+        json!({
+            "name": TOOL_LIST_SESSIONS,
+            "description": "List unarchived Patchbay Code sessions in this mesh so you can find a recipient by title and node.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        json!({
+            "name": TOOL_SEND,
+            "description": send_description,
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "targetSessionId": { "type": "string", "description": "The Patchbay Code session ID from list_agent_sessions." },
+                    "message": { "type": "string", "description": "The message to deliver." }
+                },
+                "required": ["targetSessionId", "message"],
+                "additionalProperties": false
+            }
+        }),
+    ];
+    if !can_steer {
+        tools.push(json!({
+            "name": TOOL_LIST_QUEUED,
+            "description": "List peer agent messages waiting for this session while you are mid-turn. This agent cannot take mid-turn prompts automatically; call accept_queued_agent_message to read one as a tool result in the current turn (that does not end your turn).",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }));
+        tools.push(json!({
+            "name": TOOL_ACCEPT_QUEUED,
+            "description": "Take one queued peer agent message into this turn as the tool result. Removes it from the queue so it will not start a new turn when you finish. Pass messageId from list_queued_agent_messages.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "messageId": { "type": "string", "description": "The messageId from list_queued_agent_messages." }
+                },
+                "required": ["messageId"],
+                "additionalProperties": false
+            }
+        }));
+    }
+    json!({ "tools": tools })
+}
+
 pub fn run_stdio() -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -335,29 +414,8 @@ async fn run_stdio_async() -> Result<()> {
                 "serverInfo": { "name": "patchbay-agent-messaging", "version": env!("CARGO_PKG_VERSION") }
             })),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": [
-                {
-                    "name": "list_agent_sessions",
-                    "description": "List unarchived Patchbay Code sessions in this mesh so you can find a recipient by title and node.",
-                    "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
-                },
-                {
-                    "name": TOOL_NAME,
-                    "description": "Send a message to another Patchbay Code session in this mesh. The recipient can reply with send_agent_message to your session. A result of sent, steered, queued, or duplicate all mean the message was accepted — do not resend because delivery was queued. Only send when you have new information.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "targetSessionId": { "type": "string", "description": "The Patchbay Code session ID from list_agent_sessions." },
-                            "message": { "type": "string", "description": "The message to deliver." }
-                        },
-                        "required": ["targetSessionId", "message"],
-                        "additionalProperties": false
-                    }
-                }
-            ] })),
-            "tools/call" => {
-                send_message_tool(&addr, &token, &source_session_id, &request["params"]).await
-            }
+            "tools/list" => Ok(tools_list()),
+            "tools/call" => call_tool(&addr, &token, &source_session_id, &request["params"]).await,
             _ => Err(anyhow!("unknown MCP method {method}")),
         };
         let response = match result {
@@ -374,7 +432,7 @@ async fn run_stdio_async() -> Result<()> {
     Ok(())
 }
 
-async fn send_message_tool(
+async fn call_tool(
     addr: &str,
     token: &str,
     source_session_id: &str,
@@ -383,11 +441,12 @@ async fn send_message_tool(
     let name = params["name"]
         .as_str()
         .ok_or_else(|| anyhow!("tool name is required"))?;
-    if name != TOOL_NAME && name != "list_agent_sessions" {
-        anyhow::bail!("unknown tool");
+    let can_steer = steering_enabled();
+    if can_steer && matches!(name, TOOL_LIST_QUEUED | TOOL_ACCEPT_QUEUED) {
+        anyhow::bail!("this agent takes mid-turn messages automatically; queued-message tools are not available");
     }
-    let (action, target_session_id, message) = if name == TOOL_NAME {
-        (
+    let (action, target_session_id, message, message_id) = match name {
+        TOOL_SEND => (
             "send",
             Some(
                 params["arguments"]["targetSessionId"]
@@ -399,9 +458,21 @@ async fn send_message_tool(
                     .as_str()
                     .ok_or_else(|| anyhow!("message is required"))?,
             ),
-        )
-    } else {
-        ("list", None, None)
+            None,
+        ),
+        TOOL_LIST_SESSIONS => ("list", None, None, None),
+        TOOL_LIST_QUEUED => ("list_queued", None, None, None),
+        TOOL_ACCEPT_QUEUED => (
+            "accept_queued",
+            None,
+            None,
+            Some(
+                params["arguments"]["messageId"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("messageId is required"))?,
+            ),
+        ),
+        _ => anyhow::bail!("unknown tool"),
     };
     let stream = TcpStream::connect(addr)
         .await
@@ -413,6 +484,7 @@ async fn send_message_tool(
         "action": action,
         "targetSessionId": target_session_id,
         "message": message,
+        "messageId": message_id,
     });
     write.write_all(request.to_string().as_bytes()).await?;
     write.write_all(b"\n").await?;
@@ -426,13 +498,17 @@ async fn send_message_tool(
     if let Some(error) = response["error"].as_str() {
         return Ok(json!({ "content": [{ "type": "text", "text": error }], "isError": true }));
     }
-    let ok = &response["ok"];
-    let delivery = ok["delivery"].as_str().unwrap_or("");
-    let note = delivery_note(delivery);
-    let text = if delivery.is_empty() {
-        ok.to_string()
-    } else {
-        format!("{ok}\n{note}")
+    let text = match name {
+        TOOL_ACCEPT_QUEUED => response["ok"]["text"].as_str().unwrap_or_default().to_owned(),
+        _ => {
+            let ok = &response["ok"];
+            let delivery = ok["delivery"].as_str().unwrap_or("");
+            if delivery.is_empty() {
+                ok.to_string()
+            } else {
+                format!("{ok}\n{}", delivery_note(delivery))
+            }
+        }
     };
     Ok(json!({ "content": [{ "type": "text", "text": text }], "isError": false }))
 }
@@ -444,11 +520,33 @@ mod tests {
     #[test]
     fn server_definition_name_matches_acp_pattern() {
         let (bridge, listener) = AgentMessagingBridge::bind().unwrap();
-        let def = bridge.server_definition("session-1").unwrap();
+        let def = bridge.server_definition("session-1", false).unwrap();
         drop(listener);
         let name = def["name"].as_str().unwrap();
         assert_eq!(name, "patchbay-agent-messaging");
         assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+        let env = def["env"].as_array().unwrap();
+        let steering = env
+            .iter()
+            .find(|e| e["name"] == "PATCHBAY_MESSAGE_STEERING")
+            .unwrap();
+        assert_eq!(steering["value"], "0");
+    }
+
+    #[test]
+    fn tools_list_adds_queue_tools_when_not_steering() {
+        let names = |can_steer| {
+            tools_list_for(can_steer)["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|t| t["name"].as_str())
+                .collect::<Vec<_>>()
+        };
+        assert!(names(false).contains(&TOOL_LIST_QUEUED));
+        assert!(names(false).contains(&TOOL_ACCEPT_QUEUED));
+        assert!(!names(true).contains(&TOOL_LIST_QUEUED));
+        assert!(!names(true).contains(&TOOL_ACCEPT_QUEUED));
     }
 
     #[test]

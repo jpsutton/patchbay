@@ -1,10 +1,12 @@
 //! Cursor subscription plan usage, polled from Cursor's dashboard API (not over ACP).
 //!
 //! `cursor-agent acp` does not emit `usage_update` or plan limits. The interactive TUI and the
-//! web dashboard get them from `GetCurrentPeriodUsage` on `api2.cursor.sh`. Patchbay polls that
-//! endpoint with the local Cursor login, shows Auto / API / total percentages, and can stop
-//! Cursor ACP turns once included plan spend is exhausted and free-on-us bonus is gone
-//! (`prefs.cursor_usage_limit`, off by default).
+//! web dashboard get them from Connect RPCs on `api2.cursor.sh`. Patchbay polls
+//! `GetCurrentPeriodUsage` (included plan + "free on us" bonus),
+//! `GetUsageLimitStatusAndActiveGrants` (credit grants / slow pool — the IDE's "free credits"),
+//! and `GetHardLimit` (whether on-demand spend is allowed). It shows Auto / API percentages plus
+//! those free pools, and can stop Cursor ACP turns once included plan, plan bonus, and credit
+//! grants are all gone and on-demand is off (`prefs.cursor_usage_limit`, off by default).
 //!
 //! Reports are tagged with the Cursor account id and fan out over the mesh so peers on the same
 //! account can skip re-polling. A peer on a different account ignores the report.
@@ -28,6 +30,21 @@ pub const FRESH_SECS: i64 = 270;
 pub const TICK: Duration = Duration::from_secs(30);
 
 const USAGE_URL: &str = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage";
+const GRANTS_URL: &str = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetUsageLimitStatusAndActiveGrants";
+const HARD_LIMIT_URL: &str = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetHardLimit";
+
+/// One promotional / free-credit grant from `GetUsageLimitStatusAndActiveGrants` (IDE "free credits").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorCreditGrant {
+    /// Cents still available on this grant.
+    pub remaining_cents: i64,
+    /// Original grant size, in cents.
+    pub total_cents: i64,
+    /// When the grant expires (unix seconds), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+}
 
 /// One Cursor account's plan usage as the dashboard reports it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -62,11 +79,28 @@ pub struct CursorPlanLimits {
     pub bonus_spend_cents: Option<i64>,
     /// Whether Cursor still has bonus / free-on-us capacity (`planUsage.remainingBonus`).
     /// Absent on older mesh reports; the guard only treats an explicit `true` as still available.
+    /// This is not the IDE's separate credit-grant pool — see `grants`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remaining_bonus: Option<bool>,
+    /// Cursor's dashboard sentence for the period (`displayMessage`), when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_message: Option<String>,
+    /// Unexpired credit grants (IDE "free credits"), from `GetUsageLimitStatusAndActiveGrants`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<CursorCreditGrant>,
+    /// Sum of `grants[].remaining_cents`. `Some(0)` means the grants RPC returned none left;
+    /// absent means that RPC was not polled (older mesh reports) or failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grants_remaining_cents: Option<i64>,
+    /// Cursor is serving from the slow pool (`usageLimitPolicyStatus.isInSlowPool`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slow_pool: Option<bool>,
+    /// On-demand / usage-based spend is allowed (`!GetHardLimit.noUsageBasedAllowed`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_demand_allowed: Option<bool>,
 }
 
-/// Included plan and free-on-us bonus are both spent; turns should stop.
+/// Included plan, free-on-us bonus, and credit grants are all spent (and on-demand is off); turns should stop.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hit {
     pub resets_at: i64,
@@ -104,6 +138,12 @@ impl CursorPlanLimits {
             return None;
         }
         let resets_at = ms_to_secs(body.get("billingCycleEnd"));
+        let display_message = body
+            .get("displayMessage")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
         Some(Self {
             account_id,
             email,
@@ -116,7 +156,46 @@ impl CursorPlanLimits {
             limit_cents,
             bonus_spend_cents,
             remaining_bonus,
+            display_message,
+            grants: Vec::new(),
+            grants_remaining_cents: None,
+            slow_pool: None,
+            on_demand_allowed: None,
         })
+    }
+
+    /// Fold in `GetUsageLimitStatusAndActiveGrants`: credit grants and slow-pool flag.
+    pub fn apply_grants(&mut self, body: &Value, now: i64) {
+        self.slow_pool = body
+            .pointer("/usageLimitPolicyStatus/isInSlowPool")
+            .and_then(Value::as_bool);
+        let mut grants = Vec::new();
+        let mut remaining_sum = 0i64;
+        if let Some(arr) = body.get("activeGrants").and_then(Value::as_array) {
+            for g in arr {
+                let remaining = json_cents(g.get("remainingCents")).unwrap_or(0);
+                let total = json_cents(g.get("totalCents")).unwrap_or(0);
+                let expires_at = ms_to_secs(g.get("expiresAtMs"));
+                if expires_at.is_some_and(|t| t <= now) {
+                    continue;
+                }
+                remaining_sum = remaining_sum.saturating_add(remaining.max(0));
+                grants.push(CursorCreditGrant {
+                    remaining_cents: remaining.max(0),
+                    total_cents: total.max(0),
+                    expires_at,
+                });
+            }
+        }
+        self.grants = grants;
+        self.grants_remaining_cents = Some(remaining_sum);
+    }
+
+    /// Fold in `GetHardLimit`: whether on-demand spend is allowed.
+    pub fn apply_hard_limit(&mut self, body: &Value) {
+        if let Some(blocked) = body.get("noUsageBasedAllowed").and_then(Value::as_bool) {
+            self.on_demand_allowed = Some(!blocked);
+        }
     }
 
     /// True when this report is new enough that another poll would be wasteful.
@@ -141,14 +220,27 @@ impl CursorPlanLimits {
         self.remaining_bonus == Some(true)
     }
 
-    /// Stop once the included plan is exhausted **and** free-on-us bonus is no longer available.
-    /// While `remainingBonus` is true, turns keep going even past the included limit.
+    /// IDE credit grants still have balance. Unknown (`None`) does not count as available.
+    pub fn grant_available(&self) -> bool {
+        self.grants_remaining_cents.is_some_and(|n| n > 0)
+    }
+
+    /// Stop once included plan, free-on-us bonus, and credit grants are all gone, and on-demand is
+    /// not allowed. While any of those still covers requests, Cursor keeps serving — so we must
+    /// not stop on `remainingBonus: false` alone. If grants were never polled (`None`), refuse to
+    /// stop: an incomplete reading used to false-stop accounts that still had free credits.
     /// After `resets_at`, nothing hits. No percent threshold — Cursor's pools are not request caps.
     pub fn hit(&self, now: i64) -> Option<Hit> {
         if self.resets_at.is_some_and(|t| t <= now) {
             return None;
         }
-        if self.bonus_available() || !self.plan_exhausted() {
+        if self.bonus_available() || !self.plan_exhausted() || self.grant_available() {
+            return None;
+        }
+        if self.on_demand_allowed == Some(true) {
+            return None;
+        }
+        if self.grants_remaining_cents.is_none() {
             return None;
         }
         Some(Hit { resets_at: self.resets_at.unwrap_or(now + 7 * 86400) })
@@ -158,7 +250,7 @@ impl CursorPlanLimits {
 impl Hit {
     pub fn message(&self, now: i64) -> String {
         format!(
-            "Your Cursor plan's included usage and free-on-us bonus are used up, so Patchbay stops its Cursor turns. The cycle resets in {}. Change this under Settings › Coding agents › Cursor CLI.",
+            "Your Cursor plan's included usage, free-on-us bonus, and free credits are used up, so Patchbay stops its Cursor turns. The cycle resets in {}. Change this under Settings › Coding agents › Cursor CLI.",
             fmt_wait(self.resets_at - now)
         )
     }
@@ -180,6 +272,14 @@ fn ms_to_secs(v: Option<&Value>) -> Option<i64> {
         _ => return None,
     };
     Some(if n > 10_000_000_000 { n / 1000 } else { n })
+}
+
+fn json_cents(v: Option<&Value>) -> Option<i64> {
+    v.and_then(|v| {
+        v.as_i64()
+            .or_else(|| v.as_f64().map(|n| n.round() as i64))
+            .or_else(|| v.as_str()?.parse().ok())
+    })
 }
 
 pub fn now() -> i64 {
@@ -440,13 +540,9 @@ fn base64_url_decode(s: &str) -> Option<Vec<u8>> {
         .ok()
 }
 
-/// Fetch the current period usage for the local Cursor login.
-pub async fn fetch(auth: &CursorAuth) -> Result<CursorPlanLimits> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()?;
+async fn dashboard_post(client: &reqwest::Client, auth: &CursorAuth, url: &str) -> Result<Value> {
     let resp = client
-        .post(USAGE_URL)
+        .post(url)
         .header("Authorization", format!("Bearer {}", auth.access_token))
         .header("Content-Type", "application/json")
         .header("Connect-Protocol-Version", "1")
@@ -456,10 +552,38 @@ pub async fn fetch(auth: &CursorAuth) -> Result<CursorPlanLimits> {
     let status = resp.status();
     let body: Value = resp.json().await?;
     if !status.is_success() {
-        return Err(anyhow!("Cursor usage HTTP {status}: {body}"));
+        return Err(anyhow!("Cursor dashboard HTTP {status} ({url}): {body}"));
     }
-    CursorPlanLimits::from_response(auth.account_id.clone(), auth.email.clone(), &body, now())
-        .ok_or_else(|| anyhow!("Cursor usage response has no planUsage (team seats often omit it)"))
+    Ok(body)
+}
+
+/// Fetch period usage, credit grants, and on-demand allowance for the local Cursor login.
+pub async fn fetch(auth: &CursorAuth) -> Result<CursorPlanLimits> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()?;
+    let (usage, grants, hard) = tokio::join!(
+        dashboard_post(&client, auth, USAGE_URL),
+        dashboard_post(&client, auth, GRANTS_URL),
+        dashboard_post(&client, auth, HARD_LIMIT_URL),
+    );
+    let observed = now();
+    let mut limits = CursorPlanLimits::from_response(
+        auth.account_id.clone(),
+        auth.email.clone(),
+        &usage?,
+        observed,
+    )
+    .ok_or_else(|| anyhow!("Cursor usage response has no planUsage (team seats often omit it)"))?;
+    match grants {
+        Ok(body) => limits.apply_grants(&body, observed),
+        Err(e) => tracing::debug!("cursor plan grants: {e:#}"),
+    }
+    match hard {
+        Ok(body) => limits.apply_hard_limit(&body),
+        Err(e) => tracing::debug!("cursor plan hard limit: {e:#}"),
+    }
+    Ok(limits)
 }
 
 /// Resolve the `cursor-agent` binary from prefs overrides, else PATH.
@@ -483,11 +607,16 @@ mod tests {
             auto: Some(auto),
             api: Some(api),
             total: Some(total),
-            // Exhausted included plan, no bonus left: the guard may apply the percent threshold.
+            // Exhausted included plan, no bonus, no grants, on-demand off: the guard may stop.
             included_spend_cents: Some(40000),
             limit_cents: Some(40000),
             bonus_spend_cents: Some(1200),
             remaining_bonus: Some(false),
+            display_message: Some("You've hit your usage limit".into()),
+            grants: Vec::new(),
+            grants_remaining_cents: Some(0),
+            slow_pool: Some(false),
+            on_demand_allowed: Some(false),
         }
     }
 
@@ -495,6 +624,7 @@ mod tests {
     fn parses_dashboard_body() {
         let body = json!({
             "billingCycleEnd": "1795191155000",
+            "displayMessage": "You've hit your usage limit",
             "planUsage": {
                 "autoPercentUsed": 0.91,
                 "apiPercentUsed": 100,
@@ -511,19 +641,54 @@ mod tests {
         assert_eq!(l.resets_at, Some(1795191155));
         assert_eq!(l.bonus_spend_cents, Some(24201));
         assert_eq!(l.remaining_bonus, Some(false));
+        assert_eq!(l.display_message.as_deref(), Some("You've hit your usage limit"));
         assert!(l.plan_exhausted());
         assert!(!l.bonus_available());
         assert!(CursorPlanLimits::from_response("42".into(), None, &json!({}), 1).is_none());
     }
 
     #[test]
-    fn hits_only_when_plan_and_bonus_are_gone() {
+    fn applies_grants_and_hard_limit() {
+        let mut l = sample(12.0, 96.0, 40.0, 9000);
+        l.apply_grants(
+            &json!({
+                "usageLimitPolicyStatus": { "isInSlowPool": true },
+                "activeGrants": [{
+                    "remainingCents": "18903",
+                    "totalCents": "30000",
+                    "expiresAtMs": "1795191155000"
+                }]
+            }),
+            1000,
+        );
+        assert_eq!(l.slow_pool, Some(true));
+        assert_eq!(l.grants_remaining_cents, Some(18903));
+        assert_eq!(l.grants.len(), 1);
+        assert!(l.grant_available());
+        assert!(l.hit(1000).is_none(), "grant still covers requests");
+
+        l.apply_hard_limit(&json!({ "noUsageBasedAllowed": true }));
+        assert_eq!(l.on_demand_allowed, Some(false));
+        l.grants.clear();
+        l.grants_remaining_cents = Some(0);
+        assert!(l.hit(1000).is_some());
+
+        l.apply_hard_limit(&json!({ "noUsageBasedAllowed": false }));
+        assert_eq!(l.on_demand_allowed, Some(true));
+        assert!(l.hit(1000).is_none(), "on-demand still allowed");
+    }
+
+    #[test]
+    fn hits_only_when_plan_bonus_and_grants_are_gone() {
         let l = sample(12.0, 96.0, 40.0, 5000);
         assert!(l.hit(1000).is_some());
         assert!(l.hit(5000).is_none(), "past reset");
         let mut early = l.clone();
         early.included_spend_cents = Some(20000);
         assert!(early.hit(1000).is_none(), "included plan still has room");
+        let mut unknown_grants = l.clone();
+        unknown_grants.grants_remaining_cents = None;
+        assert!(unknown_grants.hit(1000).is_none(), "incomplete grants reading must not stop");
     }
 
     #[test]
@@ -581,6 +746,6 @@ mod tests {
     fn message_says_when_it_resets() {
         let hit = Hit { resets_at: 1000 + 3600 };
         assert!(hit.message(1000).contains("1h"));
-        assert!(hit.message(1000).contains("free-on-us"));
+        assert!(hit.message(1000).contains("free credits"));
     }
 }

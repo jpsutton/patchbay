@@ -145,6 +145,13 @@ export interface PlanAccount {
 }
 
 /** Cursor plan usage from the dashboard poll (see `code/cursor_plan.rs`). Percentages are 0–100. */
+/** One Cursor credit grant (IDE "free credits"), separate from plan free-on-us bonus. */
+export interface CursorCreditGrant {
+  remainingCents: number;
+  totalCents: number;
+  expiresAt?: number | null;
+}
+
 export interface CursorPlanLimits {
   accountId: string;
   email?: string | null;
@@ -159,8 +166,21 @@ export interface CursorPlanLimits {
   limitCents?: number | null;
   /** "Free usage on us" already consumed, in cents. */
   bonusSpendCents?: number | null;
-  /** Whether Cursor still has bonus / free-on-us capacity. */
+  /**
+   * Whether Cursor still has plan free-on-us capacity (`remainingBonus`). Not the same as
+   * credit grants — see `grants` / `grantsRemainingCents`.
+   */
   remainingBonus?: boolean | null;
+  /** Cursor's dashboard sentence for the period, when present. */
+  displayMessage?: string | null;
+  /** Unexpired credit grants from `GetUsageLimitStatusAndActiveGrants`. */
+  grants?: CursorCreditGrant[];
+  /** Sum of grant remaining cents; `0` means polled and empty, absent means unknown. */
+  grantsRemainingCents?: number | null;
+  /** Cursor is serving from the slow pool. */
+  slowPool?: boolean | null;
+  /** On-demand / usage-based spend is allowed. */
+  onDemandAllowed?: boolean | null;
 }
 
 /**

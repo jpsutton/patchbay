@@ -274,6 +274,15 @@ function cursorPlanRows(limits: CursorPlanLimits | null, now: number): InfoRow[]
       value: limits.resetsAt != null && limits.resetsAt > now ? `${Math.round(n)}% · resets in ${fmtSpan(limits.resetsAt - now)}` : `${Math.round(n)}%`,
     });
   };
+  if (limits.includedSpendCents != null && limits.limitCents != null && limits.limitCents > 0 && live) {
+    rows.push({
+      label: "Included",
+      value:
+        limits.resetsAt != null && limits.resetsAt > now
+          ? `${fmtUsdCents(limits.includedSpendCents)} / ${fmtUsdCents(limits.limitCents)} · resets in ${fmtSpan(limits.resetsAt - now)}`
+          : `${fmtUsdCents(limits.includedSpendCents)} / ${fmtUsdCents(limits.limitCents)}`,
+    });
+  }
   pct("Auto", limits.auto);
   pct("API", limits.api);
   if (limits.auto == null && limits.api == null) pct("Total", limits.total);
@@ -288,6 +297,19 @@ function cursorPlanRows(limits: CursorPlanLimits | null, now: number): InfoRow[]
     rows.push({ label: "Free on us", value: "still available" });
   } else if (limits.remainingBonus === false) {
     rows.push({ label: "Free on us", value: "no longer available" });
+  }
+  if (limits.grantsRemainingCents != null) {
+    const left = limits.grantsRemainingCents;
+    rows.push({
+      label: "Free credits",
+      value:
+        left > 0
+          ? `${fmtUsdCents(left)} left${limits.slowPool ? " · slow pool" : ""}`
+          : `used up${limits.slowPool ? " · slow pool" : ""}`,
+    });
+  }
+  if (limits.onDemandAllowed != null) {
+    rows.push({ label: "On-demand", value: limits.onDemandAllowed ? "on" : "off" });
   }
   if (rows.every((r) => r.label === "Account") && live) {
     rows.push({ label: "Usage", value: "not reported yet" });

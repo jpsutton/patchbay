@@ -955,6 +955,11 @@ async fn cursor_plan_limits_reach_peers_on_the_same_account() {
         limit_cents: Some(40000),
         bonus_spend_cents: Some(500),
         remaining_bonus: Some(true),
+        display_message: None,
+        grants: Vec::new(),
+        grants_remaining_cents: Some(0),
+        slow_pool: Some(false),
+        on_demand_allowed: Some(false),
     };
     adopt_cursor_plan(&a.state, report(40.0, 60, "42"), true);
     until("B has A's Cursor report", 10, || {

@@ -51,6 +51,13 @@ queued for its next turn. The recipient can reply by
 calling `send_agent_message` with the sender's session id. Members share the mesh's existing trust
 boundary, so every admitted member can send messages to every unarchived session.
 
+The messaging MCP is assembled after ACP `initialize`, with `PATCHBAY_MESSAGE_STEERING` set from
+whether that agent steers (ACP `_meta.steering.supported` or Grok interject). Steering agents keep
+only the two tools above; peer mail joins the running turn as usual. Agents that cannot steer also
+get `list_queued_agent_messages` and `accept_queued_agent_message`: the tool descriptions tell them
+to accept a waiting peer message as a mid-turn tool result so it does not wait for turn end (and is
+removed from the next-turn queue). User-queued composer prompts are not listed.
+
 To stop overnight ping-pong, the bridge rate-limits each session (20 / 10 minutes) and each
 source→target pair (25 / hour). The receiving host collapses an identical body from the same
 source within 10 minutes as `delivery: "duplicate"` without re-prompting. Tool results and the
@@ -167,7 +174,7 @@ So a message sent mid-turn takes one of two paths:
   - Claude Code and Codex advertise `initialize` `_meta.steering.supported` and take `_session/steering` (`{sessionId, prompt}`). Patchbay sends `_meta.steering.idleBehavior: "promptRequired"`, so Claude hands back a message that arrives just after its turn ended. Patchbay then sends it as a new turn. Codex ignores this field. In that window it starts a turn of its own, and no `session/prompt` reports when that turn ends.
   - Grok Build takes `x.ai/interject` (`{sessionId, text, content}`) and merges the message at its next safe point. Grok doesn't advertise this, so it is `Extensions.interject`. Its interject carries only text and images, so a message with files or @-mentions waits for the next turn instead.
   - Patchbay checks steering support only from what the agent advertises, never from whether a call returns. Antigravity answers any `_` method with `null`.
-- **Queued** otherwise, or when a steer fails. Patchbay sends queued messages one at a time when the running turn ends normally. A stop, or a turn that ends in an error, drops the queue. The window that sent the dropped messages gets their text back in its composer.
+- **Queued** otherwise, or when a steer fails. Patchbay sends queued messages one at a time when the running turn ends normally. A stop, or a turn that ends in an error, drops the queue. The window that sent the dropped messages gets their text back in its composer. For peer agent messages on a non-steering recipient, the messaging MCP also offers `list_queued_agent_messages` / `accept_queued_agent_message` so the busy agent can pull one into the current turn as a tool result (see "Messaging between Code sessions" above).
 
 Every prompt carries a `promptId`, which the UI generates and the backend fills in when it is missing. The agent thread reports each step as a `userPrompt` event with a `delivery`:
 - `sent`: a new turn. This marks the session busy.
@@ -190,7 +197,7 @@ Observed quirks:
 
 - Cursor and Claude Code can't `session/load` a session that never got a prompt. Patchbay falls back to a new session and shows a notice.
 - Cursor sends no ACP usage. Claude sends `usage_update` with context size and cumulative cost, and `_meta["_claude/rateLimit"]` for plan windows.
-- **Cursor plan usage** is polled out of band from `GetCurrentPeriodUsage` on `api2.cursor.sh` (same undocumented dashboard API other ACP clients use), about every five minutes while a Cursor session is running or the Cursor plan blade is open. Reports are tagged with the Cursor account id and fan out as `mesh://cursor-plan-limits` so peers on the same account can skip re-polling. The sidebar has a separate Cursor gauge/blade (Auto / API %, plus free-on-us bonus used / still available from `bonusSpend` and `remainingBonus`). Stopping Cursor turns when the plan is used up is off by default (`cursorUsageLimit`); when on, it waits until included plan spend is exhausted **and** `remainingBonus` is false (no percent threshold). Team seats that omit `planUsage` are not covered yet.
+- **Cursor plan usage** is polled out of band from Connect RPCs on `api2.cursor.sh` (same undocumented dashboard API other ACP clients use), about every five minutes while a Cursor session is running or the Cursor plan blade is open: `GetCurrentPeriodUsage` (included plan + "free on us" `bonusSpend` / `remainingBonus`), `GetUsageLimitStatusAndActiveGrants` (IDE credit grants / slow pool — a separate free pool from plan bonus), and `GetHardLimit` (on-demand allowed). Reports are tagged with the Cursor account id and fan out as `mesh://cursor-plan-limits` so peers on the same account can skip re-polling. The sidebar Cursor gauge/blade shows Auto / API %, included dollars, free-on-us, free-credit grants, slow pool, and on-demand. Stopping Cursor turns when the plan is used up is off by default (`cursorUsageLimit`); when on, it waits until included spend is exhausted, plan bonus is gone, credit grants are gone, and on-demand is off (no percent threshold). An incomplete grants reading does not stop. Team seats that omit `planUsage` are not covered yet.
 - Cursor's ACP adapter (2026.10.01) drops AwaitShell calls (`awaitToolCall`): its `summarizeToolCall` has no case for them, so no `tool_call` is sent, and a turn waiting on a background shell, or just sleeping, looked stuck. Patchbay preloads `src-tauri/src/code/cursor_acp_preload.cjs` into `cursor-agent acp` (`NODE_OPTIONS=--require`, written to `<data dir>/cursor/`). It wraps Cursor's tool presentation object at run time, found by its `summarizeToolCall` method in the webpack chunks as they load, and fills in a title, input and output only where Cursor returns nothing. A Cursor release that handles AwaitShell itself wins, and one that moves the code leaves Cursor unchanged. The preload restores the user's own `NODE_OPTIONS` so the commands the agent runs don't load it. Set `PATCHBAY_CURSOR_PRELOAD_DEBUG=1` for its log on stderr.
 - Each agent writes its sessions to its own store (`~/.claude`, `~/.local/share/opencode`, `~/.cursor`, Kilo's data dir). Patchbay keeps only the ACP session id.
 

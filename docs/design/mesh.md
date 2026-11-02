@@ -146,7 +146,8 @@ and message one by session id. The source node routes `code.agent_message` to th
 host, using the same direct or relayed mesh connection as other remote-control RPCs. The target
 host checks that the claimed source session belongs to the authenticated sending member, starts
 the target agent if it is idle, and otherwise steers the message into the running turn or queues
-it behind that turn, as it does a user's mid-turn message.
+it behind that turn, as it does a user's mid-turn message. A recipient that cannot steer can also
+pull a queued peer message mid-turn through `accept_queued_agent_message` (see `agents.md`).
 The message appears as an attributed prompt; a reply is a separate message back to the source
 session. Any admitted member can use the tool, consistent with the mesh's existing full-trust
 remote-control model. Identical retries from the same source within a short window are accepted as
