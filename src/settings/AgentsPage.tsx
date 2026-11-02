@@ -173,7 +173,7 @@ function CursorUsageLimit() {
     <>
       <Row
         label="Stop when plan is used up"
-        hint="Cancel running Cursor turns and hold new prompts once included plan spend is exhausted and Cursor's free-on-us bonus is gone. While bonus remains, turns keep going. There is no percent threshold. Usage is polled from Cursor's dashboard about every five minutes while a Cursor session is active. Off by default."
+        hint="Cancel running Cursor turns and hold new prompts once included plan spend, free-on-us bonus, and free-credit grants are all gone, and on-demand spending is off. While any of those still covers requests (including the IDE's slow-pool credits), turns keep going. There is no percent threshold. Usage is polled from Cursor's dashboard about every five minutes while a Cursor session is active. Off by default."
       >
         <Toggle
           label="Stop when plan is used up"

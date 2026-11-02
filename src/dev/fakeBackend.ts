@@ -4,6 +4,7 @@ import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 import type { Channel } from "@tauri-apps/api/core";
 import { emptyParams, usesPatchbayModels } from "../lib/ipc";
+import { uuid } from "../lib/platform";
 import { applyChange, type SidebarEntry } from "../lib/sidebarLayout";
 import type {
   MeshChatEvent,
@@ -120,7 +121,7 @@ const fakeOptionsFor = (csid: string): AcpConfigOption[] => {
   return agent === "patchbay" ? fakePatchbayOptions(csid) : agent === "grok" ? [] : fakeOptions(csid);
 };
 const DEMO_FILES = ["README.md", "Cargo.toml", "src/main.rs", "src/lib.rs", "src/code/acp.rs", "src/code/mcp.rs", "docs/guide.md", "package.json"];
-const id = () => crypto.randomUUID();
+const id = () => uuid();
 const now = () => Date.now();
 
 const db = {
@@ -226,19 +227,29 @@ function fakeCursorPlanLimits() {
   const mode = new URLSearchParams(location.search).get("cursorPlan");
   if (mode === "none") return null;
   const now = Math.floor(Date.now() / 1000);
-  const onBonus = mode !== "noBonus";
+  // `grant` = included+bonus gone, free credits left (slow pool). `exhausted` = everything gone.
+  const grant = mode === "grant";
+  const exhausted = mode === "exhausted";
+  const onBonus = mode !== "noBonus" && !grant && !exhausted;
   return {
     accountId: "298981080",
     email: "you@example.com",
     observedAt: now - 90,
     resetsAt: now + 5 * 86400,
-    auto: 12.5,
-    api: 54,
-    total: 18.3,
-    includedSpendCents: 40000,
+    auto: grant || exhausted ? 100 : 12.5,
+    api: grant || exhausted ? 100 : 54,
+    total: grant || exhausted ? 100 : 18.3,
+    includedSpendCents: grant || exhausted || !onBonus ? 40000 : 20000,
     limitCents: 40000,
-    bonusSpendCents: onBonus ? 24201 : 24201,
+    bonusSpendCents: 24201,
     remainingBonus: onBonus,
+    displayMessage: grant || exhausted ? "You've hit your usage limit" : "You've used 50% of your included usage",
+    grants: grant
+      ? [{ remainingCents: 18903, totalCents: 30000, expiresAt: now + 5 * 86400 }]
+      : [],
+    grantsRemainingCents: grant ? 18903 : exhausted ? 0 : null,
+    slowPool: grant || exhausted ? true : null,
+    onDemandAllowed: false,
   };
 }
 
@@ -595,6 +606,47 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
     ]);
     codeEmit(csid, { type: "update", update: { sessionUpdate: "subagents_update", agents: fakeAgents.get(csid) } });
     await say("Three subagents are running in the background.");
+    turnEmit({ type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
+  // `/cursor-subagents`: Cursor-shaped `subagent_spawned` / `subagent_state_update` announcements
+  // (what the Cursor CLI sends when Task starts children). Rows appear under the transcript, then
+  // clear as each child finishes.
+  if (text.startsWith("/cursor-subagents")) {
+    fakeStopped.delete(csid);
+    const kids = [
+      { id: "30e89cbf-270c-42ec-a8d2-5992d3c00c24", name: "generalPurpose", task: "Investigate issue #234 follow-ups" },
+      { id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890", name: "explore", task: "Scan ACP readers #74/#81" },
+    ];
+    for (const k of kids) {
+      codeEmit(csid, {
+        type: "update",
+        update: {
+          sessionUpdate: "subagent_spawned",
+          subagentSessionId: k.id,
+          name: k.name,
+          task: k.task,
+          capabilities: {},
+          _meta: { cursor: { agentId: k.id, model: "default" } },
+        },
+      });
+    }
+    await say("Two Cursor subagents are running.");
+    for (let t0 = 0; t0 < 4_000 && !fakeStopped.has(csid); t0 += 200) await sleep(200);
+    if (fakeStopped.has(csid)) {
+      fakeStopped.delete(csid);
+      turnEmit({ type: "promptDone", stopReason: "cancelled" });
+      return;
+    }
+    codeEmit(csid, {
+      type: "update",
+      update: { sessionUpdate: "subagent_state_update", subagentSessionId: kids[0].id, state: "completed" },
+    });
+    codeEmit(csid, {
+      type: "update",
+      update: { sessionUpdate: "subagent_state_update", subagentSessionId: kids[1].id, state: "failed" },
+    });
+    await say("The first finished; the second failed.");
     turnEmit({ type: "promptDone", stopReason: "end_turn" });
     return;
   }
@@ -989,9 +1041,34 @@ export function install() {
   db.providers.push(p);
   db.models.push({ id: "m1", providerId: "p1", modelId: "demo-model", displayName: "Demo model", vision: true, contextWindow: 128000, params: { ...emptyParams(), pricing: { input: 3, cachedInput: 0.3, cacheWrite: 3.75, output: 15 } } });
   db.models.push({ id: "m2", providerId: "p1", modelId: "demo-mini", displayName: "Demo mini", vision: false, contextWindow: 32000, params: emptyParams() });
-  const seed = (cwd: string, title: string, ago: number, activity: CodeSession["activity"], hostNode = ME) =>
-    db.code.push({ id: id(), cwd, acpSessionId: null, title, modelRef: "m1", pinned: false, createdAt: now() - ago, updatedAt: now() - ago, activity, hostNode, epoch: 0, agent: "patchbay", agentModel: null, permissionMode: "default" });
+  const seed = (
+    cwd: string,
+    title: string,
+    ago: number,
+    activity: CodeSession["activity"],
+    hostNode = ME,
+    agent: CodeSession["agent"] = "patchbay",
+  ) =>
+    db.code.push({
+      id: id(),
+      cwd,
+      acpSessionId: null,
+      title,
+      modelRef: "m1",
+      pinned: false,
+      createdAt: now() - ago,
+      updatedAt: now() - ago,
+      activity,
+      hostNode,
+      epoch: 0,
+      agent,
+      agentModel: null,
+      permissionMode: "default",
+    });
   seed("/home/demo/Projects/nulamp", "Windows installer testing", 1000, "edit");
+  // Claude Code + Cursor sessions so the sidebar plan panes can be previewed without creating one.
+  seed("/home/demo/Projects/nulamp", "Claude plan preview", 800, null, ME, "claude-code");
+  seed("/home/demo/Projects/nulamp", "Cursor plan preview", 700, null, ME, "cursor");
   if (readmeDemo) {
     readmeSessionId = db.code[db.code.length - 1].id;
     Object.assign(db.models[0], { modelId: "qwen3-coder", displayName: "Qwen3 Coder" });

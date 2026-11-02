@@ -173,18 +173,18 @@ jobs:
             --target "$GITHUB_SHA" --title "Patchbay ${{ steps.build.outputs.version }}" \
             --generate-notes "${assets[@]}"
 
-      # jpsutton/arch-repo checks for new releases hourly; this makes it publish now.
-      # Best effort: needs a token that can write to that repository.
+      # Start jpsutton/arch-repo's publish workflow so the pacman repository updates.
+      # Needs a fine-grained token with Actions: write on that repository.
       - name: Update the pacman repository
         env:
           ARCH_REPO_DISPATCH_TOKEN: ${{ secrets.ARCH_REPO_DISPATCH_TOKEN }}
         run: |
           if [ -z "$ARCH_REPO_DISPATCH_TOKEN" ]; then
-            echo "::notice::ARCH_REPO_DISPATCH_TOKEN is not set; jpsutton/arch-repo picks up the release within the hour"
+            echo "::warning::ARCH_REPO_DISPATCH_TOKEN is not set; jpsutton/arch-repo was not updated"
             exit 0
           fi
-          GH_TOKEN=$ARCH_REPO_DISPATCH_TOKEN gh api repos/jpsutton/arch-repo/dispatches -f event_type=package-released \
-            || echo "::warning::could not notify jpsutton/arch-repo; it picks up the release within the hour"
+          GH_TOKEN=$ARCH_REPO_DISPATCH_TOKEN gh workflow run publish.yml -R jpsutton/arch-repo \
+            || echo "::warning::could not notify jpsutton/arch-repo; the pacman repository was not updated"
 
       # The self-hosted F-Droid repository on GitHub Pages (gh-pages branch, /fdroid).
       - name: F-Droid repository

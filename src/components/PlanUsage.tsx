@@ -309,15 +309,28 @@ function AccountUsage({ a, named, first, now, limit }: { a: PlanAccount; named: 
 
 /**
  * Claude plan usage from the last reports of Claude Code, or of Patchbay's agent on a Claude login, one section per
- * account. Stays open until its button is clicked again, so it can sit beside a running session.
+ * account. Full-width sidebar pane above the footer; stays open until its button is clicked again.
  */
-export function PlanUsageBlade({ className }: { className: string }) {
+export function PlanUsageBlade({ className }: { className?: string }) {
   const all = useStore((s) => s.planAccounts);
   const open = useStore((s) => s.planOpen);
+  const setOpen = useStore((s) => s.setPlanOpen);
   const guard = useStore((s) => s.prefs.usageLimit);
   const openSettingsAt = useStore((s) => s.openSettingsAt);
   const defaultAgent = useStore((s) => s.prefs.defaultAgent);
   const now = useNow(open);
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        setOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [open, setOpen]);
   if (!open) return null;
   const limit = guard.enabled ? guard.percent : null;
   const accounts = all.filter((a) => reported(a, now));
@@ -326,7 +339,7 @@ export function PlanUsageBlade({ className }: { className: string }) {
     <div
       role="dialog"
       aria-label="Claude plan usage"
-      className={`z-30 w-[280px] rounded-xl border border-border bg-raised py-1.5 text-[13px] shadow-float ${className}`}
+      className={`max-h-[40vh] w-full shrink-0 overflow-y-auto border-t border-line bg-panel py-1.5 text-[13px] ${className ?? ""}`}
     >
       <div className="flex items-baseline justify-between px-3 pb-1.5 pt-2">
         <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-faint">Claude plan</span>

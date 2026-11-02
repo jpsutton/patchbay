@@ -189,6 +189,30 @@ pub enum Delivery {
     Queued,
 }
 
+/// A peer agent message waiting behind the running turn (`origin` is `agent:…`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueuedAgentMessage {
+    pub message_id: String,
+    /// First part of the prompt text, for listing without shipping the whole body.
+    pub preview: String,
+    pub origin: String,
+}
+
+/// Whether a prompt came from another Code session via agent messaging.
+pub fn is_agent_message_origin(origin: &str) -> bool {
+    origin.starts_with("agent:")
+}
+
+fn agent_message_preview(text: &str) -> String {
+    const MAX: usize = 240;
+    let mut preview: String = text.chars().take(MAX).collect();
+    if text.chars().count() > MAX {
+        preview.push('…');
+    }
+    preview
+}
+
 /// A user prompt: the ACP blocks for the agent, and what the transcript shows for it.
 #[derive(Debug, Clone)]
 pub struct UserMessage {
@@ -225,6 +249,15 @@ pub enum AgentCmd {
     /// Send a queued prompt, or one steered into the running turn, now: cancel the running turn
     /// and send it next.
     SendNow { prompt_id: String },
+    /// Peer agent messages waiting in the queue (`origin` starts with `agent:`).
+    ListQueuedAgent {
+        reply: oneshot::Sender<Result<Vec<QueuedAgentMessage>>>,
+    },
+    /// Take one queued peer agent message out of the queue (for an MCP tool result mid-turn).
+    AcceptQueuedAgent {
+        prompt_id: String,
+        reply: oneshot::Sender<Result<String>>,
+    },
     Cancel,
     /// Stop one running tool call; the turn goes on. Patchbay's own agent only.
     CancelTool { tool_call_id: String },
@@ -364,40 +397,88 @@ struct TurnCtx {
     done: mpsc::UnboundedSender<bool>,
 }
 
+/// How many times a transport drop re-sends `session/prompt` after the first failure.
+/// Cursor ACP turns end on the first blip (`enableAgentRetries` is off there); Patchbay retries
+/// the same prompt on the live session so the user doesn't have to.
+const TRANSPORT_RETRIES: u32 = 2;
+
+fn transport_backoff(attempt: u32) -> std::time::Duration {
+    if cfg!(test) {
+        std::time::Duration::from_millis(20)
+    } else {
+        // 1s, then 2s.
+        std::time::Duration::from_secs(1u64 << attempt.min(2))
+    }
+}
+
 /// Start a turn for `msg` with `session/prompt`.
 fn start_turn(ctx: &TurnCtx, msg: UserMessage) -> Result<Delivery> {
-    let req: acp::PromptRequest = from_json(json!({ "sessionId": ctx.session_id, "prompt": msg.blocks }))?;
     emit(&ctx.sink, &ctx.csid, msg.event(Delivery::Sent));
     let ctx = ctx.clone();
     tokio::task::spawn_local(async move {
         let (sink, csid) = (&ctx.sink, ctx.csid.as_str());
-        let go_on = match ctx.conn.prompt(req).await {
-            Ok(resp) => {
-                let v = serde_json::to_value(&resp).unwrap_or_default();
-                if v["usage"].is_object() {
-                    emit(sink, csid, CodeEvent::TurnUsage { usage: v["usage"].clone() });
+        let mut attempt = 0u32;
+        let go_on = loop {
+            let req: acp::PromptRequest = match from_json(json!({
+                "sessionId": ctx.session_id,
+                "prompt": msg.blocks,
+            })) {
+                Ok(r) => r,
+                Err(e) => {
+                    emit(sink, csid, CodeEvent::Error { message: format!("{e:#}") });
+                    emit(sink, csid, CodeEvent::PromptDone { stop_reason: json!("error") });
+                    break false;
                 }
-                let go_on = v["stopReason"] != "cancelled";
-                emit(sink, csid, CodeEvent::PromptDone { stop_reason: v["stopReason"].clone() });
-                go_on
-            }
-            // Signed out mid-session (a logout, an expired token): offer a sign-in when there is
-            // one Patchbay can run, else say how.
-            Err(e) if is_auth_required(&e) => {
-                let message = auth_message(&e, &ctx.init_v, ctx.login_hint, true);
-                if ctx.auth_methods.is_empty() {
+            };
+            match ctx.conn.prompt(req).await {
+                Ok(resp) => {
+                    let v = serde_json::to_value(&resp).unwrap_or_default();
+                    if v["usage"].is_object() {
+                        emit(sink, csid, CodeEvent::TurnUsage { usage: v["usage"].clone() });
+                    }
+                    let go_on = v["stopReason"] != "cancelled";
+                    emit(sink, csid, CodeEvent::PromptDone { stop_reason: v["stopReason"].clone() });
+                    break go_on;
+                }
+                // Signed out mid-session (a logout, an expired token): offer a sign-in when there is
+                // one Patchbay can run, else say how.
+                Err(e) if is_auth_required(&e) => {
+                    let message = auth_message(&e, &ctx.init_v, ctx.login_hint, true);
+                    if ctx.auth_methods.is_empty() {
+                        emit(sink, csid, CodeEvent::Error { message });
+                    } else {
+                        ctx.auth_lost.set(true);
+                        emit(sink, csid, CodeEvent::AuthRequired { message, methods: ctx.auth_methods.clone() });
+                    }
+                    emit(sink, csid, CodeEvent::PromptDone { stop_reason: json!("error") });
+                    break false;
+                }
+                Err(e) if is_retriable_transport(&e) && attempt < TRANSPORT_RETRIES => {
+                    attempt += 1;
+                    emit(
+                        sink,
+                        csid,
+                        CodeEvent::Notice {
+                            message: format!(
+                                "The agent's connection dropped; retrying ({attempt}/{TRANSPORT_RETRIES})…"
+                            ),
+                        },
+                    );
+                    tokio::time::sleep(transport_backoff(attempt - 1)).await;
+                }
+                Err(e) => {
+                    let message = if attempt > 0 {
+                        format!(
+                            "The agent's connection dropped after {} tries. Send your message again.\n{e}",
+                            attempt + 1
+                        )
+                    } else {
+                        e.to_string()
+                    };
                     emit(sink, csid, CodeEvent::Error { message });
-                } else {
-                    ctx.auth_lost.set(true);
-                    emit(sink, csid, CodeEvent::AuthRequired { message, methods: ctx.auth_methods.clone() });
+                    emit(sink, csid, CodeEvent::PromptDone { stop_reason: json!("error") });
+                    break false;
                 }
-                emit(sink, csid, CodeEvent::PromptDone { stop_reason: json!("error") });
-                false
-            }
-            Err(e) => {
-                emit(sink, csid, CodeEvent::Error { message: e.to_string() });
-                emit(sink, csid, CodeEvent::PromptDone { stop_reason: json!("error") });
-                false
             }
         };
         let _ = ctx.done.send(go_on);
@@ -1049,6 +1130,36 @@ fn unknown_update(update: &Value) -> Option<String> {
         // Patchbay's own agent: how its subagents are doing (`patchbay-agent`'s `publish_agents`).
         "subagents_update" if update["agents"].is_array() => None,
         "subagents_update" => Some("The agent sent a subagent list Patchbay can't show".into()),
+        // Cursor ACP (and Grok): a child session announced on the parent. The UI folds these into
+        // the subagent rows; child traffic still streams under its own session id and is dropped.
+        "subagent_spawned"
+            if update["subagentSessionId"].is_string()
+                || update["child_session_id"].is_string()
+                || update["subagent_id"].is_string() =>
+        {
+            None
+        }
+        "subagent_spawned" => Some("The agent sent a subagent spawn Patchbay can't show (no id)".into()),
+        "subagent_state_update"
+            if (update["subagentSessionId"].is_string()
+                || update["child_session_id"].is_string()
+                || update["subagent_id"].is_string())
+                && update["state"].is_string() =>
+        {
+            None
+        }
+        "subagent_state_update" => {
+            Some("The agent sent a subagent state Patchbay can't show".into())
+        }
+        "subagent_finished"
+            if (update["subagentSessionId"].is_string()
+                || update["child_session_id"].is_string()
+                || update["subagent_id"].is_string())
+                && (update["state"].is_string() || update["status"].is_string()) =>
+        {
+            None
+        }
+        "subagent_finished" => Some("The agent sent a subagent finish Patchbay can't show".into()),
         _ => Some(format!("The agent sent an update Patchbay doesn't know (\"{kind}\")")),
     }
 }
@@ -1611,6 +1722,40 @@ async fn run(
                             emit(&sink, &csid, CodeEvent::Unqueued { prompt_ids: vec![prompt_id], restore: false });
                         }
                     }
+                    AgentCmd::ListQueuedAgent { reply } => {
+                        let list = queue
+                            .iter()
+                            .filter(|(_, m)| is_agent_message_origin(&m.origin))
+                            .map(|(_, m)| QueuedAgentMessage {
+                                message_id: m.id.clone(),
+                                preview: agent_message_preview(&m.text),
+                                origin: m.origin.clone(),
+                            })
+                            .collect();
+                        let _ = reply.send(Ok(list));
+                    }
+                    AgentCmd::AcceptQueuedAgent { prompt_id, reply } => {
+                        let found = queue.iter().position(|(_, m)| m.id == prompt_id);
+                        let r = match found {
+                            Some(i) if is_agent_message_origin(&queue[i].1.origin) => {
+                                let (_, msg) = queue.remove(i).expect("found above");
+                                emit(
+                                    &sink,
+                                    &csid,
+                                    CodeEvent::Unqueued {
+                                        prompt_ids: vec![prompt_id],
+                                        restore: false,
+                                    },
+                                );
+                                Ok(msg.text)
+                            }
+                            Some(_) => Err(anyhow!(
+                                "that queued prompt is not a peer agent message"
+                            )),
+                            None => Err(anyhow!("no queued peer agent message with that id")),
+                        };
+                        let _ = reply.send(r);
+                    }
                     AgentCmd::SendNow { prompt_id } => {
                         if force_steers {
                             // Nothing is cancelled: a steered message stays steered, once the
@@ -1834,6 +1979,12 @@ fn refuse_until_signed_in(cmd: AgentCmd) {
             let _ = reply.send(Err(anyhow!("a sign-in is already in progress")));
         }
         AgentCmd::Prompt { reply, .. } => answer(reply, Err(anyhow!("the agent isn't signed in yet"))),
+        AgentCmd::ListQueuedAgent { reply } => {
+            let _ = reply.send(Err(anyhow!("the agent isn't signed in yet")));
+        }
+        AgentCmd::AcceptQueuedAgent { reply, .. } => {
+            let _ = reply.send(Err(anyhow!("the agent isn't signed in yet")));
+        }
         AgentCmd::Unqueue { .. }
         | AgentCmd::SendNow { .. }
         | AgentCmd::Cancel
@@ -1976,6 +2127,27 @@ fn is_auth_required(e: &acp::Error) -> bool {
             .is_some_and(|k| AUTH_ERROR_KINDS.contains(&k)),
         _ => false,
     }
+}
+
+/// Cursor (and some other agents) end an ACP turn on a brief transport blip. The error names
+/// itself retriable, but ACP never retries. Match the shapes Cursor staff and users report.
+fn is_retriable_transport(e: &acp::Error) -> bool {
+    let msg = e.message.to_ascii_lowercase();
+    const NEEDLES: &[&str] = &[
+        "retriableerror",
+        "http/2 stream closed",
+        "cancel (0x8)",
+        "[canceled]",
+        "[cancelled]",
+        "[unavailable]",
+        "deadline_exceeded",
+        "bidi_append_deadline_exceeded",
+        "connection stalled",
+        "ping timed out",
+        "econnreset",
+        "socket hang up",
+    ];
+    NEEDLES.iter().any(|n| msg.contains(n))
 }
 
 /// An internal error's message without JSON-RPC's generic "Internal error:" prefix, or `None`
@@ -2207,8 +2379,8 @@ async fn open_session(
 mod tests {
     use super::{
         AgentCmd, AuthChoice, CodeEvent, ConfigIds, Delivery, Envelope, RewindPoint, SessionConfig, SpawnSpec, Steer,
-        Steered, UserMessage, auth_choices, auth_metas, merge_config, pick_rewind_point, steer_outcome,
-        terminal_auth_command,
+        Steered, UserMessage, auth_choices, auth_metas, is_retriable_transport, merge_config, pick_rewind_point,
+        steer_outcome, terminal_auth_command,
     };
     use serde_json::json;
     use std::sync::{Arc, Mutex};
@@ -2426,10 +2598,11 @@ mod tests {
     /// key `sk-test` in codex-acp's shape, so the string shape Patchbay tries first is refused.
     /// The prompt `expire` signs it out again, and prompts fail with `auth_required` until the
     /// next sign-in. `expire-oauth` does the same with claude-agent-acp's `-32603` and
-    /// `errorKind`, and `crash` fails with a `-32603` that isn't about signing in. To clients
-    /// that run terminal sign-ins it also offers `tui`, whose command
-    /// (this script with `--login`) leaves a `signed-in` file that a new process starts with.
-    /// `--no-methods` starts it signed in, with no auth methods.
+    /// `errorKind`, and `crash` fails with a `-32603` that isn't about signing in. `flaky` fails
+    /// the first two prompts with Cursor's HTTP/2 CANCEL RetriableError, then succeeds;
+    /// `always-flaky` always returns that error. To clients that run terminal sign-ins it also
+    /// offers `tui`, whose command (this script with `--login`) leaves a `signed-in` file that a
+    /// new process starts with. `--no-methods` starts it signed in, with no auth methods.
     ///
     /// Turns: a prompt `hold` runs until a `release` steer or a cancel, and `brief` for half a
     /// second. `subagent` streams `child:work` under another session id, as a subagent would,
@@ -2449,6 +2622,8 @@ no_methods = "--no-methods" in sys.argv
 authed = no_methods or os.path.exists("signed-in")
 lock = threading.Lock()
 held = None
+flaky_left = 2
+TRANSPORT = "Error: RetriableError: [canceled] http/2 stream closed with error code CANCEL (0x8)"
 def send(m):
     with lock:
         sys.stdout.write(json.dumps(m) + "\n"); sys.stdout.flush()
@@ -2511,6 +2686,11 @@ for line in sys.stdin:
         if t == "crash":
             send({"jsonrpc": "2.0", "id": i, "error": {"code": -32603, "message": "Internal error: boom",
                   "data": {"errorKind": "unknown"}}})
+            continue
+        if t == "always-flaky" or (t == "flaky" and flaky_left > 0):
+            if t == "flaky":
+                flaky_left -= 1
+            send({"jsonrpc": "2.0", "id": i, "error": {"code": -32603, "message": TRANSPORT}})
             continue
         if not authed and t == "expire-oauth":
             send({"jsonrpc": "2.0", "id": i, "error": {"code": -32603,
@@ -2769,6 +2949,86 @@ for line in sys.stdin:
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A Cursor-shaped transport drop mid-prompt is retried on the same session; the turn
+    /// succeeds without an error entry once the agent answers.
+    #[test]
+    fn a_retriable_transport_drop_is_retried() {
+        let dir = std::env::temp_dir().join(format!("pb-retry-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        send_prompt(&tx, "flaky");
+        wait_for(&events, "promptDone", |evs| evs.iter().any(prompt_done));
+        let notices: Vec<String> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                CodeEvent::Notice { message } if message.contains("connection dropped") => Some(message.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notices.len(), 2, "{notices:?}");
+        assert!(notices[0].contains("1/2"), "{notices:?}");
+        assert!(notices[1].contains("2/2"), "{notices:?}");
+        assert_eq!(count(&events, |e| matches!(e, CodeEvent::Error { .. })), 0);
+        assert_eq!(agent_heard(&events, 1), ["prompt:flaky"]);
+        assert_eq!(stop_reasons(&events), [json!("end_turn")]);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Exhausted transport retries surface a clear error; the session stays up for a later prompt.
+    #[test]
+    fn exhausted_transport_retries_keep_the_session() {
+        let dir = std::env::temp_dir().join(format!("pb-retry-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        send_prompt(&tx, "always-flaky");
+        wait_for(&events, "promptDone", |evs| evs.iter().any(prompt_done));
+        assert_eq!(
+            count(&events, |e| matches!(e, CodeEvent::Notice { message } if message.contains("connection dropped"))),
+            2
+        );
+        let errors: Vec<String> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                CodeEvent::Error { message } => Some(message.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("after 3 tries"), "{errors:?}");
+        assert!(errors[0].contains("RetriableError"), "{errors:?}");
+
+        send_prompt(&tx, "hello");
+        wait_for(&events, "second promptDone", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 2);
+        assert_eq!(agent_heard(&events, 1), ["prompt:hello"]);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn retriable_transport_matches_cursor_shapes() {
+        let hit = |m: &str| is_retriable_transport(&super::acp::Error::new(-32603, m));
+        assert!(hit("Error: RetriableError: [canceled] http/2 stream closed with error code CANCEL (0x8)"));
+        assert!(hit("ConnectError: [unavailable]"));
+        assert!(hit("deadline_exceeded: bidi_append_deadline_exceeded"));
+        assert!(hit("Connection stalled"));
+        assert!(hit("PING timed out"));
+        assert!(!hit("Internal error: boom"));
+        assert!(!hit("Authentication required"));
+    }
+
     /// claude-agent-acp reports an expired login as an internal error tagged `errorKind`. That
     /// asks for a sign-in, with the reason minus "Internal error:"; other internal errors don't.
     #[test]
@@ -3025,6 +3285,63 @@ for line in sys.stdin:
         );
         let unqueued = |e: &CodeEvent| matches!(e, CodeEvent::Unqueued { prompt_ids, restore: false } if prompt_ids == &["third"]);
         assert_eq!(count(&events, unqueued), 1);
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A non-steering agent can pull a queued peer message mid-turn so it never becomes the next turn.
+    #[test]
+    fn accept_queued_agent_message_mid_turn() {
+        let dir = std::env::temp_dir().join(format!("pb-accept-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        let peer = UserMessage {
+            id: "peer-1".into(),
+            blocks: vec![json!({ "type": "text", "text": "hello from peer" })],
+            text: "hello from peer".into(),
+            origin: "agent:node-a:session-b".into(),
+            attachments: json!([]),
+        };
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        tx.send(AgentCmd::Prompt { msg: peer, force: false, reply: Some(reply) }).unwrap();
+        assert_eq!(rx.blocking_recv().unwrap().unwrap(), Delivery::Queued);
+
+        // A user-queued prompt is not offered as a peer agent message.
+        assert_eq!(prompt(&tx, "user-queued"), Delivery::Queued);
+
+        let (list_reply, list_rx) = tokio::sync::oneshot::channel();
+        tx.send(AgentCmd::ListQueuedAgent { reply: list_reply }).unwrap();
+        let listed = list_rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].message_id, "peer-1");
+        assert!(listed[0].preview.contains("hello from peer"));
+
+        let (accept_reply, accept_rx) = tokio::sync::oneshot::channel();
+        tx.send(AgentCmd::AcceptQueuedAgent {
+            prompt_id: "peer-1".into(),
+            reply: accept_reply,
+        })
+        .unwrap();
+        assert_eq!(accept_rx.blocking_recv().unwrap().unwrap(), "hello from peer");
+
+        let unqueued =
+            |e: &CodeEvent| matches!(e, CodeEvent::Unqueued { prompt_ids, restore: false } if prompt_ids == &["peer-1"]);
+        wait_for(&events, "accepted", |evs| evs.iter().any(unqueued));
+
+        // Stopping the hold drops the remaining user queue; the accepted peer never starts a turn.
+        tx.send(AgentCmd::Cancel).unwrap();
+        wait_for(&events, "cancelled", |evs| {
+            evs.iter().any(|e| matches!(e, CodeEvent::PromptDone { stop_reason } if stop_reason == "cancelled"))
+        });
+        assert_eq!(agent_heard(&events, 1), ["prompt:hold"]);
+        assert!(!deliveries(&events).iter().any(|(id, d)| id == "peer-1" && *d == Delivery::Sent));
         no_errors(&events);
         tx.send(AgentCmd::Shutdown).unwrap();
         thread.join().unwrap();

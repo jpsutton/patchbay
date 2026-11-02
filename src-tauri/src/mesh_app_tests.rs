@@ -955,6 +955,11 @@ async fn cursor_plan_limits_reach_peers_on_the_same_account() {
         limit_cents: Some(40000),
         bonus_spend_cents: Some(500),
         remaining_bonus: Some(true),
+        display_message: None,
+        grants: Vec::new(),
+        grants_remaining_cents: Some(0),
+        slow_pool: Some(false),
+        on_demand_allowed: Some(false),
     };
     adopt_cursor_plan(&a.state, report(40.0, 60, "42"), true);
     until("B has A's Cursor report", 10, || {
@@ -1061,6 +1066,20 @@ async fn agents_message_each_other_across_the_mesh() {
     let (r, got) = tokio::join!(send_agent_message(&b.state, &bn, &sb.id, &sa.id, "pong"), take_agent_message(&mut rx_a));
     r.unwrap();
     assert!(got.text.contains("pong") && got.text.contains(&sb.id), "{}", got.text);
+    assert!(
+        got.text.contains("Do not resend just because a prior delivery was queued"),
+        "anti-loop footer present: {}",
+        got.text
+    );
+
+    // An identical retry is accepted without a second prompt.
+    let again = send_agent_message(&b.state, &bn, &sb.id, &sa.id, "pong").await.unwrap();
+    assert_eq!(again["delivery"], "duplicate");
+    assert_eq!(again["accepted"], true);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), rx_a.recv()).await.is_err(),
+        "duplicate must not re-prompt the target"
+    );
 
     // Guards: no self-messages, and a node can't send as a session it doesn't host.
     assert!(send_agent_message(&a.state, &an, &sa.id, &sa.id, "x").await.is_err());
