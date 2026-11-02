@@ -147,19 +147,21 @@ async fn handle_bridge(
         match request.action.as_str() {
             "list" => crate::list_agent_sessions(&state, &request.source_session_id),
             "send" => {
-                check_rate(&request.source_session_id)?;
+                let target = request
+                    .target_session_id
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("targetSessionId is required"))?;
+                let message = request
+                    .message
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("message is required"))?;
+                check_send_limits(&request.source_session_id, target)?;
                 crate::send_agent_message(
                     &state,
                     &state.mesh.node_id().to_owned(),
                     &request.source_session_id,
-                    request
-                        .target_session_id
-                        .as_deref()
-                        .ok_or_else(|| anyhow!("targetSessionId is required"))?,
-                    request
-                        .message
-                        .as_deref()
-                        .ok_or_else(|| anyhow!("message is required"))?,
+                    target,
+                    message,
                 )
                 .await
             }
@@ -191,9 +193,20 @@ async fn handle_bridge(
 
 const RATE_MAX: usize = 20;
 const RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
+/// Caps a single conversation pair so overnight ping-pong cannot burn thousands of turns.
+const PAIR_MAX: usize = 25;
+const PAIR_WINDOW: std::time::Duration = std::time::Duration::from_secs(3600);
+/// Identical body from the same source to the same target within this window is not re-prompted.
+const DEDUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// Stops two agents ping-ponging forever: at most `RATE_MAX` sends per session per window.
-/// shortcut: counts sends only, not reply chains; add a hop count if a loop gets past this.
+/// Per-session and per-pair send budgets before the bridge calls into the mesh.
+pub(crate) fn check_send_limits(source_session_id: &str, target_session_id: &str) -> Result<()> {
+    check_rate(source_session_id)?;
+    check_pair_rate(source_session_id, target_session_id)?;
+    Ok(())
+}
+
+/// At most `RATE_MAX` sends per session per 10 minutes.
 fn check_rate(session_id: &str) -> Result<()> {
     static SENDS: std::sync::LazyLock<
         std::sync::Mutex<std::collections::HashMap<String, Vec<std::time::Instant>>>,
@@ -207,6 +220,92 @@ fn check_rate(session_id: &str) -> Result<()> {
     }
     recent.push(now);
     Ok(())
+}
+
+/// At most `PAIR_MAX` sends from one session to another per hour (each direction counted alone).
+fn check_pair_rate(source_session_id: &str, target_session_id: &str) -> Result<()> {
+    static PAIRS: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<(String, String), Vec<std::time::Instant>>>,
+    > = std::sync::LazyLock::new(Default::default);
+    let now = std::time::Instant::now();
+    let key = (source_session_id.to_owned(), target_session_id.to_owned());
+    let mut pairs = PAIRS.lock().unwrap();
+    let recent = pairs.entry(key).or_default();
+    recent.retain(|t| now.duration_since(*t) < PAIR_WINDOW);
+    if recent.len() >= PAIR_MAX {
+        anyhow::bail!(
+            "rate limit: at most {PAIR_MAX} agent messages per hour to the same session (pause or send something new later)"
+        );
+    }
+    recent.push(now);
+    Ok(())
+}
+
+#[derive(Clone)]
+struct RecentDelivery {
+    at: std::time::Instant,
+    message_id: String,
+}
+
+fn recent_deliveries() -> &'static std::sync::Mutex<std::collections::HashMap<String, RecentDelivery>> {
+    static RECENT: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<String, RecentDelivery>>,
+    > = std::sync::LazyLock::new(Default::default);
+    &RECENT
+}
+
+fn delivery_key(source_session_id: &str, target_session_id: &str, message: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source_session_id.hash(&mut hasher);
+    target_session_id.hash(&mut hasher);
+    message.trim().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// If this exact body was already delivered from `source` to `target` within `DEDUP_WINDOW`,
+/// return the prior `messageId` so the host can skip re-prompting.
+pub(crate) fn take_duplicate(
+    source_session_id: &str,
+    target_session_id: &str,
+    message: &str,
+) -> Option<String> {
+    let now = std::time::Instant::now();
+    let key = delivery_key(source_session_id, target_session_id, message);
+    let mut recent = recent_deliveries().lock().unwrap();
+    recent.retain(|_, d| now.duration_since(d.at) < DEDUP_WINDOW);
+    recent.get(&key).map(|d| d.message_id.clone())
+}
+
+/// Remember a successful delivery so an identical retry can be collapsed.
+pub(crate) fn remember_delivery(
+    source_session_id: &str,
+    target_session_id: &str,
+    message: &str,
+    message_id: &str,
+) {
+    let now = std::time::Instant::now();
+    let key = delivery_key(source_session_id, target_session_id, message);
+    let mut recent = recent_deliveries().lock().unwrap();
+    recent.retain(|_, d| now.duration_since(d.at) < DEDUP_WINDOW);
+    recent.insert(
+        key,
+        RecentDelivery {
+            at: now,
+            message_id: message_id.to_owned(),
+        },
+    );
+}
+
+/// Short note for the MCP tool result so agents do not treat queued/steered as failure.
+pub(crate) fn delivery_note(delivery: &str) -> &'static str {
+    match delivery {
+        "sent" => "accepted: delivered as a new turn",
+        "steered" => "accepted: joined the running turn — do not resend",
+        "queued" => "accepted: queued for the agent's next turn — do not resend",
+        "duplicate" => "accepted earlier: identical message already delivered — do not resend",
+        _ => "accepted",
+    }
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -233,9 +332,9 @@ fn tools_list() -> Value {
 
 fn tools_list_for(can_steer: bool) -> Value {
     let send_description = if can_steer {
-        "Send a message to another Patchbay Code session in this mesh. When that session is mid-turn and can take mid-turn messages, it receives yours in the running turn; otherwise the message waits for its next turn. The recipient can reply by sending a message to your session."
+        "Send a message to another Patchbay Code session in this mesh. When that session is mid-turn and can take mid-turn messages, it receives yours in the running turn; otherwise the message waits for its next turn. The recipient can reply by sending a message to your session. A result of sent, steered, queued, or duplicate all mean the message was accepted — do not resend because delivery was queued. Only send when you have new information."
     } else {
-        "Send a message to another Patchbay Code session in this mesh. When that session is mid-turn and cannot take mid-turn messages, the message queues until its turn ends or it calls accept_queued_agent_message. This session also queues peer messages mid-turn: use list_queued_agent_messages and accept_queued_agent_message to read them as a tool step without ending your turn."
+        "Send a message to another Patchbay Code session in this mesh. When that session is mid-turn and cannot take mid-turn messages, the message queues until its turn ends or it calls accept_queued_agent_message. This session also queues peer messages mid-turn: use list_queued_agent_messages and accept_queued_agent_message to read them as a tool step without ending your turn. A result of sent, steered, queued, or duplicate all mean the message was accepted — do not resend because delivery was queued. Only send when you have new information."
     };
     let mut tools = vec![
         json!({
@@ -401,7 +500,15 @@ async fn call_tool(
     }
     let text = match name {
         TOOL_ACCEPT_QUEUED => response["ok"]["text"].as_str().unwrap_or_default().to_owned(),
-        _ => response["ok"].to_string(),
+        _ => {
+            let ok = &response["ok"];
+            let delivery = ok["delivery"].as_str().unwrap_or("");
+            if delivery.is_empty() {
+                ok.to_string()
+            } else {
+                format!("{ok}\n{}", delivery_note(delivery))
+            }
+        }
     };
     Ok(json!({ "content": [{ "type": "text", "text": text }], "isError": false }))
 }
@@ -445,9 +552,40 @@ mod tests {
     #[test]
     fn rate_limit_trips_after_max_sends() {
         for _ in 0..RATE_MAX {
-            check_rate("rate-test").unwrap();
+            check_rate("rate-test-session").unwrap();
         }
-        assert!(check_rate("rate-test").is_err());
+        assert!(check_rate("rate-test-session").is_err());
         assert!(check_rate("other-session").is_ok());
+    }
+
+    #[test]
+    fn pair_rate_trips_after_max_to_same_target() {
+        let src = "pair-src";
+        let dst = "pair-dst";
+        for _ in 0..PAIR_MAX {
+            check_pair_rate(src, dst).unwrap();
+        }
+        assert!(check_pair_rate(src, dst).is_err());
+        assert!(check_pair_rate(src, "other-dst").is_ok(), "other target still allowed");
+        assert!(check_pair_rate(dst, src).is_ok(), "reply direction is a separate pair");
+    }
+
+    #[test]
+    fn identical_deliveries_dedup_within_window() {
+        let src = "dedup-src";
+        let dst = "dedup-dst";
+        assert!(take_duplicate(src, dst, "same body").is_none());
+        remember_delivery(src, dst, "same body", "msg-1");
+        assert_eq!(take_duplicate(src, dst, "same body").as_deref(), Some("msg-1"));
+        assert_eq!(take_duplicate(src, dst, " same body ").as_deref(), Some("msg-1"));
+        assert!(take_duplicate(src, dst, "different").is_none());
+        assert!(take_duplicate(src, "other", "same body").is_none());
+    }
+
+    #[test]
+    fn delivery_notes_discourage_resend_on_queued() {
+        assert!(delivery_note("queued").contains("do not resend"));
+        assert!(delivery_note("duplicate").contains("do not resend"));
+        assert!(delivery_note("sent").contains("accepted"));
     }
 }

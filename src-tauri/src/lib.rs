@@ -1908,13 +1908,26 @@ async fn deliver_agent_message_local(
     if state.code.is_moving(target_session_id) {
         anyhow::bail!("target session is being moved to another computer");
     }
+    // Identical retries from overnight ping-pong: accept without waking the agent again.
+    if let Some(prior_id) =
+        agent_messaging::take_duplicate(source_session_id, target_session_id, message)
+    {
+        return Ok(serde_json::json!({
+            "targetSessionId": target_session_id,
+            "targetTitle": target.title,
+            "delivery": "duplicate",
+            "messageId": prior_id,
+            "accepted": true,
+            "note": agent_messaging::delivery_note("duplicate"),
+        }));
+    }
     // An idle session may have no live agent process; start it so the message can run.
     if !state.code.is_running(target_session_id) {
         code_start_local(state, target_session_id.to_owned()).await?;
     }
     let source_node = state.mesh.member_name(from_node);
     let text = format!(
-        "Patchbay agent message from Code session '{}' ({}) on {} ({}):\n\n{}\n\nTo reply, use the Patchbay send_agent_message tool and target session {}.",
+        "Patchbay agent message from Code session '{}' ({}) on {} ({}):\n\n{}\n\nTo reply, use the Patchbay send_agent_message tool and target session {}. Do not resend just because a prior delivery was queued or steered — that means it was accepted. Only message them when you have new information.",
         source.title, source_session_id, source_node, from_node, message, source_session_id
     );
     let prompt_id = new_id();
@@ -1929,11 +1942,19 @@ async fn deliver_agent_message_local(
         false,
     )
     .await?;
+    agent_messaging::remember_delivery(source_session_id, target_session_id, message, &prompt_id);
+    let delivery_str = match delivery {
+        code::acp::Delivery::Sent => "sent",
+        code::acp::Delivery::Steered => "steered",
+        code::acp::Delivery::Queued => "queued",
+    };
     Ok(serde_json::json!({
         "targetSessionId": target_session_id,
         "targetTitle": target.title,
         "delivery": delivery,
         "messageId": prompt_id,
+        "accepted": true,
+        "note": agent_messaging::delivery_note(delivery_str),
     }))
 }
 

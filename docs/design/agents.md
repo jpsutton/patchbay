@@ -58,6 +58,12 @@ get `list_queued_agent_messages` and `accept_queued_agent_message`: the tool des
 to accept a waiting peer message as a mid-turn tool result so it does not wait for turn end (and is
 removed from the next-turn queue). User-queued composer prompts are not listed.
 
+To stop overnight ping-pong, the bridge rate-limits each session (20 / 10 minutes) and each
+source→target pair (25 / hour). The receiving host collapses an identical body from the same
+source within 10 minutes as `delivery: "duplicate"` without re-prompting. Tool results and the
+injected prompt say that `sent` / `steered` / `queued` / `duplicate` all mean accepted — agents
+must not resend because delivery was queued.
+
 ## Models, modes and config options
 
 Agents report these three ways:
