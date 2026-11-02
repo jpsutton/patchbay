@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<fdroid>
+	<repo icon="icon.png" name="Patchbay" pubkey="308204f2308202daa0030201020209008abd707fa819c1c5300d06092a864886f70d01010c05003026312430220603550403131b506174636862617920462d44726f6964207265706f7369746f72793020170d3236313031373137313033385a180f32303534303330343137313033385a3026312430220603550403131b506174636862617920462d44726f6964207265706f7369746f727930820222300d06092a864886f70d01010105000382020f003082020a0282020100c4b38b4f56ed36c9e030c65f15e286b55bac24a59c9007c175a52a3257f407df0f0037e58843c139886c7f21841c224d2315787e88941c338b8fa8ad8d313a0acc6ce62c3255dc492836f40c5d9d452abc2534cc6a96045106ddd3b4626497acb7a26c6ce7ed3032af0af84eaf3295404b0ceee98d7c8414de5ea15be174b5ae89e9dfc5c4fd46f960490eb1567ebf8294d3118f844f4e72e10122266da0276d61cfb945b5c43d4f71d8acf1230048bf26d0703aa7f074f2e0cc71d80e265a61399344f48223996106842df99122a85e7dd9ce0d28f3a2094d831a6f693174796aa20aee030f5d8541a2f99406724239588982929ea61c4a7db4d13c35d1d0346729049befc637ae003ab53210c8f3b4a99b18aebd1a85cdc9c427d2d13e124070ec0625e228ef614c7c84d68757d11f466b97ff1fea72be827f344187c10c9f8f42cd4b6f5e17ee25f0bb1ba5d151817ca29a7a3fd0d290bfb8ef711cb64cf3ac3ce2602fa78845451dc99b8f1deb1ec616887df685ac3fdd8d86f2e6285efc6e0abfe2675633288a0a59cdc4ca41569e5407bdd3f163d39a2b6dda072280741d12c1443ae95a1bc67c4c13c8c4d9ba5bd9ec97e51de3cfbfe053c035b7991421fc7ac36bbf422a52fa7070fbda2edee53735fde8c8cda01cef0e3609d08352ffcff325d387f3a486c422faa88c1822fde1f34b809df0a24d209c61c7de9e8d0203010001a321301f301d0603551d0e04160414be44b02067c1313a2a2fae25ff8af41eec9b4ecb300d06092a864886f70d01010c050003820201002e0c9ef9c782369e834265c4476a2510e9935dfa279ae17547f596fcd2e80836bbe57cc7c01b6835252fff15635f584b1f71c5487af404d4cf1bac5ee7b13b3d66c4772322df677dc6eedebe6721a80f41441a21dc13a69fc7b6d9a7677c02d6b238a90b1359aa86672851c07d4d5ae46b368c296fed93d7f1725dbd9c5171550d29fdd16a965a8167b9ab153a4b9a614e75ab1e9d26a513e97ab0b6bf420b3ea2d1b655af6e2aa4594782fe111bb0fe33036f877da40121889b228139e19a6ee8a75248fb9a3768086fec5b895e718712bd7d5e15f1c9c71013509f676082ca4a7ab5b5c7f31c74f77d9b1130d82abab54002cadf8c2cf0481b549574910bd787a18f2e85681f5603fa2d5edb32a216db7c2d5d5d459e3b2533ace0d5611344702103453397e18808f809b7298ed51b535e0644d7b94a50ad71a881425f250656f3ec62c18f195e2b16f226ad9f7e0a5814dd63cfeab4f8cc2b3a83dc58bffe56260b71a02d99790d4c4df12436535fe0cac846edf7fab607b5f29a4f6f44bcd00076b733c8a17f63b1cf32fab7063690c0b17ef840b11f371764e53c13520ed400f7cacb77df193d2ae19ba5ef84f1bdd5186c8a1053096fb3ff60ea9064e43f99f4ac94f30a321fc78234b965ef898e71a5fe4f2e09275a706aa05305340138f8a3c8607d579d0c7c3fcb4f9cf62a20d3d6f5cabf03f1f4168184ac28c80d" timestamp="1793583522" url="https://jpsutton.github.io/patchbay/fdroid/repo" version="20002">
+		<description>Patchbay Remote, the phone app for a Patchbay mesh. Built and signed by the release workflow of https://github.com/jpsutton/patchbay.</description>
+	</repo>
+	<application id="dev.patchbay.remote">
+		<id>dev.patchbay.remote</id>
+		<added>2026-10-31</added>
+		<lastupdated>2026-11-02</lastupdated>
+		<name>Patchbay Remote</name>
+		<summary>Drive your Patchbay computers' chats and coding agents from your phone</summary>
+		<desc>Patchbay Remote joins your Patchbay mesh as a phone. It shows the chats and Code
+sessions of your computers, live, and lets you send messages, answer an agent's
+permission requests and stop a turn.
+
+The phone does no work of its own and keeps no copy of your data or API keys. It
+connects to whichever of your computers it can reach: on your home network, or
+through ZeroTier, Tailscale or a VPN. No cloud service sits in between.
+
+You need Patchbay on at least one computer, and the mesh passphrase. A computer
+approves the phone before it can connect.</desc>
+		<license>Apache-2.0</license>
+		<categories>Development,Internet</categories>
+		<category>Development</category>
+		<web>https://github.com/jpsutton/patchbay</web>
+		<source>https://github.com/jpsutton/patchbay</source>
+		<tracker>https://github.com/jpsutton/patchbay/issues</tracker>
+		<changelog>https://github.com/jpsutton/patchbay/releases</changelog>
+		<marketversion></marketversion>
+		<marketvercode>17001</marketvercode>
+		<package>
+			<version>0.17.1</version>
+			<versioncode>17001</versioncode>
+			<apkname>patchbay-remote-0.17.1-arm64.apk</apkname>
+			<hash type="sha256">0a6d32a0e0ea928e4513f4d308c3b371372f6b7d2eaaa6eb39a81a583457682d</hash>
+			<size>24259645</size>
+			<sdkver>26</sdkver>
+			<targetSdkVersion>37</targetSdkVersion>
+			<added>2026-11-02</added>
+			<sig>6fd723f2b98a40fc6a088304ca850fe1</sig>
+			<permissions>ACCESS_LOCAL_NETWORK,FOREGROUND_SERVICE,FOREGROUND_SERVICE_DATA_SYNC,INTERNET,POST_NOTIFICATIONS,RECEIVE_BOOT_COMPLETED,USE_BIOMETRIC,USE_FINGERPRINT,WAKE_LOCK,dev.patchbay.remote.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION</permissions>
+			<nativecode>arm64-v8a</nativecode>
+		</package>
+		<package>
+			<version>0.17.0</version>
+			<versioncode>17000</versioncode>
+			<apkname>patchbay-remote-0.17.0-arm64.apk</apkname>
+			<hash type="sha256">fc16e570e22ab93ee06454f704bb2de611e127c9808c7f87ea16fa05d5b2b318</hash>
+			<size>24251453</size>
+			<sdkver>26</sdkver>
+			<targetSdkVersion>37</targetSdkVersion>
+			<added>2026-11-01</added>
+			<sig>6fd723f2b98a40fc6a088304ca850fe1</sig>
+			<permissions>ACCESS_LOCAL_NETWORK,FOREGROUND_SERVICE,FOREGROUND_SERVICE_DATA_SYNC,INTERNET,POST_NOTIFICATIONS,RECEIVE_BOOT_COMPLETED,USE_BIOMETRIC,USE_FINGERPRINT,WAKE_LOCK,dev.patchbay.remote.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION</permissions>
+			<nativecode>arm64-v8a</nativecode>
+		</package>
+		<package>
+			<version>0.16.1</version>
+			<versioncode>16001</versioncode>
+			<apkname>patchbay-remote-0.16.1-arm64.apk</apkname>
+			<hash type="sha256">e330915b2c5debec0bcba05095fa83a15294575ad687c9ada373de9970fd54af</hash>
+			<size>24239165</size>
+			<sdkver>26</sdkver>
+			<targetSdkVersion>37</targetSdkVersion>
+			<added>2026-10-31</added>
+			<sig>6fd723f2b98a40fc6a088304ca850fe1</sig>
+			<permissions>ACCESS_LOCAL_NETWORK,FOREGROUND_SERVICE,FOREGROUND_SERVICE_DATA_SYNC,INTERNET,POST_NOTIFICATIONS,RECEIVE_BOOT_COMPLETED,USE_BIOMETRIC,USE_FINGERPRINT,WAKE_LOCK,dev.patchbay.remote.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION</permissions>
+			<nativecode>arm64-v8a</nativecode>
+		</package>
+	</application>
+</fdroid>
