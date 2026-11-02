@@ -2776,7 +2776,7 @@ dependencies = [
 
 [[package]]
 name = "patchbay-mesh"
-version = "0.17.0"
+version = "0.17.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
