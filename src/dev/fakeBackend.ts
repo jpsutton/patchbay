@@ -227,19 +227,29 @@ function fakeCursorPlanLimits() {
   const mode = new URLSearchParams(location.search).get("cursorPlan");
   if (mode === "none") return null;
   const now = Math.floor(Date.now() / 1000);
-  const onBonus = mode !== "noBonus";
+  // `grant` = included+bonus gone, free credits left (slow pool). `exhausted` = everything gone.
+  const grant = mode === "grant";
+  const exhausted = mode === "exhausted";
+  const onBonus = mode !== "noBonus" && !grant && !exhausted;
   return {
     accountId: "298981080",
     email: "you@example.com",
     observedAt: now - 90,
     resetsAt: now + 5 * 86400,
-    auto: 12.5,
-    api: 54,
-    total: 18.3,
-    includedSpendCents: 40000,
+    auto: grant || exhausted ? 100 : 12.5,
+    api: grant || exhausted ? 100 : 54,
+    total: grant || exhausted ? 100 : 18.3,
+    includedSpendCents: grant || exhausted || !onBonus ? 40000 : 20000,
     limitCents: 40000,
-    bonusSpendCents: onBonus ? 24201 : 24201,
+    bonusSpendCents: 24201,
     remainingBonus: onBonus,
+    displayMessage: grant || exhausted ? "You've hit your usage limit" : "You've used 50% of your included usage",
+    grants: grant
+      ? [{ remainingCents: 18903, totalCents: 30000, expiresAt: now + 5 * 86400 }]
+      : [],
+    grantsRemainingCents: grant ? 18903 : exhausted ? 0 : null,
+    slowPool: grant || exhausted ? true : null,
+    onDemandAllowed: false,
   };
 }
 
