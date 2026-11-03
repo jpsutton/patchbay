@@ -60,14 +60,14 @@ Download Patchbay from the [Releases page](https://github.com/jpsutton/patchbay/
 
 | Platform | Packages |
 | --- | --- |
-| Linux | `.deb` (Ubuntu 24.04 or newer, Debian 13), `.rpm` (Fedora, openSUSE), AppImage, and Arch Linux packages in the jpsutton pacman repository. Needs glibc 2.39 or newer. |
+| Linux | `.deb` (Ubuntu 24.04 or newer, Debian 13), `.rpm` (Fedora, openSUSE), AppImage, and Arch Linux packages in the jpsutton pacman repository. Needs glibc 2.39 or newer. 64-bit ARM: `.deb` for Debian 12 or newer and an apt repository. |
 | Windows | Installer (`.exe`) and `.msi` |
 | macOS | `.dmg` (Apple silicon) |
 | Android | Patchbay Remote, the phone app: `.apk` (arm64, Android 8.0 or newer) and an F-Droid repository |
 
 Windows and macOS builds aren't signed by Microsoft or Apple yet, so your system will warn you the first time you open them.
 
-The macOS app, the Windows installers and the AppImage update themselves. When a new release is out, an **Update** button appears above **Settings** in the sidebar. The `.deb`, `.rpm` and Arch packages update through your package manager instead.
+The macOS app, the Windows installers and the AppImage update themselves. When a new release is out, an **Update** button appears above **Settings** in the sidebar. The `.deb`, `.rpm`, Arch and apt packages update through your package manager instead.
 
 ### macOS
 
@@ -86,6 +86,24 @@ xattr -dr com.apple.quarantine /Applications/Patchbay.app
 ```
 
 For a computer without a display, `patchbayd` runs Patchbay headless and serves the same UI to a browser. It comes in the same formats (`.deb`, `.rpm`, the Arch packages, plus archives for any Linux, Windows and macOS), with systemd units on Linux. See [docs/headless.md](docs/headless.md).
+
+### Debian and Ubuntu on 64-bit ARM (apt)
+
+The Debian 12 build (`arm64`, glibc 2.36 or newer) runs on Debian 12 and 13 and on Ubuntu 24.04. Add the signed apt repository:
+
+```bash
+curl -fsSL https://jpsutton.github.io/patchbay/apt/patchbay-archive-keyring.gpg | sudo tee /usr/share/keyrings/patchbay.gpg >/dev/null
+```
+
+```bash
+echo "deb [signed-by=/usr/share/keyrings/patchbay.gpg] https://jpsutton.github.io/patchbay/apt stable main" | sudo tee /etc/apt/sources.list.d/patchbay.list
+```
+
+```bash
+sudo apt update && sudo apt install patchbay
+```
+
+For a computer without a display, install `patchbayd` instead. The key is the release key, with the fingerprint shown in the Arch Linux section below.
 
 ### Arch Linux
 
