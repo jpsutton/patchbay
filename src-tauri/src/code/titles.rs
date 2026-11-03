@@ -175,6 +175,7 @@ mod tests {
             permission_mode: "default".into(),
             archived_at: None,
             title_manual: manual,
+            created_by: None,
         }
     }
 

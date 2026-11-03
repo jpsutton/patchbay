@@ -201,7 +201,7 @@ pub struct ApprovalSetup {
 }
 
 impl ApprovalSetup {
-    fn for_agent(kind: AgentKind) -> Self {
+    pub(crate) fn for_agent(kind: AgentKind) -> Self {
         match kind {
             AgentKind::Patchbay => Self {
                 select_mode: None,

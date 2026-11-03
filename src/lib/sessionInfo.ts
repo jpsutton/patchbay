@@ -142,6 +142,7 @@ export function sessionInfoSections(i: SessionInfoInput): InfoSection[] {
   const sessionRows: (InfoRow | null)[] = [
     { label: "Title", value: session.title },
     { label: "Patchbay session ID", value: session.id, mono: true, copy: true },
+    session.createdBy ? { label: "Created by session", value: session.createdBy, mono: true, copy: true } : null,
     {
       label: "Agent session ID",
       value: agentSession ?? "none yet: the agent hasn't started this session",
