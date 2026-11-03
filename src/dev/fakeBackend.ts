@@ -1066,9 +1066,13 @@ export function install() {
       permissionMode: "default",
     });
   seed("/home/demo/Projects/nulamp", "Windows installer testing", 1000, "edit");
-  // Claude Code + Cursor sessions so the sidebar plan panes can be previewed without creating one.
+  // Coding agent sessions so the sidebar badges and plan panes can be previewed without creating one.
   seed("/home/demo/Projects/nulamp", "Claude plan preview", 800, null, ME, "claude-code");
   seed("/home/demo/Projects/nulamp", "Cursor plan preview", 700, null, ME, "cursor");
+  seed("/home/demo/Projects/nulamp", "Antigravity session recovery", 650, "commit", ME, "antigravity");
+  seed("/home/demo/Projects/nulamp", "OpenCode refactor", 600, "branch", ME, "opencode");
+  seed("/home/demo/Projects/nulamp", "Codex prompt migration", 550, "edit", ME, "codex");
+  seed("/home/demo/Projects/nulamp", "Kilo quickfix", 500, "chat", ME, "kilo");
   if (readmeDemo) {
     readmeSessionId = db.code[db.code.length - 1].id;
     Object.assign(db.models[0], { modelId: "qwen3-coder", displayName: "Qwen3 Coder" });

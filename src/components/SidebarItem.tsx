@@ -1,8 +1,10 @@
 import { useState, type MouseEvent, type ReactNode } from "react";
 import { ContextMenu, type ItemAction } from "./ItemMenu";
 import type { Activity } from "../lib/activity";
+import { AGENT_LABELS, type AgentId } from "../lib/ipc";
 import { Dot } from "./Dot";
 import {
+  AgentBadgeIcon,
   ArchiveIcon,
   ChatIcon,
   CloudIcon,
@@ -10,6 +12,7 @@ import {
   GitBranchIcon,
   GitCommitIcon,
   GitPullRequestIcon,
+  hasAgentBadge,
   MessageCodeIcon,
   StarIcon,
   XIcon,
@@ -43,6 +46,7 @@ export function SidebarItem({
   busy,
   status,
   icon,
+  agent,
   ring,
   meta,
   host,
@@ -65,6 +69,8 @@ export function SidebarItem({
   status?: "running" | "idle";
   /** Leading icon: a chat, or what a Code session has done. */
   icon: "conversation" | Activity;
+  /** Coding agent harness that runs the session. */
+  agent?: AgentId;
   /** Chats: the model's cable ring replaces the icon (a `ModelRing`). */
   ring?: ReactNode;
   /** Right-aligned mono detail, e.g. a short time; hidden while the row's buttons show. */
@@ -115,6 +121,8 @@ export function SidebarItem({
       />
     );
   }
+  const agentLabel = agent ? AGENT_LABELS[agent] ?? agent : null;
+
   return (
     <div
       className={`group mx-2 flex h-[34px] cursor-pointer items-center gap-2.5 rounded-lg pr-2 text-[14px] ${indent ? "pl-4" : "pl-2.5"} ${
@@ -143,10 +151,13 @@ export function SidebarItem({
       {ring ? (
         <span className={`flex w-4 shrink-0 justify-center ${busy ? "signal-pulse" : ""}`}>{ring}</span>
       ) : (
-        <ItemIcon icon={icon} busy={busy} status={status} attention={attention} />
+        <ItemIcon icon={icon} agent={agent} busy={busy} status={status} attention={attention} />
       )}
       <div className="min-w-0 flex-1">
-        <div className="truncate">{title}</div>
+        <div className="truncate">
+          {title}
+          {agentLabel && <span className="sr-only"> ({agentLabel})</span>}
+        </div>
         {subtitle && <div className="truncate font-mono text-[11px] font-normal text-faint">{subtitle}</div>}
       </div>
       {host && (
@@ -212,11 +223,13 @@ const ICONS: Record<"conversation" | Activity, { Icon: typeof ChatIcon; color: s
 
 function ItemIcon({
   icon,
+  agent,
   busy,
   status,
   attention,
 }: {
   icon: "conversation" | Activity;
+  agent?: AgentId;
   busy?: boolean;
   status?: "running" | "idle";
   attention?: boolean;
@@ -231,11 +244,21 @@ function ItemIcon({
         : status === "idle"
           ? "agent stopped"
           : null;
+  const agentLabel = agent ? AGENT_LABELS[agent] ?? agent : null;
+  const fullLabel = agentLabel ? `${agentLabel} · ${label}` : label;
   // The status light: amber = needs you, blue = working, green = agent ready. None when stopped.
   const light = attention ? "text-accent signal-pulse" : busy ? "text-live" : status === "running" ? "text-ok" : null;
   return (
-    <span className={`relative flex shrink-0 ${color}`} title={state ? `${label} · ${state}` : label}>
+    <span className={`relative flex shrink-0 ${color}`} title={state ? `${fullLabel} · ${state}` : fullLabel}>
       <Icon size={16} />
+      {hasAgentBadge(agent) && (
+        <span
+          className="absolute -top-1 -left-1 flex items-center justify-center rounded-full bg-panel p-[1px] text-faint group-hover:text-muted"
+          aria-hidden="true"
+        >
+          <AgentBadgeIcon agent={agent} size={9} />
+        </span>
+      )}
       {light && <Dot ring="panel" className={`absolute -bottom-0.5 -right-0.5 ${light}`} />}
     </span>
   );

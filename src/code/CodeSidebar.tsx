@@ -391,6 +391,7 @@ export function CodeSidebar() {
       <SidebarItem
         key={s.id}
         icon={strongest(s.activity, live) ?? "chat"}
+        agent={s.agent}
         indent={!inPinned}
         title={s.title}
         subtitle={inPinned ? basename(s.cwd) : undefined}
