@@ -2,7 +2,8 @@
 # staging already ran the full build (build.yml), so this takes that run's
 # artifacts, signs every one (PATCHBAY_GPG_KEY), tags the release v<version> and
 # creates a GitHub Release with the packages, signatures and SHA256SUMS. The
-# jpsutton pacman repository (jpsutton/arch-repo) then picks up the Arch packages. The phone app's APK is signed with its own key
+# jpsutton pacman repository (jpsutton/arch-repo) then picks up the Arch packages, and the Debian
+# arm64 packages go into the signed apt repository on GitHub Pages (PATCHBAY_GPG_KEY). The phone app's APK is signed with its own key
 # (PATCHBAY_APK_KEYSTORE) and published to the F-Droid repository on GitHub Pages
 # (PATCHBAY_FDROID_KEYSTORE); without those secrets the release goes out without it.
 # latest.json, the in-app updater's feed, is signed with the updater key
@@ -88,8 +89,8 @@ jobs:
           for name in patchbay-linux patchbay-arch; do
             gh run download "${{ steps.build.outputs.run }}" -R "$GITHUB_REPOSITORY" -n "$name" -D dist
           done
-          # Windows and macOS are best effort: ship them only if they built.
-          for name in patchbay-windows patchbay-macos; do
+          # Debian arm64, Windows and macOS are best effort: ship them only if they built.
+          for name in patchbay-debian patchbay-windows patchbay-macos; do
             gh run download "${{ steps.build.outputs.run }}" -R "$GITHUB_REPOSITORY" -n "$name" -D dist \
               || echo "::warning::$name was not built; releasing without it"
           done
@@ -185,6 +186,22 @@ jobs:
           fi
           GH_TOKEN=$ARCH_REPO_DISPATCH_TOKEN gh workflow run publish.yml -R jpsutton/arch-repo \
             || echo "::warning::could not notify jpsutton/arch-repo; the pacman repository was not updated"
+
+      # The apt repository on GitHub Pages (gh-pages branch, /apt), signed with the release key.
+      # Runs before the F-Droid step, which keeps what it finds on gh-pages.
+      - name: apt repository
+        env:
+          PATCHBAY_GPG_KEY: ${{ secrets.PATCHBAY_GPG_KEY }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          debs=(dist/*_arm64.deb)
+          if [ ${#debs[@]} -eq 0 ]; then
+            echo "::warning::no Debian arm64 packages were built; the apt repository was not updated"
+            exit 0
+          fi
+          command -v apt-ftparchive >/dev/null || sudo apt-get install -y --no-install-recommends apt-utils >/dev/null
+          scripts/ci/apt-repo.sh "${debs[@]}"
 
       # The self-hosted F-Droid repository on GitHub Pages (gh-pages branch, /fdroid).
       - name: F-Droid repository

@@ -138,6 +138,7 @@ struct RemoteTerm {
 struct LiveAgent {
     ready: Option<serde_json::Value>,
     permissions: Vec<(String, serde_json::Value)>,
+    questions: Vec<(String, serde_json::Value)>,
     usage: Option<serde_json::Value>,
     /// The agent's `authRequired` event while it waits for a sign-in.
     auth: Option<serde_json::Value>,
@@ -716,6 +717,20 @@ async fn list_agents(state: &AppState, host: Option<String>) -> CmdResult<serde_
     Ok(serde_json::to_value(agents)?)
 }
 
+async fn install_antigravity_agent(state: &AppState) -> CmdResult<String> {
+    let prog = code::agents::install_antigravity(&state.data_dir).await?;
+    let path = prog.to_string_lossy().into_owned();
+    let mut prefs = prefs::load(&state.db);
+    prefs.agent_paths.insert("antigravity".to_owned(), path.clone());
+    prefs::save(&state.db, &prefs)?;
+    Ok(path)
+}
+
+async fn clear_antigravity_auth(_state: &AppState) -> CmdResult<()> {
+    tokio::task::spawn_blocking(code::agents::clear_antigravity_auth).await??;
+    Ok(())
+}
+
 async fn update_code_session(
     state: &AppState,
     id: String,
@@ -905,6 +920,14 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
                 CodeEvent::PermissionResolved { request_id } => {
                     if let Some(l) = live.get_mut(&id) {
                         l.permissions.retain(|(r, _)| r != request_id);
+                    }
+                }
+                CodeEvent::Question { request_id, .. } => {
+                    live.entry(id).or_default().questions.push((request_id.clone(), ev))
+                }
+                CodeEvent::QuestionResolved { request_id } => {
+                    if let Some(l) = live.get_mut(&id) {
+                        l.questions.retain(|(r, _)| r != request_id);
                     }
                 }
                 CodeEvent::Status { state, .. } if state == "exited" => {
@@ -1571,6 +1594,7 @@ fn code_attach_local(state: &AppState, id: &str) -> serde_json::Value {
         events.extend(l.ready.clone());
         events.extend(l.auth.clone());
         events.extend(l.permissions.iter().map(|(_, e)| e.clone()));
+        events.extend(l.questions.iter().map(|(_, e)| e.clone()));
         events.extend(l.usage.clone());
         events.extend(l.plan.clone());
     }
@@ -2212,6 +2236,24 @@ async fn code_permission_respond(
     Ok(())
 }
 
+/// Answer a question card. The card stays up until this arrives.
+async fn code_question_respond(
+    state: &AppState,
+    request_id: String,
+    answers: serde_json::Value,
+    id: Option<String>,
+) -> CmdResult<()> {
+    if let Some(id) = id
+        && let Some(host) = remote_host(state, &id)?
+    {
+        let params = serde_json::json!({ "requestId": request_id, "answers": answers });
+        state.mesh.rpc(&host, "code.question", params).await?;
+        return Ok(());
+    }
+    state.code.respond_question(&request_id, answers);
+    Ok(())
+}
+
 
 // ---------------- moving sessions between nodes ----------------
 
@@ -2532,6 +2574,10 @@ impl mesh::RpcHandler for MeshRpc {
             "code.permission" => {
                 let opt = p["optionId"].as_str().map(str::to_owned);
                 state.code.respond_permission(param(&p, "requestId")?, opt);
+                Ok(Value::Null)
+            }
+            "code.question" => {
+                state.code.respond_question(param(&p, "requestId")?, p["answers"].clone());
                 Ok(Value::Null)
             }
             "code.auto_title" => Ok(json!(code_auto_title_local(state, &id()?).await?)),

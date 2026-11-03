@@ -40,11 +40,10 @@ pub fn body(cfg: &Config, req: &Request) -> Value {
         b["top_p"] = json!(p);
     }
     if let Some(e) = cfg.effort {
-        b["reasoning_effort"] = json!(if e == Effort::Max { "xhigh" } else { e.as_str() });
+        // OpenAI's effort stops at `xhigh`; other servers take `max` as is.
+        b["reasoning_effort"] = json!(if e == Effort::Max && is_openai(cfg) { "xhigh" } else { e.as_str() });
     }
-    if is_openai(cfg)
-        && let Some(k) = &req.cache_key
-    {
+    if let Some(k) = &req.cache_key {
         b["prompt_cache_key"] = json!(k);
     }
     if !req.tools.is_empty() {
@@ -335,6 +334,17 @@ mod tests {
     }
 
     #[test]
+    fn sends_cache_key_to_every_server() {
+        let mut req = Request::simple("sys", "hi");
+        req.cache_key = Some("session-1".into());
+        for base in ["https://api.example.com/v1", "https://api.openai.com/v1"] {
+            let c = Config::new(WireFormat::ChatCompletions, base, "m");
+            assert_eq!(body(&c, &req)["prompt_cache_key"], "session-1", "{base}");
+        }
+        assert!(body(&cfg(), &Request::simple("sys", "hi")).get("prompt_cache_key").is_none());
+    }
+
+    #[test]
     fn sends_reasoning_back_unless_turned_off() {
         let call = ToolCall { id: "c1".into(), name: "read".into(), arguments: json!({}), signature: None };
         let mut req = Request::simple("sys", "hi");
@@ -360,6 +370,18 @@ mod tests {
 
         let openai = Config::new(WireFormat::ChatCompletions, "https://api.openai.com/v1", "m");
         assert!(assistant(&openai).get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn sends_max_effort_except_to_openai() {
+        let req = Request::simple("sys", "hi");
+        let effort = |base: &str| {
+            let mut c = Config::new(WireFormat::ChatCompletions, base, "m");
+            c.effort = Some(Effort::Max);
+            body(&c, &req)["reasoning_effort"].clone()
+        };
+        assert_eq!(effort("https://api.example.com/v1"), "max");
+        assert_eq!(effort("https://api.openai.com/v1"), "xhigh");
     }
 
     #[test]

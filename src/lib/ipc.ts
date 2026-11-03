@@ -463,6 +463,10 @@ export interface AgentInfo {
   supportsInstructions: boolean;
   /** Can be set to run on Patchbay's providers instead of its own sign-in. */
   takesProviders: boolean;
+  /** Whether Patchbay can download and set up this agent automatically. */
+  canInstall?: boolean;
+  /** Human-readable sign-in status (e.g. "Google Account (Personal)"), if known. */
+  authStatus?: string | null;
 }
 
 /** Labels for agent ids, for places that don't load the full list. */
@@ -552,6 +556,8 @@ export type CodeEvent =
   | { type: "update"; update: AcpUpdate }
   | { type: "permission"; requestId: string; request: AcpPermissionRequest }
   | { type: "permissionResolved"; requestId: string }
+  | { type: "question"; requestId: string; form: AgentQuestionForm }
+  | { type: "questionResolved"; requestId: string }
   | { type: "promptDone"; stopReason: string }
   | { type: "error"; message: string }
   | { type: "usage"; usage: UsageView }
@@ -714,6 +720,31 @@ export type AcpUpdate =
   | { sessionUpdate: "current_mode_update"; currentModeId: string }
   | { sessionUpdate: "available_commands_update"; availableCommands: AcpCommand[] }
   | { sessionUpdate: string; [k: string]: unknown };
+
+export interface AgentQuestionOption {
+  id: string;
+  label: string;
+  description?: string | null;
+}
+
+export interface AgentQuestion {
+  id: string;
+  prompt: string;
+  multi: boolean;
+  freeText: boolean;
+  skippable: boolean;
+  options: AgentQuestionOption[];
+}
+
+export interface AgentQuestionForm {
+  questions: AgentQuestion[];
+}
+
+export interface AgentQuestionAnswer {
+  id: string;
+  picks: string[];
+  note: string;
+}
 
 export interface AcpPermissionOption {
   optionId: string;
@@ -1041,6 +1072,10 @@ export const api = {
     invoke<CodeSession[]>("import_claude_sessions", { ids, agent: agent ?? null }),
   /** With `host`, the agents installed on that computer. */
   listAgents: (host?: string | null) => invoke<AgentInfo[]>("list_agents", { host: host ?? null }),
+  /** Download and configure Google's Antigravity ACP server into Patchbay's data directory. */
+  installAntigravityAgent: () => invoke<string>("install_antigravity_agent"),
+  /** Clear Antigravity's saved authentication so a session prompts to sign in again. */
+  clearAntigravityAuth: () => invoke<void>("clear_antigravity_auth"),
   updateCodeSession: (
     id: string,
     patch: { title?: string; modelRef?: string; pinned?: boolean; activity?: Activity; archived?: boolean },
@@ -1124,6 +1159,8 @@ export const api = {
   wireLogSave: () => invoke<string>("wire_log_save"),
   codePermissionRespond: (requestId: string, optionId: string | null, sessionId?: string) =>
     invoke<void>("code_permission_respond", { requestId, optionId, id: sessionId }),
+  codeQuestionRespond: (requestId: string, answers: AgentQuestionAnswer[], sessionId?: string) =>
+    invoke<void>("code_question_respond", { requestId, answers, id: sessionId }),
   codeAttach: (id: string) => invoke<CodeAttach>("code_attach", { id }),
   /**
    * Catch up on events this window missed (see `code_resume` in lib.rs): from `point`, or a fresh

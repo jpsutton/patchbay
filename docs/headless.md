@@ -9,6 +9,7 @@ Download it from the [Releases page](https://github.com/jpsutton/patchbay/releas
 | Platform | Package |
 | --- | --- |
 | Debian, Ubuntu | `patchbayd_<version>_amd64.deb` (Ubuntu 24.04 or newer, Debian 13) |
+| Debian 12 or newer, Ubuntu 24.04 (arm64) | `patchbayd_<version>_arm64.deb`, or `sudo apt install patchbayd` from the Patchbay apt repository (set it up as in the main README) |
 | Fedora, openSUSE | `patchbayd-<version>-1.x86_64.rpm` |
 | Arch Linux | `patchbayd` in the jpsutton pacman repository (set it up as in the main README, then `sudo pacman -Sy patchbayd`) |
 | Any Linux | `patchbayd-<version>-linux-x86_64.tar.gz` (glibc 2.39 or newer) |

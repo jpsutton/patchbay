@@ -34,6 +34,7 @@ import { FileLinkContext } from "../components/FileLink";
 import { EditMessage } from "../components/EditMessage";
 import { UsageBar } from "../components/UsageBar";
 import { TerminalPane } from "../terminal/TerminalPane";
+import { QuestionCard } from "./QuestionCard";
 import { PermissionCard, PlanDocCard, planDocOf, StopButton, ToolCallCard, ToolGroup } from "./ToolCallCard";
 import { toolDescription } from "./toolLabel";
 import { SignInCard } from "./SignInCard";
@@ -1336,7 +1337,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     }
   }
 
-  const needsYou = (s?.permissions.length ?? 0) > 0 || !!s?.auth;
+  const needsYou = (s?.permissions.length ?? 0) > 0 || (s?.questions.length ?? 0) > 0 || !!s?.auth;
   // The status light: amber = needs you, blue = working, green = ready, red = stopped.
   const dot = needsYou
     ? { className: "text-accent signal-pulse", halo: 3 }
@@ -1623,7 +1624,10 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     again={status === "ready"}
                   />
                 )}
-                {working && s?.permissions.length === 0 && <WorkingIndicator s={s} onStop={stopTurn} />}
+                {s?.questions.map((q) => (
+                  <QuestionCard key={q.requestId} requestId={q.requestId} form={q.form} sessionId={session.id} />
+                ))}
+                {working && s?.permissions.length === 0 && s.questions.length === 0 && <WorkingIndicator s={s} onStop={stopTurn} />}
                 <SubagentsPanel sessionId={session.id} />
                 {background.length > 0 && (
                   <div className="flex items-center gap-2 text-xs text-muted" title={background.map(backgroundLabel).join("\n")}>

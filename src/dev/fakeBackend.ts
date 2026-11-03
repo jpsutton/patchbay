@@ -1636,6 +1636,25 @@ export function install() {
           return null;
         }
         case "list_agents": return FAKE_AGENTS;
+        case "install_antigravity_agent": {
+          const ag = FAKE_AGENTS.find((x) => x.id === "antigravity");
+          if (ag) {
+            ag.available = true;
+            ag.program = "/opt/patchbay/agents/antigravity-acp/agy_acp_server.par";
+            ag.version = "1.4.3";
+            ag.source = "override";
+            ag.error = null;
+            ag.authStatus = "Google Account (Personal)";
+          }
+          return "/opt/patchbay/agents/antigravity-acp/agy_acp_server.par";
+        }
+        case "clear_antigravity_auth": {
+          const ag = FAKE_AGENTS.find((x) => x.id === "antigravity");
+          if (ag) {
+            ag.authStatus = null;
+          }
+          return null;
+        }
         case "host_info": return { version: "0.11.0", os: "macos", arch: "aarch64" };
         case "code_set_agent": {
           const s = db.code.find((x) => x.id === a.id)!;
@@ -1712,6 +1731,7 @@ export function install() {
           r?.((a.optionId as string) ?? null);
           return null;
         }
+        case "code_question_respond": return null;
 
         case "term_open": {
           if (a.authMethod) {

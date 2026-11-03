@@ -135,6 +135,8 @@ commands! {
     list_code_sessions();
     create_code_session(cwd, model_ref, agent, host);
     list_agents(host);
+    install_antigravity_agent();
+    clear_antigravity_auth();
     list_claude_sessions();
     import_claude_sessions(ids, agent);
     update_code_session(id, title, model_ref, pinned, activity, archived);
@@ -170,6 +172,7 @@ commands! {
     wire_log_save();
     code_permission_respond(request_id, option_id, id);
     code_session_image(id, path);
+    code_question_respond(request_id, answers, id);
     code_move(id, target, cwd);
     code_take_over(id, cwd);
     code_checkpoints();
