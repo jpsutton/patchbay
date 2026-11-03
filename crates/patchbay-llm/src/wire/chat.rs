@@ -43,9 +43,7 @@ pub fn body(cfg: &Config, req: &Request) -> Value {
         // OpenAI's effort stops at `xhigh`; other servers take `max` as is.
         b["reasoning_effort"] = json!(if e == Effort::Max && is_openai(cfg) { "xhigh" } else { e.as_str() });
     }
-    if is_openai(cfg)
-        && let Some(k) = &req.cache_key
-    {
+    if let Some(k) = &req.cache_key {
         b["prompt_cache_key"] = json!(k);
     }
     if !req.tools.is_empty() {
@@ -333,6 +331,17 @@ mod tests {
         assert_eq!(b["messages"][2]["tool_calls"][0]["function"]["arguments"], "{\"path\":\"a\"}");
         assert_eq!(b["messages"][3], json!({"role": "tool", "tool_call_id": "c1", "content": "contents"}));
         assert_eq!(b["tools"][0]["function"]["name"], "read");
+    }
+
+    #[test]
+    fn sends_cache_key_to_every_server() {
+        let mut req = Request::simple("sys", "hi");
+        req.cache_key = Some("session-1".into());
+        for base in ["https://api.example.com/v1", "https://api.openai.com/v1"] {
+            let c = Config::new(WireFormat::ChatCompletions, base, "m");
+            assert_eq!(body(&c, &req)["prompt_cache_key"], "session-1", "{base}");
+        }
+        assert!(body(&cfg(), &Request::simple("sys", "hi")).get("prompt_cache_key").is_none());
     }
 
     #[test]
