@@ -10,7 +10,7 @@
 #   deb/rpm   /usr/lib/patchbayd/{patchbayd,web/}, /usr/bin/patchbayd, and systemd units
 #             in /usr/lib/systemd/{user/patchbayd.service,system/patchbayd@.service}
 # Expects the frontend (pnpm build) to be built already, as the CI jobs do before bundling.
-# deb needs dpkg-deb, rpm needs rpmbuild.
+# deb needs dpkg-deb, rpm needs rpmbuild. PATCHBAYD_DEB_LIBC sets the deb's glibc floor (default 2.39).
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -103,7 +103,7 @@ Package: patchbayd
 Version: $version
 Architecture: $debarch
 Maintainer: Patchbay <https://github.com/jpsutton/patchbay>
-Depends: libc6 (>= 2.39), libdbus-1-3
+Depends: libc6 (>= ${PATCHBAYD_DEB_LIBC:-2.39}), libdbus-1-3
 Section: utils
 Priority: optional
 Homepage: https://github.com/jpsutton/patchbay

@@ -1,6 +1,6 @@
 # Full build on pull requests into release: every package for every platform.
-# Linux packages are required for a release; Windows and macOS builds are best
-# effort (unsigned, not required checks): a release ships them if they built.
+# Linux packages are required for a release; the Debian arm64, Windows and macOS builds are best
+# effort (Windows and macOS unsigned; not required checks): a release ships them if they built.
 # release.yml publishes the artifacts of the final PR head without rebuilding.
 # workflow_dispatch runs it on any branch, for testing the build itself.
 name: build
@@ -61,6 +61,35 @@ jobs:
             src-tauri/target/release/bundle/daemon/*.tar.gz
             src-tauri/target/release/bundle/daemon/*.deb
             src-tauri/target/release/bundle/daemon/*.rpm
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  # Debian 12 .debs for 64-bit ARM (the app and patchbayd), built natively in a debian:12 container so
+  # they need only glibc 2.36. Best effort like Windows and macOS: a release ships them, and adds
+  # them to the apt repository, if they built.
+  debian-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo-debian/registry
+            src-tauri/target
+          key: debian-arm64-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: debian-arm64-
+      - name: Build the .debs (debian:12 container)
+        run: |
+          mkdir -p ~/.cargo-debian
+          docker run --rm -v "$GITHUB_WORKSPACE:/src" -v "$HOME/.cargo-debian:/cargo" -w /src \
+            debian:12 scripts/ci/build-debian.sh
+          sudo chown -R "$(id -u):$(id -g)" out src-tauri/target ~/.cargo-debian
+      - uses: actions/upload-artifact@v4
+        with:
+          name: patchbay-debian
+          path: out/*.deb
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
