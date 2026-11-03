@@ -831,6 +831,46 @@ fn code_sink(state: &AppState) -> code::acp::Sink {
     Arc::new(move |env| on_code_event(&state, env))
 }
 
+/// The agent lost the session (a live agent answering "Session not found"): restart it, which
+/// reloads the session from the agent's own store, and send the refused prompt again. Once per
+/// prompt, so an agent that keeps losing it ends with an error instead of a loop.
+fn on_session_lost(state: &AppState, id: String, message: code::acp::UserMessage, error: String) {
+    static RESENT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::LazyLock::new(Default::default);
+    let sink = code_sink(state);
+    let say = {
+        let id = id.clone();
+        move |event| sink(code::acp::Envelope { code_session_id: id.clone(), event })
+    };
+    if !RESENT.lock().unwrap().insert(message.id.clone()) {
+        say(code::acp::CodeEvent::Error {
+            message: format!("The agent lost this session again. Press Restart to start it over.\n{error}"),
+        });
+        return;
+    }
+    // The notice first, so it's set aside with the transcript: an entry after the reset would make
+    // the window drop the set-aside copy when the reload ends.
+    say(code::acp::CodeEvent::Notice {
+        message: "The agent lost this session. Restarting it and sending your message again…".into(),
+    });
+    say(code::acp::CodeEvent::Restarting {});
+    let state = state.clone();
+    // A thread of its own: this runs on the agent's thread, which the restart stops.
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(e) => return say(code::acp::CodeEvent::Error { message: e.to_string() }),
+        };
+        let resent = rt.block_on(async {
+            code_start_local(&state, id.clone()).await?;
+            state.code.prompt(&id, message, false).await
+        });
+        if let Err(e) = resent {
+            say(code::acp::CodeEvent::Error { message: format!("Couldn't restart the agent: {e:#}") });
+        }
+    });
+}
+
 fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     use code::acp::CodeEvent;
     if let CodeEvent::PlanLimits { limits } = env.event {
@@ -841,6 +881,10 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
         let tagged = serde_json::json!({ "account": account, "name": name, "limits": limits });
         state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, tagged);
         adopt_plan_limits(state, &account, name, limits, true);
+        return;
+    }
+    if let CodeEvent::SessionLost { message, error } = env.event {
+        on_session_lost(state, env.code_session_id, message, error);
         return;
     }
     track_titles(state, &env);

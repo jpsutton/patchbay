@@ -686,6 +686,16 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
         subagents: e.state === "exited" ? [] : s.subagents,
       };
       break;
+    case "restarting":
+      // What startAgent does for the Restart button: what's on screen waits for the reload.
+      next = {
+        ...emptyCode(),
+        configRev: s.configRev,
+        catalogRev: s.catalogRev,
+        history: s.entries.length ? { entries: s.entries, toolCalls: endBackground(s.toolCalls) } : s.history,
+        earlier: s.earlier,
+      };
+      break;
     case "sessionReady": {
       // A replay rebuilt the transcript: drop the cached copy. No replay but resumed: the cache
       // is the transcript. A fresh session keeps the cache as earlier, out-of-context history.
