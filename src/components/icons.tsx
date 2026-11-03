@@ -228,6 +228,19 @@ export const XIcon = icon(
   </>,
 );
 
+export const MoreIcon = icon(
+  <>
+    <circle cx="12" cy="12" r="1" />
+    <circle cx="19" cy="12" r="1" />
+    <circle cx="5" cy="12" r="1" />
+  </>,
+  <>
+    <circle cx="3" cy="9" r="1" />
+    <circle cx="9" cy="9" r="1" />
+    <circle cx="15" cy="9" r="1" />
+  </>,
+);
+
 export const GitPullRequestIcon = icon(
   <>
     <circle cx="18" cy="18" r="3" />

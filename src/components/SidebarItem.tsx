@@ -1,4 +1,4 @@
-import { useState, type MouseEvent, type ReactNode } from "react";
+import { useState, type MouseEvent, type PointerEvent, type ReactNode } from "react";
 import { ContextMenu, type ItemAction } from "./ItemMenu";
 import type { Activity } from "../lib/activity";
 import { Dot } from "./Dot";
@@ -51,6 +51,7 @@ export function SidebarItem({
   pinned,
   selected,
   onSelect,
+  onPointerDown,
   onRename,
   onDelete,
   onArchive,
@@ -79,6 +80,8 @@ export function SidebarItem({
   selected?: boolean;
   /** Gets the click, so a caller can read Shift/Ctrl/Cmd. */
   onSelect: (e: MouseEvent) => void;
+  /** A press on the row, for a caller that starts a drag from it. */
+  onPointerDown?: (e: PointerEvent<HTMLElement>) => void;
   onRename: (t: string) => void;
   onDelete: () => void;
   /** When set, the row's hover button archives instead of deleting. */
@@ -125,6 +128,7 @@ export function SidebarItem({
             : "text-fg/75 hover:bg-panel-2/50 hover:text-fg"
       } ${subtitle ? "h-auto py-1.5" : ""}`}
       onClick={onSelect}
+      onPointerDown={onPointerDown}
       // Shift-click would also select the text between the rows.
       onMouseDown={(e) => {
         if (e.shiftKey) e.preventDefault();
