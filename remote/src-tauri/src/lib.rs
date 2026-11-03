@@ -766,7 +766,20 @@ async fn code_attach(r: Shared<'_>, id: String) -> CmdResult<Value> {
     if res["covered"] == false && !tail.is_empty() {
         events.push(json!({ "type": "notice", "message": "Earlier output from this turn isn't available here" }));
     }
-    events.extend(tail.iter().map(|e| e[1]["event"].clone()));
+    // The host's snapshot already lists each open question. The turn's tail carries that same
+    // event, and applying both showed two cards.
+    let open_questions: HashSet<String> = events
+        .iter()
+        .filter(|e| e["type"] == "question")
+        .filter_map(|e| e["requestId"].as_str().map(str::to_owned))
+        .collect();
+    events.extend(tail.iter().filter_map(|e| {
+        let ev = &e[1]["event"];
+        if ev["type"] == "question" && ev["requestId"].as_str().is_some_and(|id| open_questions.contains(id)) {
+            return None;
+        }
+        Some(ev.clone())
+    }));
     Ok(json!({
         "running": attach["running"].as_bool().unwrap_or(false),
         "busy": attach["busy"].as_bool().unwrap_or(false),
@@ -870,6 +883,18 @@ async fn code_permission_respond(
 ) -> CmdResult<()> {
     let id = id.ok_or_else(|| CmdError("which session?".into()))?;
     r.code("code.permission", json!({ "id": id, "requestId": request_id, "optionId": option_id })).await?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn code_question_respond(
+    r: Shared<'_>,
+    request_id: String,
+    answers: Value,
+    id: Option<String>,
+) -> CmdResult<()> {
+    let id = id.ok_or_else(|| CmdError("which session?".into()))?;
+    r.code("code.question", json!({ "id": id, "requestId": request_id, "answers": answers })).await?;
     Ok(())
 }
 
@@ -1054,6 +1079,7 @@ pub fn run() {
             code_set_config_option,
             code_rewind,
             code_permission_respond,
+            code_question_respond,
             code_usage,
             session_plan_usage,
             list_project_files,

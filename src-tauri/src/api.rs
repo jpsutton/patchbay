@@ -172,6 +172,7 @@ commands! {
     wire_log_save();
     code_permission_respond(request_id, option_id, id);
     code_session_image(id, path);
+    code_question_respond(request_id, answers, id);
     code_move(id, target, cwd);
     code_take_over(id, cwd);
     code_checkpoints();
