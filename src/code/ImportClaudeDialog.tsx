@@ -20,8 +20,9 @@ function ago(ms: number): string {
 const size = (bytes: number) => (bytes >= 1_000_000 ? `${(bytes / 1_000_000).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1000))} KB`);
 
 /**
- * Bring sessions over from Claude Code. Each becomes a Code session with its conversation as
- * earlier history; the agent chosen here gets that conversation with its first message.
+ * Bring sessions over from Claude Code, from every account it is signed in with. Claude Code
+ * continues the real session; another agent gets its conversation as earlier history and with its
+ * first message.
  */
 export function ImportClaudeDialog() {
   const isOpen = useStore((s) => s.importClaudeOpen);
@@ -35,6 +36,7 @@ function Dialog() {
   const [agent, setAgent] = useState<AgentId | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const close = () => setOpen(false);
@@ -69,8 +71,13 @@ function Dialog() {
 
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return (found ?? []).filter((c) => !q || `${c.title} ${c.preview} ${c.cwd}`.toLowerCase().includes(q));
-  }, [found, query]);
+    return (found ?? []).filter((c) => (showArchived || !c.archived) && (!q || `${c.title} ${c.preview} ${c.cwd}`.toLowerCase().includes(q)));
+  }, [found, query, showArchived]);
+  // Only a session whose folder exists and that isn't imported yet is continued for real.
+  const resuming = agent === "claude-code" && (found ?? []).some((c) => picked.has(c.id) && c.cwdExists && !c.imported);
+  const archived = (found ?? []).filter((c) => c.archived).length;
+  // Name the account only when there is a choice of them.
+  const manyAccounts = new Set((found ?? []).map((c) => c.configDir)).size > 1;
 
   const toggle = (id: string) =>
     setPicked((p) => {
@@ -130,6 +137,13 @@ function Dialog() {
           />
         </div>
 
+        {archived > 0 && (
+          <label className="flex items-center gap-2 px-5 pt-2 text-xs text-muted">
+            <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+            Show {archived} archived in Claude Desktop
+          </label>
+        )}
+
         <div className="mt-2 min-h-[200px] flex-1 overflow-y-auto border-y border-line py-1">
           {!found && !err && <div className="px-5 py-4 text-xs text-muted">Looking in Claude Code's folder…</div>}
           {found && shown.length === 0 && (
@@ -159,7 +173,9 @@ function Dialog() {
                 </span>
                 <span className="block truncate text-xs text-muted">{c.preview}</span>
                 <span className="block truncate font-mono text-[11px] text-faint">
+                  {manyAccounts && `${tilde(c.configDir)} · `}
                   {tilde(c.cwd)}
+                  {c.archived && " · archived"}
                   {!c.cwdExists && " (folder is gone; opens in the nearest one that exists)"}
                   {c.imported && " · imported already: opens the copy"}
                 </span>
@@ -188,6 +204,12 @@ function Dialog() {
           )}
         </div>
 
+        {resuming && (
+          <div className="px-5 pt-1 text-xs text-muted">
+            Continues the real Claude Code session, so don't use it in Claude Code or Claude Desktop at the same time. Afterwards{" "}
+            <span className="font-mono">claude --resume</span> picks it up there too.
+          </div>
+        )}
         {err && <div className="px-5 pt-2 text-xs text-danger">{err}</div>}
         <div className="flex items-center justify-end gap-2 px-5 py-3">
           <button className="h-[34px] rounded-lg px-3.5 text-xs text-muted hover:bg-panel-2 hover:text-fg" onClick={close}>
