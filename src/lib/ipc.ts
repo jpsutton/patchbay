@@ -537,6 +537,7 @@ export interface AuthChoice {
 
 export type CodeEvent =
   | { type: "status"; state: "starting" | "ready" | "exited"; message: string | null }
+  | { type: "restarting" }
   | {
       type: "sessionReady";
       acpSessionId: string;

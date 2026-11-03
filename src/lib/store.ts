@@ -554,6 +554,12 @@ function endBackground(calls: Record<string, AcpToolCall>): Record<string, AcpTo
   );
 }
 
+/** Calls still shown running when their turn or agent ends: no update for them will come now. */
+function endRunning(calls: Record<string, AcpToolCall>, status: "completed" | "failed"): Record<string, AcpToolCall> {
+  if (!Object.values(calls).some(isRunning)) return calls;
+  return Object.fromEntries(Object.entries(calls).map(([k, tc]) => [k, isRunning(tc) ? { ...tc, status } : tc]));
+}
+
 /** `entries` with no steered message waiting on the agent: its turn is over. */
 function noPending(entries: Entry[]): Entry[] {
   return entries.some((x) => x.kind === "user" && x.pending)
@@ -682,8 +688,18 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
         queued: e.state === "exited" ? [] : s.queued,
         restore: e.state === "exited" ? handBack(s.restore, s.queued, useStore.getState().mesh?.nodeId) : s.restore,
         // Commands an agent backgrounded end with it, and so do its subagents.
-        toolCalls: e.state === "exited" ? endBackground(s.toolCalls) : s.toolCalls,
+        toolCalls: e.state === "exited" ? endRunning(endBackground(s.toolCalls), "failed") : s.toolCalls,
         subagents: e.state === "exited" ? [] : s.subagents,
+      };
+      break;
+    case "restarting":
+      // What startAgent does for the Restart button: what's on screen waits for the reload.
+      next = {
+        ...emptyCode(),
+        configRev: s.configRev,
+        catalogRev: s.catalogRev,
+        history: s.entries.length ? { entries: s.entries, toolCalls: endBackground(s.toolCalls) } : s.history,
+        earlier: s.earlier,
       };
       break;
     case "sessionReady": {
@@ -823,6 +839,8 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
         ...s,
         busy: false,
         entries: note ? [...entries, { kind: "info", text: note }] : entries,
+        // A call the turn ended without finishing (the agent lost its backend mid-call, say).
+        toolCalls: endRunning(s.toolCalls, e.stopReason === "end_turn" ? "completed" : "failed"),
       };
       saveTranscript(id, next);
       {
