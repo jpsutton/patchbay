@@ -708,6 +708,8 @@ export interface Subagent {
   origin?: "agent" | "session";
   /** Client clock when a session-origin row last started running; drives elapsed time. */
   startedAt?: number;
+  /** Client clock when the row was first seen failed; the panel drops it a minute later. */
+  failedAt?: number;
 }
 
 export type AcpUpdate =

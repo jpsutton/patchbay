@@ -11,6 +11,8 @@ import type { Subagent } from "./ipc";
 export const STALL_SECS = 300;
 /** The same when it waits on the user, who is the only one who can get it going. */
 export const BLOCKED_SECS = 120;
+/** A failed subagent keeps its row this long; the main agent's notification covers it after. */
+export const FAILED_SHOWN_SECS = 60;
 
 export type Health = "active" | "quiet" | "waiting" | "done" | "failed" | "stopped";
 
@@ -88,8 +90,24 @@ export function health(a: Subagent, idle: number): Health {
 }
 
 /** The subagents worth a row: those still running, and the ones that just failed. */
-export function shown(agents: Subagent[]): Subagent[] {
-  return agents.filter((a) => a.status === "running" || a.status === "failed");
+export function shown(agents: Subagent[], now = Date.now()): Subagent[] {
+  return agents.filter(
+    (a) =>
+      a.status === "running" ||
+      (a.status === "failed" && (a.failedAt == null || now - a.failedAt < FAILED_SHOWN_SECS * 1000)),
+  );
+}
+
+/**
+ * A `subagents_update` list, with `failedAt` kept from `prev` for rows already failed and set to
+ * `now` for rows that just failed. Patchbay's agent lists every subagent for the whole session.
+ */
+export function stampFailed(prev: Subagent[], next: Subagent[], now = Date.now()): Subagent[] {
+  return next.map((a) => {
+    if (a.status !== "failed") return a;
+    const was = prev.find((p) => p.id === a.id);
+    return { ...a, failedAt: was?.status === "failed" ? (was.failedAt ?? now) : now };
+  });
 }
 
 /** Whether the row can offer Stop: only a Patchbay background subagent while it runs. */
@@ -167,6 +185,7 @@ export function applyState(
         blocked: false,
         worktree: null,
         origin: "session",
+        failedAt: status === "failed" ? now : undefined,
       },
     ];
   }
@@ -182,6 +201,7 @@ export function applyState(
           error: error ?? a.error,
           elapsed_secs: elapsed,
           startedAt: undefined,
+          failedAt: status === "failed" ? (a.status === "failed" ? (a.failedAt ?? now) : now) : undefined,
           current: status === "running" ? a.current : statusNote(status, error),
         }
       : a,

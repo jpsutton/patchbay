@@ -42,7 +42,7 @@ import { chunkChars, phaseOf, type Phase } from "./workingStatus";
 import { appendUserChunk } from "./harness";
 import { planUpdateOf } from "./todoPlan";
 import { applyChange, type LayoutChange, type SidebarEntry } from "./sidebarLayout";
-import { applySpawned, applyState } from "./subagents";
+import { applySpawned, applyState, stampFailed } from "./subagents";
 
 export { codeWorking, FOREGROUND_IDLE_MS, hasActiveForegroundTools } from "./codeWorking";
 export { harnessTags } from "./harness";
@@ -641,7 +641,7 @@ function reduceUpdate(s: CodeState, u: AcpUpdate, agent: AgentId | undefined): C
       return stamp({ ...s, plan: (u as { entries: AcpPlanEntry[] }).entries });
     case "subagents_update": {
       const agents = (u as { agents?: Subagent[] }).agents;
-      return Array.isArray(agents) ? { ...s, subagents: agents, subagentsAt: Date.now() } : s;
+      return Array.isArray(agents) ? { ...s, subagents: stampFailed(s.subagents, agents), subagentsAt: Date.now() } : s;
     }
     case "subagent_spawned": {
       const next = applySpawned(s.subagents, u as unknown as Record<string, unknown>);
