@@ -1022,9 +1022,9 @@ function phoneMesh() {
 }
 
 const CLAUDE_SESSIONS = [
-  { id: "c1", cwd: "/home/demo/projects/demo-app", cwdExists: true, title: "Fix login redirect", preview: "The login redirect loops when the session cookie expires. Can you fix it?", modified: Date.now() - 3_600_000, size: 412_000, imported: null },
-  { id: "c2", cwd: "/home/demo/projects/demo-app", cwdExists: true, title: "Add dark mode", preview: "Add a dark mode toggle to settings", modified: Date.now() - 86_400_000 * 3, size: 1_800_000, imported: null },
-  { id: "c3", cwd: "/home/demo/projects/old-worktree", cwdExists: false, title: "Refactor parser", preview: "Split the parser into a lexer and a parser", modified: Date.now() - 86_400_000 * 20, size: 90_000, imported: null },
+  { id: "c1", cwd: "/home/demo/projects/demo-app", cwdExists: true, title: "Fix login redirect", preview: "The login redirect loops when the session cookie expires. Can you fix it?", modified: Date.now() - 3_600_000, size: 412_000, imported: null, configDir: "/home/demo/.claude", archived: false },
+  { id: "c2", cwd: "/home/demo/projects/demo-app", cwdExists: true, title: "Add dark mode", preview: "Add a dark mode toggle to settings", modified: Date.now() - 86_400_000 * 3, size: 1_800_000, imported: null, configDir: "/home/demo/.claude-work", archived: false },
+  { id: "c3", cwd: "/home/demo/projects/old-worktree", cwdExists: false, title: "Refactor parser", preview: "Split the parser into a lexer and a parser", modified: Date.now() - 86_400_000 * 20, size: 90_000, imported: null, configDir: "/home/demo/.claude", archived: true },
 ];
 
 export function install() {
@@ -1341,13 +1341,18 @@ export function install() {
               made.push(prior);
               continue;
             }
+            const resumes = a.agent === "claude-code" && c.cwdExists;
             const s: CodeSession = {
-              id: id(), cwd: c.cwd, acpSessionId: null, title: c.title, modelRef: null, pinned: false,
+              id: id(), cwd: c.cwd, acpSessionId: resumes ? c.id : null, title: c.title, modelRef: null, pinned: false,
               createdAt: c.modified - 3_600_000, updatedAt: c.modified, activity: null, agent: (a.agent as AgentId | null) ?? "patchbay",
               agentModel: null, hostNode: ME, epoch: 0, permissionMode: "default", titleManual: true,
             };
             db.code.push(s);
             db.settings[`import.claude.${cid}`] = s.id;
+            if (resumes) {
+              made.push(s);
+              continue;
+            }
             db.transcripts[s.id] = JSON.stringify({
               v: 1,
               earlier: {

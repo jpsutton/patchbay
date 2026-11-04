@@ -146,6 +146,9 @@ impl CodeManager {
                 if !current() {
                     return;
                 }
+                if let acp::CodeEvent::SessionReady { loaded, .. } = &env.event {
+                    import_claude::settle_fallback(&db, &csid, *loaded);
+                }
                 let limits = match &env.event {
                     acp::CodeEvent::ContextUsage { update } => plan_limits::PlanLimits::from_update(update),
                     _ => None,

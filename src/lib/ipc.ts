@@ -633,6 +633,10 @@ export interface ClaudeSession {
   size: number;
   /** The Code session an earlier import made. */
   imported: string | null;
+  /** The Claude config directory it is in: which account it belongs to. */
+  configDir: string;
+  /** Claude Desktop has archived it. */
+  archived: boolean;
 }
 
 export interface AcpToolCall {
@@ -1068,7 +1072,7 @@ export const api = {
   /** With `host`, the session runs on that computer, in its folder `cwd`. */
   createCodeSession: (cwd: string, modelRef: string | null, agent?: AgentId, host?: string | null) =>
     invoke<CodeSession>("create_code_session", { cwd, modelRef, agent: agent ?? null, host: host ?? null }),
-  /** Claude Code's sessions on this computer. */
+  /** Claude Code's sessions on this computer, from every account. */
   listClaudeSessions: () => invoke<ClaudeSession[]>("list_claude_sessions"),
   /** Make Code sessions from Claude Code's, continued by `agent` (default: the preferred one). */
   importClaudeSessions: (ids: string[], agent?: AgentId | null) =>

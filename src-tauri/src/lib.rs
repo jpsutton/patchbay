@@ -631,10 +631,10 @@ async fn create_code_session(
     Err(CmdError(format!("the session started on {}, but hasn't reached this computer yet", state.mesh.member_name(&host))))
 }
 
-/// Claude Code's sessions on this computer, marking those already imported.
+/// Claude Code's sessions on this computer, from every account it is signed in with (the default
+/// config directory and the ones the providers name), marking those already imported.
 async fn list_claude_sessions(state: &AppState) -> CmdResult<Vec<code::import_claude::ClaudeSessionInfo>> {
-    let dir = code::import_claude::projects_dir()?;
-    let mut found = tokio::task::spawn_blocking(move || code::import_claude::list(&dir)).await?;
+    let mut found = tokio::task::spawn_blocking(claude_sessions_on_disk(state)?).await?;
     for f in &mut found {
         f.imported = state
             .db
@@ -644,14 +644,29 @@ async fn list_claude_sessions(state: &AppState) -> CmdResult<Vec<code::import_cl
     Ok(found)
 }
 
+/// A job that lists every Claude Code session on disk, with Claude Desktop's titles.
+fn claude_sessions_on_disk(state: &AppState) -> CmdResult<impl FnOnce() -> Vec<code::import_claude::ClaudeSessionInfo> + use<>> {
+    let own: Vec<_> = state
+        .db
+        .list_providers()?
+        .into_iter()
+        .filter(|(p, _)| p.claude_config_dir.is_some())
+        .filter_map(|(p, _)| claude_auth::resolve_dir(p.claude_config_dir.as_deref()).ok())
+        .collect();
+    Ok(move || {
+        let desktop = code::import_claude::desktop_dir().map(|d| code::import_claude::desktop_meta(&d)).unwrap_or_default();
+        code::import_claude::list_all(&code::import_claude::config_dirs(own), &desktop)
+    })
+}
+
 /// Make a Code session from each of Claude Code's sessions `ids`, with `agent` (default: the
-/// preferred one) to continue them. A session imported before opens again instead of copying.
+/// preferred one) to continue them. Claude Code continues the real session; any other agent gets a
+/// copy of the conversation. A session imported before opens again instead.
 async fn import_claude_sessions(state: &AppState, ids: Vec<String>, agent: Option<String>) -> CmdResult<Vec<CodeSession>> {
-    let projects = code::import_claude::projects_dir()?;
-    let found = {
-        let p = projects.clone();
-        tokio::task::spawn_blocking(move || code::import_claude::list(&p)).await?
-    };
+    // One import at a time, so two for the same session can't both find it not imported yet.
+    static IMPORTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one_at_a_time = IMPORTING.lock().await;
+    let found = tokio::task::spawn_blocking(claude_sessions_on_disk(state)?).await?;
     let mut made = Vec::new();
     for id in ids {
         let key = format!("import.claude.{id}");
@@ -659,14 +674,12 @@ async fn import_claude_sessions(state: &AppState, ids: Vec<String>, agent: Optio
             made.push(existing);
             continue;
         }
-        let path = found
-            .iter()
-            .find(|f| f.id == id)
-            .and_then(|f| projects.read_dir().ok()?.flatten().map(|d| d.path().join(format!("{}.jsonl", f.id))).find(|p| p.is_file()))
-            .ok_or_else(|| CmdError(format!("Claude Code session {id} not found")))?;
+        let info = found.iter().find(|f| f.id == id).ok_or_else(|| CmdError(format!("Claude Code session {id} not found")))?;
+        let path = info.path.clone();
         let conv = tokio::task::spawn_blocking(move || code::import_claude::convert(&path)).await??;
+        let original = std::path::PathBuf::from(&conv.cwd);
         // The original folder may be gone (a deleted worktree): use the nearest one that exists.
-        let mut cwd = std::path::PathBuf::from(&conv.cwd);
+        let mut cwd = original.clone();
         while !cwd.is_dir() && cwd.pop() {}
         let cwd = if cwd.as_os_str().is_empty() || !cwd.is_dir() {
             code::agents::home_dir().ok_or_else(|| CmdError("no folder to open the session in".into()))?
@@ -676,8 +689,7 @@ async fn import_claude_sessions(state: &AppState, ids: Vec<String>, agent: Optio
         let s = create_code_session_local(state, &cwd.to_string_lossy(), None, agent.clone())?;
         state.db.set_code_session_title(&s.id, &chat::clip(&conv.title, 80), true)?;
         state.db.set_code_session_times(&s.id, conv.created_ms.max(1), conv.updated_ms.max(conv.created_ms).max(1))?;
-        state.db.set_code_transcript(&s.id, &conv.transcript)?;
-        state.db.set_setting(&format!("mesh.handoff.{}", s.id), &handoff::import_prompt(Some(&conv.transcript), "Claude Code"))?;
+        code::import_claude::attach(&state.db, &s, info, &conv, original.is_dir())?;
         state.db.set_setting(&key, &s.id)?;
         made.push(state.db.get_code_session(&s.id)?.unwrap_or(s));
     }
@@ -763,6 +775,9 @@ async fn delete_code_session(state: &AppState, id: String) -> CmdResult<()> {
     state.code.titles.forget(&id);
     // Must match the id `TerminalPane` opens with.
     state.terminals.close(&format!("term-{id}"));
+    for key in [code::import_claude::config_dir_key(&id), code::import_claude::fallback_key(&id)] {
+        state.db.with_conn(|c| c.execute("DELETE FROM settings WHERE key = ?1", [&key]))?;
+    }
     Ok(state.db.delete_code_session(&id)?)
 }
 

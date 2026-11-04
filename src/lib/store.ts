@@ -39,6 +39,7 @@ import { activityOf, strongest, type Activity } from "./activity";
 import { isRemoteApp } from "./platform";
 import { isForegroundUpdate } from "./codeWorking";
 import { chunkChars, phaseOf, type Phase } from "./workingStatus";
+import { adoptEarlier } from "./earlierHistory";
 import { appendUserChunk } from "./harness";
 import { planUpdateOf } from "./todoPlan";
 import { applyChange, type LayoutChange, type SidebarEntry } from "./sidebarLayout";
@@ -736,6 +737,17 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
         auth: null,
         questions: [],
       };
+      // A new session: the host may just have saved earlier history this window hasn't read (an
+      // import whose real session wouldn't load). Take it before a save writes over it.
+      if (!e.loaded) {
+        loadTranscript(id).then((saved) => {
+          const cur = useStore.getState().code[id];
+          const earlier = cur && adoptEarlier(cur.earlier, saved.earlier);
+          if (cur && earlier !== cur.earlier) {
+            useStore.setState((st) => ({ code: { ...st.code, [id]: { ...st.code[id], earlier } } }));
+          }
+        });
+      }
       break;
     }
     case "authRequired":
