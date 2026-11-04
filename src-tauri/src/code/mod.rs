@@ -47,6 +47,9 @@ pub struct CodeManager {
     pub titles: titles::Titles,
     pub plan: plan_limits::PlanGuard,
     pub cursor_plan: cursor_plan::CursorPlanGuard,
+    /// Tests: `start` attaches a stand-in agent and hands its commands out here instead of spawning one.
+    #[cfg(test)]
+    pub test_started: Mutex<Option<mpsc::UnboundedSender<(String, mpsc::UnboundedReceiver<AgentCmd>)>>>,
 }
 
 impl CodeManager {
@@ -125,6 +128,13 @@ impl CodeManager {
         code_session_id: &str,
         message_bridge: Option<crate::agent_messaging::AgentMessagingBridge>,
     ) -> Result<()> {
+        #[cfg(test)]
+        if let Some(tx) = self.test_started.lock().unwrap().as_ref() {
+            // A dropped receiver stands for an agent that fails to start.
+            tx.send((code_session_id.to_owned(), self.attach_test_agent(code_session_id)))
+                .map_err(|_| anyhow!("stand-in agent failed to start"))?;
+            return Ok(());
+        }
         // Let a previous agent for this session flush and exit first, so the new one loads
         // its final state and the old "exited" event can't land after the new "ready".
         self.stop_and_wait(code_session_id, std::time::Duration::from_secs(5));

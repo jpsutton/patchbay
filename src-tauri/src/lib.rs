@@ -2041,6 +2041,125 @@ async fn deliver_agent_message_local(
     }))
 }
 
+/// Sessions one agent session may create, ever (archived ones count: a loop can't recycle slots).
+pub(crate) const MAX_CREATED_SESSIONS: i64 = 5;
+/// A person's session is depth 0; a session it creates is 1, and one that creates is 2. Nothing
+/// at depth 2 may create.
+const MAX_CREATE_DEPTH: usize = 2;
+
+/// A Code session made by another session's agent: in `cwd` on this computer, with the creator's
+/// agent, model and permission mode unless `agent` or `model` say otherwise, then started and
+/// given `prompt` as its first message. Never more permissive than the creator.
+pub(crate) async fn create_agent_session(
+    state: &AppState,
+    creator_id: &str,
+    cwd: &str,
+    prompt: &str,
+    title: Option<&str>,
+    agent: Option<&str>,
+    model: Option<&str>,
+) -> anyhow::Result<serde_json::Value> {
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        anyhow::bail!("prompt cannot be empty");
+    }
+    if prompt.len() > 16 * 1024 {
+        anyhow::bail!("prompt is longer than 16 KiB");
+    }
+    // One create at a time per creator, so parallel tool calls can't all pass the cap check.
+    static LOCKS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        std::sync::LazyLock::new(Default::default);
+    let lock = LOCKS.lock().unwrap().entry(creator_id.to_owned()).or_default().clone();
+    let _one_at_a_time = lock.lock().await;
+    let creator = state
+        .db
+        .get_code_session(creator_id)?
+        .ok_or_else(|| anyhow::anyhow!("source Code session was not found"))?;
+    if creator.host_node.as_deref() != Some(state.mesh.node_id()) || creator.archived_at.is_some() {
+        anyhow::bail!("only a session running on this computer can create sessions");
+    }
+    // Auto mode trusts edits inside a session's own folder, so a child may not reach beyond its creator's.
+    let root = std::fs::canonicalize(&creator.cwd)
+        .map_err(|e| anyhow::anyhow!("the creating session's folder {} is not usable: {e}", creator.cwd))?;
+    let folder = std::fs::canonicalize(cwd).map_err(|e| anyhow::anyhow!("{cwd} is not a usable folder: {e}"))?;
+    if !folder.starts_with(&root) {
+        anyhow::bail!("cwd must be {} or a folder inside it", creator.cwd);
+    }
+    // The creator's own folder keeps its stored spelling, so permission rules keyed by it still apply.
+    let cwd = if folder == root { creator.cwd.clone() } else { folder.to_string_lossy().into_owned() };
+    // An agent that acts without asking would run outside the approval mode the child inherits.
+    if let Some(a) = agent.filter(|a| *a != creator.agent)
+        && creator.permission_mode != "always-approve"
+    {
+        let kind = code::agents::AgentKind::parse(a).ok_or_else(|| anyhow::anyhow!("unknown coding agent {a}"))?;
+        if !code::agents::ApprovalSetup::for_agent(kind).gaps.is_empty() {
+            anyhow::bail!(
+                "{a} can act without asking whatever the approval mode, so it can't be chosen from a session that isn't in always-approve mode; use your own agent ({}) or omit agent",
+                creator.agent
+            );
+        }
+    }
+    let mut depth = 0;
+    let mut up = creator.created_by.clone();
+    while let Some(id) = up {
+        depth += 1;
+        if depth >= MAX_CREATE_DEPTH {
+            anyhow::bail!("sessions created by agents can't create sessions beyond depth {MAX_CREATE_DEPTH}");
+        }
+        up = state.db.get_code_session(&id)?.and_then(|s| s.created_by);
+    }
+    if state.db.count_created_by(creator_id)? >= MAX_CREATED_SESSIONS {
+        anyhow::bail!("a session may create at most {MAX_CREATED_SESSIONS} sessions");
+    }
+    let agent = agent.map(str::to_owned).unwrap_or_else(|| creator.agent.clone());
+    let model = model.or(creator.model_ref.as_deref());
+    let session = create_code_session_local(state, &cwd, model, Some(agent))?;
+    // A failure past this point would leave an empty session that still counts toward the cap.
+    let started: anyhow::Result<()> = async {
+        // Inherit rather than seed from prefs: a restricted creator can't spawn a looser session.
+        state.db.set_code_session_permission_mode(&session.id, &creator.permission_mode)?;
+        state.db.set_code_session_created_by(&session.id, creator_id)?;
+        if let Some(t) = title.map(str::trim).filter(|t| !t.is_empty()) {
+            state.db.set_code_session_title(&session.id, t, true)?;
+        }
+        code_start_local(state, session.id.clone()).await?;
+        // After the brief so the first line still titles the session.
+        let text = format!(
+            "{prompt}\n\n---\nPatchbay session '{}' ({creator_id}) created this session and sent you this brief. To reply, use the Patchbay send_agent_message tool and target session {creator_id}.",
+            creator.title
+        );
+        code_prompt_local(
+            state,
+            session.id.clone(),
+            text,
+            Vec::new(),
+            Vec::new(),
+            format!("agent:{}:{creator_id}", state.mesh.node_id()),
+            None,
+            false,
+        )
+        .await?;
+        Ok(())
+    }
+    .await;
+    if let Err(e) = started {
+        if let Err(del) = delete_code_session(state, session.id.clone()).await {
+            // Don't let the leftover row use up the creator's cap.
+            tracing::warn!("couldn't remove session {} after a failed create: {}", session.id, del.0);
+            let _ = state.db.clear_code_session_created_by(&session.id);
+        }
+        return Err(e);
+    }
+    let created = state.db.get_code_session(&session.id)?.unwrap_or(session);
+    Ok(serde_json::json!({
+        "sessionId": created.id,
+        "title": created.title,
+        "agent": created.agent,
+        "permissionMode": created.permission_mode,
+        "note": "Created and started; the brief was sent. Use send_agent_message with this sessionId to follow up.",
+    }))
+}
+
 async fn code_unqueue(state: &AppState, id: String, prompt_id: String) -> CmdResult<()> {
     if let Some(host) = remote_host(state, &id)? {
         state.mesh.rpc(&host, "code.unqueue", serde_json::json!({ "id": id, "promptId": prompt_id })).await?;

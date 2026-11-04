@@ -337,6 +337,8 @@ export interface CodeSession {
   archivedAt?: number | null;
   /** Someone named it: automatic titles leave it alone until "Auto-retitle". */
   titleManual?: boolean;
+  /** The Code session whose agent created this one; absent when a person did. */
+  createdBy?: string | null;
 }
 
 // ---- mesh ----
