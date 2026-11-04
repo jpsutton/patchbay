@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import type { CacheClock, Tokens } from "../lib/ipc";
+import { isRemoteApp } from "../lib/platform";
 
 export function fmtTokens(n: number): string {
   if (n < 1000) return String(n);
@@ -12,9 +14,14 @@ function fmtCost(usd: number): string {
   return usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
 }
 
+type DetailRow = { label: string; value: string };
+
 /**
  * One-line usage summary under a composer: session token totals on the left, a context-window
  * meter on the right. `contextWindow` null means the model's window is unknown.
+ *
+ * On the phone (remote), tap the bar to open a bottom sheet with the same details desktop gets
+ * from hover tooltips — touch has no hover.
  */
 export function UsageBar({
   totals,
@@ -35,6 +42,8 @@ export function UsageBar({
   cache?: CacheClock | null;
   onConfigureWindow?: () => void;
 }) {
+  const remote = isRemoteApp();
+  const [sheetOpen, setSheetOpen] = useState(false);
   const cacheNote = useCacheNote(cache ?? null, contextTokens);
   const hasTotals = !!totals && (totals.input > 0 || totals.output > 0);
   if (!hasTotals && contextTokens == null) return <div className="h-5" />;
@@ -78,44 +87,192 @@ export function UsageBar({
     .filter(Boolean)
     .join("\n\n");
 
+  const rows = usageDetailRows({
+    totals,
+    hasTotals,
+    fresh,
+    reported,
+    cost,
+    contextTokens,
+    contextWindow,
+    pct,
+    autoCompactPercent,
+    cacheNote,
+  });
+
+  const openSheet = () => setSheetOpen(true);
+
   return (
-    <div className="meta mt-1.5 flex h-5 items-center gap-3 px-1.5 text-faint" aria-label="Token usage">
-      {/* Narrow screens (phones) leave out the cached count; it is in the tooltip. The context fill and the prompt cache clock are only in the meter's tooltip. */}
-      {hasTotals && totals && (
-        <div className="flex shrink-0 items-center gap-2 whitespace-nowrap" title={detail}>
-          <span>
-            In <span className="text-muted">{fmtTokens(totals.input)}</span>
-            {totals.cachedRead > 0 && <span className="hidden sm:inline"> ({fmtTokens(totals.cachedRead)} cached)</span>}
-          </span>
-          <span>·</span>
-          <span>
-            Out <span className="text-muted">{fmtTokens(totals.output)}</span>
-          </span>
-          {cost != null && (
-            <>
-              <span>·</span>
-              <span>{reported != null ? fmtCost(cost) : `~${fmtCost(cost)}`}</span>
-            </>
+    <>
+      <div
+        className={`meta mt-1.5 flex h-5 items-center gap-3 px-1.5 text-faint ${remote ? "cursor-pointer rounded-md active:bg-panel-2" : ""}`}
+        aria-label={remote ? "Token usage, tap for details" : "Token usage"}
+        role={remote ? "button" : undefined}
+        tabIndex={remote ? 0 : undefined}
+        onClick={remote ? openSheet : undefined}
+        onKeyDown={
+          remote
+            ? (e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  openSheet();
+                }
+              }
+            : undefined
+        }
+      >
+        {/* Narrow screens (phones) leave out the cached count; it is in the tooltip / sheet. The context fill and the prompt cache clock are only in the meter's tooltip / sheet. */}
+        {hasTotals && totals && (
+          <div className="flex shrink-0 items-center gap-2 whitespace-nowrap" title={remote ? undefined : detail}>
+            <span>
+              In <span className="text-muted">{fmtTokens(totals.input)}</span>
+              {totals.cachedRead > 0 && <span className="hidden sm:inline"> ({fmtTokens(totals.cachedRead)} cached)</span>}
+            </span>
+            <span>·</span>
+            <span>
+              Out <span className="text-muted">{fmtTokens(totals.output)}</span>
+            </span>
+            {cost != null && (
+              <>
+                <span>·</span>
+                <span>{reported != null ? fmtCost(cost) : `~${fmtCost(cost)}`}</span>
+              </>
+            )}
+          </div>
+        )}
+        <div className="flex-1" />
+        <div className="flex shrink-0 items-center gap-1.5 whitespace-nowrap" title={remote ? undefined : ctxTitle}>
+          {contextWindow ? (
+            <ContextRing pct={pct ?? 0} tone={tone} compactAt={autoCompactPercent ?? null} />
+          ) : (
+            // No window, no meter: the bare count stays as the thing to hover / tap.
+            <span>
+              Context <span className="text-muted">{contextTokens == null ? "—" : fmtTokens(contextTokens)}</span>
+            </span>
+          )}
+          {!contextWindow && onConfigureWindow && contextTokens != null && (
+            <button
+              type="button"
+              className="hidden shrink-0 whitespace-nowrap font-sans text-accent-ink hover:underline sm:inline"
+              onClick={(e) => {
+                e.stopPropagation();
+                onConfigureWindow();
+              }}
+            >
+              set window
+            </button>
           )}
         </div>
-      )}
-      <div className="flex-1" />
-      <div className="flex shrink-0 items-center gap-1.5 whitespace-nowrap" title={ctxTitle}>
-        {contextWindow ? (
-          <ContextRing pct={pct ?? 0} tone={tone} compactAt={autoCompactPercent ?? null} />
-        ) : (
-          // No window, no meter: the bare count stays as the thing to hover.
-          <span>
-            Context <span className="text-muted">{contextTokens == null ? "—" : fmtTokens(contextTokens)}</span>
-          </span>
-        )}
-        {!contextWindow && onConfigureWindow && contextTokens != null && (
-          <button className="hidden shrink-0 whitespace-nowrap font-sans text-accent-ink hover:underline sm:inline" onClick={onConfigureWindow}>
-            set window
-          </button>
-        )}
       </div>
-    </div>
+      {sheetOpen && <UsageDetailSheet rows={rows} onClose={() => setSheetOpen(false)} />}
+    </>
+  );
+}
+
+function usageDetailRows({
+  totals,
+  hasTotals,
+  fresh,
+  reported,
+  cost,
+  contextTokens,
+  contextWindow,
+  pct,
+  autoCompactPercent,
+  cacheNote,
+}: {
+  totals: Tokens | null;
+  hasTotals: boolean;
+  fresh: number;
+  reported: number | null;
+  cost: number | null;
+  contextTokens: number | null;
+  contextWindow: number | null;
+  pct: number | null;
+  autoCompactPercent?: number | null;
+  cacheNote: string | null;
+}): DetailRow[] {
+  const rows: DetailRow[] = [];
+  if (hasTotals && totals) {
+    rows.push({ label: "Input", value: `${totals.input.toLocaleString()} tokens` });
+    rows.push({ label: "Fresh", value: fresh.toLocaleString() });
+    rows.push({ label: "Cache read", value: totals.cachedRead.toLocaleString() });
+    rows.push({ label: "Cache write", value: totals.cacheWrite.toLocaleString() });
+    rows.push({ label: "Output", value: `${totals.output.toLocaleString()} tokens` });
+    if (totals.reasoning) rows.push({ label: "Reasoning", value: totals.reasoning.toLocaleString() });
+    if (reported != null) rows.push({ label: "Cost", value: `${fmtCost(reported)} (reported)` });
+    else if (cost != null) rows.push({ label: "Cost", value: `~${fmtCost(cost)} (estimated)` });
+    else rows.push({ label: "Cost", value: "Not reported yet" });
+    if (totals.apiMs) rows.push({ label: "API time", value: `${(totals.apiMs / 1000).toFixed(1)}s` });
+  } else {
+    rows.push({ label: "Tokens", value: "Not reported yet" });
+  }
+
+  if (contextTokens == null) {
+    rows.push({ label: "Context", value: "Not reported yet" });
+  } else if (contextWindow) {
+    rows.push({
+      label: "Context",
+      value: `${contextTokens.toLocaleString()} of ${contextWindow.toLocaleString()} (${Math.round(pct ?? 0)}%)`,
+    });
+    if (autoCompactPercent) rows.push({ label: "Auto-compact", value: `At ${autoCompactPercent}%` });
+  } else {
+    rows.push({
+      label: "Context",
+      value: `${contextTokens.toLocaleString()} tokens (set window in Settings for a meter)`,
+    });
+  }
+
+  if (cacheNote) {
+    for (const line of cacheNote.split("\n").filter(Boolean)) {
+      rows.push({ label: rows.some((r) => r.label === "Cache") ? "" : "Cache", value: line });
+    }
+  }
+
+  return rows;
+}
+
+/** Phone bottom sheet: same usage facts as the desktop hover tooltips, as readable rows. */
+function UsageDetailSheet({ rows, onClose }: { rows: DetailRow[]; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return createPortal(
+    <div className="fixed inset-0 z-[60] flex flex-col justify-end bg-black/45" onClick={onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Session usage"
+        className="rounded-t-2xl border-t border-border bg-raised px-2 pb-[calc(env(safe-area-inset-bottom)+8px)] pt-2"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="truncate px-3 pb-2 pt-1 text-[13px] font-medium text-fg">Session usage</div>
+        <dl className="px-1 pb-2">
+          {rows.map((r, i) => (
+            <div
+              key={`${r.label}-${i}`}
+              className="grid grid-cols-[7.5rem_1fr] items-start gap-x-2 border-t border-line px-2 py-2.5 first:border-t-0"
+            >
+              <dt className="text-[13px] text-muted">{r.label || "\u00a0"}</dt>
+              <dd className="min-w-0 break-words text-[14px] text-fg">{r.value}</dd>
+            </div>
+          ))}
+        </dl>
+        <button
+          type="button"
+          className="mt-1 flex h-12 w-full items-center justify-center rounded-xl text-[16px] text-muted active:bg-panel-2"
+          onClick={onClose}
+        >
+          Close
+        </button>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
