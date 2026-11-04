@@ -37,12 +37,15 @@ import {
 import { notifyInBackground } from "./notify";
 import { activityOf, strongest, type Activity } from "./activity";
 import { isRemoteApp } from "./platform";
+import { loadStringList, saveStringList } from "./manualOrder";
+import * as paneLogic from "./panes";
 import { isForegroundUpdate } from "./codeWorking";
 import { chunkChars, phaseOf, type Phase } from "./workingStatus";
+import { adoptEarlier } from "./earlierHistory";
 import { appendUserChunk } from "./harness";
 import { planUpdateOf } from "./todoPlan";
 import { applyChange, type LayoutChange, type SidebarEntry } from "./sidebarLayout";
-import { applySpawned, applyState } from "./subagents";
+import { applySpawned, applyState, stampFailed } from "./subagents";
 
 export { codeWorking, FOREGROUND_IDLE_MS, hasActiveForegroundTools } from "./codeWorking";
 export { harnessTags } from "./harness";
@@ -385,6 +388,8 @@ interface Store {
   activeConversationId: string | null;
   codeSessions: CodeSession[];
   activeCodeSessionId: string | null;
+  /** Code sessions in split panes, left to right; empty when not split. `activeCodeSessionId` is the focused one. */
+  panes: string[];
   code: Record<string, CodeState>;
   chatStreams: Record<string, ChatStream>;
   toast: string | null;
@@ -433,6 +438,14 @@ interface Store {
   /** Show a layout change at once, then write it; reload if the write fails. */
   changeSidebarLayout: (change: LayoutChange) => Promise<void>;
   selectCodeSession: (id: string | null) => void;
+  /** Open a Code session beside the open one; in a full split it replaces the pane on `side`. */
+  openInSplit: (id: string, side: paneLogic.Side) => void;
+  /** Open a Code session beside the open one, replacing the pane you're not in when the split is full. */
+  openBeside: (id: string) => void;
+  closePane: (id: string) => void;
+  /** Move focus to the next or previous pane. */
+  cyclePane: (delta: 1 | -1) => void;
+  swapPanes: () => void;
   resetCode: (id: string) => void;
   pushCodeEntry: (id: string, e: Entry) => void;
   setCodeBusy: (id: string, busy: boolean) => void;
@@ -554,6 +567,12 @@ function endBackground(calls: Record<string, AcpToolCall>): Record<string, AcpTo
   );
 }
 
+/** Calls still shown running when their turn or agent ends: no update for them will come now. */
+function endRunning(calls: Record<string, AcpToolCall>, status: "completed" | "failed"): Record<string, AcpToolCall> {
+  if (!Object.values(calls).some(isRunning)) return calls;
+  return Object.fromEntries(Object.entries(calls).map(([k, tc]) => [k, isRunning(tc) ? { ...tc, status } : tc]));
+}
+
 /** `entries` with no steered message waiting on the agent: its turn is over. */
 function noPending(entries: Entry[]): Entry[] {
   return entries.some((x) => x.kind === "user" && x.pending)
@@ -641,7 +660,7 @@ function reduceUpdate(s: CodeState, u: AcpUpdate, agent: AgentId | undefined): C
       return stamp({ ...s, plan: (u as { entries: AcpPlanEntry[] }).entries });
     case "subagents_update": {
       const agents = (u as { agents?: Subagent[] }).agents;
-      return Array.isArray(agents) ? { ...s, subagents: agents, subagentsAt: Date.now() } : s;
+      return Array.isArray(agents) ? { ...s, subagents: stampFailed(s.subagents, agents), subagentsAt: Date.now() } : s;
     }
     case "subagent_spawned": {
       const next = applySpawned(s.subagents, u as unknown as Record<string, unknown>);
@@ -682,8 +701,18 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
         queued: e.state === "exited" ? [] : s.queued,
         restore: e.state === "exited" ? handBack(s.restore, s.queued, useStore.getState().mesh?.nodeId) : s.restore,
         // Commands an agent backgrounded end with it, and so do its subagents.
-        toolCalls: e.state === "exited" ? endBackground(s.toolCalls) : s.toolCalls,
+        toolCalls: e.state === "exited" ? endRunning(endBackground(s.toolCalls), "failed") : s.toolCalls,
         subagents: e.state === "exited" ? [] : s.subagents,
+      };
+      break;
+    case "restarting":
+      // What startAgent does for the Restart button: what's on screen waits for the reload.
+      next = {
+        ...emptyCode(),
+        configRev: s.configRev,
+        catalogRev: s.catalogRev,
+        history: s.entries.length ? { entries: s.entries, toolCalls: endBackground(s.toolCalls) } : s.history,
+        earlier: s.earlier,
       };
       break;
     case "sessionReady": {
@@ -720,6 +749,17 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
         auth: null,
         questions: [],
       };
+      // A new session: the host may just have saved earlier history this window hasn't read (an
+      // import whose real session wouldn't load). Take it before a save writes over it.
+      if (!e.loaded) {
+        loadTranscript(id).then((saved) => {
+          const cur = useStore.getState().code[id];
+          const earlier = cur && adoptEarlier(cur.earlier, saved.earlier);
+          if (cur && earlier !== cur.earlier) {
+            useStore.setState((st) => ({ code: { ...st.code, [id]: { ...st.code[id], earlier } } }));
+          }
+        });
+      }
       break;
     }
     case "authRequired":
@@ -823,6 +863,8 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
         ...s,
         busy: false,
         entries: note ? [...entries, { kind: "info", text: note }] : entries,
+        // A call the turn ended without finishing (the agent lost its backend mid-call, say).
+        toolCalls: endRunning(s.toolCalls, e.stopReason === "end_turn" ? "completed" : "failed"),
       };
       saveTranscript(id, next);
       {
@@ -916,6 +958,38 @@ let codeSessionsSeq = 0;
 /** Same for the sidebar layout. */
 let sidebarLayoutSeq = 0;
 
+const PANES_KEY = "patchbay.panes";
+/** The saved panes are read once, when the first session list shows which sessions still exist. */
+let panesRestored = false;
+
+function paneState(): paneLogic.PaneState {
+  const s = useStore.getState();
+  return { panes: s.panes, active: s.activeCodeSessionId };
+}
+
+/** Sets the panes and the focused session together, and saves the panes. The phone has no split. */
+function applyPanes(next: paneLogic.PaneState) {
+  useStore.setState({ panes: next.panes, activeCodeSessionId: next.active });
+  if (!isRemoteApp()) saveStringList(PANES_KEY, next.panes);
+}
+
+/** Restore the saved panes on the first session list; after that, drop panes whose session is gone or archived. */
+function syncPanes(list: CodeSession[]) {
+  if (isRemoteApp()) return;
+  const live = new Set(list.filter((s) => s.archivedAt == null).map((s) => s.id));
+  if (!panesRestored) {
+    panesRestored = true;
+    const panes = paneLogic.restorePanes(loadStringList(PANES_KEY), live);
+    if (panes.length === 0) return;
+    const cur = useStore.getState().activeCodeSessionId;
+    useStore.setState({ panes, activeCodeSessionId: cur !== null && panes.includes(cur) ? cur : panes[0] });
+    return;
+  }
+  const cur = paneState();
+  const next = paneLogic.prunePanes(cur, live);
+  if (next !== cur) applyPanes(next);
+}
+
 export const useStore = create<Store>((set, get) => ({
   mode: "chat",
   paletteOpen: false,
@@ -997,6 +1071,7 @@ export const useStore = create<Store>((set, get) => ({
   codeSessions: [],
   sidebarLayout: null,
   activeCodeSessionId: null,
+  panes: [],
   code: {},
   chatStreams: {},
   toast: null,
@@ -1103,6 +1178,7 @@ export const useStore = create<Store>((set, get) => ({
     const list = await api.listCodeSessions();
     if (seq !== codeSessionsSeq) return;
     set({ codeSessions: list });
+    syncPanes(list);
     backfillActivity();
   },
   refreshSidebarLayout: async () => {
@@ -1123,7 +1199,15 @@ export const useStore = create<Store>((set, get) => ({
       await get().refreshSidebarLayout().catch(() => {});
     }
   },
-  selectCodeSession: (id) => set({ activeCodeSessionId: id }),
+  selectCodeSession: (id) => {
+    if (get().panes.length === 0) set({ activeCodeSessionId: id });
+    else applyPanes(paneLogic.selectPane(paneState(), id));
+  },
+  openInSplit: (id, side) => applyPanes(paneLogic.openInSplit(paneState(), id, side)),
+  openBeside: (id) => applyPanes(paneLogic.openInSplit(paneState(), id, paneLogic.otherSide(paneState()))),
+  closePane: (id) => applyPanes(paneLogic.closePane(paneState(), id)),
+  cyclePane: (delta) => applyPanes(paneLogic.cyclePane(paneState(), delta)),
+  swapPanes: () => applyPanes(paneLogic.swapPanes(paneState())),
 
   resetCode: (id) => {
     flushCodeEvents(id);

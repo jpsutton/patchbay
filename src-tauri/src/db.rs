@@ -238,6 +238,9 @@ CREATE TABLE ui_prefs (
 -- Which Claude Code login a claude_login provider uses: a CLAUDE_CONFIG_DIR, NULL for the default.
 -- Not synced: a path on one node means nothing on another.
 ALTER TABLE providers ADD COLUMN claude_config_dir TEXT;
+"#, r#"
+-- The Code session whose agent created this one (`create_agent_session`), NULL when a person did.
+ALTER TABLE code_sessions ADD COLUMN created_by TEXT;
 "#];
 
 pub fn now_ms() -> i64 {
@@ -568,6 +571,9 @@ pub struct CodeSession {
     pub archived_at: Option<i64>,
     /// Someone named it: automatic titles leave it alone until "Auto-retitle".
     pub title_manual: bool,
+    /// The Code session whose agent created this one; None when a person did.
+    #[serde(default)]
+    pub created_by: Option<String>,
 }
 
 /// Values `code_sessions.activity` may hold.
@@ -1049,7 +1055,7 @@ impl Db {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT id, cwd, acp_session_id, title, model_ref, created_at, updated_at, pinned, activity,
-                    agent, agent_model, host_node, epoch, permission_mode, archived_at, title_manual
+                    agent, agent_model, host_node, epoch, permission_mode, archived_at, title_manual, created_by
              FROM code_sessions ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([], map_code_session)?;
@@ -1061,7 +1067,7 @@ impl Db {
             .conn()
             .query_row(
                 "SELECT id, cwd, acp_session_id, title, model_ref, created_at, updated_at, pinned, activity,
-                        agent, agent_model, host_node, epoch, permission_mode, archived_at, title_manual
+                        agent, agent_model, host_node, epoch, permission_mode, archived_at, title_manual, created_by
                  FROM code_sessions WHERE id = ?1",
                 [id],
                 map_code_session,
@@ -1101,6 +1107,7 @@ impl Db {
             permission_mode: mode.to_owned(),
             archived_at: None,
             title_manual: false,
+            created_by: None,
         };
         self.conn().execute(
             "INSERT INTO code_sessions (id, cwd, acp_session_id, title, model_ref, created_at, updated_at,
@@ -1109,6 +1116,24 @@ impl Db {
             params![s.id, s.cwd, s.title, s.model_ref, now, s.agent, s.host_node, s.permission_mode],
         )?;
         Ok(s)
+    }
+
+    /// Forgets who created `id`, so a session that couldn't be removed stops counting toward its
+    /// creator's cap.
+    pub fn clear_code_session_created_by(&self, id: &str) -> Result<()> {
+        self.conn().execute("UPDATE code_sessions SET created_by = NULL WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// How many sessions `creator` has created, archived ones included.
+    pub fn count_created_by(&self, creator: &str) -> Result<i64> {
+        Ok(self.conn().query_row("SELECT COUNT(*) FROM code_sessions WHERE created_by = ?1", [creator], |r| r.get(0))?)
+    }
+
+    /// Records the session whose agent created `id`.
+    pub fn set_code_session_created_by(&self, id: &str, creator: &str) -> Result<()> {
+        self.conn().execute("UPDATE code_sessions SET created_by = ?2 WHERE id = ?1", params![id, creator])?;
+        Ok(())
     }
 
     pub fn set_code_session_permission_mode(&self, id: &str, mode: &str) -> Result<()> {
@@ -1120,6 +1145,22 @@ impl Db {
             "UPDATE code_sessions SET permission_mode = ?2 WHERE id = ?1",
             params![id, mode],
         )?;
+        // Sessions an agent created never hold a looser mode than their creator, so lowering the
+        // creator's mode lowers theirs too (raising it leaves them as they are).
+        let rank = |m: &str| PERMISSION_MODES.iter().position(|x| *x == m);
+        let looser: Vec<String> = {
+            let conn = self.conn();
+            let mut stmt = conn.prepare("SELECT id, permission_mode FROM code_sessions WHERE created_by = ?1")?;
+            let rows = stmt.query_map([id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|(_, m)| rank(m) > rank(mode))
+                .map(|(kid, _)| kid)
+                .collect()
+        };
+        for kid in looser {
+            self.set_code_session_permission_mode(&kid, mode)?;
+        }
         Ok(())
     }
 
@@ -1603,6 +1644,7 @@ fn map_code_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<CodeSession> {
         permission_mode: r.get(13)?,
         archived_at: r.get(14)?,
         title_manual: r.get(15)?,
+        created_by: r.get(16)?,
     })
 }
 
@@ -1638,6 +1680,24 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].agent, "claude-code");
         assert_eq!(rows[0].model_ref.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn lowering_a_creators_mode_lowers_the_sessions_it_created() {
+        let (db, _) = temp_db();
+        let creator = db.create_code_session("/p", None, "grok", "always-approve").unwrap();
+        let child = db.create_code_session("/p", None, "grok", "always-approve").unwrap();
+        let grand = db.create_code_session("/p", None, "grok", "auto").unwrap();
+        db.set_code_session_created_by(&child.id, &creator.id).unwrap();
+        db.set_code_session_created_by(&grand.id, &child.id).unwrap();
+        let mode = |id: &str| db.get_code_session(id).unwrap().unwrap().permission_mode;
+        db.set_code_session_permission_mode(&creator.id, "auto").unwrap();
+        assert_eq!((mode(&child.id), mode(&grand.id)), ("auto".into(), "auto".into()));
+        db.set_code_session_permission_mode(&creator.id, "default").unwrap();
+        assert_eq!((mode(&child.id), mode(&grand.id)), ("default".into(), "default".into()));
+        // Raising the creator's mode leaves them alone.
+        db.set_code_session_permission_mode(&creator.id, "always-approve").unwrap();
+        assert_eq!(mode(&child.id), "default");
     }
 
     #[test]

@@ -49,7 +49,8 @@ function go(l: Loc) {
   try {
     const s = useStore.getState();
     if (l.mode === "chat") s.selectConversation(l.id);
-    else s.selectCodeSession(l.id);
+    // In a split, "no session" would close the focused pane; leave the panes alone instead.
+    else if (l.id !== null || s.panes.length === 0) s.selectCodeSession(l.id);
     s.setMode(l.mode);
   } finally {
     jumping = false;

@@ -1086,6 +1086,209 @@ async fn agents_message_each_other_across_the_mesh() {
     assert!(send_agent_message(&a.state, &an, &sb.id, &sa.id, "x").await.is_err());
 }
 
+/// An agent creates a sibling session: it starts in the folder with the creator's approval mode,
+/// gets the brief, shows in the list, and the limits hold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_creates_a_session_within_its_limits() {
+    let a = node("alpha-create");
+    let an = a.state.mesh.node_id().to_owned();
+    let proj = a.dir.join("proj");
+    let work = proj.join("work");
+    repo(&proj);
+    std::fs::create_dir_all(&work).unwrap();
+    let sa = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok", "auto").unwrap();
+    let _rx_a = a.state.code.attach_test_agent(&sa.id);
+    let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
+    *a.state.code.test_started.lock().unwrap() = Some(started_tx);
+
+    let cwd = work.to_string_lossy().into_owned();
+    let create = create_agent_session(&a.state, &sa.id, &cwd, "Build the thing", Some("Builder"), None, None);
+    let child_side = async {
+        let (id, mut rx) = started.recv().await.expect("the agent is started");
+        (id, take_agent_message(&mut rx).await)
+    };
+    let (r, (child_id, got)) = tokio::join!(create, child_side);
+    let r = r.unwrap();
+    assert_eq!(r["sessionId"], child_id.as_str());
+    assert!(got.text.starts_with("Build the thing") && got.text.contains(&sa.id), "{}", got.text);
+    assert_eq!(got.origin, format!("agent:{an}:{}", sa.id));
+
+    let child = a.state.db.get_code_session(&child_id).unwrap().unwrap();
+    assert_eq!(child.permission_mode, "auto", "inherits the creator's mode");
+    assert_eq!(child.created_by.as_deref(), Some(sa.id.as_str()));
+    assert_eq!((child.title.as_str(), child.agent.as_str(), child.cwd.as_str()), ("Builder", "grok", std::fs::canonicalize(&work).unwrap().to_str().unwrap()));
+    let listed = list_agent_sessions(&a.state, &sa.id).unwrap();
+    assert!(listed.as_array().unwrap().iter().any(|s| s["sessionId"] == child_id.as_str()));
+
+    // Guards: a folder that doesn't exist, an empty brief, and an unknown agent.
+    let missing = a.dir.join("nope").to_string_lossy().into_owned();
+    assert!(create_agent_session(&a.state, &sa.id, &missing, "x", None, None, None).await.is_err());
+    assert!(create_agent_session(&a.state, &sa.id, &cwd, "  ", None, None, None).await.is_err());
+    assert!(create_agent_session(&a.state, &sa.id, &cwd, "x", None, Some("nope"), None).await.is_err());
+
+    // Depth: a session created by an agent may create (depth 2), but its own child may not.
+    let grand = a.state.db.create_code_session(&cwd, None, "grok", "auto").unwrap();
+    a.state.db.set_code_session_created_by(&grand.id, &child_id).unwrap();
+    let err = create_agent_session(&a.state, &grand.id, &cwd, "x", None, None, None).await.unwrap_err();
+    assert!(err.to_string().contains("depth"), "{err}");
+
+    // Cap: five created sessions, then no more (the one above counts).
+    for _ in 0..MAX_CREATED_SESSIONS - 1 {
+        let s = a.state.db.create_code_session(&cwd, None, "grok", "auto").unwrap();
+        a.state.db.set_code_session_created_by(&s.id, &sa.id).unwrap();
+    }
+    let err = create_agent_session(&a.state, &sa.id, &cwd, "x", None, None, None).await.unwrap_err();
+    assert!(err.to_string().contains("at most"), "{err}");
+}
+
+/// A restrictive creator can't spawn a looser session, whatever the global preference or agent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_created_session_is_never_looser_than_its_creator() {
+    let a = node("alpha-create-mode");
+    let proj = a.dir.join("proj");
+    let work = proj.join("work");
+    repo(&proj);
+    std::fs::create_dir_all(&work).unwrap();
+    let mut prefs = prefs::load(&a.state.db);
+    prefs.permission_mode = "always-approve".into();
+    prefs::save(&a.state.db, &prefs).unwrap();
+    let sa = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok", "default").unwrap();
+    let _rx_a = a.state.code.attach_test_agent(&sa.id);
+    let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
+    *a.state.code.test_started.lock().unwrap() = Some(started_tx);
+
+    let cwd = work.to_string_lossy().into_owned();
+    let create = create_agent_session(&a.state, &sa.id, &cwd, "x", None, Some("opencode"), None);
+    let child_side = async {
+        let (_, mut rx) = started.recv().await.expect("the agent is started");
+        take_agent_message(&mut rx).await
+    };
+    let (r, _) = tokio::join!(create, child_side);
+    assert_eq!(r.unwrap()["permissionMode"], "default");
+}
+
+/// A session whose agent fails to start is removed, so it doesn't use up the creator's cap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_agent_creation_leaves_no_session() {
+    let a = node("alpha-create-fail");
+    let proj = a.dir.join("proj");
+    let work = proj.join("work");
+    repo(&proj);
+    std::fs::create_dir_all(&work).unwrap();
+    let sa = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok", "default").unwrap();
+    let (started_tx, started) = tokio::sync::mpsc::unbounded_channel();
+    drop(started);
+    *a.state.code.test_started.lock().unwrap() = Some(started_tx);
+
+    let before = a.state.db.list_code_sessions().unwrap().len();
+    let cwd = work.to_string_lossy().into_owned();
+    assert!(create_agent_session(&a.state, &sa.id, &cwd, "x", None, None, None).await.is_err());
+    assert_eq!(a.state.db.list_code_sessions().unwrap().len(), before);
+    assert_eq!(a.state.db.count_created_by(&sa.id).unwrap(), 0);
+}
+
+/// The MCP tool call reaches `create_agent_session` through the loopback bridge with its arguments.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_mcp_create_tool_reaches_the_app_through_the_bridge() {
+    let a = node("alpha-create-bridge");
+    let proj = a.dir.join("proj");
+    let work = proj.join("work");
+    repo(&proj);
+    std::fs::create_dir_all(&work).unwrap();
+    let sa = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok", "auto").unwrap();
+    let _rx_a = a.state.code.attach_test_agent(&sa.id);
+    let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
+    *a.state.code.test_started.lock().unwrap() = Some(started_tx);
+
+    let (bridge, listener) = agent_messaging::AgentMessagingBridge::bind().unwrap();
+    let def = bridge.server_definition(&sa.id, true).unwrap();
+    bridge.serve(listener, a.state.clone());
+    let env = |k: &str| def["env"].as_array().unwrap().iter().find(|e| e["name"] == k).unwrap()["value"].as_str().unwrap().to_owned();
+
+    let params = json!({ "name": "create_agent_session", "arguments": { "cwd": work.to_string_lossy(), "prompt": "via bridge", "title": "Bridged" } });
+    let (addr, token) = (env("PATCHBAY_MESSAGE_ADDR"), env("PATCHBAY_MESSAGE_TOKEN"));
+    let call = agent_messaging::call_tool(&addr, &token, &sa.id, &params);
+    let child_side = async {
+        let (id, mut rx) = started.recv().await.expect("the agent is started");
+        (id, take_agent_message(&mut rx).await)
+    };
+    let (r, (id, got)) = tokio::join!(call, child_side);
+    let r = r.unwrap();
+    assert_eq!(r["isError"], false, "{r}");
+    assert!(got.text.starts_with("via bridge"), "{}", got.text);
+    let child = a.state.db.get_code_session(&id).unwrap().unwrap();
+    assert_eq!((child.title.as_str(), child.created_by.as_deref()), ("Bridged", Some(sa.id.as_str())));
+}
+
+/// A child can't reach beyond its creator's folder, and an agent that acts without asking can't be
+/// chosen from a session that isn't in always-approve mode.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_created_session_stays_in_its_creators_folder_and_approvals() {
+    let a = node("alpha-create-scope");
+    let proj = a.dir.join("proj");
+    let work = proj.join("work");
+    repo(&proj);
+    std::fs::create_dir_all(&work).unwrap();
+    let sa = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok", "default").unwrap();
+    let outside = a.dir.to_string_lossy().into_owned();
+    let sneaky = proj.join("work").join("..").join("..").to_string_lossy().into_owned();
+    for cwd in [outside.as_str(), sneaky.as_str(), ".", "/"] {
+        let err = create_agent_session(&a.state, &sa.id, cwd, "x", None, None, None).await.unwrap_err();
+        assert!(err.to_string().contains("cwd must be") || err.to_string().contains("not a usable"), "{cwd}: {err}");
+    }
+    let cwd = work.to_string_lossy().into_owned();
+    for gapped in [code::agents::AgentKind::Cursor.id(), code::agents::AgentKind::ClaudeCode.id()] {
+        let err = create_agent_session(&a.state, &sa.id, &cwd, "x", None, Some(gapped), None).await.unwrap_err();
+        assert!(err.to_string().contains("without asking"), "{gapped}: {err}");
+    }
+    assert_eq!(a.state.db.count_created_by(&sa.id).unwrap(), 0, "refusals create nothing");
+
+    // From always-approve the same agent is allowed.
+    a.state.db.set_code_session_permission_mode(&sa.id, "always-approve").unwrap();
+    let _rx_a = a.state.code.attach_test_agent(&sa.id);
+    let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
+    *a.state.code.test_started.lock().unwrap() = Some(started_tx);
+    let create = create_agent_session(&a.state, &sa.id, &cwd, "x", None, Some(code::agents::AgentKind::Cursor.id()), None);
+    let child_side = async {
+        let (_, mut rx) = started.recv().await.expect("the agent is started");
+        take_agent_message(&mut rx).await
+    };
+    let (r, _) = tokio::join!(create, child_side);
+    assert_eq!(r.unwrap()["agent"], code::agents::AgentKind::Cursor.id());
+}
+
+/// Parallel creates can't pass the cap together.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_creates_respect_the_cap() {
+    let a = node("alpha-create-race");
+    let proj = a.dir.join("proj");
+    repo(&proj);
+    let cwd = proj.to_string_lossy().into_owned();
+    let sa = a.state.db.create_code_session(&cwd, None, "grok", "default").unwrap();
+    let _rx_a = a.state.code.attach_test_agent(&sa.id);
+    let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
+    *a.state.code.test_started.lock().unwrap() = Some(started_tx);
+    tokio::spawn(async move {
+        while let Some((_, mut rx)) = started.recv().await {
+            tokio::spawn(async move {
+                take_agent_message(&mut rx).await;
+            });
+        }
+    });
+
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..MAX_CREATED_SESSIONS + 3 {
+        let (state, id, cwd) = (a.state.clone(), sa.id.clone(), cwd.clone());
+        set.spawn(async move { create_agent_session(&state, &id, &cwd, "x", None, None, None).await.is_ok() });
+    }
+    let mut made = 0;
+    while let Some(ok) = set.join_next().await {
+        made += ok.unwrap() as i64;
+    }
+    assert_eq!(made, MAX_CREATED_SESSIONS);
+    assert_eq!(a.state.db.count_created_by(&sa.id).unwrap(), MAX_CREATED_SESSIONS);
+}
+
 /// A window on B that missed some of A's events for a session catches up through `code_resume`:
 /// the events after its last point while A's ring has them, else a snapshot with the status of
 /// the tool calls it still shows running.

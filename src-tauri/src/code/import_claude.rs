@@ -4,7 +4,8 @@
 //! leaves dead branches behind). The import follows the chain from the last message back to the
 //! start, turns it into Patchbay's transcript entries and tool calls, and the new session carries
 //! it as earlier history. The agent that continues the session gets the conversation as context
-//! with its first prompt (see `handoff::import_prompt`), as after a switch of agents.
+//! with its first prompt (see `handoff::import_prompt`), as after a switch of agents. Claude Code
+//! itself does better: it loads the real session (see [`resumes`]).
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
@@ -16,6 +17,8 @@ use serde_json::{Value, json};
 
 /// How much of a file's start and end `list` reads to name the session.
 const SCAN_BYTES: u64 = 192 * 1024;
+/// Largest Desktop metadata file read.
+const DESKTOP_CAP: u64 = 1_000_000;
 /// Longest tool output kept per tool call.
 const RESULT_CAP: usize = 8_000;
 /// Longest text kept per side of an edit.
@@ -40,6 +43,15 @@ pub struct ClaudeSessionInfo {
     pub size: u64,
     /// The Code session an earlier import made, while it still exists.
     pub imported: Option<String>,
+    /// The Claude config directory the file is in: which account the session belongs to.
+    pub config_dir: String,
+    /// Claude Desktop has archived it.
+    pub archived: bool,
+    #[serde(skip)]
+    pub path: PathBuf,
+    /// The user named it in Claude Code (`/rename`); Desktop's title doesn't replace that.
+    #[serde(skip)]
+    custom_title: bool,
 }
 
 /// A session converted for Patchbay.
@@ -55,8 +67,149 @@ pub struct Converted {
     pub turns: usize,
 }
 
-pub fn projects_dir() -> Result<PathBuf> {
-    Ok(crate::claude_auth::config_dir()?.join("projects"))
+/// Whether the agent can continue the Claude Code session itself, not a copy of it: only Claude
+/// Code reads its own files, and it looks them up in the folder named after the directory it
+/// runs in, so the session must be filed under the folder it will launch in.
+pub fn resumes(agent: &str, cwd_exists: bool, filed_under_cwd: bool) -> bool {
+    agent == "claude-code" && cwd_exists && filed_under_cwd
+}
+
+/// Claude Code's folder name for a working directory: everything but letters and digits is `-`.
+fn encode_cwd(cwd: &str) -> String {
+    cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+}
+
+/// Whether the session file sits in the folder Claude Code names for `cwd`. The cwd read from the
+/// file's first prompt can differ (after a `cd`, in a worktree), and then the agent can't find it.
+pub fn filed_under(file: &Path, cwd: &str) -> bool {
+    file.parent().and_then(Path::file_name).is_some_and(|f| *f == *encode_cwd(cwd))
+}
+
+/// Set up the Code session `s` made for the Claude Code session `info` (converted as `conv`,
+/// whose folder is `cwd_exists`): a real resume where the agent can do one, a text copy otherwise.
+pub fn attach(db: &crate::db::Db, s: &crate::db::CodeSession, info: &ClaudeSessionInfo, conv: &Converted, cwd_exists: bool) -> Result<()> {
+    if resumes(&s.agent, cwd_exists, filed_under(&info.path, &conv.cwd)) {
+        // The agent replays the real session, so the copy isn't shown (the replay would repeat
+        // it); it waits in case the load fails. A session of another account is only found by an
+        // agent running with that account's config directory.
+        db.update_code_session(&s.id, Some(&info.id), None, None)?;
+        db.set_setting(&fallback_key(&s.id), &conv.transcript)?;
+        db.set_setting(&config_dir_key(&s.id), &info.config_dir)?;
+    } else {
+        db.set_code_transcript(&s.id, &conv.transcript)?;
+        db.set_setting(&format!("mesh.handoff.{}", s.id), &crate::handoff::import_prompt(Some(&conv.transcript), "Claude Code"))?;
+    }
+    Ok(())
+}
+
+/// The setting that names the config directory a resumed session's agent must run with.
+pub fn config_dir_key(code_session_id: &str) -> String {
+    format!("claude.config_dir.{code_session_id}")
+}
+
+/// Where an imported session's transcript waits while its agent tries to load the real session.
+pub fn fallback_key(code_session_id: &str) -> String {
+    format!("claude.fallback.{code_session_id}")
+}
+
+/// The agent has opened the session: after a load the real conversation is there and the waiting
+/// copy goes; after a fresh start the copy becomes the session's transcript and the note the first
+/// prompt carries.
+pub fn settle_fallback(db: &crate::db::Db, code_session_id: &str, loaded: bool) {
+    let key = fallback_key(code_session_id);
+    let Ok(Some(transcript)) = db.get_setting(&key) else { return };
+    if !loaded {
+        let _ = db.set_code_transcript(code_session_id, &transcript);
+        let note = crate::handoff::import_prompt(Some(&transcript), "Claude Code");
+        let _ = db.set_setting(&format!("mesh.handoff.{code_session_id}"), &note);
+    }
+    let _ = db.with_conn(|c| c.execute("DELETE FROM settings WHERE key = ?1", [&key]));
+}
+
+/// Claude config directories to read sessions from: the default one, `~/.claude` and `extra` (the
+/// providers' own), each once and only if it has a `projects` folder.
+pub fn config_dirs(extra: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let defaults = crate::claude_auth::config_dir().into_iter().chain(crate::claude_auth::home().map(|h| h.join(".claude")));
+    distinct_dirs(defaults.chain(extra))
+}
+
+fn distinct_dirs(dirs: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut out: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for d in dirs {
+        let key = d.canonicalize().unwrap_or_else(|_| d.clone());
+        if d.join("projects").is_dir() && !out.iter().any(|(_, k)| *k == key) {
+            out.push((d, key));
+        }
+    }
+    out.into_iter().map(|(d, _)| d).collect()
+}
+
+/// What Claude Desktop's Code tab keeps about a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Desktop {
+    pub title: String,
+    pub archived: bool,
+    last_activity: i64,
+}
+
+/// Where Claude Desktop keeps one metadata file per Code session.
+pub fn desktop_dir() -> Option<PathBuf> {
+    let var = |k: &str| std::env::var_os(k).map(PathBuf::from);
+    let base = if cfg!(windows) {
+        var("APPDATA")?
+    } else if cfg!(target_os = "macos") {
+        var("HOME")?.join("Library/Application Support")
+    } else {
+        var("XDG_CONFIG_HOME").unwrap_or(var("HOME")?.join(".config"))
+    };
+    Some(base.join("Claude/claude-code-sessions"))
+}
+
+/// Desktop's metadata under `root` (`<account>/<org>/local_<id>.json`), by the id of the Claude
+/// Code session it drives. A session Desktop has several records of keeps the newest.
+pub fn desktop_meta(root: &Path) -> HashMap<String, Desktop> {
+    let mut out: HashMap<String, Desktop> = HashMap::new();
+    let subdirs = |p: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(p).into_iter().flatten().flatten().map(|e| e.path()).filter(|e| e.is_dir()).collect()
+    };
+    for dir in subdirs(root).iter().flat_map(|a| subdirs(a)) {
+        for f in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let name = f.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("local_") || !name.ends_with(".json") {
+                continue;
+            }
+            if f.metadata().is_ok_and(|m| m.len() > DESKTOP_CAP) {
+                continue;
+            }
+            let Some(v) = std::fs::read_to_string(f.path()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { continue };
+            let Some(id) = v["cliSessionId"].as_str() else { continue };
+            let d = Desktop {
+                title: v["title"].as_str().unwrap_or_default().trim().to_owned(),
+                archived: v["isArchived"].as_bool().unwrap_or(false),
+                last_activity: v["lastActivityAt"].as_i64().unwrap_or(0),
+            };
+            if out.get(id).is_none_or(|o| o.last_activity <= d.last_activity) {
+                out.insert(id.to_owned(), d);
+            }
+        }
+    }
+    out
+}
+
+/// The sessions of every config directory, newest first, once per id, with Desktop's titles.
+pub fn list_all(dirs: &[PathBuf], desktop: &HashMap<String, Desktop>) -> Vec<ClaudeSessionInfo> {
+    let mut seen = HashSet::new();
+    let mut out: Vec<ClaudeSessionInfo> = dirs.iter().flat_map(|d| list(&d.join("projects"))).filter(|s| seen.insert(s.id.clone())).collect();
+    for s in &mut out {
+        if let Some(d) = desktop.get(&s.id) {
+            if !d.title.is_empty() && !s.custom_title {
+                s.title = d.title.clone();
+            }
+            s.archived = d.archived;
+        }
+    }
+    out.sort_by(|a, b| b.modified.cmp(&a.modified));
+    out
 }
 
 /// Every session file under `projects`, newest first, without the ones with nothing to show.
@@ -128,6 +281,8 @@ fn summarize(path: &Path) -> Option<ClaudeSessionInfo> {
     if preview.is_empty() {
         return None;
     }
+    let custom = custom.filter(|t| !t.trim().is_empty());
+    let custom_title = custom.is_some();
     let title = custom.or(ai).filter(|t| !t.trim().is_empty()).unwrap_or_else(|| one_line(&preview, 80));
     Some(ClaudeSessionInfo {
         id,
@@ -138,6 +293,10 @@ fn summarize(path: &Path) -> Option<ClaudeSessionInfo> {
         modified,
         size: meta.len(),
         imported: None,
+        config_dir: path.parent().and_then(Path::parent).and_then(Path::parent).map(|d| d.to_string_lossy().into_owned()).unwrap_or_default(),
+        archived: false,
+        path: path.to_owned(),
+        custom_title,
     })
 }
 
@@ -562,18 +721,137 @@ mod tests {
         assert_eq!(main_branch(&lines), [0, 2]);
     }
 
-    /// Against the real `~/.claude/projects`: `cargo test --lib real_sessions -- --ignored --nocapture`.
+    /// A config directory holding `projects/-work-proj/<id>.jsonl`, each file a session with `title`.
+    fn config_with(sessions: &[(&str, &str)]) -> PathBuf {
+        let dir = tempdir();
+        let proj = dir.join("projects/-work-proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        for (id, title) in sessions {
+            std::fs::write(proj.join(format!("{id}.jsonl")), fixture().replace("Fix it", title)).unwrap();
+        }
+        dir
+    }
+
+    fn desktop_file(root: &Path, name: &str, cli: &str, title: &str, archived: bool, active: i64) {
+        let dir = root.join("acct/org");
+        std::fs::create_dir_all(&dir).unwrap();
+        let v = json!({ "sessionId": name, "cliSessionId": cli, "title": title, "isArchived": archived, "lastActivityAt": active });
+        std::fs::write(dir.join(format!("{name}.json")), v.to_string()).unwrap();
+    }
+
+    #[test]
+    fn lists_every_account_once_with_desktop_titles() {
+        let (a, b) = (config_with(&[("s1", "Mine"), ("s2", "Old")]), config_with(&[("s1", "Dup"), ("s3", "Other account")]));
+        // `s2` was never named in Claude Code, so Desktop's name shows.
+        let s2 = a.join("projects/-work-proj/s2.jsonl");
+        let unnamed: String = std::fs::read_to_string(&s2).unwrap().lines().skip(1).map(|l| format!("{l}\n")).collect();
+        std::fs::write(&s2, unnamed).unwrap();
+        let desktop = tempdir();
+        desktop_file(&desktop, "local_1", "s2", "Renamed in Desktop", true, 5);
+        desktop_file(&desktop, "local_2", "s2", "Stale record", false, 1);
+        desktop_file(&desktop, "local_3", "s3", "", false, 1);
+        std::fs::write(desktop.join("acct/org/local_bad.json"), "{").unwrap();
+        let meta = desktop_meta(&desktop);
+        assert_eq!(meta["s2"], Desktop { title: "Renamed in Desktop".into(), archived: true, last_activity: 5 });
+
+        let found = list_all(&[a.clone(), b.clone()], &meta);
+        let by = |id: &str| found.iter().find(|s| s.id == id).unwrap();
+        assert_eq!(found.len(), 3, "s1 listed once");
+        assert_eq!(by("s1").title, "Mine", "the first directory wins");
+        assert_eq!(by("s1").config_dir, a.to_string_lossy());
+        assert_eq!(by("s2").title, "Renamed in Desktop");
+        assert!(by("s2").archived && !by("s1").archived);
+        assert_eq!(by("s3").title, "Other account", "an empty Desktop title changes nothing");
+        assert_eq!(by("s3").config_dir, b.to_string_lossy());
+        assert!(by("s3").path.is_file());
+    }
+
+    #[test]
+    fn config_dirs_skip_repeats_and_empty_ones() {
+        let a = config_with(&[("s1", "x")]);
+        let empty = tempdir();
+        let alias = tempdir().join("alias");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&a, &alias).unwrap();
+        #[cfg(unix)]
+        assert_eq!(distinct_dirs([a.clone(), empty.clone(), alias, a.clone()]), [a]);
+        #[cfg(not(unix))]
+        assert_eq!(distinct_dirs([a.clone(), empty, a.clone()]), [a]);
+    }
+
+    /// A Code session for the fixture session `s1` of a config dir (its folder is `-work-proj`).
+    fn attach_fixture(agent: &str, cwd_exists: bool, file_cwd: &str) -> (crate::db::Db, crate::db::CodeSession) {
+        let config = config_with(&[("s1", "Fix it")]);
+        let db = crate::db::Db::open(&tempdir().join("db.sqlite")).unwrap();
+        let s = db.create_code_session(&tempdir().to_string_lossy(), None, agent, "default").unwrap();
+        let info = list_all(&[config], &HashMap::new()).remove(0);
+        let mut conv = convert(&info.path).unwrap();
+        conv.cwd = file_cwd.into();
+        attach(&db, &s, &info, &conv, cwd_exists).unwrap();
+        (db, s)
+    }
+
+    #[test]
+    fn a_resumed_import_keeps_no_transcript_but_a_waiting_copy() {
+        let (db, s) = attach_fixture("claude-code", true, "/work/proj");
+        let acp = db.get_code_session(&s.id).unwrap().unwrap().acp_session_id;
+        assert_eq!(acp.as_deref(), Some("s1"));
+        assert_eq!(db.code_transcript(&s.id).unwrap(), None, "the replay would show it twice");
+        assert!(db.get_setting(&fallback_key(&s.id)).unwrap().unwrap().contains("earlier"));
+        assert!(db.get_setting(&config_dir_key(&s.id)).unwrap().is_some());
+        assert_eq!(db.get_setting(&format!("mesh.handoff.{}", s.id)).unwrap(), None);
+    }
+
+    #[test]
+    fn other_imports_get_the_text_copy() {
+        // Another agent, a folder that is gone, a file filed under another folder than its cwd.
+        for (agent, exists, cwd) in [("opencode", true, "/work/proj"), ("claude-code", false, "/work/proj"), ("claude-code", true, "/elsewhere")] {
+            let (db, s) = attach_fixture(agent, exists, cwd);
+            assert!(db.code_transcript(&s.id).unwrap().unwrap().contains("earlier"), "{agent} {exists} {cwd}");
+            assert!(db.get_setting(&format!("mesh.handoff.{}", s.id)).unwrap().is_some());
+            assert_eq!(db.get_setting(&fallback_key(&s.id)).unwrap(), None);
+            assert_eq!(db.get_code_session(&s.id).unwrap().unwrap().acp_session_id, None);
+        }
+    }
+
+    #[test]
+    fn a_failed_load_restores_the_copy_and_a_good_one_drops_it() {
+        for loaded in [true, false] {
+            let (db, s) = attach_fixture("claude-code", true, "/work/proj");
+            settle_fallback(&db, &s.id, loaded);
+            assert_eq!(db.code_transcript(&s.id).unwrap().is_some(), !loaded);
+            assert_eq!(db.get_setting(&format!("mesh.handoff.{}", s.id)).unwrap().is_some(), !loaded);
+            assert_eq!(db.get_setting(&fallback_key(&s.id)).unwrap(), None);
+        }
+        let (db, s) = attach_fixture("opencode", true, "/work/proj");
+        settle_fallback(&db, &s.id, false);
+        assert!(db.get_setting(&format!("mesh.handoff.{}", s.id)).unwrap().is_some(), "untouched: nothing was waiting");
+    }
+
+    #[test]
+    fn finds_the_folder_claude_code_names_for_a_cwd() {
+        assert_eq!(encode_cwd("/Users/me/meraki_terraform"), "-Users-me-meraki-terraform");
+        assert!(filed_under(Path::new("/c/projects/-Users-me-meraki-terraform/s.jsonl"), "/Users/me/meraki_terraform"));
+        assert!(!filed_under(Path::new("/c/projects/-Users-me/s.jsonl"), "/Users/me/meraki_terraform"));
+    }
+
+    #[test]
+    fn a_name_given_in_claude_code_beats_desktops() {
+        let config = config_with(&[("s1", "Named in the CLI")]);
+        let meta = HashMap::from([("s1".to_owned(), Desktop { title: "Desktop's".into(), archived: false, last_activity: 1 })]);
+        assert_eq!(list_all(&[config], &meta)[0].title, "Named in the CLI");
+    }
+
+    /// Against the real config directories: `cargo test --lib real_sessions -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn real_sessions() {
         let t = std::time::Instant::now();
-        let all = list(&projects_dir().unwrap());
+        let all = list_all(&config_dirs([]), &desktop_dir().map(|d| desktop_meta(&d)).unwrap_or_default());
         eprintln!("{} sessions listed in {:?}", all.len(), t.elapsed());
         let biggest = all.iter().max_by_key(|s| s.size).unwrap();
-        let path = projects_dir().unwrap().join(std::fs::read_dir(projects_dir().unwrap()).unwrap().flatten()
-            .map(|d| d.path()).find(|d| d.join(format!("{}.jsonl", biggest.id)).is_file()).unwrap()).join(format!("{}.jsonl", biggest.id));
         let t = std::time::Instant::now();
-        let c = convert(&path).unwrap();
+        let c = convert(&biggest.path).unwrap();
         eprintln!("{} ({} MB) -> {} KB, {} turns, {:?}, title {:?}", biggest.id, biggest.size / 1_000_000, c.transcript.len() / 1000, c.turns, t.elapsed(), c.title);
     }
 

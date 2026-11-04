@@ -39,14 +39,14 @@ export function SubagentsPanel({ sessionId }: { sessionId: string }) {
   const at = useStore((s) => s.code[sessionId]?.subagentsAt ?? null);
   const canStop = useStore((s) => !!s.code[sessionId]?.extensions.cancelTool);
   const [, tick] = useState(0);
-  const rows = agents ? shown(agents) : [];
+  const now = Date.now();
+  const rows = agents ? shown(agents, now) : [];
   useEffect(() => {
     if (rows.length === 0) return;
     const id = window.setInterval(() => tick((n) => n + 1), 1000);
     return () => clearInterval(id);
   }, [rows.length]);
   if (rows.length === 0) return null;
-  const now = Date.now();
 
   return (
     <ul className="flex flex-col gap-1" aria-label="Subagents">
@@ -58,7 +58,7 @@ export function SubagentsPanel({ sessionId }: { sessionId: string }) {
         const meta =
           a.origin === "session"
             ? [fmtElapsed(ran * 1000)]
-            : [fmtElapsed(ran * 1000), a.steps > 0 ? `${a.steps} steps` : null, `idle ${fmtElapsed(idle * 1000)}`];
+            : [fmtElapsed(ran * 1000), a.steps > 0 ? `${a.steps} steps` : null, a.status === "running" ? `idle ${fmtElapsed(idle * 1000)}` : null];
         return (
           <li key={a.id} className={`flex items-center gap-2 text-xs ${warn ? "text-warn" : "text-muted"}`} data-subagent-health={h}>
             <Dot size={6} className={TONE[h]} />

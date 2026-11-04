@@ -631,10 +631,10 @@ async fn create_code_session(
     Err(CmdError(format!("the session started on {}, but hasn't reached this computer yet", state.mesh.member_name(&host))))
 }
 
-/// Claude Code's sessions on this computer, marking those already imported.
+/// Claude Code's sessions on this computer, from every account it is signed in with (the default
+/// config directory and the ones the providers name), marking those already imported.
 async fn list_claude_sessions(state: &AppState) -> CmdResult<Vec<code::import_claude::ClaudeSessionInfo>> {
-    let dir = code::import_claude::projects_dir()?;
-    let mut found = tokio::task::spawn_blocking(move || code::import_claude::list(&dir)).await?;
+    let mut found = tokio::task::spawn_blocking(claude_sessions_on_disk(state)?).await?;
     for f in &mut found {
         f.imported = state
             .db
@@ -644,14 +644,29 @@ async fn list_claude_sessions(state: &AppState) -> CmdResult<Vec<code::import_cl
     Ok(found)
 }
 
+/// A job that lists every Claude Code session on disk, with Claude Desktop's titles.
+fn claude_sessions_on_disk(state: &AppState) -> CmdResult<impl FnOnce() -> Vec<code::import_claude::ClaudeSessionInfo> + use<>> {
+    let own: Vec<_> = state
+        .db
+        .list_providers()?
+        .into_iter()
+        .filter(|(p, _)| p.claude_config_dir.is_some())
+        .filter_map(|(p, _)| claude_auth::resolve_dir(p.claude_config_dir.as_deref()).ok())
+        .collect();
+    Ok(move || {
+        let desktop = code::import_claude::desktop_dir().map(|d| code::import_claude::desktop_meta(&d)).unwrap_or_default();
+        code::import_claude::list_all(&code::import_claude::config_dirs(own), &desktop)
+    })
+}
+
 /// Make a Code session from each of Claude Code's sessions `ids`, with `agent` (default: the
-/// preferred one) to continue them. A session imported before opens again instead of copying.
+/// preferred one) to continue them. Claude Code continues the real session; any other agent gets a
+/// copy of the conversation. A session imported before opens again instead.
 async fn import_claude_sessions(state: &AppState, ids: Vec<String>, agent: Option<String>) -> CmdResult<Vec<CodeSession>> {
-    let projects = code::import_claude::projects_dir()?;
-    let found = {
-        let p = projects.clone();
-        tokio::task::spawn_blocking(move || code::import_claude::list(&p)).await?
-    };
+    // One import at a time, so two for the same session can't both find it not imported yet.
+    static IMPORTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one_at_a_time = IMPORTING.lock().await;
+    let found = tokio::task::spawn_blocking(claude_sessions_on_disk(state)?).await?;
     let mut made = Vec::new();
     for id in ids {
         let key = format!("import.claude.{id}");
@@ -659,14 +674,12 @@ async fn import_claude_sessions(state: &AppState, ids: Vec<String>, agent: Optio
             made.push(existing);
             continue;
         }
-        let path = found
-            .iter()
-            .find(|f| f.id == id)
-            .and_then(|f| projects.read_dir().ok()?.flatten().map(|d| d.path().join(format!("{}.jsonl", f.id))).find(|p| p.is_file()))
-            .ok_or_else(|| CmdError(format!("Claude Code session {id} not found")))?;
+        let info = found.iter().find(|f| f.id == id).ok_or_else(|| CmdError(format!("Claude Code session {id} not found")))?;
+        let path = info.path.clone();
         let conv = tokio::task::spawn_blocking(move || code::import_claude::convert(&path)).await??;
+        let original = std::path::PathBuf::from(&conv.cwd);
         // The original folder may be gone (a deleted worktree): use the nearest one that exists.
-        let mut cwd = std::path::PathBuf::from(&conv.cwd);
+        let mut cwd = original.clone();
         while !cwd.is_dir() && cwd.pop() {}
         let cwd = if cwd.as_os_str().is_empty() || !cwd.is_dir() {
             code::agents::home_dir().ok_or_else(|| CmdError("no folder to open the session in".into()))?
@@ -676,8 +689,7 @@ async fn import_claude_sessions(state: &AppState, ids: Vec<String>, agent: Optio
         let s = create_code_session_local(state, &cwd.to_string_lossy(), None, agent.clone())?;
         state.db.set_code_session_title(&s.id, &chat::clip(&conv.title, 80), true)?;
         state.db.set_code_session_times(&s.id, conv.created_ms.max(1), conv.updated_ms.max(conv.created_ms).max(1))?;
-        state.db.set_code_transcript(&s.id, &conv.transcript)?;
-        state.db.set_setting(&format!("mesh.handoff.{}", s.id), &handoff::import_prompt(Some(&conv.transcript), "Claude Code"))?;
+        code::import_claude::attach(&state.db, &s, info, &conv, original.is_dir())?;
         state.db.set_setting(&key, &s.id)?;
         made.push(state.db.get_code_session(&s.id)?.unwrap_or(s));
     }
@@ -763,6 +775,9 @@ async fn delete_code_session(state: &AppState, id: String) -> CmdResult<()> {
     state.code.titles.forget(&id);
     // Must match the id `TerminalPane` opens with.
     state.terminals.close(&format!("term-{id}"));
+    for key in [code::import_claude::config_dir_key(&id), code::import_claude::fallback_key(&id)] {
+        state.db.with_conn(|c| c.execute("DELETE FROM settings WHERE key = ?1", [&key]))?;
+    }
     Ok(state.db.delete_code_session(&id)?)
 }
 
@@ -831,6 +846,46 @@ fn code_sink(state: &AppState) -> code::acp::Sink {
     Arc::new(move |env| on_code_event(&state, env))
 }
 
+/// The agent lost the session (a live agent answering "Session not found"): restart it, which
+/// reloads the session from the agent's own store, and send the refused prompt again. Once per
+/// prompt, so an agent that keeps losing it ends with an error instead of a loop.
+fn on_session_lost(state: &AppState, id: String, message: code::acp::UserMessage, error: String) {
+    static RESENT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::LazyLock::new(Default::default);
+    let sink = code_sink(state);
+    let say = {
+        let id = id.clone();
+        move |event| sink(code::acp::Envelope { code_session_id: id.clone(), event })
+    };
+    if !RESENT.lock().unwrap().insert(message.id.clone()) {
+        say(code::acp::CodeEvent::Error {
+            message: format!("The agent lost this session again. Press Restart to start it over.\n{error}"),
+        });
+        return;
+    }
+    // The notice first, so it's set aside with the transcript: an entry after the reset would make
+    // the window drop the set-aside copy when the reload ends.
+    say(code::acp::CodeEvent::Notice {
+        message: "The agent lost this session. Restarting it and sending your message again…".into(),
+    });
+    say(code::acp::CodeEvent::Restarting {});
+    let state = state.clone();
+    // A thread of its own: this runs on the agent's thread, which the restart stops.
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(e) => return say(code::acp::CodeEvent::Error { message: e.to_string() }),
+        };
+        let resent = rt.block_on(async {
+            code_start_local(&state, id.clone()).await?;
+            state.code.prompt(&id, message, false).await
+        });
+        if let Err(e) = resent {
+            say(code::acp::CodeEvent::Error { message: format!("Couldn't restart the agent: {e:#}") });
+        }
+    });
+}
+
 fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     use code::acp::CodeEvent;
     if let CodeEvent::PlanLimits { limits } = env.event {
@@ -841,6 +896,10 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
         let tagged = serde_json::json!({ "account": account, "name": name, "limits": limits });
         state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, tagged);
         adopt_plan_limits(state, &account, name, limits, true);
+        return;
+    }
+    if let CodeEvent::SessionLost { message, error } = env.event {
+        on_session_lost(state, env.code_session_id, message, error);
         return;
     }
     track_titles(state, &env);
@@ -1979,6 +2038,125 @@ async fn deliver_agent_message_local(
         "messageId": prompt_id,
         "accepted": true,
         "note": agent_messaging::delivery_note(delivery_str),
+    }))
+}
+
+/// Sessions one agent session may create, ever (archived ones count: a loop can't recycle slots).
+pub(crate) const MAX_CREATED_SESSIONS: i64 = 5;
+/// A person's session is depth 0; a session it creates is 1, and one that creates is 2. Nothing
+/// at depth 2 may create.
+const MAX_CREATE_DEPTH: usize = 2;
+
+/// A Code session made by another session's agent: in `cwd` on this computer, with the creator's
+/// agent, model and permission mode unless `agent` or `model` say otherwise, then started and
+/// given `prompt` as its first message. Never more permissive than the creator.
+pub(crate) async fn create_agent_session(
+    state: &AppState,
+    creator_id: &str,
+    cwd: &str,
+    prompt: &str,
+    title: Option<&str>,
+    agent: Option<&str>,
+    model: Option<&str>,
+) -> anyhow::Result<serde_json::Value> {
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        anyhow::bail!("prompt cannot be empty");
+    }
+    if prompt.len() > 16 * 1024 {
+        anyhow::bail!("prompt is longer than 16 KiB");
+    }
+    // One create at a time per creator, so parallel tool calls can't all pass the cap check.
+    static LOCKS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        std::sync::LazyLock::new(Default::default);
+    let lock = LOCKS.lock().unwrap().entry(creator_id.to_owned()).or_default().clone();
+    let _one_at_a_time = lock.lock().await;
+    let creator = state
+        .db
+        .get_code_session(creator_id)?
+        .ok_or_else(|| anyhow::anyhow!("source Code session was not found"))?;
+    if creator.host_node.as_deref() != Some(state.mesh.node_id()) || creator.archived_at.is_some() {
+        anyhow::bail!("only a session running on this computer can create sessions");
+    }
+    // Auto mode trusts edits inside a session's own folder, so a child may not reach beyond its creator's.
+    let root = std::fs::canonicalize(&creator.cwd)
+        .map_err(|e| anyhow::anyhow!("the creating session's folder {} is not usable: {e}", creator.cwd))?;
+    let folder = std::fs::canonicalize(cwd).map_err(|e| anyhow::anyhow!("{cwd} is not a usable folder: {e}"))?;
+    if !folder.starts_with(&root) {
+        anyhow::bail!("cwd must be {} or a folder inside it", creator.cwd);
+    }
+    // The creator's own folder keeps its stored spelling, so permission rules keyed by it still apply.
+    let cwd = if folder == root { creator.cwd.clone() } else { folder.to_string_lossy().into_owned() };
+    // An agent that acts without asking would run outside the approval mode the child inherits.
+    if let Some(a) = agent.filter(|a| *a != creator.agent)
+        && creator.permission_mode != "always-approve"
+    {
+        let kind = code::agents::AgentKind::parse(a).ok_or_else(|| anyhow::anyhow!("unknown coding agent {a}"))?;
+        if !code::agents::ApprovalSetup::for_agent(kind).gaps.is_empty() {
+            anyhow::bail!(
+                "{a} can act without asking whatever the approval mode, so it can't be chosen from a session that isn't in always-approve mode; use your own agent ({}) or omit agent",
+                creator.agent
+            );
+        }
+    }
+    let mut depth = 0;
+    let mut up = creator.created_by.clone();
+    while let Some(id) = up {
+        depth += 1;
+        if depth >= MAX_CREATE_DEPTH {
+            anyhow::bail!("sessions created by agents can't create sessions beyond depth {MAX_CREATE_DEPTH}");
+        }
+        up = state.db.get_code_session(&id)?.and_then(|s| s.created_by);
+    }
+    if state.db.count_created_by(creator_id)? >= MAX_CREATED_SESSIONS {
+        anyhow::bail!("a session may create at most {MAX_CREATED_SESSIONS} sessions");
+    }
+    let agent = agent.map(str::to_owned).unwrap_or_else(|| creator.agent.clone());
+    let model = model.or(creator.model_ref.as_deref());
+    let session = create_code_session_local(state, &cwd, model, Some(agent))?;
+    // A failure past this point would leave an empty session that still counts toward the cap.
+    let started: anyhow::Result<()> = async {
+        // Inherit rather than seed from prefs: a restricted creator can't spawn a looser session.
+        state.db.set_code_session_permission_mode(&session.id, &creator.permission_mode)?;
+        state.db.set_code_session_created_by(&session.id, creator_id)?;
+        if let Some(t) = title.map(str::trim).filter(|t| !t.is_empty()) {
+            state.db.set_code_session_title(&session.id, t, true)?;
+        }
+        code_start_local(state, session.id.clone()).await?;
+        // After the brief so the first line still titles the session.
+        let text = format!(
+            "{prompt}\n\n---\nPatchbay session '{}' ({creator_id}) created this session and sent you this brief. To reply, use the Patchbay send_agent_message tool and target session {creator_id}.",
+            creator.title
+        );
+        code_prompt_local(
+            state,
+            session.id.clone(),
+            text,
+            Vec::new(),
+            Vec::new(),
+            format!("agent:{}:{creator_id}", state.mesh.node_id()),
+            None,
+            false,
+        )
+        .await?;
+        Ok(())
+    }
+    .await;
+    if let Err(e) = started {
+        if let Err(del) = delete_code_session(state, session.id.clone()).await {
+            // Don't let the leftover row use up the creator's cap.
+            tracing::warn!("couldn't remove session {} after a failed create: {}", session.id, del.0);
+            let _ = state.db.clear_code_session_created_by(&session.id);
+        }
+        return Err(e);
+    }
+    let created = state.db.get_code_session(&session.id)?.unwrap_or(session);
+    Ok(serde_json::json!({
+        "sessionId": created.id,
+        "title": created.title,
+        "agent": created.agent,
+        "permissionMode": created.permission_mode,
+        "note": "Created and started; the brief was sent. Use send_agent_message with this sessionId to follow up.",
     }))
 }
 

@@ -24,6 +24,7 @@ import {
   type Target,
   type TopItem,
 } from "../lib/sidebarLayout";
+import { startSessionDrag } from "../lib/paneDrag";
 
 const COLLAPSED_KEY = "patchbay.codeSidebar.collapsed";
 /** The folder order from before the layout synced. It seeds the first layout. */
@@ -89,6 +90,7 @@ interface Group {
 export function CodeSidebar() {
   const sessions = useStore((s) => s.codeSessions);
   const activeId = useStore((s) => s.activeCodeSessionId);
+  const panes = useStore((s) => s.panes);
   const select = useStore((s) => s.selectCodeSession);
   const refresh = useStore((s) => s.refreshCodeSessions);
   const code = useStore((s) => s.code);
@@ -391,10 +393,11 @@ export function CodeSidebar() {
       <SidebarItem
         key={s.id}
         icon={strongest(s.activity, live) ?? "chat"}
+        agent={s.agent}
         indent={!inPinned}
         title={s.title}
         subtitle={inPinned ? basename(s.cwd) : undefined}
-        active={s.id === activeId}
+        active={s.id === activeId || panes.includes(s.id)}
         selected={picked.has(s.id) && s.archivedAt == null}
         busy={st?.busy}
         attention={(st?.permissions.length ?? 0) > 0}
@@ -402,7 +405,14 @@ export function CodeSidebar() {
         host={prefs.groupByProject ? hostLabel(s) : undefined}
         pinned={s.pinned}
         status={st && (st.status === "ready" || st.status === "starting") ? "running" : "idle"}
+        onPointerDown={s.archivedAt == null ? (e) => startSessionDrag(e, s.id, s.title) : undefined}
         onSelect={async (e) => {
+          // Alt+click opens the session beside the open one.
+          if (e.altKey && s.archivedAt == null) {
+            e.preventDefault();
+            useStore.getState().openBeside(s.id);
+            return;
+          }
           if (s.archivedAt == null && (e.shiftKey || e.ctrlKey || e.metaKey)) {
             e.preventDefault();
             // A Shift-click with nothing clicked yet starts from the open session.

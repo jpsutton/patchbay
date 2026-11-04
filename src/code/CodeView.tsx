@@ -48,8 +48,10 @@ import { CopyButton, copyText } from "../components/CopyButton";
 import { ListenButton, ReadAloudButton, useSpeakingId, useStopSpeechWhenHidden } from "../components/ReadAloudButton";
 import { ExportMenu } from "../components/ExportMenu";
 import { WidthMenu } from "../components/WidthMenu";
-import { codeToJson, codeToMarkdown, saveExport } from "../lib/export";
-import { useViewAction, ViewActive } from "../lib/shortcuts";
+import { codeToJson, codeToMarkdown, saveExport, type ExportFormat } from "../lib/export";
+import { ContextMenu, type ItemAction } from "../components/ItemMenu";
+import { PaneContext, useViewAction, ViewActive } from "../lib/shortcuts";
+import { usePaneSession } from "../lib/pane";
 import { enqueueSpeech, speakingNow, stopSpeech } from "../lib/speech";
 import { liveCursorNow, takeLiveProse, type LiveCursor } from "../lib/spokenText";
 import { HeaderButton } from "../components/HeaderButton";
@@ -63,6 +65,7 @@ import {
   FileDiffIcon,
   InfoIcon,
   MonitorUpIcon,
+  MoreIcon,
   PaperclipIcon,
   PencilIcon,
   PlusIcon,
@@ -899,7 +902,7 @@ function ChangesPanel({ changes, cwd, onClose }: { changes: FileChange[]; cwd: s
 export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const drag = useDragRegion();
   const remote = isRemoteApp();
-  const activeId = useStore((s) => s.activeCodeSessionId);
+  const activeId = usePaneSession();
   const sessions = useStore((s) => s.codeSessions);
   const state = useStore((s) => (activeId ? s.code[activeId] : undefined));
   const models = useStore((s) => s.models);
@@ -921,6 +924,20 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   /** Fills the composer after Stop when this agent cannot rewind. */
   const [composerSeed, setComposerSeed] = useState<{ id: number; text: string; replace?: boolean } | null>(null);
   const [moving, setMoving] = useState<"move" | "takeOver" | null>(null);
+  /** The header's "more" menu in a narrow pane: where it opens, when it's open. */
+  const [more, setMore] = useState<{ x: number; y: number } | null>(null);
+  const moreRef = useRef<HTMLDivElement>(null);
+  /**
+   * What a split pane's header gives up to fit: 0 nothing, 1 mode and approvals to a second row, 2 also
+   * the path, agent label and rarely used buttons (into a "more" menu), 3 also Activity, Changes and
+   * Terminal. Chosen by measuring the header, not by its width: what has to fit varies (the window
+   * buttons in the rightmost pane, a long title, the agent's modes).
+   */
+  const [level, setLevel] = useState(0);
+  const headerRef = useRef<HTMLElement>(null);
+  /** The header width each level needed when it overflowed, to know when a wider pane lets one go back. */
+  const needed = useRef<number[]>([]);
+  const fitHeader = useRef<() => void>(() => {});
   /** Forces a re-render when the post-foreground idle window expires. */
   const [, setIdleTick] = useState(0);
   const sticky = useStickyScroll([state?.entries, state?.toolCalls, state?.permissions, state?.auth]);
@@ -995,7 +1012,35 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   // The header's badge needs the count even with the panel shut, so this always runs; the key
   // keeps it from redoing the work when only text or non-diff tool output changed.
   const changesCache = useRef<{ key: unknown[]; value: FileChange[] } | null>(null);
-  const viewActive = useContext(ViewActive);
+  // Only the focused pane reads aloud and takes window-wide input.
+  const pane = useContext(PaneContext);
+  const split = !!pane?.split;
+  fitHeader.current = () => {
+    const el = headerRef.current;
+    if (!split || !el) {
+      if (level !== 0) setLevel(0);
+      return;
+    }
+    const room = el.clientWidth;
+    // The title keeps a minimum width, so a header with too much in it overflows.
+    if (el.scrollWidth > room + 1) {
+      if (level < 3) {
+        needed.current[level] = el.scrollWidth;
+        setLevel(level + 1);
+      }
+    } else if (level > 0 && room >= (needed.current[level - 1] ?? Infinity)) setLevel(level - 1);
+  };
+  // After every render, so a longer title or a new badge is noticed; the observer catches resizes.
+  useLayoutEffect(() => fitHeader.current());
+  useEffect(() => {
+    const el = headerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => fitHeader.current());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [split, !!session]);
+  const paneFocused = pane?.focused ?? true;
+  const viewActive = useContext(ViewActive) && paneFocused;
   const listenOn = useStore((s) => s.prefs.readAloudListen);
   const skipListen = useRef(false);
   useStopSpeechWhenHidden();
@@ -1408,7 +1453,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
         <div
           role="radiogroup"
           aria-label="Agent mode"
-          className={`mr-1 flex gap-0.5 rounded-[9px] border border-line bg-panel p-0.5 text-[12px] ${ready ? "" : "pointer-events-none opacity-50"}`}
+          className={`mr-1 flex shrink-0 gap-0.5 rounded-[9px] border border-line bg-panel p-0.5 text-[12px] ${ready ? "" : "pointer-events-none opacity-50"}`}
         >
           {modes.map((m) => {
             const on = m.id === s.modes!.currentModeId;
@@ -1418,7 +1463,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                 role="radio"
                 aria-checked={on}
                 title={m.description ?? m.name}
-                className={`h-[26px] rounded-[7px] px-2.5 ${on ? "bg-panel-2 text-fg" : "text-muted hover:text-fg"}`}
+                className={`h-[26px] whitespace-nowrap rounded-[7px] px-2.5 ${on ? "bg-panel-2 text-fg" : "text-muted hover:text-fg"}`}
                 onClick={() => !on && setAcpMode(m.id)}
               >
                 {m.name}
@@ -1463,7 +1508,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
       role="radiogroup"
       aria-label="Approvals"
       title="What runs without asking you"
-      className="mr-1 flex gap-0.5 rounded-[9px] border border-line bg-panel p-0.5 text-[12px]"
+      className="mr-1 flex shrink-0 gap-0.5 rounded-[9px] border border-line bg-panel p-0.5 text-[12px]"
     >
       {approvalOpts.map((m) => {
         const on = m.id === approval;
@@ -1494,17 +1539,60 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     </button>
   );
 
+  const showMove = !remote && !!mesh?.member && mesh.members.filter((m) => m.state !== "removed").length > 1;
+  const exportAs = (f: ExportFormat) =>
+    s &&
+    saveExport(
+      session.title,
+      f,
+      f === "markdown" ? codeToMarkdown(session, s.entries, s.toolCalls) : codeToJson(session, s.entries, s.toolCalls),
+    );
+  const moreActions: ItemAction[] = [
+    ...(level >= 3
+      ? [
+          { label: outstanding ? `Activity: plan and jobs (${outstanding})` : "Activity: plan and jobs", onSelect: () => setBlade(blade === "activity" ? null : "activity") },
+          { label: changes.length ? `Changes (${changes.length})` : "Changes", onSelect: () => setBlade(blade === "changes" ? null : "changes") },
+          ...(!remote && !hostOffline
+            ? [
+                {
+                  label: showTerm ? "Hide terminal" : "Terminal",
+                  onSelect: () => {
+                    setShowTerm(!showTerm);
+                    setTermMounted((m) => ({ ...m, [session.id]: true }));
+                  },
+                },
+              ]
+            : []),
+        ]
+      : []),
+    ...(s && s.entries.length > 0
+      ? [
+          { label: "Export as Markdown", onSelect: () => exportAs("markdown") },
+          { label: "Export as JSON", onSelect: () => exportAs("json") },
+        ]
+      : []),
+    ...(showMove && !working ? [{ label: "Move to another computer…", onSelect: () => setMoving("move") }] : []),
+    { label: "Session info…", onSelect: () => useStore.getState().setSessionInfoId(session.id) },
+    { label: "Restart the agent", onSelect: () => start(session.id) },
+  ];
+
   return (
     <FileLinkContext.Provider value={fileLinks}>
     <div className="flex h-full min-w-0 flex-1 flex-col">
-      <header {...drag} className={`flex h-12 shrink-0 items-center gap-1 border-b border-line pr-3 ${leading ? "pl-1" : "pl-6"}`}>
+      <header ref={headerRef} {...drag} className={`flex h-12 shrink-0 items-center gap-1 border-b border-line pr-3 ${leading ? "pl-1" : "pl-6"}`}>
         {leading}
         <Dot {...dot} title={dotLabel} role="img" aria-label={`Agent ${dotLabel}`} />
-        <div {...drag} className="mx-2.5 flex min-w-0 flex-1 items-baseline gap-2.5">
-          <h1 {...drag} className="shrink truncate text-[15px] font-medium" style={{ minWidth: "4rem" }}>
+        {/* The minimum is on this box, not the title: only then does a crowded header overflow (which is how
+            `fitHeader` notices) instead of the title drawing over its neighbours. The last level lets it shrink. */}
+        <div
+          {...drag}
+          className="mx-2.5 flex min-w-0 flex-1 items-baseline gap-2.5"
+          style={split && level < 3 ? { minWidth: "10rem" } : undefined}
+        >
+          <h1 {...drag} className="shrink truncate text-[15px] font-medium" style={{ minWidth: "4rem" }} title={level >= 2 ? `${session.title}\n${session.cwd}` : undefined}>
             {session.title}
           </h1>
-          {!remote && (
+          {!remote && level < 2 && (
             <>
               <span {...drag} className="min-w-0 flex-[1_1_0] truncate font-mono text-[12px] text-faint" title={session.cwd}>
                 {session.cwd.replace(/^\/home\/[^/]+|^\/Users\/[^/]+/, "~")}
@@ -1514,7 +1602,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             </>
           )}
         </div>
-        {!remote && (
+        {!remote && level === 0 && (
           <>
             {modeControl}
             {approvalControl}
@@ -1522,20 +1610,14 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
           </>
         )}
         <div className="mx-1 h-5 w-px bg-line" />
-        {!remote && <WidthMenu />}
-        {!remote && (
+        {!remote && level < 2 && <WidthMenu />}
+        {!remote && level < 2 && (
           <ExportMenu
             disabled={!s || s.entries.length === 0}
-            onExport={(f) =>
-              s &&
-              saveExport(
-                session.title,
-                f,
-                f === "markdown" ? codeToMarkdown(session, s.entries, s.toolCalls) : codeToJson(session, s.entries, s.toolCalls),
-              )
-            }
+            onExport={exportAs}
           />
         )}
+        {level < 3 && (
         <HeaderButton
           label="Activity: plan and jobs"
           active={blade === "activity"}
@@ -1544,6 +1626,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
         >
           <ActivityIcon />
         </HeaderButton>
+        )}
+        {level < 3 && (
         <HeaderButton
           label="Changes"
           active={blade === "changes"}
@@ -1552,12 +1636,13 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
         >
           <FileDiffIcon />
         </HeaderButton>
-        {!remote && mesh?.member && mesh.members.filter((m) => m.state !== "removed").length > 1 && (
+        )}
+        {showMove && level < 2 && (
           <HeaderButton label="Move to another computer" disabled={working} onClick={() => setMoving("move")}>
             <MonitorUpIcon />
           </HeaderButton>
         )}
-        {!remote && (
+        {!remote && level < 3 && (
           <HeaderButton
             label={host ? `Terminal on ${memberName(mesh, host)}` : "Terminal"}
             active={showTerm}
@@ -1570,14 +1655,50 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             <TerminalIcon />
           </HeaderButton>
         )}
-        <HeaderButton label="Session info: IDs, agent, model" onClick={() => useStore.getState().setSessionInfoId(session.id)}>
-          <InfoIcon />
-        </HeaderButton>
-        <HeaderButton label="Restart the agent and reload this session" onClick={() => start(session.id)}>
-          <RestartIcon />
-        </HeaderButton>
-        <WindowControls />
+        {level < 2 && (
+          <>
+            <HeaderButton label="Session info: IDs, agent, model" onClick={() => useStore.getState().setSessionInfoId(session.id)}>
+              <InfoIcon />
+            </HeaderButton>
+            <HeaderButton label="Restart the agent and reload this session" onClick={() => start(session.id)}>
+              <RestartIcon />
+            </HeaderButton>
+          </>
+        )}
+        {level >= 2 && (
+          <div ref={moreRef} className="shrink-0">
+            <HeaderButton
+              label="More"
+              active={!!more}
+              aria-haspopup="menu"
+              aria-expanded={!!more}
+              onClick={() => {
+                const r = moreRef.current?.getBoundingClientRect();
+                if (r) setMore({ x: r.left, y: r.bottom + 4 });
+              }}
+            >
+              <MoreIcon />
+            </HeaderButton>
+          </div>
+        )}
+        {pane?.closable && (
+          <HeaderButton label="Close pane" onClick={() => useStore.getState().closePane(session.id)}>
+            <XIcon />
+          </HeaderButton>
+        )}
+        {/* Only the rightmost pane reaches the window's edge. */}
+        {(pane?.last ?? true) && <WindowControls />}
       </header>
+      {!remote && level > 0 && (
+        <div className="flex shrink-0 flex-wrap items-center gap-y-1 border-b border-line px-3 py-1.5">
+          {level >= 2 && agentLabel}
+          {level >= 2 && <HostBadge session={session} />}
+          {modeControl}
+          {approvalControl}
+          {gapsButton}
+        </div>
+      )}
+      {more && <ContextMenu x={more.x} y={more.y} title="More" actions={moreActions} onClose={() => setMore(null)} />}
 
       <div className="flex min-h-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col">
@@ -1823,7 +1944,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             />
           </div>
         </div>
-        {blade && !remote && (
+        {blade && !remote && !pane?.split && (
           <aside
             className="relative max-w-[70%] shrink-0 border-l border-line bg-panel/50"
             style={{ width: bladeWidth }}
@@ -1843,8 +1964,13 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             {bladePanel}
           </aside>
         )}
-        {blade && remote && (
-          <div className="fixed inset-0 z-40 flex flex-col bg-bg pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
+        {/* The phone covers the screen; in a split the panel covers its own pane (a side column would crush it). */}
+        {blade && (remote || pane?.split) && (
+          <div
+            className={`${
+              remote ? "fixed pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]" : "absolute"
+            } inset-0 z-40 flex flex-col bg-bg`}
+          >
             {bladePanel}
           </div>
         )}

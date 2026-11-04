@@ -16,6 +16,7 @@ const TOOL_SEND: &str = "send_agent_message";
 const TOOL_LIST_SESSIONS: &str = "list_agent_sessions";
 const TOOL_LIST_QUEUED: &str = "list_queued_agent_messages";
 const TOOL_ACCEPT_QUEUED: &str = "accept_queued_agent_message";
+const TOOL_CREATE: &str = "create_agent_session";
 const MAX_LINE: usize = 64 * 1024;
 
 #[derive(Clone)]
@@ -109,6 +110,9 @@ struct BridgeRequest {
     message: Option<String>,
     #[serde(default)]
     message_id: Option<String>,
+    /// The tool's arguments, for actions that take more than the fields above (`create`).
+    #[serde(default)]
+    arguments: Option<Value>,
 }
 
 async fn handle_bridge(
@@ -162,6 +166,20 @@ async fn handle_bridge(
                     &request.source_session_id,
                     target,
                     message,
+                )
+                .await
+            }
+            "create" => {
+                let args = request.arguments.as_ref().ok_or_else(|| anyhow!("arguments are required"))?;
+                let text = |k: &str| args[k].as_str();
+                crate::create_agent_session(
+                    &state,
+                    &request.source_session_id,
+                    text("cwd").ok_or_else(|| anyhow!("cwd is required"))?,
+                    text("prompt").ok_or_else(|| anyhow!("prompt is required"))?,
+                    text("title"),
+                    text("agent"),
+                    text("model"),
                 )
                 .await
             }
@@ -356,6 +374,22 @@ fn tools_list_for(can_steer: bool) -> Value {
             }
         }),
     ];
+    tools.push(json!({
+        "name": TOOL_CREATE,
+        "description": "Start a new Patchbay Code session on this computer, in an existing folder, and send it a first prompt (a brief). It appears in Patchbay like any session and has your agent, model and approval mode unless you pass agent or model; it never gets looser approvals than yours. It returns its sessionId: use send_agent_message to follow up, and it can message you back. Limits: at most 5 sessions per creating session, and a session created this way can create only one level deeper. Create a session only when the user asked for one or the work clearly needs a separate session.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cwd": { "type": "string", "description": "Absolute path of an existing folder for the new session." },
+                "prompt": { "type": "string", "description": "The first message: a self-contained brief, as the new session sees nothing of this conversation." },
+                "title": { "type": "string", "description": "Optional session title; defaults to one taken from the prompt." },
+                "agent": { "type": "string", "description": "Optional coding agent id; defaults to your agent." },
+                "model": { "type": "string", "description": "Optional model; defaults to your model." }
+            },
+            "required": ["cwd", "prompt"],
+            "additionalProperties": false
+        }
+    }));
     if !can_steer {
         tools.push(json!({
             "name": TOOL_LIST_QUEUED,
@@ -432,7 +466,7 @@ async fn run_stdio_async() -> Result<()> {
     Ok(())
 }
 
-async fn call_tool(
+pub(crate) async fn call_tool(
     addr: &str,
     token: &str,
     source_session_id: &str,
@@ -460,6 +494,7 @@ async fn call_tool(
             ),
             None,
         ),
+        TOOL_CREATE => ("create", None, None, None),
         TOOL_LIST_SESSIONS => ("list", None, None, None),
         TOOL_LIST_QUEUED => ("list_queued", None, None, None),
         TOOL_ACCEPT_QUEUED => (
@@ -485,6 +520,7 @@ async fn call_tool(
         "targetSessionId": target_session_id,
         "message": message,
         "messageId": message_id,
+        "arguments": (name == TOOL_CREATE).then(|| params["arguments"].clone()),
     });
     write.write_all(request.to_string().as_bytes()).await?;
     write.write_all(b"\n").await?;
@@ -547,6 +583,23 @@ mod tests {
         assert!(names(false).iter().any(|n| n == TOOL_ACCEPT_QUEUED));
         assert!(!names(true).iter().any(|n| n == TOOL_LIST_QUEUED));
         assert!(!names(true).iter().any(|n| n == TOOL_ACCEPT_QUEUED));
+    }
+
+    #[test]
+    fn tools_list_offers_create_agent_session_in_both_modes() {
+        for can_steer in [true, false] {
+            let list = tools_list_for(can_steer);
+            let tool = list["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == TOOL_CREATE)
+                .expect("create tool listed");
+            assert_eq!(tool["inputSchema"]["required"], json!(["cwd", "prompt"]));
+            for k in ["cwd", "prompt", "title", "agent", "model"] {
+                assert!(tool["inputSchema"]["properties"][k].is_object(), "{k}");
+            }
+        }
     }
 
     #[test]

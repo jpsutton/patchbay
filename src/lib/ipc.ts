@@ -337,6 +337,8 @@ export interface CodeSession {
   archivedAt?: number | null;
   /** Someone named it: automatic titles leave it alone until "Auto-retitle". */
   titleManual?: boolean;
+  /** The Code session whose agent created this one; absent when a person did. */
+  createdBy?: string | null;
 }
 
 // ---- mesh ----
@@ -537,6 +539,7 @@ export interface AuthChoice {
 
 export type CodeEvent =
   | { type: "status"; state: "starting" | "ready" | "exited"; message: string | null }
+  | { type: "restarting" }
   | {
       type: "sessionReady";
       acpSessionId: string;
@@ -632,6 +635,10 @@ export interface ClaudeSession {
   size: number;
   /** The Code session an earlier import made. */
   imported: string | null;
+  /** The Claude config directory it is in: which account it belongs to. */
+  configDir: string;
+  /** Claude Desktop has archived it. */
+  archived: boolean;
 }
 
 export interface AcpToolCall {
@@ -708,6 +715,8 @@ export interface Subagent {
   origin?: "agent" | "session";
   /** Client clock when a session-origin row last started running; drives elapsed time. */
   startedAt?: number;
+  /** Client clock when the row was first seen failed; the panel drops it a minute later. */
+  failedAt?: number;
 }
 
 export type AcpUpdate =
@@ -1065,7 +1074,7 @@ export const api = {
   /** With `host`, the session runs on that computer, in its folder `cwd`. */
   createCodeSession: (cwd: string, modelRef: string | null, agent?: AgentId, host?: string | null) =>
     invoke<CodeSession>("create_code_session", { cwd, modelRef, agent: agent ?? null, host: host ?? null }),
-  /** Claude Code's sessions on this computer. */
+  /** Claude Code's sessions on this computer, from every account. */
   listClaudeSessions: () => invoke<ClaudeSession[]>("list_claude_sessions"),
   /** Make Code sessions from Claude Code's, continued by `agent` (default: the preferred one). */
   importClaudeSessions: (ids: string[], agent?: AgentId | null) =>

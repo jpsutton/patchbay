@@ -64,6 +64,30 @@ source within 10 minutes as `delivery: "duplicate"` without re-prompting. Tool r
 injected prompt say that `sent` / `steered` / `queued` / `duplicate` all mean accepted — agents
 must not resend because delivery was queued.
 
+### Creating a session
+
+`create_agent_session` (`cwd`, `prompt`, optional `title`, `agent`, `model`) lets an agent start a
+new Code session on its own computer. It creates the session, starts its agent and sends `prompt`
+through `code_prompt_local`, so plan limits apply, as an `agent:` message with a footer naming the
+creator so the new session can reply with `send_agent_message`. The result carries the new session
+id. `code_sessions.created_by` records the creator; the session info dialog shows it.
+
+Security model: any running session may create, with no approval step; the creator's tool call and
+the new session's first message are the visible notice. The new session gets the creator's
+permission mode, agent and model unless `agent` or `model` are passed.
+- **Folder.** `cwd` is canonicalized and must be the creator's folder or inside it (auto mode trusts
+  edits inside a session's own folder, so a wider folder would widen that trust). The creation is local only.
+- **Agent.** A different agent is refused when it can act without asking whatever the mode (its
+  `ApprovalSetup` gaps: Cursor, Claude Code, Codex, ...), unless the creator is in always-approve.
+- **Mode ceiling.** Lowering a creator's mode lowers the modes of the sessions it created, and theirs
+  in turn; raising it leaves them as they are.
+- **Limits.** At most 5 sessions per creator (archived ones count), checked under a per-creator lock so
+  parallel calls can't pass it together. A session created by an agent that was itself created by an
+  agent cannot create, so chains stop at depth 2.
+If the new session's agent fails to start or the brief can't be sent, the half-made session is deleted so
+it does not use up the cap; if the delete itself fails it is logged and the session stops counting.
+`created_by` is not mesh-synced, so depth and the cap are judged on the computer that hosts the creator.
+
 ## Models, modes and config options
 
 Agents report these three ways:

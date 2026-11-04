@@ -28,14 +28,34 @@ pub fn launcher(db: Arc<Db>, data_dir: &Path) -> NativeAgent {
     })
 }
 
+/// Picker labels for `models`. A display name that more than one model shares gets its provider's
+/// name in parentheses, so the same model from two providers can be told apart.
+fn picker_names<'a>(models: &[crate::db::Model], provider_name: impl Fn(&str) -> Option<&'a str>) -> Vec<String> {
+    models
+        .iter()
+        .map(|m| {
+            let shared = models.iter().filter(|o| o.display_name == m.display_name).count() > 1;
+            match provider_name(&m.provider_id) {
+                Some(p) if shared => format!("{} ({p})", m.display_name),
+                _ => m.display_name.clone(),
+            }
+        })
+        .collect()
+}
+
 #[async_trait]
 impl Host for AppHost {
     fn models(&self) -> Vec<ModelInfo> {
-        self.db
-            .list_models()
-            .unwrap_or_default()
+        let models = self.db.list_models().unwrap_or_default();
+        let providers = self.db.list_providers().unwrap_or_default();
+        let names = picker_names(
+            &models,
+            |id| providers.iter().find(|(p, _)| p.id == id).map(|(p, _)| p.name.as_str()),
+        );
+        models
             .into_iter()
-            .map(|m| ModelInfo { id: model_key(&m.id), effort: m.params.reasoning_effort(), name: m.display_name })
+            .zip(names)
+            .map(|(m, name)| ModelInfo { id: model_key(&m.id), effort: m.params.reasoning_effort(), name })
             .collect()
     }
 
@@ -144,4 +164,35 @@ pub fn claude_overview(prefs: &crate::prefs::Preferences, cwd: Option<&Path>) ->
             "source": h.source.label(),
         })).collect::<Vec<_>>(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model(id: &str, provider_id: &str, display_name: &str) -> crate::db::Model {
+        crate::db::Model {
+            id: id.into(),
+            provider_id: provider_id.into(),
+            model_id: id.into(),
+            display_name: display_name.into(),
+            vision: false,
+            context_window: None,
+            params: Default::default(),
+        }
+    }
+
+    #[test]
+    fn picker_names_tag_only_shared_names() {
+        let models = [model("a", "p1", "Claude Opus 5.5"), model("b", "p2", "Claude Opus 5.5"), model("c", "p1", "Claude Mythos 5.1")];
+        let provider = |id: &str| match id {
+            "p1" => Some("Claude Plan"),
+            "p2" => Some("Anthropic CVP"),
+            _ => None,
+        };
+        assert_eq!(
+            picker_names(&models, provider),
+            ["Claude Opus 5.5 (Claude Plan)", "Claude Opus 5.5 (Anthropic CVP)", "Claude Mythos 5.1"]
+        );
+    }
 }

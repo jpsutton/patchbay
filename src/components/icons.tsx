@@ -1,4 +1,5 @@
 import type { ReactNode, SVGProps } from "react";
+import type { AgentId } from "../lib/ipc";
 
 /**
  * Line icons drawn on Lucide's 24-unit grid (ISC license).
@@ -225,6 +226,19 @@ export const XIcon = icon(
   <>
     <path d="M18 6 6 18" />
     <path d="m6 6 12 12" />
+  </>,
+);
+
+export const MoreIcon = icon(
+  <>
+    <circle cx="12" cy="12" r="1" />
+    <circle cx="19" cy="12" r="1" />
+    <circle cx="5" cy="12" r="1" />
+  </>,
+  <>
+    <circle cx="3" cy="9" r="1" />
+    <circle cx="9" cy="9" r="1" />
+    <circle cx="15" cy="9" r="1" />
   </>,
 );
 
@@ -539,3 +553,96 @@ export const MeshIcon = icon(
     <path d="m18 8-5 8.3" />
   </>,
 );
+
+const KNOWN_AGENTS: ReadonlySet<string> = new Set([
+  "antigravity",
+  "claude-code",
+  "cursor",
+  "opencode",
+  "codex",
+  "kilo",
+  "grok",
+  "patchbay",
+]);
+
+/** Whether this agent id has a dedicated sidebar badge glyph. */
+export function hasAgentBadge(agent: string | null | undefined): agent is AgentId {
+  return typeof agent === "string" && KNOWN_AGENTS.has(agent);
+}
+
+/** A compact badge glyph identifying which coding agent runs a session. */
+export function AgentBadgeIcon({
+  agent,
+  size = 10,
+  className = "",
+}: {
+  agent: string;
+  size?: number | string;
+  className?: string;
+}) {
+  if (!hasAgentBadge(agent)) return null;
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 12 12"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.4}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      {agent === "antigravity" && (
+        <>
+          <path d="M2 3.5h8L6 10.5z" strokeWidth={1.3} strokeLinejoin="round" />
+          <path d="M6 3.5v3" strokeWidth={1.2} strokeLinecap="round" />
+        </>
+      )}
+      {agent === "claude-code" && (
+        <>
+          <path d="M6 1.5v9M1.5 6h9" strokeWidth={1.4} strokeLinecap="round" />
+          <path d="M2.8 2.8l6.4 6.4M9.2 2.8l-6.4 6.4" strokeWidth={1.2} strokeLinecap="round" />
+        </>
+      )}
+      {agent === "cursor" && (
+        <>
+          <path d="m6 1.5 4.5 2.5v4.5L6 11 1.5 8.5V4z" strokeWidth={1.2} strokeLinejoin="round" />
+          <path d="M1.5 4 6 6.5 10.5 4" strokeWidth={1.2} strokeLinejoin="round" />
+          <path d="M6 6.5v4.5" strokeWidth={1.2} strokeLinecap="round" />
+        </>
+      )}
+      {agent === "opencode" && (
+        <>
+          <path d="m4.5 3.5-3 2.5 3 2.5" strokeWidth={1.4} strokeLinecap="round" strokeLinejoin="round" />
+          <path d="m7.5 3.5 3 2.5-3 2.5" strokeWidth={1.4} strokeLinecap="round" strokeLinejoin="round" />
+          <path d="m6.5 3-1 6" strokeWidth={1.1} strokeLinecap="round" />
+        </>
+      )}
+      {agent === "codex" && (
+        <>
+          <path d="M2.5 2.5h5a2 2 0 0 1 2 2v5H3.5a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1z" strokeWidth={1.2} strokeLinejoin="round" />
+          <path d="M4.5 5.5h3M4.5 7.5h2" strokeWidth={1.2} strokeLinecap="round" />
+        </>
+      )}
+      {agent === "kilo" && (
+        <path d="M3.5 2v8M8.5 2.5 4 6.5l4.5 3.5" strokeWidth={1.4} strokeLinecap="round" strokeLinejoin="round" />
+      )}
+      {agent === "grok" && (
+        <>
+          <path d="m3 9.5 6-7" strokeWidth={1.5} strokeLinecap="round" />
+          <path d="m4.5 10 5-6" strokeWidth={1.2} strokeLinecap="round" />
+        </>
+      )}
+      {agent === "patchbay" && (
+        <>
+          <circle cx="6" cy="6" r="4.2" strokeWidth={1.2} />
+          <circle cx="6" cy="6" r="1.5" fill="currentColor" stroke="none" />
+        </>
+      )}
+    </svg>
+  );
+}
+

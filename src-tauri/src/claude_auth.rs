@@ -45,7 +45,7 @@ fn token_endpoint() -> String {
         .unwrap_or_else(|_| "https://api.anthropic.com/v1/oauth/token".into())
 }
 
-fn home() -> Result<PathBuf> {
+pub(crate) fn home() -> Result<PathBuf> {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(PathBuf::from)
         .ok_or_else(|| anyhow!("cannot find home directory"))

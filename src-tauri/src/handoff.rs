@@ -536,6 +536,7 @@ mod tests {
             permission_mode: "default".into(),
             archived_at: None,
             title_manual: false,
+            created_by: None,
         }
     }
 

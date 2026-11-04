@@ -201,7 +201,7 @@ pub struct ApprovalSetup {
 }
 
 impl ApprovalSetup {
-    fn for_agent(kind: AgentKind) -> Self {
+    pub(crate) fn for_agent(kind: AgentKind) -> Self {
         match kind {
             AgentKind::Patchbay => Self {
                 select_mode: None,
@@ -744,6 +744,13 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
         _ => {}
     }
     env.extend(providers.env);
+    // A session imported from a Claude account runs with that account's folder, where its files
+    // are. Last, so no provider setting overrides it.
+    if kind == AgentKind::ClaudeCode
+        && let Some(dir) = db.get_setting(&super::import_claude::config_dir_key(&session.id))?
+    {
+        env.push(("CLAUDE_CONFIG_DIR".to_owned(), dir));
+    }
     Ok(Launch {
         program: resolved.program,
         args: resolved.args,

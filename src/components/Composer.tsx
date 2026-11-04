@@ -4,7 +4,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, errorText, type AcpCommand, type Attachment } from "../lib/ipc";
 import { forceSendKeyLabel, insertNewlineAtCaret, isForceSendKey, isSendKey, needsExplicitNewline, useStore } from "../lib/store";
-import { ViewActive } from "../lib/shortcuts";
+import { PaneContext, ViewActive } from "../lib/shortcuts";
 import { fuzzyPaths } from "../lib/fuzzy";
 import { ArrowUpIcon, PaperclipIcon, SlidersIcon } from "./icons";
 import { ChipRows } from "./ChipSelect";
@@ -323,22 +323,55 @@ export function Composer({
   const viewActive = useContext(ViewActive);
   const activeRef = useRef(viewActive);
   activeRef.current = viewActive;
+  // In a split, a dropped file belongs to the pane under the pointer, not to every composer.
+  const pane = useContext(PaneContext);
+  // `closable`, not `split`: a pane hidden by a narrow window must not take drops either.
+  const splitRef = useRef(pane?.closable ?? false);
+  splitRef.current = pane?.closable ?? false;
+  /** Tauri reports drops in physical pixels; the page's zoom is the webview's, so measure the ratio. */
+  const dropScale = useRef(window.devicePixelRatio || 1);
+  const refreshDropScale = () =>
+    getCurrentWebview()
+      .size()
+      .then((s) => {
+        if (window.innerWidth > 0) dropScale.current = s.width / window.innerWidth;
+      })
+      .catch(() => {});
+  const inMyPane = (x: number, y: number) => {
+    if (!splitRef.current) return true;
+    const r = ref.current?.closest("[data-pane]")?.getBoundingClientRect();
+    return !r || (x >= r.left && x < r.right && y >= r.top && y < r.bottom);
+  };
   useEffect(() => {
     if (isWeb()) return webDrops();
     let unlisten: (() => void) | undefined;
+    let gone = false;
     getCurrentWebview()
       .onDragDropEvent((ev) => {
         const p = ev.payload;
         if (!activeRef.current) return;
-        if (p.type === "enter" || p.type === "over") setDragging(true);
-        else if (p.type === "leave") setDragging(false);
+        if (p.type === "leave") {
+          setDragging(false);
+          return;
+        }
+        if (p.type === "enter" && splitRef.current) refreshDropScale();
+        const mine = inMyPane(p.position.x / dropScale.current, p.position.y / dropScale.current);
+        if (p.type === "enter" || p.type === "over") setDragging(mine);
         else if (p.type === "drop") {
           setDragging(false);
-          addRef.current(p.paths.map((path) => () => api.addAttachmentPath(path)));
+          if (mine) addRef.current(p.paths.map((path) => () => api.addAttachmentPath(path)));
         }
       })
-      .then((u) => (unlisten = u));
-    return () => unlisten?.();
+      .then((u) => {
+        // Registered after cleanup already ran (StrictMode, a pane closing): remove it now, or every
+        // dropped file would be attached once more per composer that came and went.
+        if (gone) u();
+        else unlisten = u;
+      });
+    return () => {
+      gone = true;
+      unlisten?.();
+    };
   }, []);
 
   // Switching conversations, or leaving the view, keeps the draft with the one it was typed into.
@@ -380,15 +413,16 @@ export function Composer({
     const files = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes("Files");
     const over = (e: DragEvent) => {
       if (!activeRef.current || !files(e)) return;
-      e.preventDefault();
-      setDragging(true);
+      const mine = inMyPane(e.clientX, e.clientY);
+      setDragging(mine);
+      if (mine) e.preventDefault();
     };
     const leave = (e: DragEvent) => {
       // Leaving the page, not just crossing between elements inside it.
       if (!e.relatedTarget) setDragging(false);
     };
     const drop = (e: DragEvent) => {
-      if (!activeRef.current || !files(e)) return;
+      if (!activeRef.current || !files(e) || !inMyPane(e.clientX, e.clientY)) return;
       e.preventDefault();
       setDragging(false);
       const list = Array.from(e.dataTransfer?.files ?? []);

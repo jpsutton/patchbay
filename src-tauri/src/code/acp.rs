@@ -109,6 +109,16 @@ pub enum CodeEvent {
     PlanLimits {
         limits: super::plan_limits::PlanLimits,
     },
+    /// The agent no longer knows this session (it lost its own backend). The app restarts the agent,
+    /// which reloads the session, and sends `message` again. Never reaches a window.
+    /// The app is restarting the agent itself: windows set the transcript aside, as the Restart
+    /// button does, so the reloaded session's replay replaces it instead of adding to it.
+    Restarting {},
+    #[serde(skip)]
+    SessionLost {
+        message: UserMessage,
+        error: String,
+    },
     /// Cumulative token usage and context fill for the session.
     Usage {
         usage: crate::usage::UsageView,
@@ -479,6 +489,11 @@ fn start_turn(ctx: &TurnCtx, msg: UserMessage) -> Result<Delivery> {
                         },
                     );
                     tokio::time::sleep(transport_backoff(attempt - 1)).await;
+                }
+                Err(e) if is_session_lost(&e) => {
+                    emit(sink, csid, CodeEvent::SessionLost { message: msg.clone(), error: e.to_string() });
+                    emit(sink, csid, CodeEvent::PromptDone { stop_reason: json!("error") });
+                    break false;
                 }
                 Err(e) => {
                     let message = if attempt > 0 {
@@ -2228,6 +2243,12 @@ fn is_auth_required(e: &acp::Error) -> bool {
     }
 }
 
+/// The running agent dropped the session: Antigravity's ACP server answers every prompt with
+/// "Internal error" and `data.details: "Session not found: <id>"` after losing its own backend.
+fn is_session_lost(e: &acp::Error) -> bool {
+    e.to_string().to_ascii_lowercase().contains("session not found")
+}
+
 /// Cursor (and some other agents) end an ACP turn on a brief transport blip. The error names
 /// itself retriable, but ACP never retries. Match the shapes Cursor staff and users report.
 fn is_retriable_transport(e: &acp::Error) -> bool {
@@ -2478,7 +2499,7 @@ async fn open_session(
 mod tests {
     use super::{
         AgentCmd, AuthChoice, CodeEvent, ConfigIds, Delivery, Envelope, RewindPoint, SessionConfig, SpawnSpec, Steer,
-        Steered, UserMessage, auth_choices, auth_metas, is_retriable_transport, merge_config, pick_rewind_point,
+        Steered, UserMessage, auth_choices, auth_metas, is_retriable_transport, is_session_lost, merge_config, pick_rewind_point,
         steer_outcome, terminal_auth_command,
     };
     use serde_json::json;
@@ -3127,6 +3148,16 @@ for line in sys.stdin:
         assert!(hit("PING timed out"));
         assert!(!hit("Internal error: boom"));
         assert!(!hit("Authentication required"));
+    }
+
+    /// Antigravity's shape: the message is only "Internal error"; the session is named in `data`.
+    #[test]
+    fn session_lost_matches_the_error_data() {
+        let lost = super::acp::Error::new(-32603, "Internal error")
+            .data(json!({ "details": "Session not found: aeeecbec-5c8d-4324-bd47-2c1fd630b41c" }));
+        assert!(is_session_lost(&lost));
+        assert!(!is_session_lost(&super::acp::Error::new(-32603, "Internal error").data(json!({ "details": "boom" }))));
+        assert!(!is_retriable_transport(&lost));
     }
 
     /// claude-agent-acp reports an expired login as an internal error tagged `errorKind`. That
