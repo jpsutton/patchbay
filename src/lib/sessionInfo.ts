@@ -6,6 +6,7 @@ import type {
   AcpConfigOption,
   AgentInfo,
   CodeSession,
+  AntigravityPlanLimits,
   CursorPlanLimits,
   HostInfo,
   PlanLimits,
@@ -319,11 +320,44 @@ function cursorPlanRows(limits: CursorPlanLimits | null, now: number): InfoRow[]
   return rows;
 }
 
+function antigravityPlanRows(limits: AntigravityPlanLimits | null, now: number): InfoRow[] {
+  if (!limits) return [{ label: "Antigravity", value: "not reported yet" }];
+  const rows: InfoRow[] = [];
+  if (limits.email) rows.push({ label: "Account", value: limits.email });
+  if (limits.unavailable) {
+    rows.push({ label: "Usage", value: limits.unavailable });
+    rows.push({ label: "Updated", value: `${fmtSpan(Math.max(0, now - limits.observedAt))} ago` });
+    return rows;
+  }
+  const buckets = limits.buckets ?? [];
+  let any = false;
+  for (const b of buckets) {
+    const live = b.resetsAt == null || b.resetsAt > now;
+    if (!live) continue;
+    any = true;
+    const left = Math.round(b.remainingFraction * 100);
+    const label = b.groupName
+      ? `${b.groupName} · ${b.window === "5h" ? "5-hour" : b.window === "weekly" ? "weekly" : b.displayName}`
+      : b.displayName;
+    rows.push({
+      label,
+      value:
+        b.resetsAt != null && b.resetsAt > now
+          ? `${left}% left · resets in ${fmtSpan(b.resetsAt - now)}`
+          : `${left}% left`,
+    });
+  }
+  if (!any) rows.push({ label: "Usage", value: buckets.length ? "reset since last report" : "not reported yet" });
+  rows.push({ label: "Updated", value: `${fmtSpan(Math.max(0, now - limits.observedAt))} ago` });
+  return rows;
+}
+
 /** Plan rows for this session, or null when there is nothing to show. */
 function planSectionRows(plan: SessionPlanUsage | null | undefined, now: number): InfoRow[] | null {
   if (plan == null) return null;
   if (plan.kind === "claude") return claudePlanRows(plan.label, plan.latest, now);
-  return cursorPlanRows(plan.limits, now);
+  if (plan.kind === "cursor") return cursorPlanRows(plan.limits, now);
+  return antigravityPlanRows(plan.limits, now);
 }
 
 /** The sections as text to paste into a bug report or a shell: `/status`'s layout. */
