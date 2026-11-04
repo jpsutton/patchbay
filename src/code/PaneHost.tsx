@@ -1,13 +1,28 @@
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { CodeView } from "./CodeView";
 import { loadWidth, ResizeHandle, saveWidth } from "../components/ResizeHandle";
 import { useStore } from "../lib/store";
 import { usePaneDrag, startPaneDrag } from "../lib/paneDrag";
-import { columnsFor, MIN_PANE_FLOOR, MIN_PANE_WIDTH, paneKeys, type PaneKeys } from "../lib/panes";
+import {
+  columnsFor,
+  defaultOrientation,
+  MIN_PANE_FLOOR,
+  MIN_PANE_FLOOR_HEIGHT,
+  MIN_PANE_HEIGHT,
+  MIN_PANE_WIDTH,
+  paneKeys,
+  rowsFor,
+  type PaneKeys,
+} from "../lib/panes";
+import { isRemoteApp } from "../lib/platform";
 import { PaneContext, type PaneInfo } from "../lib/shortcuts";
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
+
+const REMOTE = isRemoteApp();
+const ORIENTATION = defaultOrientation(REMOTE);
+const HORIZONTAL = ORIENTATION === "horizontal";
 
 const WINDOW_LABEL: string = (() => {
   try {
@@ -17,23 +32,31 @@ const WINDOW_LABEL: string = (() => {
   }
 })();
 const IS_MAIN_WINDOW = WINDOW_LABEL === "main";
-const PANE_WIDTH_KEY = IS_MAIN_WINDOW ? "patchbay.paneWidth" : `patchbay.paneWidth.${WINDOW_LABEL}`;
-const PANE_WIDTHS_KEY = IS_MAIN_WINDOW ? "patchbay.paneWidths" : `patchbay.paneWidths.${WINDOW_LABEL}`;
+const PANE_SIZE_KEY = REMOTE
+  ? "patchbay.remote.paneHeight"
+  : IS_MAIN_WINDOW
+    ? "patchbay.paneWidth"
+    : `patchbay.paneWidth.${WINDOW_LABEL}`;
+const PANE_SIZES_KEY = REMOTE
+  ? "patchbay.remote.paneHeights"
+  : IS_MAIN_WINDOW
+    ? "patchbay.paneWidths"
+    : `patchbay.paneWidths.${WINDOW_LABEL}`;
 
 // If this is a non-main window, clean up any leftover localStorage keys from previous launches
-if (!IS_MAIN_WINDOW) {
+if (!IS_MAIN_WINDOW && !REMOTE) {
   try {
-    localStorage.removeItem(PANE_WIDTH_KEY);
-    localStorage.removeItem(PANE_WIDTHS_KEY);
+    localStorage.removeItem(PANE_SIZE_KEY);
+    localStorage.removeItem(PANE_SIZES_KEY);
   } catch {
     /* ignore */
   }
 }
 
-function loadSavedWidths(): Record<number, number[]> {
-  if (!IS_MAIN_WINDOW) return {};
+function loadSavedSizes(): Record<number, number[]> {
+  if (!IS_MAIN_WINDOW && !REMOTE) return {};
   try {
-    const raw = localStorage.getItem(PANE_WIDTHS_KEY);
+    const raw = localStorage.getItem(PANE_SIZES_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
@@ -53,9 +76,9 @@ function loadSavedWidths(): Record<number, number[]> {
   return {};
 }
 
-function saveSavedWidths(record: Record<number, number[]>) {
+function saveSavedSizes(record: Record<number, number[]>) {
   try {
-    localStorage.setItem(PANE_WIDTHS_KEY, JSON.stringify(record));
+    localStorage.setItem(PANE_SIZES_KEY, JSON.stringify(record));
   } catch {
     /* ignore */
   }
@@ -75,10 +98,20 @@ function DragFeedback() {
       {target && (
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute inset-y-0 z-30 border-2 border-accent bg-accent/10 transition-[left,width] duration-75"
-          style={{ left: target.box.left, width: target.box.width }}
+          className={`pointer-events-none absolute z-30 border-2 border-accent bg-accent/10 transition-[left,width,top,height] duration-75 ${
+            HORIZONTAL ? "inset-x-0" : "inset-y-0"
+          }`}
+          style={
+            HORIZONTAL
+              ? { top: target.box.left, height: target.box.width }
+              : { left: target.box.left, width: target.box.width }
+          }
         >
-          <span className="absolute left-1/2 top-4 -translate-x-1/2 rounded-full bg-accent px-3 py-1 text-[12px] font-medium text-accent-fg shadow-md whitespace-nowrap">
+          <span
+            className={`absolute left-1/2 -translate-x-1/2 rounded-full bg-accent px-3 py-1 text-[12px] font-medium text-accent-fg shadow-md whitespace-nowrap ${
+              HORIZONTAL ? "top-1/2 -translate-y-1/2" : "top-4"
+            }`}
+          >
             {target.badge}
           </span>
         </div>
@@ -99,20 +132,21 @@ function DragFeedback() {
 
 /**
  * The Code tab: one `CodeView` per pane. With no split it is the single open session, as before.
- * A split puts multiple side by side with dividers; a window too narrow for all shows only the focused
- * one and keeps the others mounted (hidden), so their terminal and scroll positions survive.
+ * A vertical split puts multiple side by side; a horizontal split stacks them. A viewport too small
+ * for all shows only the focused one and keeps the others mounted (hidden), so their terminal and
+ * scroll positions survive. `leading` is phone chrome (back / sessions) shown on the first visible pane.
  */
-export function PaneHost() {
+export function PaneHost({ leading }: { leading?: ReactNode } = {}) {
   const panes = useStore((s) => s.panes);
   const open = useStore((s) => s.activeCodeSessionId);
   const select = useStore((s) => s.selectCodeSession);
   const host = useRef<HTMLDivElement>(null);
-  const [width, setWidth] = useState(0);
+  const [extent, setExtent] = useState(0);
 
-  const [savedWidths, setSavedWidths] = useState<Record<number, number[]>>(() => {
-    const loaded = loadSavedWidths();
+  const [savedSizes, setSavedSizes] = useState<Record<number, number[]>>(() => {
+    const loaded = loadSavedSizes();
     if (!loaded[2]) {
-      const oldTwo = loadWidth(PANE_WIDTH_KEY, 0, 0, 100_000);
+      const oldTwo = loadWidth(PANE_SIZE_KEY, 0, 0, 100_000);
       if (oldTwo > 0) loaded[2] = [oldTwo];
     }
     return loaded;
@@ -121,8 +155,12 @@ export function PaneHost() {
   useLayoutEffect(() => {
     const el = host.current;
     if (!el) return;
-    setWidth(el.getBoundingClientRect().width);
-    const ro = new ResizeObserver(([e]) => setWidth(e.contentRect.width));
+    const measure = () => {
+      const r = el.getBoundingClientRect();
+      setExtent(HORIZONTAL ? r.height : r.width);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
@@ -130,16 +168,21 @@ export function PaneHost() {
   const inSplit = panes.length >= 2;
   const ids: (string | null)[] = inSplit ? panes : [open];
   const n = ids.length;
-  const equalShare = Math.round(width / Math.max(1, n));
-  const minPaneW = Math.min(MIN_PANE_WIDTH, Math.max(160, Math.floor(width / Math.max(1, n))));
-  // Narrow window fallback: allow panes to flex down to a usable density (MIN_PANE_FLOOR,
-  // deliberately below MIN_PANE_WIDTH of 240px) before collapsing to the single focused pane,
-  // so 3 or 4 panes remain side-by-side on typical desktop/laptop splits without overflowing.
-  const sideBySide = inSplit && columnsFor(width) >= 2 && width >= n * MIN_PANE_FLOOR;
+  const equalShare = Math.round(extent / Math.max(1, n));
+  const minPane = HORIZONTAL
+    ? Math.min(MIN_PANE_HEIGHT, Math.max(120, Math.floor(extent / Math.max(1, n))))
+    : Math.min(MIN_PANE_WIDTH, Math.max(160, Math.floor(extent / Math.max(1, n))));
+  // Too-small viewport: allow panes to flex down to a usable density before collapsing to the
+  // single focused pane, keeping the others mounted so state survives.
+  const sideBySide =
+    inSplit &&
+    (HORIZONTAL
+      ? rowsFor(extent) >= 2 && extent >= n * MIN_PANE_FLOOR_HEIGHT
+      : columnsFor(extent) >= 2 && extent >= n * MIN_PANE_FLOOR);
 
-  const currentWidths = useMemo(() => {
+  const currentSizes = useMemo(() => {
     if (!sideBySide || n < 2) return [];
-    const saved = savedWidths[n];
+    const saved = savedSizes[n];
     if (!saved || saved.length !== n - 1) {
       return Array.from({ length: n - 1 }, () => equalShare);
     }
@@ -147,47 +190,47 @@ export function PaneHost() {
     let used = 0;
     for (let i = 0; i < n - 1; i++) {
       const remainingPanes = n - i;
-      const maxForThis = width - used - (remainingPanes - 1) * minPaneW;
-      if (maxForThis < minPaneW) {
+      const maxForThis = extent - used - (remainingPanes - 1) * minPane;
+      if (maxForThis < minPane) {
         return Array.from({ length: n - 1 }, () => equalShare);
       }
-      const clamped = Math.max(minPaneW, Math.min(maxForThis, saved[i]));
+      const clamped = Math.max(minPane, Math.min(maxForThis, saved[i]));
       result.push(clamped);
       used += clamped;
     }
     return result;
-  }, [sideBySide, n, width, savedWidths, equalShare, minPaneW]);
+  }, [sideBySide, n, extent, savedSizes, equalShare, minPane]);
 
   const maxFor = (i: number) => {
-    const curW = currentWidths[i] ?? equalShare;
-    const nextW =
+    const cur = currentSizes[i] ?? equalShare;
+    const next =
       i < n - 2
-        ? (currentWidths[i + 1] ?? equalShare)
-        : width - currentWidths.reduce((a, b) => a + b, 0);
-    return Math.max(minPaneW, curW + nextW - minPaneW);
+        ? (currentSizes[i + 1] ?? equalShare)
+        : extent - currentSizes.reduce((a, b) => a + b, 0);
+    return Math.max(minPane, cur + next - minPane);
   };
 
-  const handleResize = (i: number, newW: number, done: boolean) => {
-    const nextWidths = [...currentWidths];
-    const dw = newW - nextWidths[i];
-    nextWidths[i] = newW;
+  const handleResize = (i: number, newSize: number, done: boolean) => {
+    const nextSizes = [...currentSizes];
+    const d = newSize - nextSizes[i];
+    nextSizes[i] = newSize;
     if (i < n - 2) {
-      nextWidths[i + 1] = Math.max(minPaneW, nextWidths[i + 1] - dw);
+      nextSizes[i + 1] = Math.max(minPane, nextSizes[i + 1] - d);
     }
-    const next = { ...savedWidths, [n]: nextWidths };
-    setSavedWidths(next);
+    const next = { ...savedSizes, [n]: nextSizes };
+    setSavedSizes(next);
     if (done) {
-      saveSavedWidths(next);
-      if (n === 2) saveWidth(PANE_WIDTH_KEY, nextWidths[0]);
+      saveSavedSizes(next);
+      if (n === 2) saveWidth(PANE_SIZE_KEY, nextSizes[0]);
     }
   };
 
   const handleReset = () => {
-    const next = { ...savedWidths };
+    const next = { ...savedSizes };
     delete next[n];
-    setSavedWidths(next);
-    saveSavedWidths(next);
-    if (n === 2) saveWidth(PANE_WIDTH_KEY, 0);
+    setSavedSizes(next);
+    saveSavedSizes(next);
+    if (n === 2) saveWidth(PANE_SIZE_KEY, 0);
   };
 
   // Keyed per session in a split, so a swap or a closed pane doesn't hand one pane's state (open
@@ -209,14 +252,23 @@ export function PaneHost() {
     [inSplit, sideBySide, open, ids.join("\n")],
   );
 
+  // Phone chrome (back / sessions) on the first visible pane so there is one of each.
+  const leadingIndex = sideBySide ? 0 : infos.findIndex((p) => p.focused);
+
   return (
-    <div ref={host} data-pane-host className="relative flex min-w-0 flex-1">
+    <div
+      ref={host}
+      data-pane-host
+      data-pane-orientation={ORIENTATION}
+      className={`relative flex min-w-0 flex-1 ${HORIZONTAL ? "min-h-0 flex-col" : ""}`}
+    >
       {ids.map((id, i) => {
         const info = infos[i];
-        // Too narrow for all: the unfocused panes stay mounted but out of sight.
+        // Too small for all: the unfocused panes stay mounted but out of sight.
         const hidden = inSplit && !sideBySide && !info.focused;
         const isNotLast = sideBySide && i < ids.length - 1;
-        const paneW = isNotLast ? (currentWidths[i] ?? equalShare) : undefined;
+        const paneSize = isNotLast ? (currentSizes[i] ?? equalShare) : undefined;
+        const showLeading = !!leading && i === leadingIndex && !hidden;
         return (
           <PaneContext.Provider key={keys[i]} value={info}>
             <div
@@ -229,42 +281,54 @@ export function PaneHost() {
               // Capture, so a click anywhere in the pane (a menu, a message) focuses it first.
               onPointerDownCapture={() => id && !info.focused && select(id)}
               onFocusCapture={() => id && !info.focused && select(id)}
-              // Cmd (Ctrl elsewhere) held: drag the pane. Plain presses are left alone.
-              onPointerDown={(e) => sideBySide && id && startPaneDrag(e, id, titleOf(e.currentTarget))}
-              className={`relative min-w-0 ${
+              // Cmd (Ctrl elsewhere) held: drag the pane. Plain presses are left alone. Phone skips drag.
+              onPointerDown={(e) => !REMOTE && sideBySide && id && startPaneDrag(e, id, titleOf(e.currentTarget))}
+              className={`relative min-w-0 ${HORIZONTAL ? "min-h-0" : ""} ${
                 hidden
                   ? "hidden"
-                  : `flex ${isNotLast ? "shrink-0 border-r border-line" : "flex-1"} ${
+                  : `flex ${
+                      isNotLast
+                        ? `shrink-0 ${HORIZONTAL ? "border-b border-line" : "border-r border-line"}`
+                        : "flex-1"
+                    } ${
                       sideBySide && !info.focused
                         ? "opacity-75 saturate-[.85] transition-[opacity,filter] hover:opacity-100"
                         : ""
                     }`
               }`}
-              style={isNotLast ? { width: paneW } : undefined}
+              style={isNotLast ? (HORIZONTAL ? { height: paneSize } : { width: paneSize }) : undefined}
             >
-              <CodeView />
-              {sideBySide && id && (
+              <CodeView leading={showLeading ? leading : undefined} />
+              {sideBySide && id && !REMOTE && (
                 <button
                   type="button"
                   aria-hidden="true"
                   tabIndex={-1}
                   title={ids.length === 2 ? "Drag to swap the panes" : "Drag to move pane"}
-                  className="group absolute left-1/2 top-0 z-20 h-2 w-11 -translate-x-1/2 cursor-grab"
+                  className={`group absolute z-20 cursor-grab ${
+                    HORIZONTAL
+                      ? "left-0 top-1/2 h-11 w-2 -translate-y-1/2"
+                      : "left-1/2 top-0 h-2 w-11 -translate-x-1/2"
+                  }`}
                   onPointerDown={(e) => {
                     e.stopPropagation();
                     startPaneDrag(e, id, titleOf(e.currentTarget), true);
                   }}
                 >
-                  <span className="mx-auto mt-[2px] block h-[3px] w-8 rounded-full bg-fg/30 opacity-0 transition-opacity group-hover:opacity-100" />
+                  <span
+                    className={`block rounded-full bg-fg/30 opacity-0 transition-opacity group-hover:opacity-100 ${
+                      HORIZONTAL ? "ml-[2px] h-8 w-[3px]" : "mx-auto mt-[2px] h-[3px] w-8"
+                    }`}
+                  />
                 </button>
               )}
               {isNotLast && (
                 <ResizeHandle
-                  width={paneW ?? equalShare}
-                  min={minPaneW}
+                  width={paneSize ?? equalShare}
+                  min={minPane}
                   max={maxFor(i)}
                   initial={equalShare}
-                  edge="right"
+                  edge={HORIZONTAL ? "bottom" : "right"}
                   label={`Resize pane ${i + 1}`}
                   onChange={(w, done) => {
                     handleResize(i, w, done);
@@ -276,7 +340,7 @@ export function PaneHost() {
           </PaneContext.Provider>
         );
       })}
-      <DragFeedback />
+      {!REMOTE && <DragFeedback />}
     </div>
   );
 }

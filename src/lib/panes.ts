@@ -2,8 +2,9 @@
  * Split view for Code sessions: which sessions sit in panes, and which one has focus. Pure and
  * import-free, so it runs under node (see panes.selftest.ts); the store holds the state.
  *
- * `panes` is empty when there is no split. Otherwise it lists the sessions left to right and
- * `active` is one of them: the focused pane, which the rest of the app treats as "the" open session.
+ * `panes` is empty when there is no split. Otherwise it lists the sessions along the split axis
+ * (left→right for vertical columns, top→bottom for horizontal rows) and `active` is one of them:
+ * the focused pane, which the rest of the app treats as "the" open session.
  */
 
 export interface PaneState {
@@ -11,16 +12,34 @@ export interface PaneState {
   active: string | null;
 }
 
+/** Axis of the split: columns (desktop) or stacked rows (phone). */
+export type PaneOrientation = "vertical" | "horizontal";
+
 export type Side = "left" | "right";
 
-/** Maximum columns of split panes side by side. */
+/** Maximum columns of split panes side by side on desktop. */
 export const MAX_PANES = 4;
+/** Maximum panes on the phone / remote app. */
+export const MAX_PANES_REMOTE = 2;
 export const MIN_PANE_WIDTH = 240;
-/** Minimum density per pane (pixels) before a split collapses to the focused pane. */
+/** Minimum density per pane (pixels) before a vertical split collapses to the focused pane. */
 export const MIN_PANE_FLOOR = 180;
+/** Minimum row height (pixels) before a horizontal split collapses to the focused pane. */
+export const MIN_PANE_FLOOR_HEIGHT = 140;
+export const MIN_PANE_HEIGHT = 160;
+
+/** How many panes this platform may hold. */
+export const maxPanesFor = (remote: boolean) => (remote ? MAX_PANES_REMOTE : MAX_PANES);
+
+/** Default split axis: phone stacks rows; desktop uses columns. */
+export const defaultOrientation = (remote: boolean): PaneOrientation => (remote ? "horizontal" : "vertical");
 
 /** How many panes fit side by side in `width` pixels. */
 export const columnsFor = (width: number) => Math.max(1, Math.min(MAX_PANES, Math.floor(width / MIN_PANE_WIDTH)));
+
+/** How many stacked panes fit in `height` pixels (phone horizontal split). */
+export const rowsFor = (height: number) =>
+  Math.max(1, Math.min(MAX_PANES_REMOTE, Math.floor(height / MIN_PANE_HEIGHT)));
 
 /** Open `id` as the app's single session, or in the focused pane when split. `null` closes that pane. */
 export function selectPane(s: PaneState, id: string | null): PaneState {
@@ -36,8 +55,8 @@ export function selectPane(s: PaneState, id: string | null): PaneState {
 export const otherSide = (s: PaneState): Side =>
   s.panes.length > 1 && s.panes.indexOf(s.active ?? "") === s.panes.length - 1 ? "left" : "right";
 
-/** Open `id` beside the open session. Adds a column if under MAX_PANES; otherwise replaces on `side`. */
-export function openInSplit(s: PaneState, id: string, side: Side): PaneState {
+/** Open `id` beside the open session. Adds a pane if under `maxPanes`; otherwise replaces on `side`. */
+export function openInSplit(s: PaneState, id: string, side: Side, maxPanes: number = MAX_PANES): PaneState {
   if (s.panes.includes(id)) return { panes: s.panes, active: id };
   if (s.panes.length === 0) {
     // Nothing to put it beside.
@@ -45,12 +64,12 @@ export function openInSplit(s: PaneState, id: string, side: Side): PaneState {
     return { panes: side === "left" ? [id, s.active] : [s.active, id], active: id };
   }
   const panes = s.panes.slice();
-  if (panes.length < MAX_PANES) {
+  if (panes.length < maxPanes) {
     const activeIdx = Math.max(0, panes.indexOf(s.active ?? ""));
     const insertAt = side === "left" ? activeIdx : activeIdx + 1;
     panes.splice(insertAt, 0, id);
   } else {
-    // When full (MAX_PANES), replace the neighbour adjacent to the active pane on the requested side
+    // When full, replace the neighbour adjacent to the active pane on the requested side
     const activeIdx = Math.max(0, panes.indexOf(s.active ?? ""));
     const targetIdx =
       side === "left"
@@ -94,9 +113,9 @@ export function swapPanes(s: PaneState): PaneState {
   return { panes: [...s.panes].reverse(), active: s.active };
 }
 
-/** Insert a pane at a specific index up to MAX_PANES. */
-export function insertPaneAt(s: PaneState, id: string, atIndex: number): PaneState {
-  if (s.panes.includes(id) || s.panes.length >= MAX_PANES) return s;
+/** Insert a pane at a specific index up to `maxPanes`. */
+export function insertPaneAt(s: PaneState, id: string, atIndex: number, maxPanes: number = MAX_PANES): PaneState {
+  if (s.panes.includes(id) || s.panes.length >= maxPanes) return s;
   if (s.panes.length === 0) {
     if (s.active === null || s.active === id) return { panes: [], active: id };
     const panes = atIndex === 0 ? [id, s.active] : [s.active, id];
@@ -127,10 +146,10 @@ export function movePane(s: PaneState, fromIdx: number, toIdx: number): PaneStat
   return { panes, active: s.active };
 }
 
-/** The panes to restore from storage: at least 2 sessions, up to MAX_PANES. */
-export function restorePanes(saved: string[], live: ReadonlySet<string>): string[] {
+/** The panes to restore from storage: at least 2 sessions, up to `maxPanes`. */
+export function restorePanes(saved: string[], live: ReadonlySet<string>, maxPanes: number = MAX_PANES): string[] {
   const panes = [...new Set(saved)].filter((p) => live.has(p));
-  return panes.length >= 2 ? panes.slice(0, MAX_PANES) : [];
+  return panes.length >= 2 ? panes.slice(0, maxPanes) : [];
 }
 
 /** What `paneKeys` remembers between renders. Start with `{ anchor: null, single: "single", last: new Map() }`. */

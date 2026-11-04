@@ -5,7 +5,10 @@ import {
   closePane,
   columnsFor,
   cyclePane,
+  defaultOrientation,
   insertPaneAt,
+  maxPanesFor,
+  MAX_PANES_REMOTE,
   movePane,
   openInSplit,
   otherSide,
@@ -13,6 +16,7 @@ import {
   prunePanes,
   replacePaneAt,
   restorePanes,
+  rowsFor,
   selectPane,
   swapPanes,
   type PaneState,
@@ -95,8 +99,21 @@ eq(restorePanes([], live), [], "restore nothing");
 // "Open beside" replaces the pane you're not in.
 eq([otherSide(st([], "a")), otherSide(st(["a", "b"], "a")), otherSide(st(["a", "b"], "b"))], ["right", "right", "left"], "other side");
 
-// Width rules.
+// Width / height rules.
 eq([columnsFor(200), columnsFor(479), columnsFor(480), columnsFor(720), columnsFor(960), columnsFor(2000)], [1, 1, 2, 3, 4, 4], "columns");
+eq([rowsFor(100), rowsFor(159), rowsFor(160), rowsFor(320), rowsFor(2000)], [1, 1, 1, 2, 2], "rows");
+
+// Platform caps and default orientation.
+eq([maxPanesFor(false), maxPanesFor(true)], [4, MAX_PANES_REMOTE], "max panes by platform");
+eq([defaultOrientation(false), defaultOrientation(true)], ["vertical", "horizontal"], "default orientation");
+
+// Remote max 2: a third open-in-split replaces the neighbour, never adds a third pane.
+eq(openInSplit(st(["a", "b"], "a"), "c", "right", 2), st(["a", "c"], "c"), "remote: replace right at max 2");
+eq(openInSplit(st(["a", "b"], "b"), "c", "left", 2), st(["c", "b"], "c"), "remote: replace left at max 2");
+// No left neighbour of the first pane: replace the other pane instead.
+eq(openInSplit(st(["a", "b"], "a"), "c", "left", 2), st(["a", "c"], "c"), "remote: replace other when no left neighbour");
+eq(insertPaneAt(st(["a", "b"], "a"), "c", 1, 2), st(["a", "b"], "a"), "remote: insert at max 2 does not add");
+eq(restorePanes(["a", "b", "c"], live, 2), ["a", "b"], "remote: restore caps at 2");
 
 // React keys: a pane's key (and so its terminal) survives the split opening, a swap, and the other pane closing.
 {

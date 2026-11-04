@@ -16,10 +16,11 @@ export function emitViewAction(a: ViewAction) {
 export const ViewActive = createContext(true);
 
 /**
- * The Code pane a view sits in. Null outside a pane host (the phone app), where the open session
- * is the store's. `focused`: this pane has focus. `split`: several panes are on screen, so input
- * meant for "the view" (file drops, shortcuts) has to find its own pane. `last`: the rightmost pane.
- * `closable`: the session is one of two in a split, even when the window is too narrow to show both.
+ * The Code pane a view sits in. Null outside a pane host, where the open session is the store's.
+ * `focused`: this pane has focus. `split`: several panes are on screen, so input meant for "the
+ * view" (file drops, shortcuts) has to find its own pane. `last`: the trailing pane on the split
+ * axis (rightmost column or bottom row). `closable`: the session is one of several in a split, even
+ * when the viewport is too small to show both.
  */
 export interface PaneInfo {
   id: string | null;

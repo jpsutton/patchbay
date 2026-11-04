@@ -5,7 +5,7 @@ import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notif
 import { api, errorText, type CodeEnvelope, type MeshChatEvent, type MeshMember, type MeshStatus } from "../lib/ipc";
 import { codeEventArrived, useStore } from "../lib/store";
 import { ChatView } from "../chat/ChatView";
-import { CodeView } from "../code/CodeView";
+import { PaneHost } from "../code/PaneHost";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { SessionInfoDialog } from "../code/SessionInfoDialog";
 import { ActionSheet, useHold, type ItemAction } from "../components/ItemMenu";
@@ -261,6 +261,7 @@ function Main({
   const [settings, setSettings] = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const activeCodeId = useStore((s) => s.activeCodeSessionId);
+  const panes = useStore((s) => s.panes);
   const [groupProjects, setGroupProjects] = useState(() => flag(GROUP_KEY, false));
   /** Set while the new-session sheet is open. `cwd` prefills the folder. */
   const [newSession, setNewSession] = useState<{ host?: string; cwd?: string } | null>(null);
@@ -269,6 +270,9 @@ function Main({
   const hiddenAt = useRef<number | null>(null);
   const liveRef = useRef(live);
   liveRef.current = live;
+  /** Sessions this phone is following while the Code view is open (single or split). */
+  const watchedCodeIds = panes.length >= 2 ? panes : activeCodeId ? [activeCodeId] : [];
+  const watchedRef = useRef<string[]>([]);
 
   // A join request's notification: tapping it opens the membership screen with the code; its
   // buttons decide at once. After a cold start the request may not have reached us yet.
@@ -370,26 +374,49 @@ function Main({
     return () => document.removeEventListener("visibilitychange", onVis);
   }, [onLock]);
 
-  // The back button and the system back gesture both return to the list. Leaving a Code session
-  // stops following it, so its state here goes too: opening it again catches up from the host
-  // instead of showing what it was doing when we left.
+  // Drop a session this phone no longer shows: stop following it and clear its local state so a
+  // later open catches up from the host instead of showing a stale transcript.
+  const dropWatched = useCallback((ids: string[]) => {
+    if (ids.length === 0) return;
+    for (const id of ids) remote.unwatch(`session:${id}`).catch(() => {});
+    useStore.setState((st) => {
+      const code = { ...st.code };
+      for (const id of ids) delete code[id];
+      return { code };
+    });
+  }, []);
+
+  // Keep follow-set in sync while in Code: closing a pane or leaving a split drops that session.
+  useEffect(() => {
+    if (view.kind !== "code") {
+      if (watchedRef.current.length) {
+        dropWatched(watchedRef.current);
+        watchedRef.current = [];
+      }
+      return;
+    }
+    const prev = watchedRef.current;
+    const gone = prev.filter((id) => !watchedCodeIds.includes(id));
+    if (gone.length) dropWatched(gone);
+    watchedRef.current = watchedCodeIds;
+  }, [view.kind, watchedCodeIds.join("\n"), dropWatched]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The back button and the system back gesture both return to the list.
   useEffect(() => {
     const onPop = () => {
-      const s = useStore.getState();
-      const id = s.activeCodeSessionId;
-      if (id) {
-        remote.unwatch(`session:${id}`).catch(() => {});
-        useStore.setState((st) => {
-          const { [id]: _, ...code } = st.code;
-          return { code };
-        });
-      }
+      const leaving = watchedRef.current;
+      watchedRef.current = [];
+      dropWatched(leaving);
+      const st = useStore.getState();
+      // closePane persists an empty list when a split ends; then clear the focused session.
+      if (st.panes.length > 0) st.closePane(st.panes[0]);
+      st.selectCodeSession(null);
       setSessionsOpen(false);
       setView({ kind: "home" });
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, []);
+  }, [dropWatched]);
 
   useEffect(() => {
     if (!toast) return;
@@ -408,17 +435,16 @@ function Main({
     </button>
   );
   const openSessions = (id: string) => {
-    const prev = useStore.getState().activeCodeSessionId;
-    if (prev && prev !== id) {
-      remote.unwatch(`session:${prev}`).catch(() => {});
-      useStore.setState((st) => {
-        const { [prev]: _, ...code } = st.code;
-        return { code };
-      });
-    }
+    // selectCodeSession focuses an open pane or replaces the focused one; the watch effect drops
+    // any session that left the split.
     useStore.getState().selectCodeSession(id);
     setSessionsOpen(false);
   };
+
+  // Long-press "Open in split view" from the sheet should tuck the sheet away once the split lands.
+  useEffect(() => {
+    if (panes.length >= 2) setSessionsOpen(false);
+  }, [panes.length]);
 
   return (
     <div className="flex h-full flex-col bg-bg">
@@ -430,7 +456,7 @@ function Main({
               controls={<ChatNodePicker members={status.members} gateway={status.gateway} />}
             />
           ) : (
-            <CodeView
+            <PaneHost
               leading={
                 <>
                   {backButton}

@@ -1,8 +1,11 @@
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { create } from "zustand";
-import { columnsFor, MAX_PANES, MIN_PANE_FLOOR } from "./panes";
+import { columnsFor, maxPanesFor, MIN_PANE_FLOOR } from "./panes";
+import { isRemoteApp } from "./platform";
 import { isMod } from "./shortcuts";
 import { useStore } from "./store";
+
+const MAX = () => maxPanesFor(isRemoteApp());
 
 /** How far the pointer must move before a press becomes a drag. */
 const THRESHOLD = 4;
@@ -106,7 +109,7 @@ export function findDragTarget(kind: "session" | "pane", id: string, x: number, 
   // Dragging a session from the sidebar
   if (panes.includes(id)) return null;
 
-  if (panes.length < MAX_PANES && hostRect.width >= (panes.length + 1) * MIN_PANE_FLOOR) {
+  if (panes.length < MAX() && hostRect.width >= (panes.length + 1) * MIN_PANE_FLOOR) {
     const isLeft = x < paneRect.left + paneRect.width / 2;
     const halfWidth = Math.round(paneWidth / 2);
     return {
@@ -249,7 +252,7 @@ export function startSessionDrag(e: ReactPointerEvent<HTMLElement>, id: string, 
       const st = useStore.getState();
       if (st.panes.length < 2) {
         st.openInSplit(id, target.side === "left" ? "left" : "right");
-      } else if (target.side === "whole" || st.panes.length >= MAX_PANES) {
+      } else if (target.side === "whole" || st.panes.length >= MAX()) {
         st.replacePaneAt(id, target.paneIndex);
       } else {
         const insertAt = target.side === "left" ? target.paneIndex : target.paneIndex + 1;
