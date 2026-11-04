@@ -115,6 +115,19 @@ If you start the desktop app while `patchbayd` runs on the same data folder, the
 
 Use **Settings → Mesh** in the web UI to create a mesh, or to join one with another member's address and the mesh passphrase, the same as in the desktop app. Once joined, phones can use the daemon as their gateway, and the desktop app can move Code sessions to and from it.
 
+### From the command line
+
+With the daemon running, `patchbayd mesh` does the same without a browser. It talks to the running daemon through its socket, so run it as the daemon's user (or pass the same `--data-dir`). The passphrase comes from `PATCHBAY_MESH_PASSPHRASE`, or from the first line of stdin with `--passphrase-stdin`, so it never shows up in `ps`.
+
+```bash
+export PATCHBAY_MESH_PASSPHRASE='the mesh passphrase'
+patchbayd mesh join 100.64.0.7 --name linode1      # prints a code, then waits for approval
+patchbayd mesh status                              # members, and requests waiting for approval
+patchbayd mesh approve laptop                      # on a member: a waiting node's name, id or id prefix
+```
+
+Check that the code `join` prints matches the one the member shows, then approve it there, either in **Settings → Mesh** or with `patchbayd mesh approve`. The other commands are `mesh create --name <name>` (start a new mesh), `mesh reject <node>` and `mesh leave`.
+
 ## Building it yourself
 
 ```bash
