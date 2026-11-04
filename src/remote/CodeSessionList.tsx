@@ -311,7 +311,7 @@ function ProjectBlock({
     <div>
       <div className="mx-2 mt-0.5 flex items-center gap-0.5 rounded-lg py-0.5 pl-2 pr-1">
         <button className="flex min-w-0 flex-1 items-center gap-1.5 py-2 text-left" aria-expanded={!collapsed} onClick={onToggle}>
-          <span className="shrink-0 truncate text-[13px] font-medium text-fg/90">{project.label}</span>
+          <span className="min-w-0 truncate text-[13px] font-medium text-fg/90">{project.label}</span>
           <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-faint">{project.where}</span>
           <ChevronRightIcon size={14} className={`shrink-0 text-faint transition-transform ${collapsed ? "" : "rotate-90"}`} />
           {collapsed && <span className="font-mono text-[11px] text-faint">{project.sessions.length}</span>}

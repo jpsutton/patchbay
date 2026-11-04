@@ -480,7 +480,7 @@ export function CodeSidebar() {
       >
         {line?.key === g.layoutKey && <DropLine top={line.edge === "top"} />}
         <div
-          className="group/header mx-2 mt-2 flex items-center gap-1 rounded-lg py-1 pl-2.5 pr-1 hover:bg-panel-2/50"
+          className="group/header mx-2 mt-2 flex min-w-0 items-center gap-1 rounded-lg py-1 pl-2.5 pr-1 hover:bg-panel-2/50"
           onContextMenu={(e) => {
             e.preventDefault();
             setAgentMenu(null);
@@ -515,8 +515,8 @@ export function CodeSidebar() {
             title={`${g.places.join("\n")}\nDrag to reorder`}
             aria-expanded={!isCollapsed}
           >
-            <span className="shrink-0 truncate text-[13px] font-medium text-fg/90">{g.label}</span>
-            <span className="min-w-0 truncate font-mono text-[11px] text-faint">{g.where}</span>
+            <span className="min-w-0 truncate text-[13px] font-medium text-fg/90">{g.label}</span>
+            <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-faint">{g.where}</span>
             <span
               className={`flex shrink-0 self-center text-faint transition-transform ${isCollapsed ? "" : "rotate-90"}`}
             >
@@ -569,7 +569,7 @@ export function CodeSidebar() {
         {line?.key === t.key && <DropLine top={line.edge === "top"} />}
         <div
           ref={blockRef(t.key, headerEls)}
-          className={`group/header mx-2 mt-2 flex items-center gap-1 rounded-lg py-1 pl-2.5 pr-1 hover:bg-panel-2/50 ${
+          className={`group/header mx-2 mt-2 flex min-w-0 items-center gap-1 rounded-lg py-1 pl-2.5 pr-1 hover:bg-panel-2/50 ${
             ring === t.key ? "ring-1 ring-accent" : ""
           }`}
           onContextMenu={(e) => {
