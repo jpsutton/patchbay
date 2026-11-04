@@ -34,6 +34,7 @@ export function ResizeHandle({
   edge,
   label,
   onChange,
+  onReset,
 }: {
   width: number;
   min: number;
@@ -42,6 +43,7 @@ export function ResizeHandle({
   edge: "left" | "right";
   label: string;
   onChange: (w: number, done: boolean) => void;
+  onReset?: () => void;
 }) {
   const [dragging, setDragging] = useState(false);
   // Pointer movement to the right makes the panel wider on its right edge, narrower on its left.
@@ -85,7 +87,7 @@ export function ResizeHandle({
         el.addEventListener("pointerup", up);
         el.addEventListener("pointercancel", up);
       }}
-      onDoubleClick={() => onChange(initial, true)}
+      onDoubleClick={() => (onReset ? onReset() : onChange(initial, true))}
       onKeyDown={(e) => {
         const step = e.shiftKey ? 48 : 16;
         if (e.key === "ArrowLeft") onChange(clampWidth(width - dir * step, min, max), true);

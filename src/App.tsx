@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { loadWidth, ResizeHandle, saveWidth } from "./components/ResizeHandle";
 import {
   api,
@@ -16,6 +17,7 @@ import {
 } from "./lib/ipc";
 import { codeEventArrived, remoteHost, resyncRemoteCode, useStore, type Mode } from "./lib/store";
 import { goBack, goForward, resetHistory, useHistory } from "./lib/history";
+import { isRemoteApp } from "./lib/platform";
 import { initZoom, zoomIn, zoomOut, zoomReset } from "./lib/zoom";
 import { ChatView } from "./chat/ChatView";
 import { newSessionIn } from "./code/CodeView";
@@ -125,6 +127,9 @@ function useGlobalShortcuts() {
         if (k === "n" && !e.shiftKey) {
           e.preventDefault();
           newThing();
+        } else if (k === "n" && e.shiftKey) {
+          e.preventDefault();
+          api.newWindow();
         } else if (k === "k" && !e.shiftKey) {
           e.preventDefault();
           st.setPaletteOpen(true);
@@ -441,6 +446,15 @@ function AppMenu() {
               focusComposer();
             })}
           />
+          {!isRemoteApp() && (
+            <MenuItem
+              label="New window"
+              keys="Mod+Shift+N"
+              onClick={run(() => {
+                api.newWindow();
+              })}
+            />
+          )}
           <MenuItem label="New Code session…" onClick={run(() => st.setNewSessionOpen(true))} />
           <MenuItem label="Search…" keys="Mod+K" onClick={run(() => st.setPaletteOpen(true))} />
           <div className="my-1 border-t border-line" />
@@ -605,6 +619,15 @@ function CollapsedRail() {
   );
 }
 
+/** Listen to window-targeted events (tray, notifications, quick entry) so multi-window setups don't duplicate. */
+function listenWindow<T>(event: string, handler: (ev: { payload: T }) => void) {
+  try {
+    return getCurrentWebviewWindow().listen<T>(event, handler);
+  } catch {
+    return listen<T>(event, handler);
+  }
+}
+
 export default function App() {
   const st = useStore();
   const {
@@ -691,14 +714,14 @@ export default function App() {
       }),
       listen<Partial<MeshProblem> & { message: string }>("mesh://error", (ev) => meshAlert(ev.payload)),
       // From the tray menu and the quick-entry window (see src-tauri/src/desktop.rs).
-      listen("tray://new-chat", () => {
+      listenWindow("tray://new-chat", () => {
         const s = useStore.getState();
         s.setMode("chat");
         s.selectConversation(null);
         focusComposer();
       }),
-      listen<NotifyTarget>("notification://open", (ev) => openNotified(ev.payload)),
-      listen<string>("quick://prompt", (ev) => {
+      listenWindow<NotifyTarget>("notification://open", (ev) => openNotified(ev.payload)),
+      listenWindow<string>("quick://prompt", (ev) => {
         const s = useStore.getState();
         s.setMode("chat");
         s.selectConversation(null);

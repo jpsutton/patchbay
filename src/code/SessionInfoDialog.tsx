@@ -105,9 +105,9 @@ export function SessionInfoDialog() {
             <section key={sec.title} className="mt-3">
               <h2 className="pb-1 font-mono text-[11px] uppercase tracking-[0.06em] text-faint">{sec.title}</h2>
               <dl className="flex flex-col">
-                {sec.rows.map((r) => (
+                {sec.rows.map((r, rowIdx) => (
                   <div
-                    key={r.label}
+                    key={`${r.label}:${rowIdx}`}
                     // Narrow screens stack the label over the value, so a UUID fits on one line.
                     className="grid grid-cols-[1fr_auto] items-start gap-x-2 gap-y-0.5 border-t border-line py-1.5 first:border-t-0 sm:grid-cols-[9.5rem_1fr_auto]"
                   >

@@ -13,9 +13,11 @@ export interface PaneState {
 
 export type Side = "left" | "right";
 
-/** shortcut: two columns, no rows. The state is a list so more columns can follow. */
-export const MAX_PANES = 2;
-export const MIN_PANE_WIDTH = 360;
+/** Maximum columns of split panes side by side. */
+export const MAX_PANES = 4;
+export const MIN_PANE_WIDTH = 240;
+/** Minimum density per pane (pixels) before a split collapses to the focused pane. */
+export const MIN_PANE_FLOOR = 180;
 
 /** How many panes fit side by side in `width` pixels. */
 export const columnsFor = (width: number) => Math.max(1, Math.min(MAX_PANES, Math.floor(width / MIN_PANE_WIDTH)));
@@ -31,9 +33,10 @@ export function selectPane(s: PaneState, id: string | null): PaneState {
 }
 
 /** The side for "open beside": the pane you're not working in, so the focused one stays put. */
-export const otherSide = (s: PaneState): Side => (s.panes.length > 1 && s.panes.indexOf(s.active ?? "") === 1 ? "left" : "right");
+export const otherSide = (s: PaneState): Side =>
+  s.panes.length > 1 && s.panes.indexOf(s.active ?? "") === s.panes.length - 1 ? "left" : "right";
 
-/** Open `id` beside the open session. When the split is full it replaces the pane on `side`. */
+/** Open `id` beside the open session. Adds a column if under MAX_PANES; otherwise replaces on `side`. */
 export function openInSplit(s: PaneState, id: string, side: Side): PaneState {
   if (s.panes.includes(id)) return { panes: s.panes, active: id };
   if (s.panes.length === 0) {
@@ -42,16 +45,30 @@ export function openInSplit(s: PaneState, id: string, side: Side): PaneState {
     return { panes: side === "left" ? [id, s.active] : [s.active, id], active: id };
   }
   const panes = s.panes.slice();
-  panes[side === "left" ? 0 : panes.length - 1] = id;
+  if (panes.length < MAX_PANES) {
+    const activeIdx = Math.max(0, panes.indexOf(s.active ?? ""));
+    const insertAt = side === "left" ? activeIdx : activeIdx + 1;
+    panes.splice(insertAt, 0, id);
+  } else {
+    // When full (MAX_PANES), replace the neighbour adjacent to the active pane on the requested side
+    const activeIdx = Math.max(0, panes.indexOf(s.active ?? ""));
+    const targetIdx =
+      side === "left"
+        ? (activeIdx > 0 ? activeIdx - 1 : 1)
+        : (activeIdx < panes.length - 1 ? activeIdx + 1 : activeIdx - 1);
+    panes[targetIdx] = id;
+  }
   return { panes, active: id };
 }
 
 /** Close `id`'s pane. The last pane left becomes the single open session. */
 export function closePane(s: PaneState, id: string | null): PaneState {
   if (id === null || !s.panes.includes(id)) return s;
+  const idx = s.panes.indexOf(id);
   const rest = s.panes.filter((p) => p !== id);
   if (rest.length <= 1) return { panes: [], active: rest[0] ?? null };
-  return { panes: rest, active: s.active === id ? rest[0] : s.active };
+  const nextActive = s.active === id ? (rest[Math.min(idx, rest.length - 1)] ?? rest[0]) : s.active;
+  return { panes: rest, active: nextActive };
 }
 
 /** Drop panes whose session is gone (`live` lists the ones that still exist and aren't archived). */
@@ -71,29 +88,49 @@ export function cyclePane(s: PaneState, delta: 1 | -1): PaneState {
   return { panes: s.panes, active: s.panes[(at + delta + n) % n] };
 }
 
-/** Swap the two panes' places; focus stays with its session. */
+/** Swap/reverse panes places. */
 export function swapPanes(s: PaneState): PaneState {
-  return s.panes.length < 2 ? s : { panes: [...s.panes].reverse(), active: s.active };
+  if (s.panes.length < 2) return s;
+  return { panes: [...s.panes].reverse(), active: s.active };
 }
 
-/** The panes to restore from storage: only a full split of sessions that still exist. */
+/** Insert a pane at a specific index up to MAX_PANES. */
+export function insertPaneAt(s: PaneState, id: string, atIndex: number): PaneState {
+  if (s.panes.includes(id) || s.panes.length >= MAX_PANES) return s;
+  if (s.panes.length === 0) {
+    if (s.active === null || s.active === id) return { panes: [], active: id };
+    const panes = atIndex === 0 ? [id, s.active] : [s.active, id];
+    return { panes, active: id };
+  }
+  const panes = s.panes.slice();
+  panes.splice(Math.max(0, Math.min(panes.length, atIndex)), 0, id);
+  return { panes, active: id };
+}
+
+/** Replace a pane at a specific index. */
+export function replacePaneAt(s: PaneState, id: string, atIndex: number): PaneState {
+  if (s.panes.includes(id)) return { panes: s.panes, active: id };
+  if (s.panes.length === 0) return { panes: [], active: id };
+  const panes = s.panes.slice();
+  panes[Math.max(0, Math.min(panes.length - 1, atIndex))] = id;
+  return { panes, active: id };
+}
+
+/** Move a pane from one index to another. */
+export function movePane(s: PaneState, fromIdx: number, toIdx: number): PaneState {
+  if (s.panes.length < 2 || fromIdx === toIdx) return s;
+  if (fromIdx < 0 || fromIdx >= s.panes.length) return s;
+  const targetIdx = Math.max(0, Math.min(s.panes.length - 1, toIdx));
+  const panes = s.panes.slice();
+  const [item] = panes.splice(fromIdx, 1);
+  panes.splice(targetIdx, 0, item);
+  return { panes, active: s.active };
+}
+
+/** The panes to restore from storage: at least 2 sessions, up to MAX_PANES. */
 export function restorePanes(saved: string[], live: ReadonlySet<string>): string[] {
   const panes = [...new Set(saved)].filter((p) => live.has(p));
-  return panes.length === MAX_PANES ? panes : [];
-}
-
-/** Which side of a host at `left`, `width` wide the pointer at `x` is over. */
-export const dropSide = (x: number, left: number, width: number): Side => (x < left + width / 2 ? "left" : "right");
-
-/** Whether dropping session `id` on a host `hostWidth` wide would change anything: there's room for two, and it isn't already a pane or the only open session. */
-export function dropAllowed(s: PaneState, id: string, hostWidth: number): boolean {
-  if (columnsFor(hostWidth) < 2 || s.panes.includes(id)) return false;
-  return !(s.panes.length === 0 && s.active === id);
-}
-
-/** Whether dragging pane `id` onto `side` of a host `hostWidth` wide would swap the two: both are on screen, and it's the other side's. */
-export function swapAllowed(s: PaneState, id: string, side: Side, hostWidth: number): boolean {
-  return s.panes.length === 2 && columnsFor(hostWidth) >= 2 && s.panes.indexOf(id) === (side === "left" ? 1 : 0);
+  return panes.length >= 2 ? panes.slice(0, MAX_PANES) : [];
 }
 
 /** What `paneKeys` remembers between renders. Start with `{ anchor: null, single: "single", last: new Map() }`. */
@@ -123,10 +160,4 @@ export function paneKeys(prev: PaneKeys, ids: (string | null)[], inSplit: boolea
   };
   const keys = ids.map(keyFor);
   return { keys, next: { anchor, single, last: new Map(ids.map((id, i) => [id, keys[i]])) } };
-}
-
-/** The left pane's width, kept so neither pane drops below the minimum. */
-export function clampLeftWidth(w: number, hostWidth: number): number {
-  if (hostWidth < 2 * MIN_PANE_WIDTH) return Math.round(hostWidth / 2);
-  return Math.round(Math.min(hostWidth - MIN_PANE_WIDTH, Math.max(MIN_PANE_WIDTH, w)));
 }

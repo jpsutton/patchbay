@@ -1,11 +1,22 @@
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { create } from "zustand";
-import { dropAllowed, dropSide, swapAllowed, type Side } from "./panes";
+import { columnsFor, MAX_PANES, MIN_PANE_FLOOR } from "./panes";
 import { isMod } from "./shortcuts";
 import { useStore } from "./store";
 
 /** How far the pointer must move before a press becomes a drag. */
 const THRESHOLD = 4;
+
+export interface PaneDragTarget {
+  /** The target pane index in the host. */
+  paneIndex: number;
+  /** Whether inserting on the left or right of this pane, or targeting the whole pane. */
+  side: "left" | "right" | "whole";
+  /** Pixel coordinates relative to data-pane-host. */
+  box: { left: number; width: number };
+  /** Text to show in the pill badge. */
+  badge: string;
+}
 
 export interface PaneDrag {
   /** A session dragged from the sidebar, or a pane dragged by its grip. */
@@ -14,21 +25,107 @@ export interface PaneDrag {
   label: string;
   x: number;
   y: number;
-  /** The side of the Code area the pointer is over, when dropping there would do something. */
-  side: Side | null;
+  target: PaneDragTarget | null;
 }
 
 /** The drag in progress, for the overlay and the label that follows the pointer. */
 export const usePaneDrag = create<{ drag: PaneDrag | null }>(() => ({ drag: null }));
 
-/** The Code area's box and the split state, if `x`, `y` is over it. */
-function overHost(x: number, y: number) {
+/** Find which pane and drop zone the pointer at (x, y) is targeting. */
+export function findDragTarget(kind: "session" | "pane", id: string, x: number, y: number): PaneDragTarget | null {
   const host = document.querySelector<HTMLElement>("[data-pane-host]");
   if (!host) return null;
-  const r = host.getBoundingClientRect();
-  if (x < r.left || x >= r.right || y < r.top || y >= r.bottom) return null;
+  const hostRect = host.getBoundingClientRect();
+  if (x < hostRect.left || x >= hostRect.right || y < hostRect.top || y >= hostRect.bottom) return null;
+
   const { panes, activeCodeSessionId } = useStore.getState();
-  return { r, state: { panes, active: activeCodeSessionId } };
+  const inSplit = panes.length >= 2;
+  const paneElements = Array.from(host.querySelectorAll<HTMLElement>(":scope > [data-pane]"));
+  if (paneElements.length === 0) return null;
+
+  // Single pane (no split)
+  if (!inSplit) {
+    if (columnsFor(hostRect.width) < 2) return null;
+    if (kind === "session" && id === activeCodeSessionId) return null;
+    const isLeft = x < hostRect.left + hostRect.width / 2;
+    const half = Math.round(hostRect.width / 2);
+    return {
+      paneIndex: 0,
+      side: isLeft ? "left" : "right",
+      box: { left: isLeft ? 0 : half, width: half },
+      badge: "Open in split view",
+    };
+  }
+
+  // Find which pane the pointer is over
+  let foundIndex = -1;
+  let paneRect: DOMRect | null = null;
+  for (let i = 0; i < paneElements.length; i++) {
+    const r = paneElements[i].getBoundingClientRect();
+    if (x >= r.left && x <= r.right) {
+      foundIndex = i;
+      paneRect = r;
+      break;
+    }
+  }
+  if (foundIndex === -1 || !paneRect) return null;
+
+  const relLeft = Math.round(paneRect.left - hostRect.left);
+  const paneWidth = Math.round(paneRect.width);
+
+  if (kind === "pane") {
+    // Dragging an existing pane to reorder
+    const fromIdx = panes.indexOf(id);
+    if (fromIdx === -1) return null;
+    if (panes.length === 2) {
+      if (fromIdx === foundIndex) return null;
+      return {
+        paneIndex: foundIndex,
+        side: "whole",
+        box: { left: relLeft, width: paneWidth },
+        badge: "Swap places",
+      };
+    }
+    // For >2 panes, edge-based insertion so the user sees whether the pane lands before or after
+    const isLeft = x < paneRect.left + paneRect.width / 2;
+    const targetIdx = isLeft ? foundIndex : foundIndex + 1;
+    if (targetIdx === fromIdx || targetIdx === fromIdx + 1) return null;
+    const finalIdx = targetIdx > fromIdx ? targetIdx - 1 : targetIdx;
+    const halfWidth = Math.round(paneWidth / 2);
+    return {
+      paneIndex: finalIdx,
+      side: isLeft ? "left" : "right",
+      box: {
+        left: isLeft ? relLeft : relLeft + halfWidth,
+        width: halfWidth,
+      },
+      badge: isLeft ? "Move left" : "Move right",
+    };
+  }
+
+  // Dragging a session from the sidebar
+  if (panes.includes(id)) return null;
+
+  if (panes.length < MAX_PANES && hostRect.width >= (panes.length + 1) * MIN_PANE_FLOOR) {
+    const isLeft = x < paneRect.left + paneRect.width / 2;
+    const halfWidth = Math.round(paneWidth / 2);
+    return {
+      paneIndex: foundIndex,
+      side: isLeft ? "left" : "right",
+      box: {
+        left: isLeft ? relLeft : relLeft + halfWidth,
+        width: halfWidth,
+      },
+      badge: isLeft ? "Insert left" : "Insert right",
+    };
+  } else {
+    return {
+      paneIndex: foundIndex,
+      side: "whole",
+      box: { left: relLeft, width: paneWidth },
+      badge: "Replace this pane",
+    };
+  }
 }
 
 /** The click that ends a drag would open the row it ends on: swallow it. */
@@ -59,9 +156,8 @@ interface Spec {
   kind: PaneDrag["kind"];
   id: string;
   label: string;
-  /** The side a drop at `x`, `y` would act on, or null when it would do nothing. */
-  sideAt: (x: number, y: number) => Side | null;
-  drop: (side: Side) => void;
+  targetAt: (x: number, y: number) => PaneDragTarget | null;
+  drop: (target: PaneDragTarget) => void;
 }
 
 /**
@@ -79,6 +175,7 @@ function track(e: ReactPointerEvent<HTMLElement>, spec: Spec) {
   } catch {
     /* the pointer is already gone */
   }
+
   // From the press, not from the first few pixels of movement: by then the browser has started
   // selecting the row's text (WebKit, which Tauri uses on macOS, does so at once) and would go on
   // selecting, or start dragging the text, instead of leaving the drag to us.
@@ -99,7 +196,7 @@ function track(e: ReactPointerEvent<HTMLElement>, spec: Spec) {
     document.removeEventListener("pointerup", up);
     document.removeEventListener("pointercancel", cancel);
     document.removeEventListener("keydown", key, true);
-    const side = usePaneDrag.getState().drag?.side ?? null;
+    const target = usePaneDrag.getState().drag?.target ?? null;
     usePaneDrag.setState({ drag: null });
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
@@ -107,7 +204,7 @@ function track(e: ReactPointerEvent<HTMLElement>, spec: Spec) {
     if (!moved) return;
     if (released) swallowNextClick();
     else swallowClickAfterRelease();
-    if (commit && side) spec.drop(side);
+    if (commit && target) spec.drop(target);
   };
   const move = (ev: PointerEvent) => {
     if (!moved) {
@@ -117,7 +214,7 @@ function track(e: ReactPointerEvent<HTMLElement>, spec: Spec) {
       document.getSelection()?.removeAllRanges();
     }
     usePaneDrag.setState({
-      drag: { kind: spec.kind, id: spec.id, label: spec.label, x: ev.clientX, y: ev.clientY, side: spec.sideAt(ev.clientX, ev.clientY) },
+      drag: { kind: spec.kind, id: spec.id, label: spec.label, x: ev.clientX, y: ev.clientY, target: spec.targetAt(ev.clientX, ev.clientY) },
     });
   };
   const up = () => finish(true);
@@ -137,7 +234,7 @@ function track(e: ReactPointerEvent<HTMLElement>, spec: Spec) {
 
 /**
  * Press on a session row, move past a few pixels, and the session follows the pointer; let go over
- * the Code area to open it beside the open one (left or right half).
+ * a pane to open or insert it beside the target.
  */
 export function startSessionDrag(e: ReactPointerEvent<HTMLElement>, id: string, label: string) {
   // Plain primary-button presses only: modifiers select rows, and a button inside the row is a click.
@@ -147,11 +244,18 @@ export function startSessionDrag(e: ReactPointerEvent<HTMLElement>, id: string, 
     kind: "session",
     id,
     label,
-    sideAt: (x, y) => {
-      const o = overHost(x, y);
-      return o && dropAllowed(o.state, id, o.r.width) ? dropSide(x, o.r.left, o.r.width) : null;
+    targetAt: (x, y) => findDragTarget("session", id, x, y),
+    drop: (target) => {
+      const st = useStore.getState();
+      if (st.panes.length < 2) {
+        st.openInSplit(id, target.side === "left" ? "left" : "right");
+      } else if (target.side === "whole" || st.panes.length >= MAX_PANES) {
+        st.replacePaneAt(id, target.paneIndex);
+      } else {
+        const insertAt = target.side === "left" ? target.paneIndex : target.paneIndex + 1;
+        st.insertPaneAt(id, insertAt);
+      }
     },
-    drop: (side) => useStore.getState().openInSplit(id, side),
   });
 }
 
@@ -160,8 +264,7 @@ const INTERACTIVE =
   "a, input, textarea, select, button, summary, [role='button'], [role='separator'], [contenteditable]:not([contenteditable='false']), canvas, .xterm";
 
 /**
- * Drag a pane to the other side to swap them. From its grip (`grip`), or with Cmd (Ctrl elsewhere)
- * held anywhere in the pane except on controls, the transcript's links and the terminal.
+ * Drag a pane to another pane to move or swap them.
  */
 export function startPaneDrag(e: ReactPointerEvent<HTMLElement>, id: string, label: string, grip = false) {
   if (e.button !== 0 || e.pointerType === "touch") return;
@@ -172,16 +275,14 @@ export function startPaneDrag(e: ReactPointerEvent<HTMLElement>, id: string, lab
     kind: "pane",
     id,
     label,
-    sideAt: (x, y) => {
-      const o = overHost(x, y);
-      if (!o) return null;
-      const side = dropSide(x, o.r.left, o.r.width);
-      return swapAllowed(o.state, id, side, o.r.width) ? side : null;
-    },
-    drop: () => {
+    targetAt: (x, y) => findDragTarget("pane", id, x, y),
+    drop: (target) => {
       const st = useStore.getState();
-      st.swapPanes();
-      st.selectCodeSession(id);
+      const fromIdx = st.panes.indexOf(id);
+      if (fromIdx !== -1 && fromIdx !== target.paneIndex) {
+        st.movePane(fromIdx, target.paneIndex);
+        st.selectCodeSession(id);
+      }
     },
   });
 }
