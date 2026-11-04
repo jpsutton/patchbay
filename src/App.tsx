@@ -18,7 +18,8 @@ import { codeEventArrived, remoteHost, resyncRemoteCode, useStore, type Mode } f
 import { goBack, goForward, resetHistory, useHistory } from "./lib/history";
 import { initZoom, zoomIn, zoomOut, zoomReset } from "./lib/zoom";
 import { ChatView } from "./chat/ChatView";
-import { CodeView, newSessionIn } from "./code/CodeView";
+import { newSessionIn } from "./code/CodeView";
+import { PaneHost } from "./code/PaneHost";
 import { NewSessionDialog } from "./code/NewSessionDialog";
 import { ImportClaudeDialog } from "./code/ImportClaudeDialog";
 import { Settings } from "./settings/Settings";
@@ -31,7 +32,7 @@ import { ArchivedToggle, SectionLabel, SidebarItem } from "./components/SidebarI
 import { chatActions } from "./lib/itemActions";
 import { fmtShort, groupByDate, matchesQuery } from "./lib/format";
 import { ModelRing } from "./lib/cable";
-import { emitViewAction, focusComposer, focusSidebarSearch, isMac, isMod, keyLabel, ViewActive } from "./lib/shortcuts";
+import { emitViewAction, focusComposer, focusSidebarSearch, isMac, isMod, keyLabel, paneShortcut, ViewActive } from "./lib/shortcuts";
 import { ScrollFade } from "./lib/useStickyScroll";
 import { notifyInBackground, openNotified, type NotifyTarget } from "./lib/notify";
 import { useDragRegion, useRoundedWindow } from "./components/WindowControls";
@@ -91,6 +92,18 @@ function useGlobalShortcuts() {
         e.preventDefault();
         if (navBack) goBack();
         else goForward();
+        return;
+      }
+      // Split panes: Ctrl+] / Ctrl+[ move focus, ⌘Ctrl+W (Ctrl+Alt+W elsewhere) closes the focused pane.
+      // Before the Mod branch below, which swallows every Ctrl key on Windows and Linux.
+      const pane = st.mode === "code" && st.panes.length > 1 && !modal ? paneShortcut(e) : null;
+      if (pane) {
+        e.preventDefault();
+        if (pane === "close") {
+          if (st.activeCodeSessionId) st.closePane(st.activeCodeSessionId);
+        } else st.cyclePane(pane === "next" ? 1 : -1);
+        // The typing cursor follows the focus to the pane it moved to.
+        focusComposer();
         return;
       }
       if (isMod(e) && !e.altKey) {
@@ -807,7 +820,7 @@ export default function App() {
           <ChatView />
         </ViewPane>
         <ViewPane active={mode === "code"}>
-          <CodeView />
+          <PaneHost />
         </ViewPane>
       </main>
       {settingsOpen && <Settings />}

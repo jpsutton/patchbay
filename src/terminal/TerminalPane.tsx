@@ -5,7 +5,7 @@ import "@xterm/xterm/css/xterm.css";
 import { ContextMenu, type ItemAction } from "../components/ItemMenu";
 import { copyText, pasteText } from "../lib/clipboard";
 import { api, errorText } from "../lib/ipc";
-import { isMod } from "../lib/shortcuts";
+import { isMod, paneShortcut } from "../lib/shortcuts";
 import { useStore } from "../lib/store";
 import { TypeAheadAddon } from "./typeAhead";
 
@@ -79,6 +79,8 @@ export function TerminalPane({
     // other terminals (⌘C and ⌘V on macOS reach the browser's own copy and paste). The keys stop
     // here: the shell doesn't see them, and neither does the app's Ctrl+Shift+C (copy last reply).
     term.attachCustomKeyEventHandler((e) => {
+      // The split-pane keys go to the app, not the shell. Only while split: otherwise Ctrl+[ is Esc.
+      if (useStore.getState().panes.length > 1 && paneShortcut(e)) return false;
       if (!isMod(e) || !e.shiftKey || e.altKey) return true;
       const k = e.key.toLowerCase();
       if (k !== "c" && k !== "v") return true;

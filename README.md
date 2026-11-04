@@ -29,6 +29,7 @@ Patchbay is a desktop app in the style of Claude Desktop. Bring your own provide
 - Review every changed file as a diff, and use the built-in terminal.
 - Type `/` for the agent's commands and `@` to mention files.
 - Add MCP servers in Settings to give the agent more tools.
+- Work in two sessions side by side: **Alt+click** a session (**Option-click** on macOS), drag it beside the open one, or pick *Open in split view* from its menu. **Ctrl+]** and **Ctrl+[** move between the panes on every OS, and **Ctrl+Alt+W** (**⌃⌘W** on macOS) closes the focused one.
 
 ### Everywhere
 

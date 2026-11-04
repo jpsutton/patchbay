@@ -127,6 +127,10 @@ export function sessionActions(
       }),
     },
   ];
+  // Beside the open session; pointless for the only session open with nothing to split it from.
+  if (desktop && !archived && !(st().panes.length === 0 && st().activeCodeSessionId === s.id)) {
+    actions.splice(1, 0, { label: "Open in split view", onSelect: () => st().openBeside(s.id) });
+  }
   if (running) {
     actions.push({
       label: "Stop agent",

@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react";
 import type { AcpPermissionRequest, AcpToolCall, AcpToolCallContent } from "../lib/ipc";
 import { api, errorText } from "../lib/ipc";
 import { mergeToolCall, useStore } from "../lib/store";
+import { usePaneSession } from "../lib/pane";
 import { DiffView, diffStats } from "./DiffView";
 import { hunkStarts } from "./hunkStarts";
 import { toolDescription } from "./toolLabel";
@@ -47,8 +48,8 @@ export function stopAction(tc: AcpToolCall, sessionId: string | null, supported:
 
 /** Stop button for a running tool call or background job; nothing when it can't be stopped. */
 export function StopButton({ tc, className = "" }: { tc: AcpToolCall; className?: string }) {
-  const sessionId = useStore((s) => s.activeCodeSessionId);
-  const supported = useStore((s) => !!(s.activeCodeSessionId && s.code[s.activeCodeSessionId]?.extensions.cancelTool));
+  const sessionId = usePaneSession();
+  const supported = useStore((s) => !!(sessionId && s.code[sessionId]?.extensions.cancelTool));
   const action = stopAction(tc, sessionId, supported);
   if (!action) return null;
   return (
@@ -263,7 +264,7 @@ export function ToolCallCard({ tc, autoApproved }: { tc: AcpToolCall; autoApprov
   // Images show without opening the row: they're usually what the agent wanted you to see.
   const images = imagesOf(tc);
   // A read of an image file shows the file when the row opens, unless the agent sent the image itself.
-  const sessionId = useStore((s) => s.activeCodeSessionId);
+  const sessionId = usePaneSession();
   const fileImage = images.length === 0 && sessionId ? readImagePath(tc) : null;
   const stats = (tc.content ?? [])
     .filter((c): c is Extract<AcpToolCallContent, { type: "diff" }> => c.type === "diff")
@@ -422,10 +423,12 @@ export function PermissionCard({
   // The request is what the user is approving: its fields win over what was stored before.
   const tc = mergeToolCall(live, request.toolCall);
   const rule = suggestRule(tc);
-  // The session id routes the answer to whichever node runs the agent.
+  // The session id routes the answer to whichever node runs the agent. In a split it's this pane's
+  // session, which may not be the focused one.
+  const sessionId = usePaneSession();
   const respond = (optionId: string) =>
     api
-      .codePermissionRespond(requestId, optionId, useStore.getState().activeCodeSessionId ?? undefined)
+      .codePermissionRespond(requestId, optionId, sessionId ?? undefined)
       .catch((e) => useStore.getState().setToast(errorText(e)));
   const allowId =
     request.options.find((o) => o.kind === "allow_once")?.optionId ??
