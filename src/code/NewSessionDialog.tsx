@@ -5,6 +5,7 @@ import { memberOnline, remoteHost, useStore } from "../lib/store";
 import { isWeb } from "../lib/platform";
 import { ChevronLeftIcon, ChevronRightIcon, FolderPlusIcon, MonitorIcon, XIcon } from "../components/icons";
 import { Dot } from "../components/Dot";
+import { ModelOptions } from "../components/ModelOptions";
 
 /** `~/…` for paths in the home folder. */
 function tilde(path: string, home: string | null): string {
@@ -46,9 +47,7 @@ function Dialog() {
   const [agent, setAgent] = useState<AgentId | null>(null);
   // For agents on Patchbay's models: the default unless another is picked here.
   const models = useStore((s) => s.models);
-  const providers = useStore((s) => s.providers);
-  const defaultModelRef = useStore((s) => s.defaultModelRef);
-  const [modelRef, setModelRef] = useState<string | null>(defaultModelRef);
+  const [modelRef, setModelRef] = useState<string | null>(() => useStore.getState().defaultModelRef);
   const [folder, setFolder] = useState<string | null>(null);
   const [browse, setBrowse] = useState<DirListing | null>(null);
   const [busy, setBusy] = useState(false);
@@ -232,21 +231,7 @@ function Dialog() {
                         aria-label="Model"
                         onChange={(e) => setModelRef(e.target.value)}
                       >
-                        {modelRef === null && <option value="">Select model</option>}
-                        {providers.map((p) => {
-                          const ms = models.filter((m) => m.providerId === p.id);
-                          if (ms.length === 0) return null;
-                          return (
-                            <optgroup key={p.id} label={p.name}>
-                              {ms.map((m) => (
-                                <option key={m.id} value={m.id}>
-                                  {m.displayName}
-                                  {m.id === defaultModelRef ? " (default)" : ""}
-                                </option>
-                              ))}
-                            </optgroup>
-                          );
-                        })}
+                        <ModelOptions value={modelRef} />
                       </select>
                     </div>
                   </>
