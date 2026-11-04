@@ -111,9 +111,26 @@ If you start the desktop app while `patchbayd` runs on the same data folder, the
 - **Secrets.** API keys go to the OS keyring when one runs. Servers usually have none, so keys are stored in the database inside the data folder. The daemon creates that folder readable by you only. If the folder already existed, check its permissions yourself.
 - **Reconnecting.** If the daemon restarts, open tabs show a banner and reload when it's back. Chats and agent turns keep running on the daemon while no tab is open.
 
+## Claude subscription on a server
+
+Patchbay's agent and Chat can use a Claude subscription through a provider set to "Use Claude Code login". On a server with no `claude` login, run `claude setup-token` on any computer and set the token it prints as `CLAUDE_CODE_OAUTH_TOKEN` in the daemon's environment, for example in a root-owned `EnvironmentFile=` (mode 600) of its systemd unit. Patchbay then uses that token for providers with no Claude config directory, ahead of any `~/.claude` login, as Claude Code does. It never renews the token: when it expires or is revoked, make a new one. Providers that name a config directory keep using that directory's login.
+
 ## Joining a mesh
 
 Use **Settings → Mesh** in the web UI to create a mesh, or to join one with another member's address and the mesh passphrase, the same as in the desktop app. Once joined, phones can use the daemon as their gateway, and the desktop app can move Code sessions to and from it.
+
+### From the command line
+
+With the daemon running, `patchbayd mesh` does the same without a browser. It talks to the running daemon through its socket, so run it as the daemon's user (or pass the same `--data-dir`). The passphrase comes from `PATCHBAY_MESH_PASSPHRASE`, or from the first line of stdin with `--passphrase-stdin`, so it never shows up in `ps`.
+
+```bash
+export PATCHBAY_MESH_PASSPHRASE='the mesh passphrase'
+patchbayd mesh join 100.64.0.7 --name linode1      # prints a code, then waits for approval
+patchbayd mesh status                              # members, and requests waiting for approval
+patchbayd mesh approve laptop                      # on a member: a waiting node's name, id or id prefix
+```
+
+Check that the code `join` prints matches the one the member shows, then approve it there, either in **Settings → Mesh** or with `patchbayd mesh approve`. The other commands are `mesh create --name <name>` (start a new mesh), `mesh reject <node>` and `mesh leave`.
 
 ## Building it yourself
 

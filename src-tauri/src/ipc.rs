@@ -87,7 +87,7 @@ async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, v: &Value) -> Result<()> 
     Ok(())
 }
 
-#[cfg(any(feature = "desktop", test))]
+#[cfg(any(feature = "desktop", feature = "daemon", test))]
 fn read_token(data_dir: &Path) -> Result<String> {
     let t = std::fs::read_to_string(data_dir.join(TOKEN_FILE))?;
     let t = t.trim();
@@ -332,8 +332,9 @@ pub mod server {
     }
 }
 
-/// The desktop app's side: a connection to the daemon that runs commands on it.
-#[cfg(any(feature = "desktop", test))]
+/// The desktop app's side: a connection to the daemon that runs commands on it. `patchbayd`
+/// itself uses it for its command line (`patchbayd mesh ...`).
+#[cfg(any(feature = "desktop", feature = "daemon", test))]
 pub mod client {
     use std::collections::HashMap;
     use std::path::Path;
