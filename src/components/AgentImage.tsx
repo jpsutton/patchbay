@@ -187,9 +187,15 @@ export function ImageViewer({ src, alt, onClose }: { src: string; alt?: string; 
   const gesture = useRef<{ x: number; y: number; t: number; moved: boolean; multi: boolean } | null>(null);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // Capture phase + preventDefault so the global Esc shortcut doesn't also stop the turn.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [onClose]);
 
   /** Zoom limit: twice actual size, and at least 4x the fitted size. */
