@@ -309,9 +309,26 @@ fn cache_set(dir: &Path, token: String, expires_at_ms: i64) {
     }
 }
 
+/// The environment variable Claude Code reads a long-lived token from (`claude setup-token`).
+const ENV_TOKEN: &str = "CLAUDE_CODE_OAUTH_TOKEN";
+
+/// The token to use instead of a login: `env` when the provider names no config directory.
+/// Another account's directory keeps its own login. The token has no refresh token, so it is
+/// never renewed: it works until it expires or is revoked.
+fn env_token(dir: Option<&str>, env: Option<String>) -> Option<String> {
+    if dir.map(str::trim).is_some_and(|d| !d.is_empty()) {
+        return None;
+    }
+    env.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty())
+}
+
 /// Return a usable access token for the Claude login in config directory `dir` (`None`: the
-/// default one), refreshing and writing rotated tokens back when needed.
+/// default one), refreshing and writing rotated tokens back when needed. For the default login,
+/// `CLAUDE_CODE_OAUTH_TOKEN` takes precedence over the credentials file, as in Claude Code.
 pub async fn access_token(dir: Option<&str>) -> Result<String> {
+    if let Some(t) = env_token(dir, std::env::var(ENV_TOKEN).ok()) {
+        return Ok(t);
+    }
     let dir = resolve_dir(dir)?;
     if let Some(t) = cache_get(&dir) {
         return Ok(t);
@@ -370,6 +387,16 @@ mod tests {
             "otherKey": "keep-me"
         });
         std::fs::write(path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn env_token_serves_only_the_default_login() {
+        let t = || Some("  sk-ant-oat01-abc\n".to_owned());
+        assert_eq!(env_token(None, t()).as_deref(), Some("sk-ant-oat01-abc"));
+        assert_eq!(env_token(Some(" "), t()).as_deref(), Some("sk-ant-oat01-abc"));
+        assert_eq!(env_token(Some("~/.claude-team"), t()), None);
+        assert_eq!(env_token(None, Some("  ".into())), None);
+        assert_eq!(env_token(None, None), None);
     }
 
     #[test]

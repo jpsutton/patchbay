@@ -122,6 +122,10 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
               To use another Claude account, enter the CLAUDE_CONFIG_DIR you signed in to it with, e.g.
               ~/.claude-team. Add one provider per account.
             </span>
+            <span>
+              With no directory, a CLAUDE_CODE_OAUTH_TOKEN (from <code>claude setup-token</code>) in Patchbay's
+              environment is used instead of the login. It is never renewed.
+            </span>
           </label>
           <p className="text-xs text-ok">Signed in via Claude Code on this machine — no API key stored.</p>
         </>
