@@ -341,6 +341,7 @@ fn main() -> Result<()> {
     }
 
     patchbay_lib::init_tracing();
+    patchbay_lib::fd_limit::raise_at_startup();
     let rt = tokio::runtime::Runtime::new()?;
     let _ = patchbay_lib::api::RUNTIME.set(rt.handle().clone());
     rt.block_on(run(args, data_dir, listen))
