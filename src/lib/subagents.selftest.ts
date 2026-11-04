@@ -5,6 +5,7 @@
 import type { Subagent } from "./ipc";
 import {
   BLOCKED_SECS,
+  FAILED_SHOWN_SECS,
   STALL_SECS,
   applySpawned,
   applyState,
@@ -12,6 +13,7 @@ import {
   health,
   idleSecs,
   shown,
+  stampFailed,
   stoppable,
   subagentIdOf,
 } from "./subagents.ts";
@@ -53,6 +55,13 @@ assert(health(agent({ status: "completed" }), 0) === "done", "done");
 
 const list = [agent({ id: "a" }), agent({ id: "b", status: "completed" }), agent({ id: "c", status: "failed" }), agent({ id: "d", status: "stopped" })];
 assert(shown(list).map((a) => a.id).join() === "a,c", "rows for running and failed only");
+
+const stamped = stampFailed([], [agent({ id: "f", status: "failed" }), agent({ id: "r" })], t0);
+assert(stamped[0].failedAt === t0 && stamped[1].failedAt === undefined, "a newly failed row gets failedAt");
+const restamped = stampFailed(stamped, [agent({ id: "f", status: "failed" })], t0 + 30_000);
+assert(restamped[0].failedAt === t0, "later updates keep the first failedAt");
+assert(shown(restamped, t0 + 30_000).length === 1, "a just-failed row shows");
+assert(shown(restamped, t0 + FAILED_SHOWN_SECS * 1000).length === 0, "a failed row leaves after a minute");
 
 assert(stoppable(agent()), "a running background agent can be stopped");
 assert(!stoppable(agent({ background: false })), "a foreground one cannot");
@@ -96,7 +105,9 @@ const failed = applyState(spawned!, {
   state: "disconnected",
 }, t0 + 10_000);
 assert(failed![0].status === "failed" && failed![0].error === "Disconnected", "disconnected maps to failed");
-assert(shown(failed!).map((a) => a.id).join() === "30e89cbf", "failed ACP rows stay visible");
+assert(shown(failed!, t0 + 10_000).map((a) => a.id).join() === "30e89cbf", "failed ACP rows stay visible");
+assert(failed![0].failedAt === t0 + 10_000, "failing stamps failedAt");
+assert(shown(failed!, t0 + 10_000 + FAILED_SHOWN_SECS * 1000).length === 0, "then leave after a minute");
 
 const grok = applySpawned([], {
   sessionUpdate: "subagent_spawned",
