@@ -10,6 +10,7 @@ const USAGE: &str = "\
 Usage: patchbayd [options]
        patchbayd token [--rotate] [options]
        patchbayd agents [options]
+       patchbayd mesh <status|create|join|approve|reject|leave> [options]
 
 Runs Patchbay headless: chats, Code sessions and the mesh, without a window.
 
@@ -24,6 +25,17 @@ Commands:
   token              Print the web UI's address with its access token
   token --rotate     Replace the token (open tabs must sign in again)
   agents             Show the subagents of Patchbay's agent sessions: state, idle time, what each is doing
+  mesh               Manage this node's mesh membership through the running daemon (see below)
+
+Mesh commands (the daemon must be running):
+  mesh status                       Mesh membership, members and requests waiting for approval
+  mesh create --name <name>         Start a new mesh with this node as its first member
+  mesh join <address> --name <name> Ask to join the mesh of the computer at <address>
+  mesh approve <node>               Admit a waiting node (its id, an id prefix or its name)
+  mesh reject <node>                Turn a waiting node away
+  mesh leave                        Leave the mesh
+  The passphrase of create and join comes from PATCHBAY_MESH_PASSPHRASE, or from the first line
+  of stdin with --passphrase-stdin.
 
 Environment:
   PATCHBAY_LOG       Log filter (default: info)
@@ -38,6 +50,10 @@ struct Args {
     token: bool,
     rotate: bool,
     agents: bool,
+    /// Words after `mesh`: the subcommand, then its arguments.
+    mesh: Option<Vec<String>>,
+    name: Option<String>,
+    passphrase_stdin: bool,
 }
 
 fn parse_args() -> Result<Args> {
@@ -53,6 +69,10 @@ fn parse_args() -> Result<Args> {
             "--rotate" => a.rotate = true,
             "token" => a.token = true,
             "agents" => a.agents = true,
+            "mesh" if a.mesh.is_none() => a.mesh = Some(Vec::new()),
+            "--name" => a.name = Some(value("--name")?),
+            "--passphrase-stdin" => a.passphrase_stdin = true,
+            word if a.mesh.is_some() && !word.starts_with('-') => a.mesh.as_mut().unwrap().push(word.to_owned()),
             "-h" | "--help" => {
                 print!("{USAGE}");
                 std::process::exit(0);
@@ -62,6 +82,9 @@ fn parse_args() -> Result<Args> {
     }
     if a.rotate && !a.token {
         bail!("--rotate goes with the token command");
+    }
+    if a.mesh.is_none() && (a.name.is_some() || a.passphrase_stdin) {
+        bail!("--name and --passphrase-stdin go with the mesh command");
     }
     Ok(a)
 }
@@ -161,6 +184,133 @@ fn print_agents(data_dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// `patchbayd mesh ...`: the mesh commands of Settings → Mesh, run on the daemon that owns the
+/// data folder (through the socket the desktop app attaches by).
+async fn mesh_cli(words: &[String], args: &Args, data_dir: &std::path::Path) -> Result<()> {
+    use patchbay_lib::api::ChanFactory;
+    use patchbay_lib::ipc::client::{AttachError, Conn};
+    use serde_json::{Value, json};
+
+    let conn = Conn::open(data_dir, std::sync::Arc::new(|_, _| {}), || {}).await.map_err(|e| match e {
+        AttachError::Unreachable(_) => anyhow::anyhow!(
+            "patchbayd isn't running on {}; start it first (for example `systemctl --user start patchbayd`)",
+            data_dir.display()
+        ),
+        e => anyhow::anyhow!("{e}"),
+    })?;
+    let no_chans: ChanFactory = std::sync::Arc::new(|_| None);
+    let call = |cmd: &'static str, a: Value| {
+        let (conn, no_chans) = (conn.clone(), no_chans.clone());
+        async move { conn.call(cmd, a, &no_chans).await.map_err(|e| anyhow::anyhow!("{e}")) }
+    };
+    let name = || args.name.clone().context("--name <this node's name> is required");
+    let passphrase = || -> Result<String> {
+        let p = if args.passphrase_stdin {
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            line.trim_end_matches(['\r', '\n']).to_owned()
+        } else {
+            std::env::var("PATCHBAY_MESH_PASSPHRASE").unwrap_or_default()
+        };
+        if p.is_empty() {
+            bail!("no passphrase: set PATCHBAY_MESH_PASSPHRASE, or pass --passphrase-stdin and write it to stdin");
+        }
+        Ok(p)
+    };
+    // The node a waiting request names: its id, a prefix of it, or its name.
+    let waiting = |status: &Value, who: &str| -> Result<String> {
+        let found: Vec<&Value> = status["pending"]
+            .as_array()
+            .map(|a| a.iter().filter(|p| p["nodeId"].as_str().is_some_and(|id| id.starts_with(who)) || p["name"] == who).collect())
+            .unwrap_or_default();
+        match found.as_slice() {
+            [one] => Ok(one["nodeId"].as_str().unwrap_or_default().to_owned()),
+            [] => bail!("no waiting request matches {who}; see `patchbayd mesh status`"),
+            _ => bail!("{who} matches more than one waiting request; use more of the node id"),
+        }
+    };
+
+    let sub = words.first().map(String::as_str).unwrap_or("status");
+    let rest = &words[words.len().min(1)..];
+    match (sub, rest) {
+        ("status", []) => print_mesh(&call("mesh_status", json!({})).await?),
+        ("create", []) => {
+            call("mesh_create", json!({ "passphrase": passphrase()?, "name": name()? })).await?;
+            println!("Created a mesh. Other computers join with this node's address and the passphrase.");
+            print_mesh(&call("mesh_status", json!({})).await?);
+        }
+        ("join", [address]) => {
+            call("mesh_join", json!({ "url": address, "passphrase": passphrase()?, "name": name()? })).await?;
+            // The daemon keeps joining after this returns; wait for the code a member must check.
+            for _ in 0..60 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let s = call("mesh_status", json!({})).await?;
+                let j = &s["joining"];
+                let err = j["error"].as_str().unwrap_or("");
+                match j["status"].as_str() {
+                    Some("waiting") => {
+                        println!(
+                            "Waiting for approval. On a computer in the mesh, check that this code matches, then approve:\n  code: {}\n  node: {}",
+                            j["code"].as_str().unwrap_or("?"),
+                            s["nodeId"].as_str().unwrap_or("?")
+                        );
+                        println!("Approve in Settings → Mesh, or with `patchbayd mesh approve {}` there.", s["name"].as_str().unwrap_or("<name>"));
+                        return Ok(());
+                    }
+                    Some("rejected") => bail!("the request was declined{}", if err.is_empty() { String::new() } else { format!(": {err}") }),
+                    Some("failed") => bail!("{}", if err.is_empty() { "couldn't join" } else { err }),
+                    _ if s["member"] == true => {
+                        println!("Joined the mesh.");
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+            bail!("still connecting to {address}; check `patchbayd mesh status`, and that the address is reachable");
+        }
+        ("approve" | "reject", [who]) => {
+            let s = call("mesh_status", json!({})).await?;
+            let id = waiting(&s, who.as_str())?;
+            call(if sub == "approve" { "mesh_approve" } else { "mesh_reject" }, json!({ "nodeId": id })).await?;
+            println!("{} {id}", if sub == "approve" { "Approved" } else { "Declined" });
+        }
+        ("leave", []) => {
+            call("mesh_leave", json!({})).await?;
+            println!("Left the mesh.");
+        }
+        _ => bail!("unknown mesh command\n\n{USAGE}"),
+    }
+    Ok(())
+}
+
+fn print_mesh(s: &serde_json::Value) {
+    let text = |v: &serde_json::Value| v.as_str().unwrap_or("-").to_owned();
+    println!("node {} ({})", text(&s["name"]), text(&s["nodeId"]));
+    if let Some(p) = s["problem"].as_object() {
+        println!("problem: {}", p.get("message").and_then(|m| m.as_str()).unwrap_or("unknown"));
+    }
+    if s["member"] != true {
+        match s["joining"]["status"].as_str() {
+            Some(st) => println!("not in a mesh yet: joining {} ({st}, code {})", text(&s["joining"]["url"]), text(&s["joining"]["code"])),
+            None => println!("not in a mesh"),
+        }
+    } else {
+        println!("mesh {}, listening on {}", text(&s["meshId"]), text(&s["listen"]));
+        for m in s["members"].as_array().into_iter().flatten() {
+            println!("  {}  {}  {}  {}", text(&m["nodeId"]), text(&m["name"]), text(&m["state"]), text(&m["role"]));
+        }
+    }
+    for p in s["pending"].as_array().into_iter().flatten() {
+        println!(
+            "waiting to join: {} ({}), code {}, connected to {}",
+            text(&p["name"]),
+            text(&p["nodeId"]),
+            text(&p["code"]),
+            text(&p["hostName"])
+        );
+    }
+}
+
 fn url_for(listen: &str, token: &str) -> String {
     let shown = listen.replace("0.0.0.0", "127.0.0.1").replace("[::]", "[::1]");
     format!("http://{shown}/#token={token}")
@@ -184,6 +334,10 @@ fn main() -> Result<()> {
         let token = load_token(&data_dir, args.rotate)?;
         println!("{}", url_for(&listen, &token));
         return Ok(());
+    }
+
+    if let Some(words) = &args.mesh {
+        return tokio::runtime::Runtime::new()?.block_on(mesh_cli(words, &args, &data_dir));
     }
 
     patchbay_lib::init_tracing();
