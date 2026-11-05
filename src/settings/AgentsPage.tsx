@@ -565,7 +565,7 @@ function EngineSettings() {
         10000,
         "no limit on a Claude plan with Stop at plan limit on, otherwise 100",
       )}
-      {field("subagentMaxSteps", "Steps per subagent", "Model requests one subagent run may make.", 40, 10000)}
+      {field("subagentMaxSteps", "Steps per subagent", "Model requests one subagent run may make.", 100, 10000)}
       {field("requestRetries", "Request retries", "Retries of a model request that fails before any output.", 2, 10)}
       {field("idleTimeoutSecs", "Stream timeout (s)", "Give up on a reply that sends nothing for this long.", 180, 3600)}
       {field("shellTimeoutSecs", "Shell timeout (s)", "Commands stop after this long unless the agent asks for more (up to 600).", 120, 600)}
