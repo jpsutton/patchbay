@@ -33,6 +33,7 @@ import { Markdown } from "../components/Markdown";
 import { FileLinkContext } from "../components/FileLink";
 import { EditMessage } from "../components/EditMessage";
 import { UsageBar } from "../components/UsageBar";
+import { MobilePlanUsage } from "../components/MobilePlanUsage";
 import { TerminalPane } from "../terminal/TerminalPane";
 import { QuestionCard } from "./QuestionCard";
 import { PermissionCard, PlanDocCard, planDocOf, StopButton, ToolCallCard, ToolGroup } from "./ToolCallCard";
@@ -52,6 +53,7 @@ import { codeToJson, codeToMarkdown, saveExport, type ExportFormat } from "../li
 import { ContextMenu, type ItemAction } from "../components/ItemMenu";
 import { PaneContext, useViewAction, ViewActive } from "../lib/shortcuts";
 import { usePaneSession } from "../lib/pane";
+import { useRememberedOpen } from "../lib/rowMemory";
 import { enqueueSpeech, speakingNow, stopSpeech } from "../lib/speech";
 import { liveCursorNow, takeLiveProse, type LiveCursor } from "../lib/spokenText";
 import { HeaderButton } from "../components/HeaderButton";
@@ -366,7 +368,7 @@ function AgentPicker() {
 }
 
 function Thought({ text }: { text: string }) {
-  const [open, setOpen] = useState(() => useStore.getState().prefs.expandReasoning);
+  const [open, setOpen] = useRememberedOpen("thought", useStore.getState().prefs.expandReasoning);
   return (
     <div className="text-xs">
       <button
@@ -388,7 +390,7 @@ function Thought({ text }: { text: string }) {
 
 /** A message the agent's harness wrote as the user: dimmed and collapsed, named by its elements. */
 function HarnessEntry({ text }: { text: string }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useRememberedOpen("harness", false);
   const tags = useMemo(() => harnessTags(text) ?? [], [text]);
   return (
     <div className="text-xs opacity-70">
@@ -916,7 +918,6 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const session = sessions.find((s) => s.id === activeId) ?? null;
 
   const [showTerm, setShowTerm] = useState(false);
-  /** Which panel the right blade shows, if any. */
   const [blade, setBlade] = useState<"activity" | "changes" | null>(null);
   const [bladeWidth, setBladeWidth] = useState(() => loadWidth(BLADE_WIDTH_KEY, BLADE_DEFAULT, BLADE_MIN, BLADE_MAX));
   const [termMounted, setTermMounted] = useState<Record<string, boolean>>({});
@@ -935,6 +936,17 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
    */
   const [level, setLevel] = useState(0);
   const headerRef = useRef<HTMLElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [viewWidth, setViewWidth] = useState(0);
+
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    setViewWidth(el.clientWidth);
+    const ro = new ResizeObserver(([e]) => setViewWidth(e.contentRect.width));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [!!session]);
   /** The header width each level needed when it overflowed, to know when a wider pane lets one go back. */
   const needed = useRef<number[]>([]);
   const fitHeader = useRef<() => void>(() => {});
@@ -1040,6 +1052,18 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     return () => ro.disconnect();
   }, [split, !!session]);
   const paneFocused = pane?.focused ?? true;
+  const isDrawerOpen = blade !== null && !remote && viewWidth < 600 && paneFocused;
+  useEffect(() => {
+    if (!isDrawerOpen) return;
+    const esc = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !e.defaultPrevented) {
+        e.preventDefault();
+        setBlade(null);
+      }
+    };
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [isDrawerOpen]);
   const viewActive = useContext(ViewActive) && paneFocused;
   const listenOn = useStore((s) => s.prefs.readAloudListen);
   const skipListen = useRef(false);
@@ -1169,7 +1193,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
 
   if (!session) {
     return (
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div ref={containerRef} className="flex min-w-0 flex-1 flex-col">
         {drag["data-tauri-drag-region"] && (
           <header {...drag} className="flex h-12 shrink-0 items-center justify-end px-4">
             <WindowControls />
@@ -1214,6 +1238,10 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     ) : blade === "changes" ? (
       <ChangesPanel changes={changes} cwd={session.cwd} onClose={() => setBlade(null)} />
     ) : null;
+  const sideBySideBlade = viewWidth >= 600;
+  const minBladeForView = Math.min(BLADE_MIN, Math.max(260, Math.round(viewWidth * 0.4)));
+  const maxBladeForView = Math.max(minBladeForView, viewWidth - 280);
+  const clampedBladeWidth = Math.min(Math.max(minBladeForView, bladeWidth), maxBladeForView);
 
   // What the session is waiting on, said plainly. A phone reaches it through a gateway, so it
   // can be reconnecting, or catching up on a session whose agent already runs.
@@ -1578,7 +1606,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
 
   return (
     <FileLinkContext.Provider value={fileLinks}>
-    <div className="flex h-full min-w-0 flex-1 flex-col">
+    <div ref={containerRef} className="relative flex h-full min-w-0 flex-1 flex-col">
       <header ref={headerRef} {...drag} className={`flex h-12 shrink-0 items-center gap-1 border-b border-line pr-3 ${leading ? "pl-1" : "pl-6"}`}>
         {leading}
         <Dot {...dot} title={dotLabel} role="img" aria-label={`Agent ${dotLabel}`} />
@@ -1700,7 +1728,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
       )}
       {more && <ContextMenu x={more.x} y={more.y} title="More" actions={moreActions} onClose={() => setMore(null)} />}
 
-      <div className="flex min-h-0 flex-1">
+      <div className="relative flex min-h-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="relative min-h-0 flex-1">
             <ScrollFade show={!sticky.atTop} />
@@ -1942,35 +1970,50 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
               cache={s?.usage?.cache ?? null}
               onConfigureWindow={() => useStore.getState().setSettingsOpen(true)}
             />
+            <MobilePlanUsage sessionId={session.id} />
           </div>
         </div>
-        {blade && !remote && !pane?.split && (
+        {blade && !remote && sideBySideBlade && (
           <aside
             className="relative max-w-[70%] shrink-0 border-l border-line bg-panel/50"
-            style={{ width: bladeWidth }}
+            style={{ width: clampedBladeWidth }}
           >
             <ResizeHandle
-              width={bladeWidth}
-              min={BLADE_MIN}
-              max={BLADE_MAX}
+              width={clampedBladeWidth}
+              min={minBladeForView}
+              max={maxBladeForView}
               initial={BLADE_DEFAULT}
               edge="left"
               label="Resize panel"
               onChange={(w, done) => {
                 setBladeWidth(w);
-                if (done) saveWidth(BLADE_WIDTH_KEY, w);
+                if (done && w >= BLADE_MIN) saveWidth(BLADE_WIDTH_KEY, w);
               }}
             />
             {bladePanel}
           </aside>
         )}
-        {/* The phone covers the screen; in a split the panel covers its own pane (a side column would crush it). */}
-        {blade && (remote || pane?.split) && (
-          <div
-            className={`${
-              remote ? "fixed pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]" : "absolute"
-            } inset-0 z-40 flex flex-col bg-bg`}
-          >
+        {/* In narrow panes, open as a partial slide-over drawer below the header, leaving the header and chat visible */}
+        {blade && !remote && !sideBySideBlade && (
+          <>
+            <div
+              className="absolute inset-0 z-30 bg-black/20 backdrop-blur-[1px] transition-opacity"
+              onClick={() => setBlade(null)}
+              aria-hidden="true"
+            />
+            <aside
+              role="dialog"
+              aria-modal="true"
+              aria-label={blade === "activity" ? "Activity" : "Changes"}
+              className="absolute right-0 top-0 bottom-0 z-40 flex w-[88%] max-w-[420px] flex-col border-l border-line bg-bg shadow-2xl"
+            >
+              {bladePanel}
+            </aside>
+          </>
+        )}
+        {/* The phone covers the screen */}
+        {blade && remote && (
+          <div className="fixed inset-0 z-40 flex flex-col bg-bg pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
             {bladePanel}
           </div>
         )}

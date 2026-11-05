@@ -23,8 +23,9 @@ export const clampWidth = (w: number, min: number, max: number) => Math.round(Ma
 /**
  * Drag a panel's edge to resize it; double-click resets, arrow keys nudge. `edge` is the panel
  * side the handle sits on: a panel at the left of the window grows when its right edge moves
- * right, one at the right grows when its left edge moves left. The panel must be `relative`.
- * `onChange(width, done)`: `done` once the drag (or key press) ended, the time to save.
+ * right, one at the right grows when its left edge moves left. Top/bottom edges resize height
+ * the same way. The panel must be `relative`. `onChange(size, done)`: `done` once the drag (or
+ * key press) ended, the time to save.
  */
 export function ResizeHandle({
   width,
@@ -34,42 +35,52 @@ export function ResizeHandle({
   edge,
   label,
   onChange,
+  onReset,
 }: {
   width: number;
   min: number;
   max: number;
   initial: number;
-  edge: "left" | "right";
+  edge: "left" | "right" | "top" | "bottom";
   label: string;
   onChange: (w: number, done: boolean) => void;
+  onReset?: () => void;
 }) {
   const [dragging, setDragging] = useState(false);
-  // Pointer movement to the right makes the panel wider on its right edge, narrower on its left.
-  const dir = edge === "right" ? 1 : -1;
+  const horizontal = edge === "top" || edge === "bottom";
+  // Pointer movement along the growth axis makes the panel larger when positive.
+  const dir = edge === "right" || edge === "bottom" ? 1 : -1;
+  const axisKey = horizontal ? ("clientY" as const) : ("clientX" as const);
+  const growKey = horizontal ? ("ArrowDown" as const) : ("ArrowRight" as const);
+  const shrinkKey = horizontal ? ("ArrowUp" as const) : ("ArrowLeft" as const);
   return (
     <div
       role="separator"
-      aria-orientation="vertical"
+      aria-orientation={horizontal ? "horizontal" : "vertical"}
       aria-label={label}
       aria-valuenow={width}
       aria-valuemin={min}
       aria-valuemax={max}
       tabIndex={0}
       title="Drag to resize · double-click to reset"
-      className={`group absolute ${edge === "right" ? "-right-1" : "-left-1"} top-0 bottom-0 z-20 w-2 cursor-col-resize outline-none`}
+      className={`group absolute z-20 outline-none ${
+        horizontal
+          ? `${edge === "bottom" ? "-bottom-1" : "-top-1"} left-0 right-0 h-2 cursor-row-resize`
+          : `${edge === "right" ? "-right-1" : "-left-1"} top-0 bottom-0 w-2 cursor-col-resize`
+      }`}
       onPointerDown={(e) => {
         if (e.button !== 0) return;
         e.preventDefault();
-        const startX = e.clientX;
+        const start = e[axisKey];
         const startW = width;
         const el = e.currentTarget;
         el.setPointerCapture(e.pointerId);
         setDragging(true);
-        document.body.style.cursor = "col-resize";
+        document.body.style.cursor = horizontal ? "row-resize" : "col-resize";
         document.body.style.userSelect = "none";
         let last = startW;
         const move = (ev: PointerEvent) => {
-          last = clampWidth(startW + dir * (ev.clientX - startX), min, max);
+          last = clampWidth(startW + dir * (ev[axisKey] - start), min, max);
           onChange(last, false);
         };
         const up = () => {
@@ -85,17 +96,19 @@ export function ResizeHandle({
         el.addEventListener("pointerup", up);
         el.addEventListener("pointercancel", up);
       }}
-      onDoubleClick={() => onChange(initial, true)}
+      onDoubleClick={() => (onReset ? onReset() : onChange(initial, true))}
       onKeyDown={(e) => {
         const step = e.shiftKey ? 48 : 16;
-        if (e.key === "ArrowLeft") onChange(clampWidth(width - dir * step, min, max), true);
-        else if (e.key === "ArrowRight") onChange(clampWidth(width + dir * step, min, max), true);
+        if (e.key === shrinkKey) onChange(clampWidth(width - dir * step, min, max), true);
+        else if (e.key === growKey) onChange(clampWidth(width + dir * step, min, max), true);
         else return;
         e.preventDefault();
       }}
     >
       <div
-        className={`mx-auto h-full w-0.5 transition-colors ${
+        className={`${
+          horizontal ? "my-auto h-0.5 w-full" : "mx-auto h-full w-0.5"
+        } transition-colors ${
           dragging ? "bg-accent" : "bg-transparent group-hover:bg-accent/50 group-focus-visible:bg-accent"
         }`}
       />

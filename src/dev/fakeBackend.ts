@@ -253,6 +253,71 @@ function fakeCursorPlanLimits() {
   };
 }
 
+/** Fake Antigravity plan usage (`?antigravityPlan=none|unavailable|low`). */
+function fakeAntigravityPlanLimits() {
+  const mode = new URLSearchParams(location.search).get("antigravityPlan");
+  if (mode === "none") return null;
+  const now = Math.floor(Date.now() / 1000);
+  if (mode === "unavailable") {
+    return {
+      accountId: "api-key",
+      email: null,
+      observedAt: now - 30,
+      buckets: [],
+      unavailable:
+        "Gemini API key auth has no Google plan quota. Sign in with a Google account in Antigravity to see plan usage.",
+    };
+  }
+  const low = mode === "low";
+  return {
+    accountId: "you@example.com",
+    email: "you@example.com",
+    observedAt: now - 90,
+    buckets: [
+      {
+        bucketId: "gemini-5h",
+        displayName: "Five Hour Limit Remaining",
+        groupName: "Gemini Models",
+        remainingFraction: low ? 0.08 : 1,
+        resetsAt: now + 4 * 3600,
+        window: "5h",
+      },
+      {
+        bucketId: "gemini-weekly",
+        displayName: "Weekly Limit Remaining",
+        groupName: "Gemini Models",
+        remainingFraction: low ? 0.22 : 0.77,
+        resetsAt: now + 3 * 86400,
+        window: "weekly",
+      },
+      {
+        bucketId: "3p-5h",
+        displayName: "Five Hour Limit Remaining",
+        groupName: "Claude and GPT models",
+        remainingFraction: 1,
+        resetsAt: now + 5 * 3600,
+        window: "5h",
+      },
+      {
+        bucketId: "3p-weekly",
+        displayName: "Weekly Limit Remaining",
+        groupName: "Claude and GPT models",
+        remainingFraction: 1,
+        resetsAt: now + 7 * 86400,
+        window: "weekly",
+      },
+      {
+        bucketId: "gemini-argon-wtu-weekly",
+        displayName: "Gemini 4 Argon Weekly Limit",
+        groupName: "Gemini 4 Argon",
+        remainingFraction: low ? 0.4 : 0.9,
+        resetsAt: now + 7 * 86400,
+        window: "weekly",
+      },
+    ],
+  };
+}
+
 /** Fake plan usage for the default account. */
 function fakePlanLimits() {
   // `?plan=none` before any report; `?plan=over` past the limit and on extra usage; `?plan=slow` a light burn.
@@ -1598,6 +1663,10 @@ export function install() {
           };
         }
         case "quick_submit": case "quick_dismiss": return null;
+        case "new_window": {
+          window.open(location.href, "_blank");
+          return null;
+        }
         // No native webview in the browser: approximate page zoom with CSS.
         case "plugin:webview|set_webview_zoom": document.documentElement.style.zoom = String(a.value); return null;
         case "plugin:notification|is_permission_granted": return true;
@@ -1708,10 +1777,15 @@ export function install() {
           return fakeCursorPlanLimits();
         case "cursor_plan_watching":
           return null;
+        case "antigravity_plan_limits":
+          return fakeAntigravityPlanLimits();
+        case "antigravity_plan_watching":
+          return null;
         case "session_plan_usage": {
           const sess = db.code.find((s) => s.id === a.id);
           if (!sess) return null;
           if (sess.agent === "cursor") return { kind: "cursor", limits: fakeCursorPlanLimits() };
+          if (sess.agent === "antigravity") return { kind: "antigravity", limits: fakeAntigravityPlanLimits() };
           if (sess.agent === "claude-code") {
             const latest = fakePlanLimits();
             return { kind: "claude", label: "Claude Code login", account: "/home/demo/.claude", latest };

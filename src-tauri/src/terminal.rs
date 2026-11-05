@@ -188,6 +188,7 @@ mod tests {
 
     #[test]
     fn a_shell_that_exited_opens_again_under_its_id() {
+        crate::test_support::raise_fd_limit();
         let terms = TerminalManager::default();
         let cwd = std::env::temp_dir();
         let cwd = cwd.to_str().unwrap();

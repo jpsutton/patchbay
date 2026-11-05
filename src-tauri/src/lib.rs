@@ -29,6 +29,8 @@ mod agent_live_tests;
 mod smoke_tests;
 #[cfg(test)]
 mod mesh_app_tests;
+#[cfg(test)]
+mod test_support;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -121,6 +123,15 @@ impl AppState {
             .and_then(|j| serde_json::from_str(&j).ok())
         {
             state.code.cursor_plan.set_resumes(r);
+        }
+        if let Some(l) = state
+            .db
+            .get_setting(ANTIGRAVITY_PLAN_KEY)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str(&j).ok())
+        {
+            state.code.antigravity_plan.record(l);
         }
         mesh.set_ui(emit);
         mesh.set_handler(Arc::new(MeshRpc { state: state.clone() }));
@@ -1181,9 +1192,23 @@ const CURSOR_PLAN_EVENT: &str = "code://cursor-plan-limits";
 const MESH_CURSOR_PLAN_EVENT: &str = "mesh://cursor-plan-limits";
 const CURSOR_PLAN_RESUME_KEY: &str = "cursor.planResume";
 
+/// Last Antigravity plan report saved for the sidebar gauge.
+const ANTIGRAVITY_PLAN_KEY: &str = "antigravity.planLimits";
+const ANTIGRAVITY_PLAN_EVENT: &str = "code://antigravity-plan-limits";
+/// A report one member fetched, shared with the others, tagged with its Google account id.
+const MESH_ANTIGRAVITY_PLAN_EVENT: &str = "mesh://antigravity-plan-limits";
+
 fn save_cursor_plan(state: &AppState) {
     if let Some(l) = state.code.cursor_plan.latest() {
         let _ = state.db.set_setting(CURSOR_PLAN_KEY, &serde_json::to_string(&l).unwrap_or_default());
+    }
+}
+
+fn save_antigravity_plan(state: &AppState) {
+    if let Some(l) = state.code.antigravity_plan.latest() {
+        let _ = state
+            .db
+            .set_setting(ANTIGRAVITY_PLAN_KEY, &serde_json::to_string(&l).unwrap_or_default());
     }
 }
 
@@ -1221,8 +1246,8 @@ async fn cursor_plan_limits(state: &AppState) -> CmdResult<Option<code::cursor_p
     Ok(state.code.cursor_plan.latest())
 }
 
-/// Claude or Cursor plan usage for one Code session (the account that session runs on), or null
-/// when the session does not consume either plan.
+/// Claude, Cursor, or Antigravity plan usage for one Code session, or null when the session does
+/// not consume any of those plans.
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum SessionPlanUsageView {
@@ -1234,6 +1259,9 @@ enum SessionPlanUsageView {
     Cursor {
         limits: Option<code::cursor_plan::CursorPlanLimits>,
     },
+    Antigravity {
+        limits: Option<code::antigravity_plan::AntigravityPlanLimits>,
+    },
 }
 
 async fn session_plan_usage(state: &AppState, id: String) -> CmdResult<Option<SessionPlanUsageView>> {
@@ -1243,6 +1271,11 @@ async fn session_plan_usage(state: &AppState, id: String) -> CmdResult<Option<Se
 pub(crate) fn session_plan_usage_local(state: &AppState, id: &str) -> Option<SessionPlanUsageView> {
     if on_cursor_session(state, id) {
         return Some(SessionPlanUsageView::Cursor { limits: state.code.cursor_plan.latest() });
+    }
+    if on_antigravity_session(state, id) {
+        return Some(SessionPlanUsageView::Antigravity {
+            limits: state.code.antigravity_plan.latest(),
+        });
     }
     let prefs = prefs::load(&state.db);
     let (account, _) = plan_account(state, &prefs, id)?;
@@ -1271,6 +1304,21 @@ async fn cursor_plan_watching(state: &AppState, open: bool) -> CmdResult<()> {
     Ok(())
 }
 
+async fn antigravity_plan_limits(
+    state: &AppState,
+) -> CmdResult<Option<code::antigravity_plan::AntigravityPlanLimits>> {
+    Ok(state.code.antigravity_plan.latest())
+}
+
+/// The Antigravity plan blade is open: poll while it is, even with no running Antigravity session.
+async fn antigravity_plan_watching(state: &AppState, open: bool) -> CmdResult<()> {
+    state.code.antigravity_plan.set_blade_open(open);
+    if open {
+        poll_antigravity_plan(state).await;
+    }
+    Ok(())
+}
+
 fn on_cursor_session(state: &AppState, id: &str) -> bool {
     state
         .db
@@ -1278,6 +1326,15 @@ fn on_cursor_session(state: &AppState, id: &str) -> bool {
         .ok()
         .flatten()
         .is_some_and(|s| code::agents::AgentKind::parse(&s.agent) == Some(code::agents::AgentKind::Cursor))
+}
+
+fn on_antigravity_session(state: &AppState, id: &str) -> bool {
+    state
+        .db
+        .get_code_session(id)
+        .ok()
+        .flatten()
+        .is_some_and(|s| code::agents::AgentKind::parse(&s.agent) == Some(code::agents::AgentKind::Antigravity))
 }
 
 fn any_running_cursor(state: &AppState) -> bool {
@@ -1288,6 +1345,88 @@ fn any_running_cursor(state: &AppState) -> bool {
         .into_iter()
         .flatten()
         .any(|s| s.agent == code::agents::AgentKind::Cursor.id() && state.code.is_running(&s.id))
+}
+
+fn any_running_antigravity(state: &AppState) -> bool {
+    state
+        .db
+        .list_code_sessions()
+        .ok()
+        .into_iter()
+        .flatten()
+        .any(|s| s.agent == code::agents::AgentKind::Antigravity.id() && state.code.is_running(&s.id))
+}
+
+/// Take an Antigravity plan report seen here, or a newer one from another member for the same account.
+fn adopt_antigravity_plan(
+    state: &AppState,
+    mut limits: code::antigravity_plan::AntigravityPlanLimits,
+    seen_here: bool,
+) {
+    if seen_here {
+        state.code.antigravity_plan.record(limits.clone());
+    } else {
+        limits.observed_at = limits.observed_at.min(code::antigravity_plan::now());
+        let local = state.code.antigravity_plan.latest().map(|l| l.account_id);
+        if local.as_deref().is_some_and(|a| a != limits.account_id) {
+            return;
+        }
+        if !state.code.antigravity_plan.adopt_mesh(limits.clone(), local.as_deref()) {
+            return;
+        }
+    }
+    save_antigravity_plan(state);
+    (state.emit)(ANTIGRAVITY_PLAN_EVENT, serde_json::to_value(&limits).unwrap_or_default());
+    if seen_here {
+        let tagged = serde_json::json!({ "accountId": limits.account_id, "limits": limits });
+        state.mesh.broadcast_event(MESH_ANTIGRAVITY_PLAN_EVENT, tagged);
+    }
+}
+
+/// Poll Antigravity quota when a session is running here or the blade is open, unless a fresh
+/// report (local or mesh) for this account already covers the window.
+async fn poll_antigravity_plan(state: &AppState) {
+    if !state.code.antigravity_plan.blade_open() && !any_running_antigravity(state) {
+        return;
+    }
+    let now = code::antigravity_plan::now();
+    if state.code.antigravity_plan.latest().is_some_and(|l| l.is_fresh(now)) {
+        return;
+    }
+    match code::antigravity_plan::auth_kind() {
+        code::antigravity_plan::AntigravityAuthKind::ApiKey => {
+            let email = None;
+            let limits = code::antigravity_plan::AntigravityPlanLimits::unavailable(
+                "api-key".into(),
+                email,
+                "Gemini API key auth has no Google plan quota. Sign in with a Google account in Antigravity to see plan usage.".into(),
+                now,
+            );
+            adopt_antigravity_plan(state, limits, true);
+            return;
+        }
+        code::antigravity_plan::AntigravityAuthKind::Missing => {
+            tracing::debug!("antigravity plan: no Antigravity auth configured");
+            return;
+        }
+        code::antigravity_plan::AntigravityAuthKind::Oauth => {}
+    }
+    let Some(auth) = code::antigravity_plan::load_auth(&state.code.antigravity_plan).await else {
+        tracing::debug!("antigravity plan: no local Google OAuth login");
+        return;
+    };
+    if state
+        .code
+        .antigravity_plan
+        .latest()
+        .is_some_and(|l| l.account_id == auth.account_id && l.is_fresh(now))
+    {
+        return;
+    }
+    match code::antigravity_plan::fetch(&auth).await {
+        Ok(limits) => adopt_antigravity_plan(state, limits, true),
+        Err(e) => tracing::debug!("antigravity plan: {e:#}"),
+    }
 }
 
 fn enforce_cursor_plan_limit(state: &AppState) {
@@ -2895,6 +3034,19 @@ impl mesh::RpcHandler for MeshRpc {
             adopt_cursor_plan(&self.state, l, false);
             return;
         }
+        if name == MESH_ANTIGRAVITY_PLAN_EVENT {
+            use code::antigravity_plan::AntigravityPlanLimits;
+            let Ok(mut l) = serde_json::from_value::<AntigravityPlanLimits>(
+                payload.get("limits").cloned().unwrap_or_else(|| payload.clone()),
+            ) else {
+                return;
+            };
+            if let Some(id) = payload["accountId"].as_str() {
+                l.account_id = id.to_owned();
+            }
+            adopt_antigravity_plan(&self.state, l, false);
+            return;
+        }
         if name != "mesh://checkpoint" {
             return;
         }
@@ -2917,6 +3069,12 @@ impl mesh::RpcHandler for MeshRpc {
         if let Some(l) = self.state.code.cursor_plan.latest() {
             out.push((
                 MESH_CURSOR_PLAN_EVENT.to_owned(),
+                serde_json::json!({ "accountId": l.account_id, "limits": l }),
+            ));
+        }
+        if let Some(l) = self.state.code.antigravity_plan.latest() {
+            out.push((
+                MESH_ANTIGRAVITY_PLAN_EVENT.to_owned(),
                 serde_json::json!({ "accountId": l.account_id, "limits": l }),
             ));
         }
@@ -3415,6 +3573,13 @@ pub fn open_locked_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow:
         loop {
             tokio::time::sleep(code::cursor_plan::TICK).await;
             poll_cursor_plan(&cursor_poller).await;
+        }
+    });
+    let antigravity_poller = state.clone();
+    api::spawn(async move {
+        loop {
+            tokio::time::sleep(code::antigravity_plan::TICK).await;
+            poll_antigravity_plan(&antigravity_poller).await;
         }
     });
     Ok(state)

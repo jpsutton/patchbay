@@ -2,6 +2,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import type { Activity } from "./activity";
 import type { UpdateInfo } from "./update";
 import type { SidebarEntry } from "./sidebarLayout";
+import { isRemoteApp } from "./platform";
 
 export type ProviderKind = "openai_chat" | "openai_responses" | "anthropic" | "gemini";
 export type AuthMode = "api_key" | "claude_login";
@@ -183,13 +184,35 @@ export interface CursorPlanLimits {
   onDemandAllowed?: boolean | null;
 }
 
+/** One Antigravity / Gemini quota bucket from `retrieveUserQuotaSummary`. */
+export interface AntigravityPlanBucket {
+  bucketId: string;
+  displayName: string;
+  groupName?: string | null;
+  /** Fraction still remaining (0–1). Used percent is `1 - remainingFraction`. */
+  remainingFraction: number;
+  resetsAt?: number | null;
+  window?: string | null;
+}
+
+/** Antigravity plan usage from the Cloud Code quota poll (see `code/antigravity_plan.rs`). */
+export interface AntigravityPlanLimits {
+  accountId: string;
+  email?: string | null;
+  observedAt: number;
+  buckets?: AntigravityPlanBucket[];
+  /** Set when OAuth quota cannot be fetched (e.g. gemini-api-key auth). */
+  unavailable?: string | null;
+}
+
 /**
- * Claude or Cursor plan usage for one Code session (`session_plan_usage`), or null when that
- * session does not run on either plan.
+ * Claude, Cursor, or Antigravity plan usage for one Code session (`session_plan_usage`), or null
+ * when that session does not run on any of those plans.
  */
 export type SessionPlanUsage =
   | { kind: "claude"; label: string; account: string; latest: PlanLimits | null }
-  | { kind: "cursor"; limits: CursorPlanLimits | null };
+  | { kind: "cursor"; limits: CursorPlanLimits | null }
+  | { kind: "antigravity"; limits: AntigravityPlanLimits | null };
 
 /** The ACP wire log's state (see `code/wire.rs`). */
 export interface WireLogStatus {
@@ -805,7 +828,7 @@ export interface ClaudeOverview {
 export interface AgentEngine {
   /** Model requests one prompt may make (default 100). */
   maxSteps: number | null;
-  /** Model requests one subagent run may make (default 40). */
+  /** Model requests one subagent run may make (default 100). */
   subagentMaxSteps: number | null;
   /** Retries of a request that fails before any output (default 2). */
   requestRetries: number | null;
@@ -1155,7 +1178,10 @@ export const api = {
   cursorPlanLimits: () => invoke<CursorPlanLimits | null>("cursor_plan_limits"),
   /** Keep the Cursor plan poller awake while the blade is open. */
   cursorPlanWatching: (open: boolean) => invoke<void>("cursor_plan_watching", { open }),
-  /** Claude or Cursor plan for this Code session; null when the session uses neither. */
+  antigravityPlanLimits: () => invoke<AntigravityPlanLimits | null>("antigravity_plan_limits"),
+  /** Keep the Antigravity plan poller awake while the blade is open. */
+  antigravityPlanWatching: (open: boolean) => invoke<void>("antigravity_plan_watching", { open }),
+  /** Claude, Cursor, or Antigravity plan for this Code session; null when none apply. */
   sessionPlanUsage: (id: string) => invoke<SessionPlanUsage | null>("session_plan_usage", { id }),
   wireLogStatus: () => invoke<WireLogStatus>("wire_log_status"),
   /** Turn the wire log on (for 30 minutes) or off. */
@@ -1214,6 +1240,9 @@ export const api = {
   termWrite: (id: string, data: string) => invoke<void>("term_write", { id, data }),
   termResize: (id: string, cols: number, rows: number) => invoke<void>("term_resize", { id, cols, rows }),
   termClose: (id: string) => invoke<void>("term_close", { id }),
+
+  /** Open an additional desktop window of the app. */
+  newWindow: () => (isRemoteApp() ? Promise.resolve() : invoke<void>("new_window").catch(() => {})),
 
   writeTextFile: (path: string, contents: string) => invoke<void>("write_text_file", { path, contents }),
   /** Native app only: whether a path from a transcript exists here (relative ones under `cwd`). */

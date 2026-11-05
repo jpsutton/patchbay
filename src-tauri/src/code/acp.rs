@@ -640,6 +640,8 @@ struct UiClient {
     tool_calls: RefCell<HashMap<String, Value>>,
     /// Which config options stand for model and mode, shared with the command loop.
     config_ids: Rc<RefCell<ConfigIds>>,
+    /// The session's config as it stands, shared with the command loop (see `apply_legacy` there).
+    config: Rc<RefCell<SessionConfig>>,
     approvals: ApprovalSetup,
     /// The command loop, to put the agent back in `approvals.select_mode`. Weak, so the loop
     /// still ends when its owner drops the sender.
@@ -679,6 +681,12 @@ struct SessionConfig {
     /// Options other than model and mode.
     extra: Value,
     ids: ConfigIds,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self::from_options(&Value::Null)
+    }
 }
 
 impl SessionConfig {
@@ -739,6 +747,19 @@ impl SessionConfig {
 
     fn ids(&self) -> ConfigIds {
         self.ids.clone()
+    }
+
+    /// Take a fresh config in. Legacy models and modes stay when the options don't cover them,
+    /// the same merge as the front end's `config` event.
+    fn absorb(&mut self, next: &SessionConfig) {
+        if !next.models.is_null() {
+            self.models = next.models.clone();
+        }
+        if !next.modes.is_null() {
+            self.modes = next.modes.clone();
+        }
+        self.extra = next.extra.clone();
+        self.ids.update(next.ids());
     }
 
     fn event(&self) -> CodeEvent {
@@ -895,6 +916,7 @@ mod tool_call_tests {
             auto_approve: Arc::new(|_, _| None),
             tool_calls: RefCell::default(),
             config_ids: Rc::default(),
+            config: Rc::default(),
             approvals: ApprovalSetup::default(),
             cmds: tx.downgrade(),
             acp_session: Rc::default(),
@@ -1148,6 +1170,7 @@ impl UiClient {
                     self.config_ids.borrow_mut().update(cfg.ids());
                     self.keep_mode(cfg.modes["currentModeId"].as_str());
                     hide_modes(&mut cfg.modes, self.approvals.hide_modes);
+                    self.config.borrow_mut().absorb(&cfg);
                     emit(&self.sink, &self.code_session_id, cfg.event());
                 }
             }
@@ -1461,6 +1484,7 @@ async fn run(
     };
 
     let config_ids: Rc<RefCell<ConfigIds>> = Rc::default();
+    let config: Rc<RefCell<SessionConfig>> = Rc::default();
     let acp_session: Rc<RefCell<Option<String>>> = Rc::default();
     let client = UiClient {
         sink: sink.clone(),
@@ -1470,6 +1494,7 @@ async fn run(
         auto_approve,
         tool_calls: RefCell::default(),
         config_ids: config_ids.clone(),
+        config: config.clone(),
         approvals: approvals.clone(),
         cmds,
         acp_session: acp_session.clone(),
@@ -1651,6 +1676,7 @@ async fn run(
         );
     }
     emit(&sink, &csid, CodeEvent::Status { state: "ready".into(), message: None });
+    *config.borrow_mut() = cfg;
 
     let drop_questions = |questions: &PendingQuestions| {
         let mut map = questions.lock().unwrap();
@@ -1677,6 +1703,15 @@ async fn run(
         let mut cfg = SessionConfig::from_options(&options);
         config_ids.borrow_mut().update(cfg.ids());
         hide_modes(&mut cfg.modes, approvals.hide_modes);
+        config.borrow_mut().absorb(&cfg);
+        emit(&sink, &csid, cfg.event());
+    };
+    // A legacy `session/set_model` or `session/set_mode` answers with nothing. Without an
+    // event, a window attaching later (a phone, a reloaded window) replays `sessionReady`
+    // and shows the model or mode the session started with.
+    let apply_legacy = |change: &dyn Fn(&mut SessionConfig)| {
+        let mut cfg = config.borrow_mut();
+        change(&mut cfg);
         emit(&sink, &csid, cfg.event());
     };
     // A prompt was refused for want of a sign-in (`AuthRequired` sent), and whether a sign-in
@@ -1943,12 +1978,18 @@ async fn run(
                     AgentCmd::SetModel { model_id, reply } => {
                         let ids = config_ids.borrow().clone();
                         let r = set_model(&conn, &session_id, &ids, &model_id).await;
-                        let _ = reply.send(r.map(|updated| updated.map(apply_config).unwrap_or(())));
+                        let _ = reply.send(r.map(|updated| match updated {
+                            Some(options) => apply_config(options),
+                            None => apply_legacy(&|cfg| cfg.models["currentModelId"] = json!(model_id)),
+                        }));
                     }
                     AgentCmd::SetMode { mode_id, reply } => {
                         let ids = config_ids.borrow().clone();
                         let r = set_mode(&conn, &session_id, &ids, &mode_id).await;
-                        let _ = reply.send(r.map(|updated| updated.map(apply_config).unwrap_or(())));
+                        let _ = reply.send(r.map(|updated| match updated {
+                            Some(options) => apply_config(options),
+                            None => apply_legacy(&|cfg| cfg.modes["currentModeId"] = json!(mode_id)),
+                        }));
                     }
                     AgentCmd::SetConfigOption { config_id, value, reply } => {
                         let r = set_config_option(&conn, &session_id, &config_id, &value)
@@ -2739,6 +2780,7 @@ if "--login" in sys.argv:
     open("signed-in", "w").close()
     sys.exit(0)
 no_methods = "--no-methods" in sys.argv
+legacy = "--legacy-config" in sys.argv
 authed = no_methods or os.path.exists("signed-in")
 lock = threading.Lock()
 held = None
@@ -2793,9 +2835,15 @@ for line in sys.stdin:
             err(i, "Authentication required", "bad key")
     elif meth == "session/new":
         if authed:
-            send({"jsonrpc": "2.0", "id": i, "result": {"sessionId": "s1"}})
+            r = {"sessionId": "s1"}
+            if legacy:
+                r["models"] = {"currentModelId": "m1", "availableModels": [{"modelId": "m1", "name": "M1"}, {"modelId": "m2", "name": "M2"}]}
+                r["modes"] = {"currentModeId": "ask", "availableModes": [{"id": "ask", "name": "Ask"}, {"id": "go", "name": "Go"}]}
+            send({"jsonrpc": "2.0", "id": i, "result": r})
         else:
             err(i, "Authentication required")
+    elif meth in ("session/set_model", "session/set_mode") and legacy:
+        send({"jsonrpc": "2.0", "id": i, "result": {}})
     elif meth == "session/prompt":
         t = text_of(p)
         if held is not None:
@@ -3039,6 +3087,44 @@ for line in sys.stdin:
         // The agent's text for the turn may land after its end: notifications run as tasks.
         let last_done = events.lock().unwrap().iter().rev().find(|e| prompt_done(e)).cloned();
         assert!(matches!(last_done, Some(CodeEvent::PromptDone { stop_reason }) if stop_reason == "end_turn"));
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An agent on the older `session/set_model` / `set_mode` answers with nothing, so Patchbay
+    /// announces the change itself: a window attaching later replays the last config.
+    #[test]
+    fn a_legacy_model_or_mode_change_is_announced() {
+        let dir = std::env::temp_dir().join(format!("pb-legacy-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods", "--legacy-config"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        wait_for(&events, "sessionReady", |evs| evs.iter().any(|e| matches!(e, CodeEvent::SessionReady { .. })));
+        let configs = |evs: &[CodeEvent]| evs.iter().filter(|e| matches!(e, CodeEvent::Config { .. })).count();
+        assert_eq!(configs(&events.lock().unwrap()), 0);
+
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        tx.send(AgentCmd::SetModel { model_id: "m2".into(), reply }).unwrap();
+        rx.blocking_recv().unwrap().unwrap();
+        wait_for(&events, "config", |evs| configs(evs) == 1);
+
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        tx.send(AgentCmd::SetMode { mode_id: "go".into(), reply }).unwrap();
+        rx.blocking_recv().unwrap().unwrap();
+        wait_for(&events, "config", |evs| configs(evs) == 2);
+
+        let evs = events.lock().unwrap();
+        let last = evs.iter().rev().find(|e| matches!(e, CodeEvent::Config { .. })).unwrap();
+        let CodeEvent::Config { models, modes, config_options } = last else { unreachable!() };
+        // The model change is kept across the mode change, and the lists stay whole.
+        assert_eq!(models["currentModelId"], "m2");
+        assert_eq!(models["availableModels"].as_array().map(Vec::len), Some(2));
+        assert_eq!(modes["currentModeId"], "go");
+        assert_eq!(modes["availableModes"].as_array().map(Vec::len), Some(2));
+        assert_eq!(config_options, &json!([]));
+        drop(evs);
         tx.send(AgentCmd::Shutdown).unwrap();
         thread.join().unwrap();
         let _ = std::fs::remove_dir_all(dir);

@@ -552,7 +552,8 @@ mod tests {
     async fn app_runs_commands_on_the_daemon() {
         use std::sync::{Arc, Mutex};
 
-        let dir = std::env::temp_dir().join(format!("pb-ipc-{}", crate::db::new_id()));
+        crate::test_support::raise_fd_limit();
+        let dir = crate::test_support::short_dir("ipc");
         let events: server::Events = tokio::sync::broadcast::channel(64).0;
         let state = crate::open_state(dir.clone(), server::ui_sink(events.clone())).unwrap();
         server::start(state.clone(), events.clone(), &dir).unwrap();
@@ -634,7 +635,8 @@ mod tests {
         use std::sync::{Arc, Mutex};
         use tokio::io::{AsyncBufReadExt, BufReader};
 
-        let dir = std::env::temp_dir().join(format!("pb-ipc-chan-{}", crate::db::new_id()));
+        crate::test_support::raise_fd_limit();
+        let dir = crate::test_support::short_dir("chan");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(TOKEN_FILE), "secret").unwrap();
         let listener = tokio::net::UnixListener::bind(socket_path(&dir)).unwrap();
