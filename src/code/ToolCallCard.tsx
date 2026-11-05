@@ -206,7 +206,8 @@ export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withI
   const diffs = content.filter((c): c is Extract<AcpToolCallContent, { type: "diff" }> => c.type === "diff");
   const starts = hunkStarts(diffs, tc.locations);
   const terminals = content.filter((c): c is Extract<AcpToolCallContent, { type: "terminal" }> => c.type === "terminal");
-  const texts = content.map(textOfContent).filter((t): t is string => !!t);
+  // A command's output can arrive on the terminal channel and again as text content: show it once.
+  const texts = tc.terminalOutput ? [] : content.map(textOfContent).filter((t): t is string => !!t);
   // Patchbay doesn't host ACP terminals, so their output only reaches us as raw tool output.
   // A tool that returned an image has it in rawOutput too, as base64: never show that as text.
   const output = texts.length === 0 && diffs.length === 0 && images.length === 0 && !tc.terminalOutput ? rawOutputText(tc.rawOutput) : null;
