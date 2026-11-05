@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, type Attachment } from "../lib/ipc";
 import { XIcon } from "./icons";
@@ -51,15 +51,32 @@ function useImageUrl(data: string, mimeType: string): string | null {
 
 
 const loaded = new Map<string, Promise<string>>();
+/** What `loaded` settled to, so a row mounting again shows the picture from its first render. */
+const resolved = new Map<string, string>();
+
+const sessionImageKey = (sessionId: string, src: string) => `${sessionId}\u0000${src}`;
 
 function loadSessionImage(sessionId: string, src: string): Promise<string> {
-  const key = `${sessionId}\u0000${src}`;
+  const key = sessionImageKey(sessionId, src);
   const hit = loaded.get(key);
   if (hit) return hit;
   const pending = api.codeSessionImage(sessionId, src);
   loaded.set(key, pending);
-  pending.catch(() => loaded.delete(key));
+  pending.then((url) => resolved.set(key, url), () => loaded.delete(key));
   return pending;
+}
+
+/**
+ * Sizes of images shown before, as natural width and height, by a cheap key for the image's data.
+ * A transcript row with an image unmounts when scrolled away; this lets it come back at the height
+ * it was measured at, instead of at nothing until the image decodes.
+ */
+const imageSizes = new Map<string, { w: number; h: number }>();
+const imageSizeKey = (data: string, mimeType: string) => `${mimeType};${data.length};${data.slice(0, 48)};${data.slice(-48)}`;
+
+/** The CSS that gives an image's box the shape of the one shown before, or none if unseen. */
+function reservedStyle(size: { w: number; h: number } | undefined): CSSProperties | undefined {
+  return size ? { width: size.w, aspectRatio: `${size.w} / ${size.h}` } : undefined;
 }
 
 /**
@@ -67,12 +84,12 @@ function loadSessionImage(sessionId: string, src: string): Promise<string> {
  * that path, so the computer sends the bytes. One fetch per path, even while the reply is still growing.
  */
 export function SessionImage({ sessionId, src, alt }: { sessionId: string; src: string; alt?: string }) {
-  const [url, setUrl] = useState<string | null>(null);
+  const [url, setUrl] = useState<string | null>(() => resolved.get(sessionImageKey(sessionId, src)) ?? null);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
     let live = true;
     setFailed(false);
-    setUrl(null);
+    setUrl(resolved.get(sessionImageKey(sessionId, src)) ?? null);
     loadSessionImage(sessionId, src).then(
       (dataUrl) => {
         if (live) setUrl(dataUrl);
@@ -106,7 +123,17 @@ export function SessionImage({ sessionId, src, alt }: { sessionId: string; src: 
 export function AgentImage({ data, mimeType, alt }: { data: string; mimeType: string; alt?: string }) {
   const [open, setOpen] = useState(false);
   const src = useImageUrl(data, mimeType);
-  if (!src) return null;
+  const sizeKey = imageSizeKey(data, mimeType);
+  // The size from an earlier mount, held for the box until this one's image has loaded.
+  const [seen] = useState(() => imageSizes.get(sizeKey));
+  const [loadedNow, setLoadedNow] = useState(false);
+  const reserve = loadedNow ? undefined : reservedStyle(seen);
+  if (!src) {
+    // The object URL is made in an effect, one render late: hold the place meanwhile.
+    return seen ? (
+      <div className="block max-h-[28rem] max-w-full rounded-lg border border-line bg-bg" style={reservedStyle(seen)} />
+    ) : null;
+  }
   return (
     <>
       <button
@@ -114,11 +141,21 @@ export function AgentImage({ data, mimeType, alt }: { data: string; mimeType: st
         onClick={() => setOpen(true)}
         aria-label={alt ? `Open ${alt}` : "Open image"}
       >
+        {/* Not lazy: the transcript mounts a row only near the viewport, and a lazy image has no
+            height until it loads, which would move everything below it. */}
         <img
           src={src}
           alt={alt ?? ""}
-          loading="lazy"
           decoding="async"
+          style={reserve}
+          onLoad={(e) => {
+            const { naturalWidth: w, naturalHeight: h } = e.currentTarget;
+            if (w > 0 && h > 0) {
+              if (imageSizes.size > 500) imageSizes.clear();
+              imageSizes.set(sizeKey, { w, h });
+            }
+            setLoadedNow(true);
+          }}
           className="block max-h-[28rem] max-w-full object-contain"
         />
       </button>

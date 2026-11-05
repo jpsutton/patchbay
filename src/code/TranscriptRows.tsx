@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { RowKeyContext } from "../lib/rowMemory";
 
 /** One row of a transcript: an entry, a group of tool calls, or a note between parts. */
 export type TranscriptRow = {
@@ -38,6 +39,16 @@ export function TranscriptRows({ rows, scroller }: { rows: TranscriptRow[]; scro
     overscan: 6,
     scrollMargin: margin,
   });
+  // The library's default skips a row that was measured before while the user scrolls up. Rows
+  // grow and shrink after they mount (highlighting, images, a row coming back from unmount), so
+  // every such change above the viewport then shoved what the reader was looking at. Keep the
+  // viewport still for any row that lies wholly above it, whichever way the user scrolls.
+  v.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
+    const top = instance.scrollOffset ?? 0;
+    // First measure, in place of the estimate: the row's top being above the viewport is enough.
+    if (!instance.itemSizeCache.has(item.key)) return item.start < top;
+    return item.end <= top;
+  };
   return (
     <div ref={list} className="relative w-full" style={{ height: v.getTotalSize() }}>
       {v.getVirtualItems().map((item) => {
@@ -50,7 +61,7 @@ export function TranscriptRows({ rows, scroller }: { rows: TranscriptRow[]; scro
             className={`absolute left-0 top-0 w-full ${row.dim ? "opacity-70" : ""}`}
             style={{ transform: `translateY(${item.start - margin}px)` }}
           >
-            {row.render()}
+            <RowKeyContext.Provider value={row.key}>{row.render()}</RowKeyContext.Provider>
           </div>
         );
       })}

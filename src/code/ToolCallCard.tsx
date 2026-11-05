@@ -3,6 +3,7 @@ import type { AcpPermissionRequest, AcpToolCall, AcpToolCallContent } from "../l
 import { api, errorText } from "../lib/ipc";
 import { mergeToolCall, useStore } from "../lib/store";
 import { usePaneSession } from "../lib/pane";
+import { useRememberedOpen } from "../lib/rowMemory";
 import { DiffView, diffStats } from "./DiffView";
 import { hunkStarts } from "./hunkStarts";
 import { toolDescription } from "./toolLabel";
@@ -260,8 +261,9 @@ export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withI
  */
 export function ToolCallCard({ tc, autoApproved }: { tc: AcpToolCall; autoApproved?: string }) {
   const hasDiff = (tc.content ?? []).some((c) => c.type === "diff");
-  const [open, setOpen] = useState(hasDiff);
-  const userToggled = useRef(false);
+  // Kept across the row unmounting out of the virtualized transcript, so it comes back as it was.
+  const [open, setOpen, restored] = useRememberedOpen(tc.toolCallId, hasDiff);
+  const userToggled = useRef(restored);
   useEffect(() => {
     if (hasDiff && !userToggled.current) setOpen(true);
   }, [hasDiff]);
