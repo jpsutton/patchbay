@@ -1663,6 +1663,10 @@ export function install() {
           };
         }
         case "quick_submit": case "quick_dismiss": return null;
+        case "new_window": {
+          window.open(location.href, "_blank");
+          return null;
+        }
         // No native webview in the browser: approximate page zoom with CSS.
         case "plugin:webview|set_webview_zoom": document.documentElement.style.zoom = String(a.value); return null;
         case "plugin:notification|is_permission_granted": return true;

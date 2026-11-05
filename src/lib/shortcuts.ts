@@ -92,6 +92,7 @@ export function focusSidebarSearch() {
 
 export const SHORTCUTS: { keys: string; label: string }[] = [
   { keys: "Mod+N", label: "New chat (Code: new session in this folder)" },
+  { keys: "Mod+Shift+N", label: "New window" },
   { keys: "Mod+K", label: "Search everything and run commands" },
   { keys: "Mod+Shift+F", label: "Filter the sidebar" },
   { keys: "Mod+B", label: "Show or hide the sidebar" },

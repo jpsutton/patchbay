@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   api,
   errorText,
@@ -452,6 +453,9 @@ interface Store {
   /** Move focus to the next or previous pane. */
   cyclePane: (delta: 1 | -1) => void;
   swapPanes: () => void;
+  insertPaneAt: (id: string, atIndex: number) => void;
+  replacePaneAt: (id: string, atIndex: number) => void;
+  movePane: (fromIdx: number, toIdx: number) => void;
   resetCode: (id: string) => void;
   pushCodeEntry: (id: string, e: Entry) => void;
   setCodeBusy: (id: string, busy: boolean) => void;
@@ -964,7 +968,25 @@ let codeSessionsSeq = 0;
 /** Same for the sidebar layout. */
 let sidebarLayoutSeq = 0;
 
-const PANES_KEY = "patchbay.panes";
+const WINDOW_LABEL: string = (() => {
+  try {
+    return getCurrentWindow().label ?? "main";
+  } catch {
+    return "main";
+  }
+})();
+const IS_MAIN_WINDOW = WINDOW_LABEL === "main";
+const PANES_KEY = IS_MAIN_WINDOW ? "patchbay.panes" : `patchbay.panes.${WINDOW_LABEL}`;
+
+// If this is a non-main window, clean up any leftover localStorage keys from previous launches
+if (!IS_MAIN_WINDOW) {
+  try {
+    localStorage.removeItem(PANES_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
 /** The saved panes are read once, when the first session list shows which sessions still exist. */
 let panesRestored = false;
 
@@ -985,6 +1007,7 @@ function syncPanes(list: CodeSession[]) {
   const live = new Set(list.filter((s) => s.archivedAt == null).map((s) => s.id));
   if (!panesRestored) {
     panesRestored = true;
+    if (!IS_MAIN_WINDOW) return; // Non-main windows always start clean without inherited split panes
     const panes = paneLogic.restorePanes(loadStringList(PANES_KEY), live);
     if (panes.length === 0) return;
     const cur = useStore.getState().activeCodeSessionId;
@@ -1235,6 +1258,9 @@ export const useStore = create<Store>((set, get) => ({
   closePane: (id) => applyPanes(paneLogic.closePane(paneState(), id)),
   cyclePane: (delta) => applyPanes(paneLogic.cyclePane(paneState(), delta)),
   swapPanes: () => applyPanes(paneLogic.swapPanes(paneState())),
+  insertPaneAt: (id, atIndex) => applyPanes(paneLogic.insertPaneAt(paneState(), id, atIndex)),
+  replacePaneAt: (id, atIndex) => applyPanes(paneLogic.replacePaneAt(paneState(), id, atIndex)),
+  movePane: (fromIdx, toIdx) => applyPanes(paneLogic.movePane(paneState(), fromIdx, toIdx)),
 
   resetCode: (id) => {
     flushCodeEvents(id);

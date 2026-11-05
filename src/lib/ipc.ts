@@ -2,6 +2,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import type { Activity } from "./activity";
 import type { UpdateInfo } from "./update";
 import type { SidebarEntry } from "./sidebarLayout";
+import { isRemoteApp } from "./platform";
 
 export type ProviderKind = "openai_chat" | "openai_responses" | "anthropic" | "gemini";
 export type AuthMode = "api_key" | "claude_login";
@@ -1239,6 +1240,9 @@ export const api = {
   termWrite: (id: string, data: string) => invoke<void>("term_write", { id, data }),
   termResize: (id: string, cols: number, rows: number) => invoke<void>("term_resize", { id, cols, rows }),
   termClose: (id: string) => invoke<void>("term_close", { id }),
+
+  /** Open an additional desktop window of the app. */
+  newWindow: () => (isRemoteApp() ? Promise.resolve() : invoke<void>("new_window").catch(() => {})),
 
   writeTextFile: (path: string, contents: string) => invoke<void>("write_text_file", { path, contents }),
   /** Native app only: whether a path from a transcript exists here (relative ones under `cwd`). */
