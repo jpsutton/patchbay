@@ -33,6 +33,7 @@ import { Markdown } from "../components/Markdown";
 import { FileLinkContext } from "../components/FileLink";
 import { EditMessage } from "../components/EditMessage";
 import { UsageBar } from "../components/UsageBar";
+import { MobilePlanUsage } from "../components/MobilePlanUsage";
 import { TerminalPane } from "../terminal/TerminalPane";
 import { QuestionCard } from "./QuestionCard";
 import { PermissionCard, PlanDocCard, planDocOf, StopButton, ToolCallCard, ToolGroup } from "./ToolCallCard";
@@ -1968,6 +1969,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
               cache={s?.usage?.cache ?? null}
               onConfigureWindow={() => useStore.getState().setSettingsOpen(true)}
             />
+            <MobilePlanUsage sessionId={session.id} />
           </div>
         </div>
         {blade && !remote && sideBySideBlade && (
