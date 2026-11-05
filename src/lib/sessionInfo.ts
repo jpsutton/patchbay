@@ -236,7 +236,7 @@ function fmtSpan(secs: number): string {
 function windowRow(label: string, w: PlanWindow | null | undefined, now: number): InfoRow | null {
   if (w == null) return null;
   if (w.resetsAt <= now) return { label, value: "reset since last report" };
-  return { label, value: `${Math.round(w.utilization * 100)}% · resets in ${fmtSpan(w.resetsAt - now)}` };
+  return { label, value: `${Math.round(w.utilization * 100)}% used · resets in ${fmtSpan(w.resetsAt - now)}` };
 }
 
 function fmtUsdCents(cents: number): string {
@@ -273,7 +273,7 @@ function cursorPlanRows(limits: CursorPlanLimits | null, now: number): InfoRow[]
     if (n == null || !live) return;
     rows.push({
       label,
-      value: limits.resetsAt != null && limits.resetsAt > now ? `${Math.round(n)}% · resets in ${fmtSpan(limits.resetsAt - now)}` : `${Math.round(n)}%`,
+      value: limits.resetsAt != null && limits.resetsAt > now ? `${Math.round(n)}% used · resets in ${fmtSpan(limits.resetsAt - now)}` : `${Math.round(n)}% used`,
     });
   };
   if (limits.includedSpendCents != null && limits.limitCents != null && limits.limitCents > 0 && live) {

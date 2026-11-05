@@ -121,7 +121,7 @@ export function AntigravityPlanUsageButton() {
       )}
       {unavailable && <span className="meta text-muted">n/a</span>}
       {!unavailable && pct != null && rows.length === 0 && (
-        <span className={`meta ${t === "danger" ? "text-danger" : t === "warn" ? "text-warn" : ""}`}>{pct}%</span>
+        <span className={`meta ${t === "danger" ? "text-danger" : t === "warn" ? "text-warn" : ""}`}>{pct}% used</span>
       )}
     </button>
   );

@@ -143,8 +143,8 @@ const base: SessionInfoInput = { session, agentLabel: "Claude Code", hostName: n
     "Plan",
   );
   assert(plan["Account"].value === "Claude Code login", "claude account label");
-  assert(plan["5-hour"].value === "42% · resets in 1h 0m", "5-hour window");
-  assert(plan["Weekly"].value.startsWith("11% · resets in 3d"), "weekly window");
+  assert(plan["5-hour"].value === "42% used · resets in 1h 0m", "5-hour window");
+  assert(plan["Weekly"].value.startsWith("11% used · resets in 3d"), "weekly window");
   assert(plan["Updated"].value === "2m ago", "observed age");
 }
 
@@ -173,8 +173,8 @@ const base: SessionInfoInput = { session, agentLabel: "Claude Code", hostName: n
     "Plan",
   );
   assert(plan["Account"].value === "you@example.com", "cursor email");
-  assert(plan["Auto"].value.startsWith("33%"), "cursor auto pool");
-  assert(plan["API"].value.startsWith("8%"), "cursor api pool");
+  assert(plan["Auto"].value.startsWith("33% used"), "cursor auto pool");
+  assert(plan["API"].value.startsWith("8% used"), "cursor api pool");
   assert(plan["Free on us"].value.includes("still available"), "cursor bonus");
 }
 

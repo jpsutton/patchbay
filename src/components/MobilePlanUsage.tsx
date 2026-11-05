@@ -70,7 +70,7 @@ export function MobilePlanUsage({ sessionId }: { sessionId: string }) {
       <button
         type="button"
         className="meta mt-1 flex h-5 w-full items-center gap-2 rounded-md px-1.5 text-left text-faint active:bg-panel-2"
-        aria-label={`${title}, tap for details`}
+        aria-label={`${title}: ${summary}, tap for details`}
         onClick={() => setSheetOpen(true)}
       >
         <span className="shrink-0 text-muted">{title}</span>
