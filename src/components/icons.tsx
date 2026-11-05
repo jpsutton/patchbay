@@ -513,6 +513,18 @@ export const SpeakerIcon = icon(
   </>,
 );
 
+/** Sound radiating from a live source: the active "stream each reply aloud" state. A distinct
+ * glyph from the idle SpeakerIcon, so "on" reads at a glance even without the accent tint. */
+export const BroadcastIcon = icon(
+  <>
+    <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
+    <path d="M7.76 7.76a6 6 0 0 0 0 8.48" />
+    <path d="M16.24 7.76a6 6 0 0 1 0 8.48" />
+    <path d="M4.93 4.93a10 10 0 0 0 0 14.14" />
+    <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+  </>,
+);
+
 export const StopIcon = icon(<rect x="6" y="6" width="12" height="12" rx="1" fill="currentColor" stroke="none" />);
 
 export const CloudIcon = icon(<path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />);

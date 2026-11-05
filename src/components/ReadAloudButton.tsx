@@ -1,5 +1,5 @@
 import { useContext, useEffect, useSyncExternalStore } from "react";
-import { SpeakerIcon, StopIcon } from "./icons";
+import { BroadcastIcon, SpeakerIcon, StopIcon } from "./icons";
 import { primeAudio, speakText, speakingNow, stopSpeech, subscribeSpeaking } from "../lib/speech";
 import { ViewActive } from "../lib/shortcuts";
 import { useStore } from "../lib/store";
@@ -44,18 +44,20 @@ export function ListenButton() {
   const on = useStore((s) => s.prefs.readAloudListen);
   const update = useStore((s) => s.updatePrefs);
   const setToast = useStore((s) => s.setToast);
+  const label = on ? "Stop reading each reply aloud" : "Read each new reply aloud";
   return (
     <button
       type="button"
-      className={`rounded-md px-2 py-1 text-xs ${on ? "bg-accent/15 text-fg" : "text-muted hover:text-fg"}`}
+      className={`flex h-7 w-7 items-center justify-center rounded-md ${on ? "bg-accent/15 text-fg" : "text-muted hover:bg-panel-2 hover:text-fg"}`}
       aria-pressed={on}
-      title="Read each new reply in this window aloud"
+      aria-label={label}
+      title={label}
       onClick={() => {
         primeAudio();
         void update({ readAloudListen: !on }).then((err) => err && setToast(err));
       }}
     >
-      {on ? "Listening" : "Listen"}
+      {on ? <BroadcastIcon size={14} /> : <SpeakerIcon size={14} />}
     </button>
   );
 }
