@@ -63,6 +63,7 @@ const LOCK_KEY = "patchbay.remote.lock";
 const STAY_KEY = "patchbay.remote.stayConnected";
 const TAB_KEY = "patchbay.remote.tab";
 const GROUP_KEY = "patchbay.remote.groupCodeByProject";
+const ONLINE_ONLY_KEY = "patchbay.remote.codeOnlineHostsOnly";
 /** Lock again after the app has been out of sight this long. */
 const RELOCK_MS = 5 * 60_000;
 
@@ -263,6 +264,7 @@ function Main({
   const activeCodeId = useStore((s) => s.activeCodeSessionId);
   const panes = useStore((s) => s.panes);
   const [groupProjects, setGroupProjects] = useState(() => flag(GROUP_KEY, false));
+  const [onlineHostsOnly, setOnlineHostsOnly] = useState(() => flag(ONLINE_ONLY_KEY, false));
   /** Set while the new-session sheet is open. `cwd` prefills the folder. */
   const [newSession, setNewSession] = useState<{ host?: string; cwd?: string } | null>(null);
   const toast = useStore((s) => s.toast);
@@ -499,6 +501,7 @@ function Main({
           onNewIn={(host, cwd) => setNewSession({ host, cwd })}
           onSettings={() => setSettings(true)}
           groupProjects={groupProjects}
+          onlineHostsOnly={onlineHostsOnly}
         />
       )}
       {view.kind !== "home" && status.phase !== "online" && <ConnectionBar status={status} />}
@@ -509,6 +512,11 @@ function Main({
           onGroupProjects={(on) => {
             setGroupProjects(on);
             setFlag(GROUP_KEY, on);
+          }}
+          onlineHostsOnly={onlineHostsOnly}
+          onOnlineHostsOnly={(on) => {
+            setOnlineHostsOnly(on);
+            setFlag(ONLINE_ONLY_KEY, on);
           }}
           onClose={() => setSettings(false)}
         />
@@ -528,6 +536,7 @@ function Main({
               <CodeSessionList
                 live={live}
                 groupByProject={groupProjects}
+                onlineOnly={onlineHostsOnly}
                 activeId={activeCodeId}
                 onOpen={openSessions}
                 onNewIn={(host, cwd) => {
@@ -597,6 +606,7 @@ function Home({
   setTab,
   live,
   groupProjects,
+  onlineHostsOnly,
   onOpenChat,
   onOpenCode,
   onNewSession,
@@ -608,6 +618,7 @@ function Home({
   setTab: (t: "chats" | "code") => void;
   live: Record<string, Live>;
   groupProjects: boolean;
+  onlineHostsOnly: boolean;
   onOpenChat: (id: string | null) => void;
   onOpenCode: (id: string) => void;
   onNewSession: () => void;
@@ -729,6 +740,7 @@ function Home({
           <CodeSessionList
             live={live}
             groupByProject={groupProjects}
+            onlineOnly={onlineHostsOnly}
             onOpen={onOpenCode}
             onNewIn={onNewIn}
           />
@@ -849,11 +861,15 @@ function SettingsSheet({
   status,
   groupProjects,
   onGroupProjects,
+  onlineHostsOnly,
+  onOnlineHostsOnly,
   onClose,
 }: {
   status: RemoteStatus;
   groupProjects: boolean;
   onGroupProjects: (on: boolean) => void;
+  onlineHostsOnly: boolean;
+  onOnlineHostsOnly: (on: boolean) => void;
   onClose: () => void;
 }) {
   const [lock, setLock] = useState(() => flag(LOCK_KEY, false));
@@ -900,9 +916,15 @@ function SettingsSheet({
           />
           <Toggle
             label="Group code sessions by project"
-            sub="Under each folder, in the groups and order set on your computers."
+            sub="Under each computer, nest sessions in their project folders. Tap a computer or folder to collapse it."
             on={groupProjects}
             onChange={onGroupProjects}
+          />
+          <Toggle
+            label="Online computers only"
+            sub="Hide code sessions whose computer is offline"
+            on={onlineHostsOnly}
+            onChange={onOnlineHostsOnly}
           />
         </div>
         <div className="mt-6 font-mono text-[11px] uppercase tracking-[0.06em] text-faint">Reading</div>
