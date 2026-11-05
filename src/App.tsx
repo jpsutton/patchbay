@@ -570,10 +570,26 @@ function SidebarList() {
     <div className="relative min-h-0 min-w-0 flex-1">
       <ScrollFade show={!atTop} />
       <div
-        className={`flex h-full min-w-0 flex-col gap-0.5 overflow-x-hidden overflow-y-auto pb-2 ${atTop ? "" : "fade-top"}`}
-        onScroll={(e) => setAtTop(e.currentTarget.scrollTop < 1)}
+        className={`flex h-full min-w-0 flex-col overflow-x-hidden overflow-y-auto pb-2 ${atTop ? "" : "fade-top"}`}
+        onScroll={(e) => {
+          // `overflow-x: hidden` still leaves the scroller scrollable horizontally: a wheel/trackpad
+          // swipe, a focused child, or a programmatic scroll can set scrollLeft and shift the whole
+          // list until some relayout (e.g. resizing the pane) clamps it back. Keep it pinned left.
+          if (e.currentTarget.scrollLeft !== 0) e.currentTarget.scrollLeft = 0;
+          setAtTop(e.currentTarget.scrollTop < 1);
+        }}
       >
-        {mode === "chat" ? <ChatList /> : <CodeSidebar />}
+        {/*
+         * Clip one level *inside* the vertical scroller. A child wider than the pane (a long title,
+         * a mono `where` path, a chip row) makes `overflow-x: hidden` extend the scroller's
+         * scrollWidth, which is exactly what lets scrollLeft become non-zero. Clipping here keeps
+         * that overflow out of the scroller's scrollable area, so scrollWidth always equals
+         * clientWidth and no horizontal offset can appear at any pane width. `clip` (not `hidden`)
+         * creates no scroll container and doesn't capture the sticky "N selected" header.
+         */}
+        <div className="flex min-w-0 flex-col gap-0.5 overflow-x-clip">
+          {mode === "chat" ? <ChatList /> : <CodeSidebar />}
+        </div>
       </div>
     </div>
   );
