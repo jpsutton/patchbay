@@ -73,7 +73,7 @@ pub const DEFAULT_MAX_STEPS: usize = 100;
 
 impl Default for Limits {
     fn default() -> Self {
-        Limits { max_steps: None, subagent_max_steps: 40, shell_timeout_ms: 120_000 }
+        Limits { max_steps: None, subagent_max_steps: 100, shell_timeout_ms: 120_000 }
     }
 }
 
