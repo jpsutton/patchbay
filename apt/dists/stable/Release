@@ -1,0 +1,23 @@
+Architectures: arm64
+Codename: stable
+Components: main
+Date: Thu, 05 Nov 2026 19:04:33 +0000
+Label: Patchbay
+Origin: Patchbay
+Suite: stable
+MD5Sum:
+ f61ee18d584016218825d24aa4a3c64b             4461 main/binary-arm64/Packages
+ fcc3a02466dfdc4e4398051498d15dcb             1643 main/binary-arm64/Packages.gz
+ 94b9fee4c1a8b6dafe5f0ee990e9fd2a             1628 main/binary-arm64/Packages.xz
+SHA1:
+ 1f2b7f51a6db8a58dc3f1ab353390507e07fbfaa             4461 main/binary-arm64/Packages
+ dba5c9e112cf3b666991a2ee9ea537b9ca6f4aa6             1643 main/binary-arm64/Packages.gz
+ 2d2ba31a9059a9b6c4f97e7601b73fea1e38c76e             1628 main/binary-arm64/Packages.xz
+SHA256:
+ f5eea62c010f751c8f45e2ee7b585a9b49b7fd3e0e54cfe3a8c5609dd36bb406             4461 main/binary-arm64/Packages
+ 0df3e516708724eaa8216ef950bb6ff4dd72e35ff556450c60307d84006230ff             1643 main/binary-arm64/Packages.gz
+ 716b834bf12fb4b7a08cd7a759979e65aa6ef363d1b5c2622b2660b47893402c             1628 main/binary-arm64/Packages.xz
+SHA512:
+ b81b370801d039e3b5eb62cf48be10f0ef75a701ab574209472437731940232fff55d84dcdac9f279fac8c2f6c2ff856e7393039066f0e3ddcb9cb4eade74a02             4461 main/binary-arm64/Packages
+ ac8bd6e106f14972678fbd86f3dcca02f5d65f42542a81a0f44a09e4cb839ee0a2ce1d5b8f80b1f0af502504acbf1bdcae0aa0b54cda7b1e8e7bded4150db8b2             1643 main/binary-arm64/Packages.gz
+ 64429575f2d417abed45483964a1e060902d5409064b5a3e006f23c24033402e1156600705276ede52ad0766e6852e13c4b896427abdfd152d88b22bda4af58e             1628 main/binary-arm64/Packages.xz
