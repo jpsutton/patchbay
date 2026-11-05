@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { AcpPermissionRequest, AcpToolCall, AcpToolCallContent } from "../lib/ipc";
 import { api, errorText } from "../lib/ipc";
 import { mergeToolCall, useStore } from "../lib/store";
@@ -253,10 +253,18 @@ export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withI
   );
 }
 
-/** One tool call as a row; consecutive rows sit together in a `ToolGroup` box. */
+/**
+ * One tool call as a row; consecutive rows sit together in a `ToolGroup` box.
+ * A row with a diff opens by default, including when the diff arrives after the row first
+ * mounts; a manual open/close is left alone after that.
+ */
 export function ToolCallCard({ tc, autoApproved }: { tc: AcpToolCall; autoApproved?: string }) {
   const hasDiff = (tc.content ?? []).some((c) => c.type === "diff");
   const [open, setOpen] = useState(hasDiff);
+  const userToggled = useRef(false);
+  useEffect(() => {
+    if (hasDiff && !userToggled.current) setOpen(true);
+  }, [hasDiff]);
   const description = toolDescription(tc);
   // Without a description from the agent, fall back to the call itself: its title and main input.
   const summary = description ? null : inputSummary(tc.rawInput);
@@ -275,7 +283,10 @@ export function ToolCallCard({ tc, autoApproved }: { tc: AcpToolCall; autoApprov
       <div className="flex items-center hover:bg-panel-2/40">
       <button
         className="flex h-[38px] min-w-0 flex-1 items-center gap-2.5 px-3 text-left text-[13px]"
-        onClick={() => setOpen(!open)}
+        onClick={() => {
+          userToggled.current = true;
+          setOpen(!open);
+        }}
         aria-expanded={open}
       >
         <span className="flex shrink-0 text-faint">
