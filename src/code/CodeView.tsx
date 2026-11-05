@@ -53,6 +53,7 @@ import { codeToJson, codeToMarkdown, saveExport, type ExportFormat } from "../li
 import { ContextMenu, type ItemAction } from "../components/ItemMenu";
 import { PaneContext, useViewAction, ViewActive } from "../lib/shortcuts";
 import { usePaneSession } from "../lib/pane";
+import { useRememberedOpen } from "../lib/rowMemory";
 import { enqueueSpeech, speakingNow, stopSpeech } from "../lib/speech";
 import { liveCursorNow, takeLiveProse, type LiveCursor } from "../lib/spokenText";
 import { HeaderButton } from "../components/HeaderButton";
@@ -367,7 +368,7 @@ function AgentPicker() {
 }
 
 function Thought({ text }: { text: string }) {
-  const [open, setOpen] = useState(() => useStore.getState().prefs.expandReasoning);
+  const [open, setOpen] = useRememberedOpen("thought", useStore.getState().prefs.expandReasoning);
   return (
     <div className="text-xs">
       <button
@@ -389,7 +390,7 @@ function Thought({ text }: { text: string }) {
 
 /** A message the agent's harness wrote as the user: dimmed and collapsed, named by its elements. */
 function HarnessEntry({ text }: { text: string }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useRememberedOpen("harness", false);
   const tags = useMemo(() => harnessTags(text) ?? [], [text]);
   return (
     <div className="text-xs opacity-70">
