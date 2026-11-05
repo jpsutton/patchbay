@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { errorText, type AgentId, type AgentInfo, type CodeSession, type MeshMember } from "../lib/ipc";
+import { errorText, usesPatchbayModels, type AgentId, type AgentInfo, type CodeSession, type MeshMember } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { ChevronLeftIcon, ChevronRightIcon, MonitorIcon, XIcon } from "../components/icons";
 import { Dot } from "../components/Dot";
+import { ModelOptions } from "../components/ModelOptions";
 
 /** What a computer offers for a new session (gateway.rs, `new_session_options_local`). */
 interface Options {
@@ -47,8 +48,9 @@ const searchCls =
   "h-10 w-full rounded-[10px] border border-border bg-raised px-3 text-[15px] text-fg outline-none placeholder:text-faint";
 
 /**
- * Start a Code session from the phone: pick a computer, an agent and a folder on that computer.
- * The session runs there, like one started at its own screen.
+ * Start a Code session from the phone: pick a computer, an agent, the model when the agent runs
+ * on Patchbay's, and a folder on that computer. The session runs there, like one started at its
+ * own screen.
  */
 export function NewSessionSheet({
   members,
@@ -73,6 +75,9 @@ export function NewSessionSheet({
   const [host, setHost] = useState<string | null>(initialHost ?? gateway ?? computers[0]?.nodeId ?? null);
   const [opts, setOpts] = useState<Options | null>(null);
   const [agent, setAgent] = useState<AgentId | null>(null);
+  // For agents on Patchbay's models: the default unless another is picked here.
+  const models = useStore((s) => s.models);
+  const [modelRef, setModelRef] = useState<string | null>(() => useStore.getState().defaultModelRef);
   const [folder, setFolder] = useState<string | null>(null);
   const [browse, setBrowse] = useState<Listing | null>(null);
   const [browseFilter, setBrowseFilter] = useState("");
@@ -115,12 +120,14 @@ export function NewSessionSheet({
     }
   };
 
+  const pickModel = !!agent && usesPatchbayModels(agent) && models.length > 0;
+  const ready = !!host && !!agent && !!folder && !busy && (!pickModel || !!modelRef);
   const start = async () => {
     if (!host || !agent || !folder) return;
     setBusy(true);
     try {
       const st = useStore.getState();
-      const s = await call.create(host, folder, st.defaultModelRef, agent);
+      const s = await call.create(host, folder, pickModel ? modelRef : st.defaultModelRef, agent);
       await st.refreshCodeSessions();
       // The gateway's list can lag the host that made it: show the new session either way.
       if (!useStore.getState().codeSessions.some((x) => x.id === s.id)) {
@@ -249,6 +256,22 @@ export function NewSessionSheet({
               )}
             </div>
 
+            {pickModel && (
+              <>
+                <div className={labelCls}>Model</div>
+                <div className="px-4">
+                  <select
+                    className="h-11 w-full rounded-[10px] border border-border bg-raised px-3 text-[15px] text-fg outline-none"
+                    value={modelRef ?? ""}
+                    aria-label="Model"
+                    onChange={(e) => setModelRef(e.target.value)}
+                  >
+                    <ModelOptions value={modelRef} />
+                  </select>
+                </div>
+              </>
+            )}
+
             <div className={labelCls}>Folder</div>
             {folders.length > 5 && (
               <div className="px-4 pb-1">
@@ -285,7 +308,7 @@ export function NewSessionSheet({
       <div className="border-t border-line px-4 pb-[calc(env(safe-area-inset-bottom)+12px)] pt-3">
         <button
           className="flex h-11 w-full items-center justify-center rounded-[10px] bg-accent px-4 text-[15px] font-semibold text-accent-fg active:brightness-95 disabled:opacity-50"
-          disabled={!host || !agent || !folder || busy}
+          disabled={!ready}
           onClick={start}
         >
           {busy ? "Starting…" : "Start session"}
