@@ -154,6 +154,14 @@ pub trait Host: Send + Sync + 'static {
     fn read_pdf(&self, _path: &std::path::Path, _pages: Option<&str>) -> Result<String, String> {
         Err("reading PDFs is not available in this build".into())
     }
+
+    /// An image for the model as `(mime, base64)`, shrunk when it is too large for the model
+    /// APIs (they reject images with an edge over a few thousand pixels). The default sends the
+    /// bytes unchanged.
+    fn prepare_image(&self, bytes: &[u8], mime: &str) -> Result<(String, String), String> {
+        use base64::Engine;
+        Ok((mime.to_owned(), base64::engine::general_purpose::STANDARD.encode(bytes)))
+    }
 }
 
 #[cfg(test)]

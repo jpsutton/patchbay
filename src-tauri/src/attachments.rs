@@ -188,7 +188,7 @@ fn rename_text(parts: Vec<Prepared>, att: &Attachment) -> Vec<Prepared> {
         .collect()
 }
 
-fn prepare_image(bytes: &[u8], mime: &str) -> Result<Prepared> {
+pub fn prepare_image(bytes: &[u8], mime: &str) -> Result<Prepared> {
     let passthrough = matches!(mime, "image/png" | "image/jpeg" | "image/gif" | "image/webp");
     let dims = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()?
