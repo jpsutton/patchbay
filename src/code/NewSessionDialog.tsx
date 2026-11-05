@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { api, errorText, type AgentId, type DirListing, type NewSessionOptions } from "../lib/ipc";
+import { api, errorText, usesPatchbayModels, type AgentId, type DirListing, type NewSessionOptions } from "../lib/ipc";
 import { memberOnline, remoteHost, useStore } from "../lib/store";
 import { isWeb } from "../lib/platform";
 import { ChevronLeftIcon, ChevronRightIcon, FolderPlusIcon, MonitorIcon, XIcon } from "../components/icons";
@@ -17,7 +17,8 @@ const rowCls = "flex w-full items-center gap-2.5 px-5 py-1.5 text-left text-sm h
 
 /**
  * Start a Code session: pick a computer (this one, or another in the mesh), an agent installed
- * there and a folder there. Like the phone's New session sheet, sized for a window.
+ * there, the model when the agent runs on Patchbay's, and a folder there. Like the phone's New
+ * session sheet, sized for a window.
  */
 export function NewSessionDialog() {
   const isOpen = useStore((s) => s.newSessionOpen);
@@ -43,6 +44,11 @@ function Dialog() {
   const [host, setHost] = useState<string | null>(initial.host);
   const [opts, setOpts] = useState<NewSessionOptions | null>(null);
   const [agent, setAgent] = useState<AgentId | null>(null);
+  // For agents on Patchbay's models: the default unless another is picked here.
+  const models = useStore((s) => s.models);
+  const providers = useStore((s) => s.providers);
+  const defaultModelRef = useStore((s) => s.defaultModelRef);
+  const [modelRef, setModelRef] = useState<string | null>(defaultModelRef);
   const [folder, setFolder] = useState<string | null>(null);
   const [browse, setBrowse] = useState<DirListing | null>(null);
   const [busy, setBusy] = useState(false);
@@ -86,13 +92,14 @@ function Dialog() {
     if (dir && !Array.isArray(dir)) setFolder(dir);
   };
 
-  const ready = !!agent && !!folder && !busy;
+  const pickModel = !!agent && usesPatchbayModels(agent) && models.length > 0;
+  const ready = !!agent && !!folder && !busy && (!pickModel || !!modelRef);
   const start = async () => {
     if (!agent || !folder) return;
     setBusy(true);
     try {
       const st = useStore.getState();
-      const s = await api.createCodeSession(folder, st.defaultModelRef, agent, host);
+      const s = await api.createCodeSession(folder, pickModel ? modelRef : st.defaultModelRef, agent, host);
       await st.refreshCodeSessions();
       st.setMode("code");
       st.selectCodeSession(s.id);
@@ -214,6 +221,36 @@ function Dialog() {
                     </select>
                   )}
                 </div>
+
+                {pickModel && (
+                  <>
+                    <div className={labelCls}>Model</div>
+                    <div className="px-5">
+                      <select
+                        className="h-9 w-full rounded-lg border border-border bg-panel px-2.5 text-sm text-fg outline-none focus:border-accent/60"
+                        value={modelRef ?? ""}
+                        aria-label="Model"
+                        onChange={(e) => setModelRef(e.target.value)}
+                      >
+                        {modelRef === null && <option value="">Select model</option>}
+                        {providers.map((p) => {
+                          const ms = models.filter((m) => m.providerId === p.id);
+                          if (ms.length === 0) return null;
+                          return (
+                            <optgroup key={p.id} label={p.name}>
+                              {ms.map((m) => (
+                                <option key={m.id} value={m.id}>
+                                  {m.displayName}
+                                  {m.id === defaultModelRef ? " (default)" : ""}
+                                </option>
+                              ))}
+                            </optgroup>
+                          );
+                        })}
+                      </select>
+                    </div>
+                  </>
+                )}
 
                 <div className={labelCls}>Folder</div>
                 <button className={`${rowCls} text-accent-ink`} onClick={pickFolder}>
