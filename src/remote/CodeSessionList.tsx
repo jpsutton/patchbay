@@ -91,6 +91,7 @@ export function CodeSessionList({
   onNewIn: (host: string, cwd: string) => void;
 }) {
   const sessions = useStore((s) => s.codeSessions);
+  const panes = useStore((s) => s.panes);
   const mesh = useStore((s) => s.mesh);
   const layout = useStore((s) => s.sidebarLayout);
   const [showArchived, setShowArchived] = useState(false);
@@ -177,7 +178,7 @@ export function CodeSessionList({
         title={s.title}
         sub={indent ? fmtShort(s.updatedAt) : `${basename(s.cwd)} · ${fmtShort(s.updatedAt)}`}
         indent={indent}
-        here={s.id === activeId}
+        here={s.id === activeId || panes.includes(s.id)}
         leading={s.pinned ? <StarIcon size={13} /> : null}
         trailing={<SessionState live={l} online={memberOnline(mesh, s.hostNode ?? "")} />}
         onClick={() => openSession(s)}

@@ -390,7 +390,7 @@ interface Store {
   activeConversationId: string | null;
   codeSessions: CodeSession[];
   activeCodeSessionId: string | null;
-  /** Code sessions in split panes, left to right; empty when not split. `activeCodeSessionId` is the focused one. */
+  /** Code sessions in split panes (left→right or top→bottom); empty when not split. `activeCodeSessionId` is the focused one. */
   panes: string[];
   code: Record<string, CodeState>;
   chatStreams: Record<string, ChatStream>;
@@ -976,10 +976,17 @@ const WINDOW_LABEL: string = (() => {
   }
 })();
 const IS_MAIN_WINDOW = WINDOW_LABEL === "main";
-const PANES_KEY = IS_MAIN_WINDOW ? "patchbay.panes" : `patchbay.panes.${WINDOW_LABEL}`;
+const IS_REMOTE = isRemoteApp();
+/** Desktop main / secondary window keys, or a phone-local key so remote split doesn't share desktop panes. */
+const PANES_KEY = IS_REMOTE
+  ? "patchbay.remote.panes"
+  : IS_MAIN_WINDOW
+    ? "patchbay.panes"
+    : `patchbay.panes.${WINDOW_LABEL}`;
+const PANE_MAX = paneLogic.maxPanesFor(IS_REMOTE);
 
 // If this is a non-main window, clean up any leftover localStorage keys from previous launches
-if (!IS_MAIN_WINDOW) {
+if (!IS_MAIN_WINDOW && !IS_REMOTE) {
   try {
     localStorage.removeItem(PANES_KEY);
   } catch {
@@ -995,20 +1002,20 @@ function paneState(): paneLogic.PaneState {
   return { panes: s.panes, active: s.activeCodeSessionId };
 }
 
-/** Sets the panes and the focused session together, and saves the panes. The phone has no split. */
+/** Sets the panes and the focused session together, and saves the panes (desktop and phone). */
 function applyPanes(next: paneLogic.PaneState) {
   useStore.setState({ panes: next.panes, activeCodeSessionId: next.active });
-  if (!isRemoteApp()) saveStringList(PANES_KEY, next.panes);
+  saveStringList(PANES_KEY, next.panes);
 }
 
 /** Restore the saved panes on the first session list; after that, drop panes whose session is gone or archived. */
 function syncPanes(list: CodeSession[]) {
-  if (isRemoteApp()) return;
   const live = new Set(list.filter((s) => s.archivedAt == null).map((s) => s.id));
   if (!panesRestored) {
     panesRestored = true;
-    if (!IS_MAIN_WINDOW) return; // Non-main windows always start clean without inherited split panes
-    const panes = paneLogic.restorePanes(loadStringList(PANES_KEY), live);
+    // Non-main desktop windows always start clean without inherited split panes.
+    if (!IS_MAIN_WINDOW && !IS_REMOTE) return;
+    const panes = paneLogic.restorePanes(loadStringList(PANES_KEY), live, PANE_MAX);
     if (panes.length === 0) return;
     const cur = useStore.getState().activeCodeSessionId;
     useStore.setState({ panes, activeCodeSessionId: cur !== null && panes.includes(cur) ? cur : panes[0] });
@@ -1253,12 +1260,12 @@ export const useStore = create<Store>((set, get) => ({
     if (get().panes.length === 0) set({ activeCodeSessionId: id });
     else applyPanes(paneLogic.selectPane(paneState(), id));
   },
-  openInSplit: (id, side) => applyPanes(paneLogic.openInSplit(paneState(), id, side)),
-  openBeside: (id) => applyPanes(paneLogic.openInSplit(paneState(), id, paneLogic.otherSide(paneState()))),
+  openInSplit: (id, side) => applyPanes(paneLogic.openInSplit(paneState(), id, side, PANE_MAX)),
+  openBeside: (id) => applyPanes(paneLogic.openInSplit(paneState(), id, paneLogic.otherSide(paneState()), PANE_MAX)),
   closePane: (id) => applyPanes(paneLogic.closePane(paneState(), id)),
   cyclePane: (delta) => applyPanes(paneLogic.cyclePane(paneState(), delta)),
   swapPanes: () => applyPanes(paneLogic.swapPanes(paneState())),
-  insertPaneAt: (id, atIndex) => applyPanes(paneLogic.insertPaneAt(paneState(), id, atIndex)),
+  insertPaneAt: (id, atIndex) => applyPanes(paneLogic.insertPaneAt(paneState(), id, atIndex, PANE_MAX)),
   replacePaneAt: (id, atIndex) => applyPanes(paneLogic.replacePaneAt(paneState(), id, atIndex)),
   movePane: (fromIdx, toIdx) => applyPanes(paneLogic.movePane(paneState(), fromIdx, toIdx)),
 
