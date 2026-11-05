@@ -121,6 +121,13 @@ impl Host for AppHost {
     fn read_pdf(&self, path: &Path, pages: Option<&str>) -> Result<String, String> {
         crate::attachments::pdf_text(path, pages).map_err(|e| format!("{e:#}"))
     }
+
+    fn prepare_image(&self, bytes: &[u8], mime: &str) -> Result<(String, String), String> {
+        match crate::attachments::prepare_image(bytes, mime).map_err(|e| format!("{e:#}"))? {
+            crate::attachments::Prepared::Image { mime, b64 } => Ok((mime, b64)),
+            crate::attachments::Prepared::Text { .. } => Err("not an image".into()),
+        }
+    }
 }
 
 /// What Patchbay's agent finds in the user's Claude Code setup, for Settings: everything there,
