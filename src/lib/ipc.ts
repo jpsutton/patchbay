@@ -828,7 +828,7 @@ export interface ClaudeOverview {
 export interface AgentEngine {
   /** Model requests one prompt may make (default 100). */
   maxSteps: number | null;
-  /** Model requests one subagent run may make (default 40). */
+  /** Model requests one subagent run may make (default 100). */
   subagentMaxSteps: number | null;
   /** Retries of a request that fails before any output (default 2). */
   requestRetries: number | null;
