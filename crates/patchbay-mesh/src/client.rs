@@ -663,6 +663,7 @@ impl Inner {
             listen_port: None,
             role: Some(ROLE_REMOTE.into()),
             features: Vec::new(),
+            app_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
         }
     }
 
