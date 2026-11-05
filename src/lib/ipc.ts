@@ -184,13 +184,35 @@ export interface CursorPlanLimits {
   onDemandAllowed?: boolean | null;
 }
 
+/** One Antigravity / Gemini quota bucket from `retrieveUserQuotaSummary`. */
+export interface AntigravityPlanBucket {
+  bucketId: string;
+  displayName: string;
+  groupName?: string | null;
+  /** Fraction still remaining (0–1). Used percent is `1 - remainingFraction`. */
+  remainingFraction: number;
+  resetsAt?: number | null;
+  window?: string | null;
+}
+
+/** Antigravity plan usage from the Cloud Code quota poll (see `code/antigravity_plan.rs`). */
+export interface AntigravityPlanLimits {
+  accountId: string;
+  email?: string | null;
+  observedAt: number;
+  buckets?: AntigravityPlanBucket[];
+  /** Set when OAuth quota cannot be fetched (e.g. gemini-api-key auth). */
+  unavailable?: string | null;
+}
+
 /**
- * Claude or Cursor plan usage for one Code session (`session_plan_usage`), or null when that
- * session does not run on either plan.
+ * Claude, Cursor, or Antigravity plan usage for one Code session (`session_plan_usage`), or null
+ * when that session does not run on any of those plans.
  */
 export type SessionPlanUsage =
   | { kind: "claude"; label: string; account: string; latest: PlanLimits | null }
-  | { kind: "cursor"; limits: CursorPlanLimits | null };
+  | { kind: "cursor"; limits: CursorPlanLimits | null }
+  | { kind: "antigravity"; limits: AntigravityPlanLimits | null };
 
 /** The ACP wire log's state (see `code/wire.rs`). */
 export interface WireLogStatus {
@@ -1156,7 +1178,10 @@ export const api = {
   cursorPlanLimits: () => invoke<CursorPlanLimits | null>("cursor_plan_limits"),
   /** Keep the Cursor plan poller awake while the blade is open. */
   cursorPlanWatching: (open: boolean) => invoke<void>("cursor_plan_watching", { open }),
-  /** Claude or Cursor plan for this Code session; null when the session uses neither. */
+  antigravityPlanLimits: () => invoke<AntigravityPlanLimits | null>("antigravity_plan_limits"),
+  /** Keep the Antigravity plan poller awake while the blade is open. */
+  antigravityPlanWatching: (open: boolean) => invoke<void>("antigravity_plan_watching", { open }),
+  /** Claude, Cursor, or Antigravity plan for this Code session; null when none apply. */
   sessionPlanUsage: (id: string) => invoke<SessionPlanUsage | null>("session_plan_usage", { id }),
   wireLogStatus: () => invoke<WireLogStatus>("wire_log_status"),
   /** Turn the wire log on (for 30 minutes) or off. */

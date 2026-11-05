@@ -112,6 +112,14 @@ pub fn apply_title_bar(app: &AppHandle, title_bar: &str) {
         if let Err(e) = w.set_decorations(!app_drawn) {
             tracing::warn!("title bar on {label}: {e:#}");
         }
+        // tao's macOS `set_decorations(false)` sets the style mask to Borderless|Resizable and
+        // drops Miniaturizable (create-time undecorated windows still include it). Without that
+        // mask, NSWindow::miniaturize no-ops — restore it so app-drawn Minimize works.
+        if app_drawn {
+            if let Err(e) = w.set_minimizable(true) {
+                tracing::warn!("title bar on {label}: {e:#}");
+            }
+        }
         #[cfg(target_os = "linux")]
         {
             let win = w.clone();
