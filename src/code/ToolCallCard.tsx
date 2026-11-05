@@ -3,6 +3,7 @@ import type { AcpPermissionRequest, AcpToolCall, AcpToolCallContent } from "../l
 import { api, errorText } from "../lib/ipc";
 import { mergeToolCall, useStore } from "../lib/store";
 import { usePaneSession } from "../lib/pane";
+import { useRememberedOpen } from "../lib/rowMemory";
 import { DiffView, diffStats } from "./DiffView";
 import { hunkStarts } from "./hunkStarts";
 import { toolDescription } from "./toolLabel";
@@ -206,7 +207,8 @@ export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withI
   const diffs = content.filter((c): c is Extract<AcpToolCallContent, { type: "diff" }> => c.type === "diff");
   const starts = hunkStarts(diffs, tc.locations);
   const terminals = content.filter((c): c is Extract<AcpToolCallContent, { type: "terminal" }> => c.type === "terminal");
-  const texts = content.map(textOfContent).filter((t): t is string => !!t);
+  // A command's output can arrive on the terminal channel and again as text content: show it once.
+  const texts = tc.terminalOutput ? [] : content.map(textOfContent).filter((t): t is string => !!t);
   // Patchbay doesn't host ACP terminals, so their output only reaches us as raw tool output.
   // A tool that returned an image has it in rawOutput too, as base64: never show that as text.
   const output = texts.length === 0 && diffs.length === 0 && images.length === 0 && !tc.terminalOutput ? rawOutputText(tc.rawOutput) : null;
@@ -260,8 +262,9 @@ export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withI
  */
 export function ToolCallCard({ tc, autoApproved }: { tc: AcpToolCall; autoApproved?: string }) {
   const hasDiff = (tc.content ?? []).some((c) => c.type === "diff");
-  const [open, setOpen] = useState(hasDiff);
-  const userToggled = useRef(false);
+  // Kept across the row unmounting out of the virtualized transcript, so it comes back as it was.
+  const [open, setOpen, restored] = useRememberedOpen(tc.toolCallId, hasDiff);
+  const userToggled = useRef(restored);
   useEffect(() => {
     if (hasDiff && !userToggled.current) setOpen(true);
   }, [hasDiff]);

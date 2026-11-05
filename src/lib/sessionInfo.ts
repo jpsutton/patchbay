@@ -219,7 +219,7 @@ export function sessionInfoSections(i: SessionInfoInput): InfoSection[] {
     if (rows.length > 0) sections.push({ title: "Usage", rows });
   }
 
-  const planRows = planSectionRows(i.plan, i.nowSecs ?? Math.floor(Date.now() / 1000));
+  const planRows = sessionPlanRows(i.plan, i.nowSecs ?? Math.floor(Date.now() / 1000));
   if (planRows) sections.push({ title: "Plan", rows: planRows });
 
   return sections;
@@ -353,7 +353,7 @@ function antigravityPlanRows(limits: AntigravityPlanLimits | null, now: number):
 }
 
 /** Plan rows for this session, or null when there is nothing to show. */
-function planSectionRows(plan: SessionPlanUsage | null | undefined, now: number): InfoRow[] | null {
+export function sessionPlanRows(plan: SessionPlanUsage | null | undefined, now: number): InfoRow[] | null {
   if (plan == null) return null;
   if (plan.kind === "claude") return claudePlanRows(plan.label, plan.latest, now);
   if (plan.kind === "cursor") return cursorPlanRows(plan.limits, now);

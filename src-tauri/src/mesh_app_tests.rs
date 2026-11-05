@@ -20,6 +20,7 @@ struct Node {
 }
 
 fn node(name: &str) -> Node {
+    crate::test_support::raise_fd_limit();
     let dir = std::env::temp_dir().join(format!("pb-app-{name}-{}", db::new_id()));
     std::fs::create_dir_all(&dir).unwrap();
     let db = Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
@@ -249,6 +250,7 @@ impl Phone {
 }
 
 fn phone() -> Phone {
+    crate::test_support::raise_fd_limit();
     let dir = std::env::temp_dir().join(format!("pb-phone-{}", db::new_id()));
     let events = Arc::new(Mutex::new(Vec::new()));
     let ev = events.clone();
