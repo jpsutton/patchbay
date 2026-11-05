@@ -9,6 +9,7 @@ import {
   type MeshChatEvent,
   type MeshProblem,
   type CodeSession,
+  type AntigravityPlanLimits,
   type CursorPlanLimits,
   type PlanAccount,
   type Preferences,
@@ -39,6 +40,7 @@ import { useDragRegion, useRoundedWindow } from "./components/WindowControls";
 import { installUpdate, useUpdate, useUpdateChecks } from "./lib/update";
 import { AlertToast, MeshChip, MeshPopover, MeshRailButton } from "./components/MeshStatus";
 import { PlanUsageBlade, PlanUsageButton } from "./components/PlanUsage";
+import { AntigravityPlanUsageBlade, AntigravityPlanUsageButton } from "./components/AntigravityPlanUsage";
 import { CursorPlanUsageBlade, CursorPlanUsageButton } from "./components/CursorPlanUsage";
 import { Dot } from "./components/Dot";
 import {
@@ -453,7 +455,7 @@ function AppMenu() {
 }
 
 /** Which plan meter belongs with the session the user is looking at. */
-type PlanKind = "claude" | "cursor";
+type PlanKind = "claude" | "cursor" | "antigravity";
 
 function planKindForSession(
   mode: Mode,
@@ -464,6 +466,7 @@ function planKindForSession(
 ): PlanKind | null {
   if (mode !== "code" || !session) return null;
   if (session.agent === "cursor") return "cursor";
+  if (session.agent === "antigravity") return "antigravity";
   if (session.agent === "claude-code" && !prefs.agentProviders["claude-code"]) return "claude";
   if (session.agent === "patchbay" && session.modelRef) {
     const model = models.find((m) => m.id === session.modelRef);
@@ -473,7 +476,7 @@ function planKindForSession(
   return null;
 }
 
-/** Which plan gauge the open Code session should show — Claude or Cursor, never both. */
+/** Which plan gauge the open Code session should show — Claude, Cursor, or Antigravity, never two. */
 function useSessionPlanKind() {
   const mode = useStore((s) => s.mode);
   const sessionId = useStore((s) => s.activeCodeSessionId);
@@ -484,21 +487,33 @@ function useSessionPlanKind() {
   return planKindForSession(mode, session, prefs, providers, models);
 }
 
-/** Claude or Cursor plan gauge button for the open Code session — never both. */
+/** Claude, Cursor, or Antigravity plan gauge button for the open Code session — never two. */
 function SessionPlanUsageButton() {
   const planOpen = useStore((s) => s.planOpen);
   const cursorPlanOpen = useStore((s) => s.cursorPlanOpen);
+  const antigravityPlanOpen = useStore((s) => s.antigravityPlanOpen);
   const setPlanOpen = useStore((s) => s.setPlanOpen);
   const setCursorPlanOpen = useStore((s) => s.setCursorPlanOpen);
+  const setAntigravityPlanOpen = useStore((s) => s.setAntigravityPlanOpen);
   const kind = useSessionPlanKind();
 
   useEffect(() => {
     if (kind !== "claude" && planOpen) setPlanOpen(false);
     if (kind !== "cursor" && cursorPlanOpen) setCursorPlanOpen(false);
-  }, [kind, planOpen, cursorPlanOpen, setPlanOpen, setCursorPlanOpen]);
+    if (kind !== "antigravity" && antigravityPlanOpen) setAntigravityPlanOpen(false);
+  }, [
+    kind,
+    planOpen,
+    cursorPlanOpen,
+    antigravityPlanOpen,
+    setPlanOpen,
+    setCursorPlanOpen,
+    setAntigravityPlanOpen,
+  ]);
 
   if (kind === "claude") return <PlanUsageButton />;
   if (kind === "cursor") return <CursorPlanUsageButton />;
+  if (kind === "antigravity") return <AntigravityPlanUsageButton />;
   return null;
 }
 
@@ -509,6 +524,7 @@ function SidebarStatusPane() {
     <>
       {kind === "claude" && <PlanUsageBlade />}
       {kind === "cursor" && <CursorPlanUsageBlade />}
+      {kind === "antigravity" && <AntigravityPlanUsageBlade />}
       <MeshPopover />
     </>
   );
@@ -651,18 +667,19 @@ export default function App() {
       .then(() => {
         const s = useStore.getState();
         if (s.models.length === 0) s.setSettingsOpen(true);
-        // Fake-backend preview: `?sidebarPane=mesh|plan|cursor` opens that sidebar pane.
+        // Fake-backend preview: `?sidebarPane=mesh|plan|cursor|antigravity` opens that sidebar pane.
         const pane = new URLSearchParams(location.search).get("sidebarPane");
-        if (pane === "mesh" || pane === "plan" || pane === "cursor") {
+        if (pane === "mesh" || pane === "plan" || pane === "cursor" || pane === "antigravity") {
           s.setMode("code");
-          if (pane === "plan" || pane === "cursor") {
-            const want = pane === "plan" ? "claude-code" : "cursor";
+          if (pane === "plan" || pane === "cursor" || pane === "antigravity") {
+            const want = pane === "plan" ? "claude-code" : pane === "cursor" ? "cursor" : "antigravity";
             const match = s.codeSessions.find((x) => x.agent === want);
             if (match) s.selectCodeSession(match.id);
           }
           if (pane === "mesh") s.setMeshPopoverOpen(true);
           else if (pane === "plan") s.setPlanOpen(true);
-          else s.setCursorPlanOpen(true);
+          else if (pane === "cursor") s.setCursorPlanOpen(true);
+          else s.setAntigravityPlanOpen(true);
         }
       })
       .catch((e) => setToast(errorText(e)));
@@ -670,12 +687,16 @@ export default function App() {
     useStore.getState().refreshMesh();
     api.planAccounts().then((a) => useStore.getState().setPlanAccounts(a), () => {});
     api.cursorPlanLimits().then((l) => useStore.getState().setCursorPlanLimits(l), () => {});
+    api.antigravityPlanLimits().then((l) => useStore.getState().setAntigravityPlanLimits(l), () => {});
     const unlisteners = [
       listen<CodeEnvelope>("code://event", (ev) => codeEventArrived(ev.payload)),
       // Preferences saved from another window or browser tab on this backend.
       listen<Preferences>("prefs://changed", (ev) => useStore.getState().prefsSaved(ev.payload)),
       listen<PlanAccount[]>("code://plan-limits", (ev) => useStore.getState().setPlanAccounts(ev.payload)),
       listen<CursorPlanLimits>("code://cursor-plan-limits", (ev) => useStore.getState().setCursorPlanLimits(ev.payload)),
+      listen<AntigravityPlanLimits>("code://antigravity-plan-limits", (ev) =>
+        useStore.getState().setAntigravityPlanLimits(ev.payload),
+      ),
       // Mesh (see src-tauri/src/mesh): membership changes, other nodes' writes, live streams.
       listen("mesh://status", () => {
         // A link to another computer may have just come back: events its sessions sent while it

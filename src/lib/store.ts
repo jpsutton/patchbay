@@ -27,6 +27,7 @@ import {
   type Subagent,
   type UsageView,
   type PlanAccount,
+  type AntigravityPlanLimits,
   type CursorPlanLimits,
   type Preferences,
   type MeshStatus,
@@ -402,6 +403,9 @@ interface Store {
   /** Last Cursor plan report from the dashboard poll or a mesh peer. */
   cursorPlanLimits: CursorPlanLimits | null;
   cursorPlanOpen: boolean;
+  /** Last Antigravity plan report from the Cloud Code quota poll or a mesh peer. */
+  antigravityPlanLimits: AntigravityPlanLimits | null;
+  antigravityPlanOpen: boolean;
   prefs: Preferences;
   loadPrefs: () => Promise<void>;
   /** Preferences someone saved on this backend (another window or browser tab): show them here. */
@@ -427,6 +431,8 @@ interface Store {
   setPlanOpen: (o: boolean) => void;
   setCursorPlanLimits: (l: CursorPlanLimits | null) => void;
   setCursorPlanOpen: (o: boolean) => void;
+  setAntigravityPlanLimits: (l: AntigravityPlanLimits | null) => void;
+  setAntigravityPlanOpen: (o: boolean) => void;
   refreshCatalog: () => Promise<void>;
   setDefaultModel: (ref: string) => Promise<void>;
   refreshConversations: () => Promise<void>;
@@ -1081,6 +1087,8 @@ export const useStore = create<Store>((set, get) => ({
   planOpen: false,
   cursorPlanLimits: null,
   cursorPlanOpen: false,
+  antigravityPlanLimits: null,
+  antigravityPlanOpen: false,
   confirm: null,
   prefs: defaultPreferences,
   loadPrefs: async () => {
@@ -1139,13 +1147,32 @@ export const useStore = create<Store>((set, get) => ({
   setToast: (toast) => set({ toast }),
   setAlert: (alert) => set({ alert }),
   setMeshPopoverOpen: (meshPopoverOpen) =>
-    set(meshPopoverOpen ? { meshPopoverOpen, planOpen: false, cursorPlanOpen: false } : { meshPopoverOpen }),
+    set(
+      meshPopoverOpen
+        ? { meshPopoverOpen, planOpen: false, cursorPlanOpen: false, antigravityPlanOpen: false }
+        : { meshPopoverOpen },
+    ),
   setPlanAccounts: (planAccounts) => set({ planAccounts }),
   setPlanOpen: (planOpen) =>
-    set(planOpen ? { planOpen, meshPopoverOpen: false, cursorPlanOpen: false } : { planOpen }),
+    set(
+      planOpen
+        ? { planOpen, meshPopoverOpen: false, cursorPlanOpen: false, antigravityPlanOpen: false }
+        : { planOpen },
+    ),
   setCursorPlanLimits: (cursorPlanLimits) => set({ cursorPlanLimits }),
   setCursorPlanOpen: (cursorPlanOpen) =>
-    set(cursorPlanOpen ? { cursorPlanOpen, meshPopoverOpen: false, planOpen: false } : { cursorPlanOpen }),
+    set(
+      cursorPlanOpen
+        ? { cursorPlanOpen, meshPopoverOpen: false, planOpen: false, antigravityPlanOpen: false }
+        : { cursorPlanOpen },
+    ),
+  setAntigravityPlanLimits: (antigravityPlanLimits) => set({ antigravityPlanLimits }),
+  setAntigravityPlanOpen: (antigravityPlanOpen) =>
+    set(
+      antigravityPlanOpen
+        ? { antigravityPlanOpen, meshPopoverOpen: false, planOpen: false, cursorPlanOpen: false }
+        : { antigravityPlanOpen },
+    ),
 
   refreshCatalog: async () => {
     const [providers, models, def] = await Promise.all([
