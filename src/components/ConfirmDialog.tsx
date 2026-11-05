@@ -64,6 +64,14 @@ export function ConfirmDialog() {
           >
             Cancel
           </button>
+          {req.altLabel && (
+            <button
+              className="h-[34px] rounded-lg border border-border px-3.5 text-xs hover:bg-panel-2"
+              onClick={() => req.resolve({ ok: false, checked: false, alt: true })}
+            >
+              {req.altLabel}
+            </button>
+          )}
           <button
             autoFocus={!req.input}
             disabled={!!req.input && !text.trim()}
