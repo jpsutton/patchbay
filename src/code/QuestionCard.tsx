@@ -4,7 +4,7 @@ import { useStore } from "../lib/store";
 
 /**
  * One agent's questions, one at a time. Skip leaves that question out. Something else is an
- * "Other" answer plus the text. The card stays until Send; nothing here dismisses it.
+ * "Other" answer plus the text. The card stays until Done; nothing here dismisses it.
  */
 export function QuestionCard({
   requestId,
@@ -181,7 +181,7 @@ export function QuestionCard({
           disabled={!ready || sending}
           onClick={goNext}
         >
-          {last ? "Send" : "Next"}
+          {last ? "Done" : "Next"}
         </button>
       </div>
     </section>
