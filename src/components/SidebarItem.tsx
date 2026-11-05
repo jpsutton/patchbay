@@ -128,7 +128,7 @@ export function SidebarItem({
 
   return (
     <div
-      className={`group mx-2 flex h-[34px] cursor-pointer items-center gap-2.5 rounded-lg pr-2 text-[14px] ${indent ? "pl-4" : "pl-2.5"} ${
+      className={`group mx-2 flex h-[34px] min-w-0 cursor-pointer items-center gap-2.5 rounded-lg pr-2 text-[14px] ${indent ? "pl-4" : "pl-2.5"} ${
         selected
           ? `bg-accent/20 text-fg ${active ? "font-medium" : ""}`
           : active

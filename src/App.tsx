@@ -537,10 +537,10 @@ function SidebarList() {
   const mode = useStore((s) => s.mode);
   const [atTop, setAtTop] = useState(true);
   return (
-    <div className="relative min-h-0 flex-1">
+    <div className="relative min-h-0 min-w-0 flex-1">
       <ScrollFade show={!atTop} />
       <div
-        className={`flex h-full flex-col gap-0.5 overflow-y-auto pb-2 ${atTop ? "" : "fade-top"}`}
+        className={`flex h-full min-w-0 flex-col gap-0.5 overflow-x-hidden overflow-y-auto pb-2 ${atTop ? "" : "fade-top"}`}
         onScroll={(e) => setAtTop(e.currentTarget.scrollTop < 1)}
       >
         {mode === "chat" ? <ChatList /> : <CodeSidebar />}
