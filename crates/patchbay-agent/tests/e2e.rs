@@ -426,7 +426,7 @@ async fn asks_the_user_a_question() {
     assert_eq!(r["stopReason"], "end_turn");
     let q = &acp.asked[0];
     let ids: Vec<&str> = q["options"].as_array().unwrap().iter().filter_map(|o| o["optionId"].as_str()).collect();
-    assert_eq!(ids, ["opt-0", "opt-1", "__ask_question_skip__"]);
+    assert_eq!(ids, ["opt-0", "opt-1", "__ask_question_other__", "__ask_question_skip__"]);
     assert!(acp.text_of("agent_message_chunk").contains("= \"Beta\""), "{}", acp.text_of("agent_message_chunk"));
     let _ = std::fs::remove_dir_all(cwd);
 }
