@@ -22,8 +22,10 @@ function fileHref(href: string): string {
 
 const cache = new Map<string, string>();
 
+const highlightKey = (code: string, lang: string) => `${lang}\u0000${code}`;
+
 async function highlight(code: string, lang: string): Promise<string> {
-  const key = `${lang}\u0000${code}`;
+  const key = highlightKey(code, lang);
   const hit = cache.get(key);
   if (hit) return hit;
   const { codeToHtml } = await import("shiki");
@@ -46,7 +48,13 @@ function isDark(): boolean {
 
 let mermaidTheme: string | null = null;
 
+/** Rendered diagrams by theme and source, so a row mounting again shows its diagram at once. */
+const diagrams = new Map<string, string>();
+const diagramKey = (code: string) => `${isDark() ? "dark" : "default"}\u0000${code}`;
+
 async function renderMermaid(id: string, code: string): Promise<string | null> {
+  const hit = diagrams.get(diagramKey(code));
+  if (hit) return hit;
   const { default: mermaid } = await import("mermaid");
   const theme = isDark() ? "dark" : "default";
   if (mermaidTheme !== theme) {
@@ -56,7 +64,10 @@ async function renderMermaid(id: string, code: string): Promise<string | null> {
   // Partial diagrams (mid-stream) fail to parse; keep showing the source until they're whole.
   if (!(await mermaid.parse(code, { suppressErrors: true }))) return null;
   try {
-    return (await mermaid.render(id, code)).svg;
+    const { svg } = await mermaid.render(id, code);
+    if (diagrams.size > 100) diagrams.clear();
+    diagrams.set(diagramKey(code), svg);
+    return svg;
   } catch {
     document.getElementById(`d${id}`)?.remove();
     return null;
@@ -65,10 +76,16 @@ async function renderMermaid(id: string, code: string): Promise<string | null> {
 
 function MermaidBlock({ code }: { code: string }) {
   const id = `mmd${useId().replace(/[^a-zA-Z0-9]/g, "")}`;
-  const [svg, setSvg] = useState<string | null>(null);
+  // A diagram drawn before is shown from the first render: the row is measured at its real height.
+  const [svg, setSvg] = useState<string | null>(() => diagrams.get(diagramKey(code)) ?? null);
   const [showCode, setShowCode] = useState(false);
   useEffect(() => {
     let live = true;
+    const cached = diagrams.get(diagramKey(code));
+    if (cached) {
+      setSvg(cached);
+      return;
+    }
     const t = setTimeout(() => {
       renderMermaid(id, code).then((s) => live && setSvg(s));
     }, 300);
@@ -102,10 +119,17 @@ export function CodeBlock({
   lang: string;
   onToggleDiagram?: () => void;
 }) {
-  const [html, setHtml] = useState<string | null>(null);
+  // Code highlighted before is shown from the first render: a row that mounts again is measured at
+  // its real height, not the plain one, so the transcript doesn't shift when the highlight lands.
+  const [html, setHtml] = useState<string | null>(() => cache.get(highlightKey(code, lang)) ?? null);
   const [copied, setCopied] = useState(false);
   useEffect(() => {
     let live = true;
+    const cached = cache.get(highlightKey(code, lang));
+    if (cached) {
+      setHtml(cached);
+      return;
+    }
     const t = setTimeout(() => {
       highlight(code, lang).then((h) => live && setHtml(h));
     }, 60);

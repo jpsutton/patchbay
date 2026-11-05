@@ -29,6 +29,8 @@ mod agent_live_tests;
 mod smoke_tests;
 #[cfg(test)]
 mod mesh_app_tests;
+#[cfg(test)]
+mod test_support;
 
 use std::path::PathBuf;
 use std::sync::Arc;
