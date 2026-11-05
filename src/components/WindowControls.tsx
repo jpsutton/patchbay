@@ -91,15 +91,22 @@ export function WindowControls() {
   const max = useMaximized();
   if (!on) return null;
   const w = () => getCurrentWindow();
+  const run = (op: () => Promise<void>, label: string) => {
+    if (!inTauri) return;
+    void op().catch((e) => console.error(`window ${label}:`, e));
+  };
   return (
     <div className="ml-2 flex shrink-0 items-center gap-0.5 border-l border-border pl-2">
-      <ControlButton label="Minimize" onClick={() => inTauri && w().minimize()}>
+      <ControlButton label="Minimize" onClick={() => run(() => w().minimize(), "minimize")}>
         <MinimizeIcon />
       </ControlButton>
-      <ControlButton label={max ? "Restore" : "Maximize"} onClick={() => inTauri && w().toggleMaximize()}>
+      <ControlButton
+        label={max ? "Restore" : "Maximize"}
+        onClick={() => run(() => w().toggleMaximize(), "toggleMaximize")}
+      >
         {max ? <RestoreIcon /> : <MaximizeIcon />}
       </ControlButton>
-      <ControlButton label="Close" danger onClick={() => inTauri && w().close()}>
+      <ControlButton label="Close" danger onClick={() => run(() => w().close(), "close")}>
         <CloseIcon />
       </ControlButton>
     </div>
