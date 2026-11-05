@@ -88,6 +88,9 @@ struct State {
     foreign: HashMap<String, JoinRequest>,
     joining: Option<Joining>,
     links: HashMap<String, LinkReport>,
+    /// Last app version each phone reported, from its own Hello or a gateway's link report. Kept
+    /// while the phone is offline.
+    remote_versions: HashMap<String, String>,
     /// Failed handshakes per source: (count, blocked until).
     blocked: HashMap<String, (u32, Instant)>,
     /// Relayed connections that end at this node: circuit -> inbound frames.
@@ -819,7 +822,10 @@ impl Inner {
                     "appVersion": if m.node_id == self.me {
                         Some(env!("CARGO_PKG_VERSION").to_owned())
                     } else {
-                        st.links.get(&m.node_id).and_then(|r| r.app_version.clone())
+                        st.links
+                            .get(&m.node_id)
+                            .and_then(|r| r.app_version.clone())
+                            .or_else(|| st.remote_versions.get(&m.node_id).cloned())
                     },
                 })
             })
@@ -1415,6 +1421,7 @@ impl Inner {
             listen_port: *self.bound_port.lock().unwrap(),
             role: None,
             features: vec![FEATURE_GATEWAY.into()],
+            app_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
         }
     }
 
@@ -1482,7 +1489,9 @@ impl Inner {
         self.emit_status();
         self.resolve(&theirs.node_id);
         match outcome {
-            Some(()) if role.is_some() => self.remote_session(sec, link, theirs.node_id, theirs.name, token).await,
+            Some(()) if role.is_some() => {
+                self.remote_session(sec, link, theirs.node_id, theirs.name, theirs.app_version, token).await
+            }
             Some(()) => {
                 let opener = theirs.node_id.clone();
                 self.session(sec, link, theirs.node_id, theirs.name, opener, None, None, token).await
@@ -1985,6 +1994,9 @@ impl Inner {
                                 a != b
                             });
                     if newer {
+                        for (id, v) in &r.remote_versions {
+                            st.remote_versions.insert(id.clone(), v.clone());
+                        }
                         st.links.insert(r.origin.clone(), r.clone());
                     }
                     (newer, remotes_changed)
@@ -2152,6 +2164,11 @@ impl Inner {
                     .collect(),
                 remotes: st.remotes.keys().cloned().collect(),
                 app_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+                remote_versions: st
+                    .remotes
+                    .keys()
+                    .filter_map(|id| st.remote_versions.get(id).map(|v| (id.clone(), v.clone())))
+                    .collect(),
             }
         };
         self.broadcast(Msg::Links(report));
@@ -2316,7 +2333,7 @@ impl Inner {
                 None => bail!("{} is not a member of this mesh", theirs.name),
             }
         }
-        self.remote_session(sec, link, theirs.node_id, theirs.name, token).await
+        self.remote_session(sec, link, theirs.node_id, theirs.name, theirs.app_version, token).await
     }
 
     /// Serve a phone that uses this node as its gateway: its requests, the topics it follows,
@@ -2327,10 +2344,14 @@ impl Inner {
         mut link: Link,
         node: String,
         name: String,
+        app_version: Option<String>,
         token: CancellationToken,
     ) -> Result<()> {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let kill = token.child_token();
+        if let Some(v) = app_version {
+            self.st.lock().unwrap().remote_versions.insert(node.clone(), v);
+        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let old = self.st.lock().unwrap().remotes.insert(
             node.clone(),

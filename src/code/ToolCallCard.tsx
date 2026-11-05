@@ -1,8 +1,9 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { AcpPermissionRequest, AcpToolCall, AcpToolCallContent } from "../lib/ipc";
 import { api, errorText } from "../lib/ipc";
 import { mergeToolCall, useStore } from "../lib/store";
 import { usePaneSession } from "../lib/pane";
+import { useRememberedOpen } from "../lib/rowMemory";
 import { DiffView, diffStats } from "./DiffView";
 import { hunkStarts } from "./hunkStarts";
 import { toolDescription } from "./toolLabel";
@@ -206,7 +207,8 @@ export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withI
   const diffs = content.filter((c): c is Extract<AcpToolCallContent, { type: "diff" }> => c.type === "diff");
   const starts = hunkStarts(diffs, tc.locations);
   const terminals = content.filter((c): c is Extract<AcpToolCallContent, { type: "terminal" }> => c.type === "terminal");
-  const texts = content.map(textOfContent).filter((t): t is string => !!t);
+  // A command's output can arrive on the terminal channel and again as text content: show it once.
+  const texts = tc.terminalOutput ? [] : content.map(textOfContent).filter((t): t is string => !!t);
   // Patchbay doesn't host ACP terminals, so their output only reaches us as raw tool output.
   // A tool that returned an image has it in rawOutput too, as base64: never show that as text.
   const output = texts.length === 0 && diffs.length === 0 && images.length === 0 && !tc.terminalOutput ? rawOutputText(tc.rawOutput) : null;
@@ -253,10 +255,19 @@ export function ToolCallBody({ tc, withImages = true }: { tc: AcpToolCall; withI
   );
 }
 
-/** One tool call as a row; consecutive rows sit together in a `ToolGroup` box. */
+/**
+ * One tool call as a row; consecutive rows sit together in a `ToolGroup` box.
+ * A row with a diff opens by default, including when the diff arrives after the row first
+ * mounts; a manual open/close is left alone after that.
+ */
 export function ToolCallCard({ tc, autoApproved }: { tc: AcpToolCall; autoApproved?: string }) {
   const hasDiff = (tc.content ?? []).some((c) => c.type === "diff");
-  const [open, setOpen] = useState(hasDiff);
+  // Kept across the row unmounting out of the virtualized transcript, so it comes back as it was.
+  const [open, setOpen, restored] = useRememberedOpen(tc.toolCallId, hasDiff);
+  const userToggled = useRef(restored);
+  useEffect(() => {
+    if (hasDiff && !userToggled.current) setOpen(true);
+  }, [hasDiff]);
   const description = toolDescription(tc);
   // Without a description from the agent, fall back to the call itself: its title and main input.
   const summary = description ? null : inputSummary(tc.rawInput);
@@ -275,7 +286,10 @@ export function ToolCallCard({ tc, autoApproved }: { tc: AcpToolCall; autoApprov
       <div className="flex items-center hover:bg-panel-2/40">
       <button
         className="flex h-[38px] min-w-0 flex-1 items-center gap-2.5 px-3 text-left text-[13px]"
-        onClick={() => setOpen(!open)}
+        onClick={() => {
+          userToggled.current = true;
+          setOpen(!open);
+        }}
         aria-expanded={open}
       >
         <span className="flex shrink-0 text-faint">

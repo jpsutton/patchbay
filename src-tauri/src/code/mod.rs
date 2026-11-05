@@ -9,6 +9,7 @@ pub mod grok_config;
 pub mod import_claude;
 pub mod mcp;
 pub mod native;
+pub mod antigravity_plan;
 pub mod cursor_plan;
 pub mod permissions;
 pub mod plan_limits;
@@ -47,6 +48,7 @@ pub struct CodeManager {
     pub titles: titles::Titles,
     pub plan: plan_limits::PlanGuard,
     pub cursor_plan: cursor_plan::CursorPlanGuard,
+    pub antigravity_plan: antigravity_plan::AntigravityPlanGuard,
     /// Tests: `start` attaches a stand-in agent and hands its commands out here instead of spawning one.
     #[cfg(test)]
     pub test_started: Mutex<Option<mpsc::UnboundedSender<(String, mpsc::UnboundedReceiver<AgentCmd>)>>>,

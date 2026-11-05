@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { errorText, type AgentId, type AgentInfo, type CodeSession, type MeshMember } from "../lib/ipc";
+import { errorText, usesPatchbayModels, type AgentId, type AgentInfo, type CodeSession, type MeshMember } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { ChevronLeftIcon, ChevronRightIcon, MonitorIcon, XIcon } from "../components/icons";
 import { Dot } from "../components/Dot";
+import { ModelOptions } from "../components/ModelOptions";
 
 /** What a computer offers for a new session (gateway.rs, `new_session_options_local`). */
 interface Options {
@@ -35,12 +36,21 @@ function tilde(path: string, home: string | null): string {
   return path;
 }
 
+/** Case-insensitive substring match on a folder name or path. */
+function matchesFolder(query: string, name: string): boolean {
+  const q = query.trim().toLowerCase();
+  return !q || name.toLowerCase().includes(q);
+}
+
 const rowCls = "flex w-full items-center gap-3 px-4 py-3 text-left text-[15px] active:bg-panel-2";
 const labelCls = "px-4 pb-1.5 pt-5 font-mono text-[11px] uppercase tracking-[0.06em] text-faint";
+const searchCls =
+  "h-10 w-full rounded-[10px] border border-border bg-raised px-3 text-[15px] text-fg outline-none placeholder:text-faint";
 
 /**
- * Start a Code session from the phone: pick a computer, an agent and a folder on that computer.
- * The session runs there, like one started at its own screen.
+ * Start a Code session from the phone: pick a computer, an agent, the model when the agent runs
+ * on Patchbay's, and a folder on that computer. The session runs there, like one started at its
+ * own screen.
  */
 export function NewSessionSheet({
   members,
@@ -65,8 +75,13 @@ export function NewSessionSheet({
   const [host, setHost] = useState<string | null>(initialHost ?? gateway ?? computers[0]?.nodeId ?? null);
   const [opts, setOpts] = useState<Options | null>(null);
   const [agent, setAgent] = useState<AgentId | null>(null);
+  // For agents on Patchbay's models: the default unless another is picked here.
+  const models = useStore((s) => s.models);
+  const [modelRef, setModelRef] = useState<string | null>(() => useStore.getState().defaultModelRef);
   const [folder, setFolder] = useState<string | null>(null);
   const [browse, setBrowse] = useState<Listing | null>(null);
+  const [browseFilter, setBrowseFilter] = useState("");
+  const [recentFilter, setRecentFilter] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -76,6 +91,8 @@ export function NewSessionSheet({
     setOpts(null);
     setFolder(null);
     setBrowse(null);
+    setBrowseFilter("");
+    setRecentFilter("");
     setErr(null);
     call.options(host).then(
       (o) => {
@@ -96,18 +113,21 @@ export function NewSessionSheet({
     if (!host) return;
     try {
       setBrowse(await call.dirs(host, path));
+      setBrowseFilter("");
       setErr(null);
     } catch (e) {
       setErr(errorText(e));
     }
   };
 
+  const pickModel = !!agent && usesPatchbayModels(agent) && models.length > 0;
+  const ready = !!host && !!agent && !!folder && !busy && (!pickModel || !!modelRef);
   const start = async () => {
     if (!host || !agent || !folder) return;
     setBusy(true);
     try {
       const st = useStore.getState();
-      const s = await call.create(host, folder, st.defaultModelRef, agent);
+      const s = await call.create(host, folder, pickModel ? modelRef : st.defaultModelRef, agent);
       await st.refreshCodeSessions();
       // The gateway's list can lag the host that made it: show the new session either way.
       if (!useStore.getState().codeSessions.some((x) => x.id === s.id)) {
@@ -121,6 +141,10 @@ export function NewSessionSheet({
   };
 
   const home = opts?.home ?? browse?.home ?? null;
+  const filteredBrowseDirs = useMemo(() => {
+    if (!browse) return [];
+    return browse.dirs.filter((d) => matchesFolder(browseFilter, d));
+  }, [browse, browseFilter]);
 
   if (browse) {
     return (
@@ -139,16 +163,35 @@ export function NewSessionSheet({
             <XIcon size={18} />
           </button>
         </header>
+        <div className="shrink-0 px-4 pb-2">
+          <input
+            type="search"
+            enterKeyHint="search"
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+            className={searchCls}
+            placeholder="Filter folders"
+            value={browseFilter}
+            aria-label="Filter folders"
+            onChange={(e) => setBrowseFilter(e.target.value)}
+          />
+        </div>
         {err && <div className="px-4 pb-2 text-[13px] text-danger">{err}</div>}
         <div className="min-h-0 flex-1 overflow-y-auto">
           {browse.dirs.length === 0 && <div className="px-4 py-6 text-[14px] text-muted">No folders here.</div>}
-          {browse.dirs.map((d) => (
+          {browse.dirs.length > 0 && filteredBrowseDirs.length === 0 && (
+            <div className="px-4 py-6 text-[14px] text-muted">No folders match.</div>
+          )}
+          {filteredBrowseDirs.map((d) => (
             <button key={d} className={rowCls} onClick={() => open(`${browse.path}/${d}`)}>
               <span className="min-w-0 flex-1 truncate">{d}</span>
               <ChevronRightIcon size={14} />
             </button>
           ))}
-          {browse.truncated && <div className="px-4 py-3 text-[12.5px] text-faint">Only the first 500 folders are shown.</div>}
+          {browse.truncated && !browseFilter.trim() && (
+            <div className="px-4 py-3 text-[12.5px] text-faint">Only the first 500 folders are shown.</div>
+          )}
         </div>
         <div className="border-t border-line px-4 pb-[calc(env(safe-area-inset-bottom)+12px)] pt-3">
           <button
@@ -167,6 +210,7 @@ export function NewSessionSheet({
 
   const agents = opts?.agents.filter((a) => a.available) ?? [];
   const folders = folder && opts && !opts.recent.includes(folder) ? [folder, ...opts.recent] : (opts?.recent ?? []);
+  const filteredFolders = folders.filter((f) => matchesFolder(recentFilter, tilde(f, home)) || matchesFolder(recentFilter, f));
 
   return (
     <div className="fixed inset-0 z-40 flex flex-col bg-bg pt-[env(safe-area-inset-top)]">
@@ -212,8 +256,43 @@ export function NewSessionSheet({
               )}
             </div>
 
+            {pickModel && (
+              <>
+                <div className={labelCls}>Model</div>
+                <div className="px-4">
+                  <select
+                    className="h-11 w-full rounded-[10px] border border-border bg-raised px-3 text-[15px] text-fg outline-none"
+                    value={modelRef ?? ""}
+                    aria-label="Model"
+                    onChange={(e) => setModelRef(e.target.value)}
+                  >
+                    <ModelOptions value={modelRef} />
+                  </select>
+                </div>
+              </>
+            )}
+
             <div className={labelCls}>Folder</div>
-            {folders.map((f) => (
+            {folders.length > 5 && (
+              <div className="px-4 pb-1">
+                <input
+                  type="search"
+                  enterKeyHint="search"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  className={searchCls}
+                  placeholder="Filter recent folders"
+                  value={recentFilter}
+                  aria-label="Filter recent folders"
+                  onChange={(e) => setRecentFilter(e.target.value)}
+                />
+              </div>
+            )}
+            {folders.length > 0 && filteredFolders.length === 0 && (
+              <div className="px-4 py-3 text-[14px] text-muted">No folders match.</div>
+            )}
+            {filteredFolders.map((f) => (
               <button key={f} className={rowCls} aria-pressed={folder === f} onClick={() => setFolder(f)}>
                 <span className="min-w-0 flex-1 truncate font-mono text-[13.5px]">{tilde(f, home)}</span>
                 {folder === f && <Dot className="text-accent" role="img" aria-label="Selected" />}
@@ -229,7 +308,7 @@ export function NewSessionSheet({
       <div className="border-t border-line px-4 pb-[calc(env(safe-area-inset-bottom)+12px)] pt-3">
         <button
           className="flex h-11 w-full items-center justify-center rounded-[10px] bg-accent px-4 text-[15px] font-semibold text-accent-fg active:brightness-95 disabled:opacity-50"
-          disabled={!host || !agent || !folder || busy}
+          disabled={!ready}
           onClick={start}
         >
           {busy ? "Starting…" : "Start session"}

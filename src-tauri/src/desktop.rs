@@ -22,8 +22,34 @@ pub const EV_NOTIFICATION_OPEN: &str = "notification://open";
 /// shown again like a new one and places it by its own policy (KWin centers it), so put it back.
 static MAIN_HIDDEN_AT: Mutex<Option<tauri::PhysicalPosition<i32>>> = Mutex::new(None);
 
+/// Label of the last-focused normal (non-quick) window.
+static LAST_FOCUSED_LABEL: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn record_window_focused(label: &str) {
+    if label != QUICK {
+        if let Ok(mut last) = LAST_FOCUSED_LABEL.lock() {
+            *last = Some(label.to_string());
+        }
+    }
+}
+
+pub fn active_normal_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
+    let last = LAST_FOCUSED_LABEL.lock().ok().and_then(|l| l.clone());
+    if let Some(lbl) = last {
+        if let Some(w) = app.get_webview_window(&lbl) {
+            return Some(w);
+        }
+    }
+    app.get_webview_window("main").or_else(|| {
+        app.webview_windows()
+            .into_iter()
+            .find(|(k, _)| k != QUICK)
+            .map(|(_, w)| w)
+    })
+}
+
 pub fn show_main(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
+    if let Some(w) = active_normal_window(app) {
         let _ = w.unminimize();
         if let Some(pos) = MAIN_HIDDEN_AT.lock().ok().and_then(|mut p| p.take())
             && !w.is_visible().unwrap_or(true)
@@ -33,7 +59,13 @@ pub fn show_main(app: &AppHandle) {
         }
         let _ = w.show();
         let _ = w.set_focus();
+        return;
     }
+    // No window left: spawn a new one asynchronously.
+    let h = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = new_window(h).await;
+    });
 }
 
 /// When the main window last lost focus. Some panels take focus on a tray click, so the window
@@ -48,7 +80,12 @@ fn main_recently_focused() -> bool {
 /// Tray icon left click: hide the main window when it is in front, otherwise bring it forward
 /// (from hidden, minimized or behind other windows).
 pub fn toggle_main(app: &AppHandle) {
-    let Some(w) = app.get_webview_window("main") else {
+    let target = active_normal_window(app);
+    let Some(w) = target else {
+        let h = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = new_window(h).await;
+        });
         return;
     };
     let in_front = w.is_visible().unwrap_or(false)
@@ -67,18 +104,28 @@ pub fn toggle_main(app: &AppHandle) {
 /// `title_bar` preference: "system" keeps the window manager's title bar; "app" removes it and
 /// the UI draws its own window controls.
 pub fn apply_title_bar(app: &AppHandle, title_bar: &str) {
-    let Some(w) = app.get_webview_window("main") else {
-        return;
-    };
     let app_drawn = title_bar == "app";
-    if let Err(e) = w.set_decorations(!app_drawn) {
-        tracing::warn!("title bar: {e:#}");
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let win = w.clone();
-        if let Err(e) = w.run_on_main_thread(move || announce_wayland_decorations(&win, app_drawn)) {
-            tracing::warn!("title bar: {e:#}");
+    for (label, w) in app.webview_windows() {
+        if label == QUICK {
+            continue;
+        }
+        if let Err(e) = w.set_decorations(!app_drawn) {
+            tracing::warn!("title bar on {label}: {e:#}");
+        }
+        // tao's macOS `set_decorations(false)` sets the style mask to Borderless|Resizable and
+        // drops Miniaturizable (create-time undecorated windows still include it). Without that
+        // mask, NSWindow::miniaturize no-ops — restore it so app-drawn Minimize works.
+        if app_drawn {
+            if let Err(e) = w.set_minimizable(true) {
+                tracing::warn!("title bar on {label}: {e:#}");
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let win = w.clone();
+            if let Err(e) = w.run_on_main_thread(move || announce_wayland_decorations(&win, app_drawn)) {
+                tracing::warn!("title bar on {label}: {e:#}");
+            }
         }
     }
 }
@@ -199,20 +246,29 @@ pub fn validate_shortcut(accel: &str) -> std::result::Result<(), String> {
 
 pub fn build_tray(app: &AppHandle) -> Result<()> {
     let show = MenuItem::with_id(app, "show", "Show Patchbay", true, None::<&str>)?;
+    let new_win = MenuItem::with_id(app, "new-window", "New window", true, None::<&str>)?;
     let new_chat = MenuItem::with_id(app, "new-chat", "New chat", true, None::<&str>)?;
     let quick = MenuItem::with_id(app, "quick", "Quick entry…", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&show, &new_chat, &quick, &sep, &quit])?;
+    let menu = Menu::with_items(app, &[&show, &new_win, &new_chat, &quick, &sep, &quit])?;
     let mut builder = TrayIconBuilder::with_id("main")
         .tooltip("Patchbay")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, ev| match ev.id().as_ref() {
             "show" => show_main(app),
+            "new-window" => {
+                let h = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = new_window(h).await;
+                });
+            }
             "new-chat" => {
                 show_main(app);
-                let _ = app.emit_to("main", EV_NEW_CHAT, ());
+                if let Some(target) = active_normal_window(app) {
+                    let _ = app.emit_to(target.label(), EV_NEW_CHAT, ());
+                }
             }
             "quick" => toggle_quick(app),
             "quit" => app.exit(0),
@@ -249,12 +305,50 @@ impl crate::DesktopHooks for Hooks {
 
 // ---------------- desktop-only commands ----------------
 
+static WINDOW_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Open a new desktop window of the app.
+#[tauri::command]
+pub async fn new_window(app: AppHandle) -> crate::CmdResult<()> {
+    let id = format!("win-{}", WINDOW_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let mut builder = WebviewWindowBuilder::new(&app, &id, WebviewUrl::App("index.html".into()))
+        .title("Patchbay")
+        .inner_size(1280.0, 820.0)
+        .min_inner_size(760.0, 500.0);
+
+    #[cfg(target_os = "linux")]
+    {
+        builder = builder.transparent(true);
+    }
+
+    let title_bar = app
+        .try_state::<crate::AppState>()
+        .map(|s| crate::prefs::load(&s.db).title_bar)
+        .or_else(|| app.try_state::<crate::daemon_link::DaemonLink>().map(|l| l.startup_prefs().0))
+        .unwrap_or_else(|| "app".into());
+    let app_drawn = title_bar == "app";
+    builder = builder.decorations(!app_drawn);
+
+    let win = builder.build()?;
+    #[cfg(target_os = "linux")]
+    {
+        let w = win.clone();
+        let _ = win.run_on_main_thread(move || announce_wayland_decorations(&w, app_drawn));
+    }
+    let _ = win.show();
+    let _ = win.set_focus();
+    record_window_focused(&id);
+    Ok(())
+}
+
 /// From the quick-entry window: hand the text to the main window as a new chat.
 #[tauri::command]
 fn quick_submit(app: AppHandle, text: String) -> crate::CmdResult<()> {
     hide_quick(&app);
     show_main(&app);
-    app.emit_to("main", EV_QUICK_PROMPT, text)?;
+    if let Some(target) = active_normal_window(&app) {
+        let _ = app.emit_to(target.label(), EV_QUICK_PROMPT, text);
+    }
     Ok(())
 }
 
@@ -393,6 +487,7 @@ fn stop_native() {
 fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     let desktop_only: Box<dyn Fn(tauri::ipc::Invoke) -> bool + Send + Sync> =
         Box::new(tauri::generate_handler![
+            new_window,
             quick_submit,
             quick_dismiss,
             write_text_file,
@@ -527,7 +622,9 @@ pub fn run() {
                     }
                     show_main(&h);
                     if let Some(open) = a.notification().and_then(|n| n.extra().get("open")) {
-                        let _ = h.emit_to("main", EV_NOTIFICATION_OPEN, open.clone());
+                        if let Some(target) = active_normal_window(&h) {
+                            let _ = h.emit_to(target.label(), EV_NOTIFICATION_OPEN, open.clone());
+                        }
                     }
                 });
             }
@@ -538,15 +635,27 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|w, ev| {
-            // The hidden quick-entry window must not keep the app alive after the main one closes.
-            if w.label() == "main" && matches!(ev, tauri::WindowEvent::Destroyed) {
-                w.app_handle().exit(0);
+            // The hidden quick-entry window must not keep the app alive after normal windows close.
+            if w.label() != QUICK && matches!(ev, tauri::WindowEvent::Destroyed) {
+                let remaining = w
+                    .app_handle()
+                    .webview_windows()
+                    .into_iter()
+                    .filter(|(label, _)| label != QUICK && label != w.label())
+                    .count();
+                if remaining == 0 {
+                    w.app_handle().exit(0);
+                }
             }
-            if w.label() == "main"
+            if w.label() != QUICK
                 && let tauri::WindowEvent::Focused(focused) = ev
-                && let Ok(mut t) = MAIN_BLURRED_AT.lock()
             {
-                *t = (!focused).then(Instant::now);
+                if *focused {
+                    record_window_focused(w.label());
+                }
+                if let Ok(mut t) = MAIN_BLURRED_AT.lock() {
+                    *t = (!focused).then(Instant::now);
+                }
             }
         })
         .invoke_handler(invoke_handler())

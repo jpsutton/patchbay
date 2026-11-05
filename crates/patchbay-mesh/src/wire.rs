@@ -36,6 +36,9 @@ pub struct Hello {
     /// Optional abilities, such as [`FEATURE_GATEWAY`]. Older nodes don't send any.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub features: Vec<String>,
+    /// App version of the sender. Older nodes omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_version: Option<String>,
 }
 
 /// Live event: a node asks to join and waits on `host`, a member. Every member that gets it may
@@ -93,6 +96,9 @@ pub struct LinkReport {
     /// App version of the origin. Older nodes omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_version: Option<String>,
+    /// App versions of the phones in `remotes`. Older nodes omit it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub remote_versions: std::collections::BTreeMap<String, String>,
 }
 
 /// One synced cell write (or a row delete when `c` is the tombstone column).

@@ -3,6 +3,7 @@ import { api, type SearchHit } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { fmtTime, matchesQuery } from "../lib/format";
 import { focusSidebarSearch, keyLabel } from "../lib/shortcuts";
+import { isRemoteApp } from "../lib/platform";
 import { SearchIcon } from "./icons";
 
 type Item = { key: string; section: string; label: string; detail?: string; snippet?: string; run: () => void };
@@ -60,6 +61,7 @@ export function CommandPalette() {
     const st = useStore.getState();
     const actions: Item[] = [
       { key: "a-new", section: "Actions", label: "New chat", detail: keyLabel("Mod+N"), run: () => { st.setMode("chat"); st.selectConversation(null); } },
+      ...(!isRemoteApp() ? [{ key: "a-window", section: "Actions", label: "New window", detail: keyLabel("Mod+Shift+N"), run: () => { api.newWindow(); } }] : []),
       { key: "a-folder", section: "Actions", label: "New Code session…", run: () => useStore.getState().setNewSessionOpen(true) },
       { key: "a-chat", section: "Actions", label: "Go to Chat", run: () => st.setMode("chat") },
       { key: "a-code", section: "Actions", label: "Go to Code", run: () => st.setMode("code") },

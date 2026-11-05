@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   api,
   errorText,
@@ -27,6 +28,7 @@ import {
   type Subagent,
   type UsageView,
   type PlanAccount,
+  type AntigravityPlanLimits,
   type CursorPlanLimits,
   type Preferences,
   type MeshStatus,
@@ -388,7 +390,7 @@ interface Store {
   activeConversationId: string | null;
   codeSessions: CodeSession[];
   activeCodeSessionId: string | null;
-  /** Code sessions in split panes, left to right; empty when not split. `activeCodeSessionId` is the focused one. */
+  /** Code sessions in split panes (left→right or top→bottom); empty when not split. `activeCodeSessionId` is the focused one. */
   panes: string[];
   code: Record<string, CodeState>;
   chatStreams: Record<string, ChatStream>;
@@ -402,6 +404,9 @@ interface Store {
   /** Last Cursor plan report from the dashboard poll or a mesh peer. */
   cursorPlanLimits: CursorPlanLimits | null;
   cursorPlanOpen: boolean;
+  /** Last Antigravity plan report from the Cloud Code quota poll or a mesh peer. */
+  antigravityPlanLimits: AntigravityPlanLimits | null;
+  antigravityPlanOpen: boolean;
   prefs: Preferences;
   loadPrefs: () => Promise<void>;
   /** Preferences someone saved on this backend (another window or browser tab): show them here. */
@@ -427,6 +432,8 @@ interface Store {
   setPlanOpen: (o: boolean) => void;
   setCursorPlanLimits: (l: CursorPlanLimits | null) => void;
   setCursorPlanOpen: (o: boolean) => void;
+  setAntigravityPlanLimits: (l: AntigravityPlanLimits | null) => void;
+  setAntigravityPlanOpen: (o: boolean) => void;
   refreshCatalog: () => Promise<void>;
   setDefaultModel: (ref: string) => Promise<void>;
   refreshConversations: () => Promise<void>;
@@ -446,6 +453,9 @@ interface Store {
   /** Move focus to the next or previous pane. */
   cyclePane: (delta: 1 | -1) => void;
   swapPanes: () => void;
+  insertPaneAt: (id: string, atIndex: number) => void;
+  replacePaneAt: (id: string, atIndex: number) => void;
+  movePane: (fromIdx: number, toIdx: number) => void;
   resetCode: (id: string) => void;
   pushCodeEntry: (id: string, e: Entry) => void;
   setCodeBusy: (id: string, busy: boolean) => void;
@@ -958,7 +968,32 @@ let codeSessionsSeq = 0;
 /** Same for the sidebar layout. */
 let sidebarLayoutSeq = 0;
 
-const PANES_KEY = "patchbay.panes";
+const WINDOW_LABEL: string = (() => {
+  try {
+    return getCurrentWindow().label ?? "main";
+  } catch {
+    return "main";
+  }
+})();
+const IS_MAIN_WINDOW = WINDOW_LABEL === "main";
+const IS_REMOTE = isRemoteApp();
+/** Desktop main / secondary window keys, or a phone-local key so remote split doesn't share desktop panes. */
+const PANES_KEY = IS_REMOTE
+  ? "patchbay.remote.panes"
+  : IS_MAIN_WINDOW
+    ? "patchbay.panes"
+    : `patchbay.panes.${WINDOW_LABEL}`;
+const PANE_MAX = paneLogic.maxPanesFor(IS_REMOTE);
+
+// If this is a non-main window, clean up any leftover localStorage keys from previous launches
+if (!IS_MAIN_WINDOW && !IS_REMOTE) {
+  try {
+    localStorage.removeItem(PANES_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
 /** The saved panes are read once, when the first session list shows which sessions still exist. */
 let panesRestored = false;
 
@@ -967,19 +1002,20 @@ function paneState(): paneLogic.PaneState {
   return { panes: s.panes, active: s.activeCodeSessionId };
 }
 
-/** Sets the panes and the focused session together, and saves the panes. The phone has no split. */
+/** Sets the panes and the focused session together, and saves the panes (desktop and phone). */
 function applyPanes(next: paneLogic.PaneState) {
   useStore.setState({ panes: next.panes, activeCodeSessionId: next.active });
-  if (!isRemoteApp()) saveStringList(PANES_KEY, next.panes);
+  saveStringList(PANES_KEY, next.panes);
 }
 
 /** Restore the saved panes on the first session list; after that, drop panes whose session is gone or archived. */
 function syncPanes(list: CodeSession[]) {
-  if (isRemoteApp()) return;
   const live = new Set(list.filter((s) => s.archivedAt == null).map((s) => s.id));
   if (!panesRestored) {
     panesRestored = true;
-    const panes = paneLogic.restorePanes(loadStringList(PANES_KEY), live);
+    // Non-main desktop windows always start clean without inherited split panes.
+    if (!IS_MAIN_WINDOW && !IS_REMOTE) return;
+    const panes = paneLogic.restorePanes(loadStringList(PANES_KEY), live, PANE_MAX);
     if (panes.length === 0) return;
     const cur = useStore.getState().activeCodeSessionId;
     useStore.setState({ panes, activeCodeSessionId: cur !== null && panes.includes(cur) ? cur : panes[0] });
@@ -1081,6 +1117,8 @@ export const useStore = create<Store>((set, get) => ({
   planOpen: false,
   cursorPlanLimits: null,
   cursorPlanOpen: false,
+  antigravityPlanLimits: null,
+  antigravityPlanOpen: false,
   confirm: null,
   prefs: defaultPreferences,
   loadPrefs: async () => {
@@ -1139,13 +1177,32 @@ export const useStore = create<Store>((set, get) => ({
   setToast: (toast) => set({ toast }),
   setAlert: (alert) => set({ alert }),
   setMeshPopoverOpen: (meshPopoverOpen) =>
-    set(meshPopoverOpen ? { meshPopoverOpen, planOpen: false, cursorPlanOpen: false } : { meshPopoverOpen }),
+    set(
+      meshPopoverOpen
+        ? { meshPopoverOpen, planOpen: false, cursorPlanOpen: false, antigravityPlanOpen: false }
+        : { meshPopoverOpen },
+    ),
   setPlanAccounts: (planAccounts) => set({ planAccounts }),
   setPlanOpen: (planOpen) =>
-    set(planOpen ? { planOpen, meshPopoverOpen: false, cursorPlanOpen: false } : { planOpen }),
+    set(
+      planOpen
+        ? { planOpen, meshPopoverOpen: false, cursorPlanOpen: false, antigravityPlanOpen: false }
+        : { planOpen },
+    ),
   setCursorPlanLimits: (cursorPlanLimits) => set({ cursorPlanLimits }),
   setCursorPlanOpen: (cursorPlanOpen) =>
-    set(cursorPlanOpen ? { cursorPlanOpen, meshPopoverOpen: false, planOpen: false } : { cursorPlanOpen }),
+    set(
+      cursorPlanOpen
+        ? { cursorPlanOpen, meshPopoverOpen: false, planOpen: false, antigravityPlanOpen: false }
+        : { cursorPlanOpen },
+    ),
+  setAntigravityPlanLimits: (antigravityPlanLimits) => set({ antigravityPlanLimits }),
+  setAntigravityPlanOpen: (antigravityPlanOpen) =>
+    set(
+      antigravityPlanOpen
+        ? { antigravityPlanOpen, meshPopoverOpen: false, planOpen: false, cursorPlanOpen: false }
+        : { antigravityPlanOpen },
+    ),
 
   refreshCatalog: async () => {
     const [providers, models, def] = await Promise.all([
@@ -1203,11 +1260,14 @@ export const useStore = create<Store>((set, get) => ({
     if (get().panes.length === 0) set({ activeCodeSessionId: id });
     else applyPanes(paneLogic.selectPane(paneState(), id));
   },
-  openInSplit: (id, side) => applyPanes(paneLogic.openInSplit(paneState(), id, side)),
-  openBeside: (id) => applyPanes(paneLogic.openInSplit(paneState(), id, paneLogic.otherSide(paneState()))),
+  openInSplit: (id, side) => applyPanes(paneLogic.openInSplit(paneState(), id, side, PANE_MAX)),
+  openBeside: (id) => applyPanes(paneLogic.openInSplit(paneState(), id, paneLogic.otherSide(paneState()), PANE_MAX)),
   closePane: (id) => applyPanes(paneLogic.closePane(paneState(), id)),
   cyclePane: (delta) => applyPanes(paneLogic.cyclePane(paneState(), delta)),
   swapPanes: () => applyPanes(paneLogic.swapPanes(paneState())),
+  insertPaneAt: (id, atIndex) => applyPanes(paneLogic.insertPaneAt(paneState(), id, atIndex, PANE_MAX)),
+  replacePaneAt: (id, atIndex) => applyPanes(paneLogic.replacePaneAt(paneState(), id, atIndex)),
+  movePane: (fromIdx, toIdx) => applyPanes(paneLogic.movePane(paneState(), fromIdx, toIdx)),
 
   resetCode: (id) => {
     flushCodeEvents(id);

@@ -103,6 +103,43 @@ impl Acp {
                     let option = self.pick.unwrap_or(if self.answer == "allow" { "allow" } else { "reject" });
                     self.send(json!({"jsonrpc": "2.0", "id": m["id"], "result": {"outcome": {"outcome": "selected", "optionId": option}}})).await;
                 }
+                // Patchbay AskUserQuestion: one multi-question form (‹ › in the UI). Reply is Grok-shaped.
+                Some(method) if method.contains("ask_user_question") => {
+                    self.asked.push(m["params"].clone());
+                    if let Some(sid) = self.steer_on_ask.take() {
+                        let id = self.next;
+                        self.next += 1;
+                        let p = json!({"sessionId": sid, "prompt": [{"type": "text", "text": "STEERED-IN"}]});
+                        self.send(json!({"jsonrpc": "2.0", "id": id, "method": "session/steering", "params": p})).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                    let questions = m["params"]["questions"].as_array().cloned().unwrap_or_default();
+                    let mut answers = serde_json::Map::new();
+                    if let Some(pick) = self.pick {
+                        // Legacy pick ids from the permission era (`opt-N`) map onto option labels.
+                        if let Some(q0) = questions.first() {
+                            let prompt = q0["question"].as_str().unwrap_or("?");
+                            let labels: Vec<&str> = q0["options"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|o| o["label"].as_str())
+                                .collect();
+                            let label = pick
+                                .strip_prefix("opt-")
+                                .and_then(|i| i.parse::<usize>().ok())
+                                .and_then(|i| labels.get(i).copied())
+                                .unwrap_or(pick);
+                            answers.insert(prompt.to_owned(), json!([label]));
+                        }
+                    }
+                    let result = if answers.is_empty() {
+                        json!({ "outcome": "cancelled" })
+                    } else {
+                        json!({ "outcome": "accepted", "answers": answers })
+                    };
+                    self.send(json!({"jsonrpc": "2.0", "id": m["id"], "result": result})).await;
+                }
                 _ => {}
             }
         }
@@ -425,8 +462,14 @@ async fn asks_the_user_a_question() {
     let r = prompt(&mut acp, &sid, "please !ask").await;
     assert_eq!(r["stopReason"], "end_turn");
     let q = &acp.asked[0];
-    let ids: Vec<&str> = q["options"].as_array().unwrap().iter().filter_map(|o| o["optionId"].as_str()).collect();
-    assert_eq!(ids, ["opt-0", "opt-1", "__ask_question_skip__"]);
+    // One `_patchbay/ask_user_question` form (not N permission requests).
+    let labels: Vec<&str> = q["questions"][0]["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|o| o["label"].as_str())
+        .collect();
+    assert_eq!(labels, ["Alpha", "Beta"]);
     assert!(acp.text_of("agent_message_chunk").contains("= \"Beta\""), "{}", acp.text_of("agent_message_chunk"));
     let _ = std::fs::remove_dir_all(cwd);
 }

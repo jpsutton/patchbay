@@ -127,9 +127,14 @@ export function sessionActions(
       }),
     },
   ];
-  // Beside the open session; pointless for the only session open with nothing to split it from.
-  if (desktop && !archived && !(st().panes.length === 0 && st().activeCodeSessionId === s.id)) {
-    actions.splice(1, 0, { label: "Open in split view", onSelect: () => st().openBeside(s.id) });
+  // Beside the open session; pointless with nothing to put it beside.
+  // Desktop: context menu / Alt+click. Phone: long-press in the sessions sheet (no Alt+click).
+  {
+    const openId = st().activeCodeSessionId;
+    const canSplit = !archived && (st().panes.length > 0 || (openId != null && openId !== s.id));
+    if (canSplit) {
+      actions.splice(1, 0, { label: "Open in split view", onSelect: () => st().openBeside(s.id) });
+    }
   }
   if (running) {
     actions.push({

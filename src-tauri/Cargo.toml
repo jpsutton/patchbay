@@ -1,6 +1,6 @@
 [package]
 name = "patchbay"
-version = "0.19.1"
+version = "0.20.0"
 # `tauri dev` runs `cargo run`, which can't choose between this and `patchbayd` on its own.
 default-run = "patchbay"
 edition = "2024"
@@ -114,6 +114,10 @@ tray-icon = { version = "0.25", default-features = false, features = ["ksni"], o
 # The quick-entry shortcut on Wayland sessions, through the GlobalShortcuts portal (same 0.11
 # the dialog plugin already links).
 ashpd = { version = "0.11", default-features = false, features = ["tokio"], optional = true }
+
+# The tests raise the open-file limit (see `test_support`); the same libc tokio already links.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
 
 [profile.dev.package."*"]
 opt-level = 1

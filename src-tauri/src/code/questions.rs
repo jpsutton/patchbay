@@ -81,6 +81,10 @@ pub fn from_ext(method: &str, raw: &Value) -> Option<QuestionForm> {
     None
 }
 
+/// Option id Patchbay's own agent offers to say "the user may type an answer". It is not a
+/// button: the card shows a text field instead, and the reply is this id, a colon and the text.
+const OTHER_ID: &str = "__ask_question_other__";
+
 /// A permission request that is a menu of choices, not a safety prompt.
 pub fn from_permission(tool: &Value, options: &Value) -> Option<QuestionForm> {
     let opts = options.as_array()?;
@@ -88,9 +92,10 @@ pub fn from_permission(tool: &Value, options: &Value) -> Option<QuestionForm> {
         return None;
     }
     let skip = opts.iter().find(|o| id_of(o) == "__ask_question_skip__").map(id_of);
+    let takes_text = opts.iter().any(|o| id_of(o) == OTHER_ID);
     let allows: Vec<&Value> = opts
         .iter()
-        .filter(|o| o["kind"] == "allow_once" && id_of(o) != "__ask_question_skip__")
+        .filter(|o| o["kind"] == "allow_once" && id_of(o) != "__ask_question_skip__" && id_of(o) != OTHER_ID)
         .collect();
     let safety = opts.iter().any(|o| {
         let kind = o["kind"].as_str().unwrap_or("");
@@ -121,7 +126,7 @@ pub fn from_permission(tool: &Value, options: &Value) -> Option<QuestionForm> {
             id: "choice".into(),
             prompt,
             multi: false,
-            free_text: false,
+            free_text: takes_text,
             skippable: skip.is_some(),
             options: choices,
             skip_option_id: skip,
@@ -177,6 +182,11 @@ pub fn permission_option(form: &QuestionForm, answers: &[Answered]) -> Option<St
     let answer = answers.iter().find(|a| a.id == q.id);
     if let Some(id) = answer.and_then(|a| a.picks.first()).filter(|s| !s.is_empty()) {
         return Some(id.clone());
+    }
+    // "Something else": the text rides in the option id, since a permission reply has no other field.
+    let note = answer.map(|a| a.note.trim()).filter(|n| q.free_text && !n.is_empty());
+    if let Some(note) = note {
+        return Some(format!("{OTHER_ID}:{note}"));
     }
     q.skip_option_id.clone()
 }
@@ -317,6 +327,11 @@ mod tests {
         });
         let form = from_ext("x.ai/ask_user_question", &raw).unwrap();
         assert_eq!(form.questions.len(), 1);
+        // Patchbay's own AskUserQuestion uses the same payload shape under this method name.
+        assert_eq!(
+            from_ext("patchbay/ask_user_question", &raw).unwrap().questions[0].prompt,
+            form.questions[0].prompt
+        );
         assert!(form.questions[0].free_text);
         assert_eq!(form.questions[0].options[0].description.as_deref(), Some("About 6 hours."));
         let resp = grok_response(&[Answered {
@@ -455,6 +470,7 @@ mod tests {
         let options = json!([
             { "optionId": "opt-0", "name": "A", "kind": "allow_once" },
             { "optionId": "opt-1", "name": "B", "kind": "allow_once" },
+            { "optionId": "__ask_question_other__", "name": "Something else...", "kind": "allow_once" },
             { "optionId": "__ask_question_skip__", "name": "Skip", "kind": "reject_once" }
         ]);
         let form = from_permission(&tool, &options).expect("a card");
@@ -467,5 +483,42 @@ mod tests {
         assert_eq!(permission_option(&form, &picked).as_deref(), Some("opt-1"));
         // Left blank, the card answers with the skip option, which the agent reads as skipped.
         assert_eq!(permission_option(&form, &[]).as_deref(), Some("__ask_question_skip__"));
+    }
+
+    #[test]
+    fn native_agent_question_takes_typed_text() {
+        let tool = json!({ "title": "Which approach?" });
+        let options = json!([
+            { "optionId": "opt-0", "name": "A", "kind": "allow_once" },
+            { "optionId": "opt-1", "name": "B", "kind": "allow_once" },
+            { "optionId": "__ask_question_other__", "name": "Something else...", "kind": "allow_once" },
+            { "optionId": "__ask_question_skip__", "name": "Skip", "kind": "reject_once" }
+        ]);
+        let form = from_permission(&tool, &options).expect("a card");
+        assert!(form.questions[0].free_text);
+        assert_eq!(form.questions[0].options.len(), 2);
+
+        let typed = [Answered { id: "choice".into(), picks: vec![], note: "  Both, A first ".into() }];
+        assert_eq!(
+            permission_option(&form, &typed).as_deref(),
+            Some("__ask_question_other__:Both, A first")
+        );
+        // Blank text is no answer: the question counts as skipped.
+        let blank = [Answered { id: "choice".into(), picks: vec![], note: "  ".into() }];
+        assert_eq!(permission_option(&form, &blank).as_deref(), Some("__ask_question_skip__"));
+    }
+
+    #[test]
+    fn agents_that_do_not_offer_the_text_option_get_no_text_field() {
+        // Cursor-style: one-off choices and a skip option. It cannot read a typed answer.
+        let options = json!([
+            { "optionId": "a", "name": "A", "kind": "allow_once" },
+            { "optionId": "b", "name": "B", "kind": "allow_once" },
+            { "optionId": "__ask_question_skip__", "name": "Skip", "kind": "allow_once" }
+        ]);
+        let form = from_permission(&json!({ "title": "Pick" }), &options).expect("a card");
+        assert!(!form.questions[0].free_text);
+        let typed = [Answered { id: "choice".into(), picks: vec![], note: "mine".into() }];
+        assert_eq!(permission_option(&form, &typed).as_deref(), Some("__ask_question_skip__"));
     }
 }

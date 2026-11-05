@@ -3,7 +3,6 @@
 use std::path::Path;
 
 use async_trait::async_trait;
-use base64::Engine;
 use patchbay_llm::{Part, ToolSpec};
 use serde_json::{Value, json};
 
@@ -117,11 +116,16 @@ come back as cells. Give an absolute path. For a large file read only the part y
             }
             return match std::fs::read(&path) {
                 Ok(bytes) => {
+                    // A too-large image would make every later request on this session fail.
+                    let (mime, data) = match session.host.prepare_image(&bytes, mime) {
+                        Ok(v) => v,
+                        Err(e) => return ToolOutput::error(format!("Cannot prepare image {}: {e}", path.display())),
+                    };
                     remember(session, &path);
                     ToolOutput {
                         content: vec![
                             Part::Text(format!("Image {} ({} bytes):", path.display(), bytes.len())),
-                            Part::Image { mime: mime.into(), data: base64::engine::general_purpose::STANDARD.encode(bytes) },
+                            Part::Image { mime, data },
                         ],
                         ui: Vec::new(),
                         raw: Value::Null,
