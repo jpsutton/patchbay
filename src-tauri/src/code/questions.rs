@@ -327,6 +327,11 @@ mod tests {
         });
         let form = from_ext("x.ai/ask_user_question", &raw).unwrap();
         assert_eq!(form.questions.len(), 1);
+        // Patchbay's own AskUserQuestion uses the same payload shape under this method name.
+        assert_eq!(
+            from_ext("patchbay/ask_user_question", &raw).unwrap().questions[0].prompt,
+            form.questions[0].prompt
+        );
         assert!(form.questions[0].free_text);
         assert_eq!(form.questions[0].options[0].description.as_deref(), Some("About 6 hours."));
         let resp = grok_response(&[Answered {
