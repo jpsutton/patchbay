@@ -952,6 +952,7 @@ pub fn run() {
     #[cfg_attr(not(mobile), allow(unused_mut))]
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_remote_platform::init());
     #[cfg(mobile)]
     {
