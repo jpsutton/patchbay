@@ -509,7 +509,8 @@ fn agent_status(cursor_agent: Option<&Path>) -> Option<Value> {
     let program = cursor_agent
         .map(|p| p.to_path_buf())
         .or_else(|| crate::code::agents::which("cursor-agent"))?;
-    let out = Command::new(program).args(["status", "--format", "json"]).output().ok()?;
+    use patchbay_agent::proc::NoWindow;
+    let out = Command::new(program).args(["status", "--format", "json"]).no_window().output().ok()?;
     if !out.status.success() {
         return None;
     }

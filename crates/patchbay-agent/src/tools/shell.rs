@@ -121,6 +121,7 @@ fn spawn_shell(
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("NO_COLOR", "1")
         .kill_on_drop(true);
+    crate::proc::NoWindow::no_window(&mut cmd);
     #[cfg(unix)]
     cmd.process_group(0);
     let mut child = cmd.spawn().map_err(|e| format!("Cannot start the shell: {e}"))?;

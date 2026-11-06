@@ -1448,13 +1448,16 @@ async fn run(
             (Box::new(to_agent), Box::new(from_agent), AgentProc::Native { done, task })
         }
         None => {
+            use patchbay_agent::proc::NoWindow;
             let mut cmd = tokio::process::Command::new(&program);
             cmd.args(&args)
                 .current_dir(&cwd)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true);
+                .kill_on_drop(true)
+                // Else Windows opens a console window for the agent that stays as long as it runs.
+                .no_window();
             for k in &env_remove {
                 cmd.env_remove(k);
             }

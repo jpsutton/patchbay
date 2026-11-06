@@ -2648,8 +2648,10 @@ fn agent_home(state: &AppState) -> PathBuf {
 
 /// Commits the target already has at `cwd`, so the bundle can leave them out.
 fn local_commits(cwd: &str) -> Vec<String> {
+    use patchbay_agent::proc::NoWindow;
     let out = std::process::Command::new("git")
         .args(["-C", cwd, "for-each-ref", "--count=100", "--format=%(objectname)", "refs/heads", "refs/remotes"])
+        .no_window()
         .output();
     match out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).lines().map(str::to_owned).collect(),
