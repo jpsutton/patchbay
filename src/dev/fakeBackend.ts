@@ -1399,6 +1399,18 @@ export function install() {
           return [];
         case "revoke_share":
           return null;
+        // Phone in-app viewer (dev stand-in): a canned HTML artifact with the sandboxed headers.
+        case "remote_share_fetch":
+          return {
+            status: 200,
+            headers: [
+              ["content-type", "text/html; charset=utf-8"],
+              ["content-disposition", 'inline; filename="demo.html"'],
+              ["content-security-policy", "sandbox"],
+              ["x-content-type-options", "nosniff"],
+            ],
+            bodyB64: btoa("<h1>Demo artifact</h1><p>Served through the gateway proxy.</p>"),
+          };
         // Set window.__fakeUpdate = { version, notes } before the first check to see the update button.
         case "update_check":
           return (window as unknown as Record<string, unknown>).__fakeUpdate ?? null;

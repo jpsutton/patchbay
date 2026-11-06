@@ -921,6 +921,21 @@ async fn list_project_files(r: Shared<'_>, session_id: Option<String>) -> CmdRes
     }
 }
 
+/// Fetch one artifact share for the in-app viewer (Phase 2). The phone has no HTTP route to the
+/// gateway, so this goes over the mesh connection it already holds: `remote.share_get` asks the
+/// gateway, which relays ONLY the opaque token to the owning node (where expiry/revocation are
+/// enforced). The result is normalized to camelCase for the frontend. An RPC failure (host offline)
+/// rejects, and the viewer shows an error state with an "open in browser" fallback.
+#[tauri::command]
+async fn remote_share_fetch(r: Shared<'_>, node_id: String, token: String) -> CmdResult<Value> {
+    let v = r.client.rpc("remote.share_get", json!({ "nodeId": node_id, "token": token })).await?;
+    Ok(json!({
+        "status": v["status"].as_u64().unwrap_or(404),
+        "headers": v["headers"].clone(),
+        "bodyB64": v["body_b64"].as_str().unwrap_or(""),
+    }))
+}
+
 /// Tell the client when any network interface's address changes (Wi-Fi to cellular, a VPN
 /// coming up), so it checks its connection at once instead of waiting for pings to fail.
 fn watch_network(client: RemoteClient) {
@@ -1085,6 +1100,7 @@ pub fn run() {
             session_plan_usage,
             list_project_files,
             code_session_image,
+            remote_share_fetch,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Patchbay Remote");
