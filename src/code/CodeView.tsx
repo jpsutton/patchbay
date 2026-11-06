@@ -56,7 +56,7 @@ import { PaneContext, useViewAction, ViewActive } from "../lib/shortcuts";
 import { usePaneSession } from "../lib/pane";
 import { useRememberedOpen } from "../lib/rowMemory";
 import { enqueueSpeech, speakingNow, stopSpeech } from "../lib/speech";
-import { liveCursorNow, takeLiveProse, type LiveCursor } from "../lib/spokenText";
+import { liveCursorNow, takeLiveProse, takeLiveQuestions, type LiveCursor, type LiveQuestionCursor } from "../lib/spokenText";
 import { HeaderButton } from "../components/HeaderButton";
 import { useDragRegion, WindowControls } from "../components/WindowControls";
 import { isRemoteApp, uuid } from "../lib/platform";
@@ -1085,20 +1085,25 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const skipListen = useRef(false);
   useStopSpeechWhenHidden();
   // Live reading: each agent message is spoken as it finishes, in order, for the length of a
-  // turn. `live` is where reading has got to in the session on screen.
+  // turn. `live` is where reading has got to in the session on screen. Questions are not entries
+  // (they live in `state.questions`), so they have their own cursor with the same join/once rules.
   const live = useRef<{ id: string; cursor: LiveCursor } | null>(null);
+  const questionCursor = useRef<LiveQuestionCursor | null>(null);
   const listenEntries = state?.entries;
+  const listenQuestions = state?.questions;
   const listenWorking = state ? codeWorking(state) : false;
 
   useEffect(() => {
     if (!listenOn || !viewActive || !activeId || !listenEntries) {
       live.current = null;
+      questionCursor.current = null;
       return;
     }
     if (live.current?.id !== activeId) {
       // Join a turn already under way at the message being written; read nothing from history.
       if (!listenWorking) {
         live.current = null;
+        questionCursor.current = null;
         return;
       }
       live.current = { id: activeId, cursor: liveCursorNow(listenEntries) };
@@ -1106,7 +1111,12 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     const cur = live.current;
     const { texts, cursor } = takeLiveProse(listenEntries, cur.cursor, !listenWorking);
     cur.cursor = cursor;
-    // Stop was pressed: keep the cursor moving but say nothing more from this turn.
+    // A form already pending when listening starts is history; only a new arrival is read, once.
+    // Compute this before the Stop branch so a question arriving while stopped is still marked
+    // seen and never blurted out later when Stop clears.
+    const q = takeLiveQuestions(listenQuestions ?? [], questionCursor.current, activeId, cur !== null);
+    questionCursor.current = q.cursor;
+    // Stop was pressed: keep both cursors moving but say nothing more from this turn.
     if (skipListen.current) {
       if (!listenWorking) skipListen.current = false;
       return;
@@ -1116,7 +1126,12 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
         setToast(e instanceof Error ? e.message : "Could not read this aloud"),
       ),
     );
-  }, [activeId, listenEntries, listenWorking, viewActive, listenOn, setToast]);
+    q.forms.forEach(({ requestId, text }) =>
+      enqueueSpeech(text, `listen:${activeId}:question:${requestId}`).catch((e) =>
+        setToast(e instanceof Error ? e.message : "Could not read this aloud"),
+      ),
+    );
+  }, [activeId, listenEntries, listenQuestions, listenWorking, viewActive, listenOn, setToast]);
 
   const changes = useMemo(() => {
     if (!state || !session) return [];
