@@ -39,12 +39,26 @@ export function ReadAloudButton({ id, text }: { id: string; text: string }) {
   );
 }
 
+/**
+ * Turn "listen to new replies" on or off. Off also stops what is being read and anything queued
+ * behind it, at once, rather than letting a long reply play out. Returns an error to show.
+ */
+export async function setListen(on: boolean): Promise<string | null> {
+  if (!on) stopSpeech();
+  const err = await useStore.getState().updatePrefs({ readAloudListen: on });
+  // A reply that finished while the change was on its way may have been queued in the meantime.
+  if (!on && !err) stopSpeech();
+  return err;
+}
+
 /** Composer control for "speak each new reply". The click is what lets the page play audio later. */
 export function ListenButton() {
   const on = useStore((s) => s.prefs.readAloudListen);
-  const update = useStore((s) => s.updatePrefs);
   const setToast = useStore((s) => s.setToast);
-  const label = on ? "Stop reading each reply aloud" : "Read each new reply aloud";
+  // One preference for every chat and session, but only the view on screen reads its replies.
+  const label = on
+    ? "Reading new replies aloud while this view is open. Click to stop"
+    : "Read each new reply aloud while this view is open";
   return (
     <button
       type="button"
@@ -54,7 +68,7 @@ export function ListenButton() {
       title={label}
       onClick={() => {
         primeAudio();
-        void update({ readAloudListen: !on }).then((err) => err && setToast(err));
+        void setListen(!on).then((err) => err && setToast(err));
       }}
     >
       {on ? <BroadcastIcon size={14} /> : <SpeakerIcon size={14} />}
