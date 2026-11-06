@@ -916,6 +916,11 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const setToast = useStore((s) => s.setToast);
   const askConfirm = useStore((st) => st.askConfirm);
   const truncateCode = useStore((st) => st.truncateCode);
+  const composerInsert = useStore((s) => s.composerInsert);
+  // ChatView and every split pane stay mounted. Only the visible, focused pane consumes an insert,
+  // and PaneHost focuses a pane on pointer-down before the button's click fires.
+  const insertViewActive = useContext(ViewActive);
+  const insertPaneFocused = useContext(PaneContext)?.focused ?? true;
   const session = sessions.find((s) => s.id === activeId) ?? null;
 
   const [showTerm, setShowTerm] = useState(false);
@@ -923,8 +928,15 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const [bladeWidth, setBladeWidth] = useState(() => loadWidth(BLADE_WIDTH_KEY, BLADE_DEFAULT, BLADE_MIN, BLADE_MAX));
   const [termMounted, setTermMounted] = useState<Record<string, boolean>>({});
   const [editingIdx, setEditingIdx] = useState<number | null>(null);
-  /** Fills the composer after Stop when this agent cannot rewind. */
-  const [composerSeed, setComposerSeed] = useState<{ id: number; text: string; replace?: boolean } | null>(null);
+  /** Fills the composer after Stop, or appends a share link from a transcript row. */
+  const [composerSeed, setComposerSeed] = useState<{ id: number; text: string; replace?: boolean; insert?: boolean } | null>(null);
+  // A share-link action in a file row appends markdown to this pane's composer. Take it
+  // atomically so only one split pane inserts it (pb-20261105-18).
+  useEffect(() => {
+    if (!composerInsert || !insertViewActive || !insertPaneFocused) return;
+    const pending = useStore.getState().takeComposerInsert();
+    if (pending) setComposerSeed({ id: pending.id, text: pending.text, insert: true });
+  }, [composerInsert, insertViewActive, insertPaneFocused]);
   const [moving, setMoving] = useState<"move" | "takeOver" | null>(null);
   /** The header's "more" menu in a narrow pane: where it opens, when it's open. */
   const [more, setMore] = useState<{ x: number; y: number } | null>(null);
