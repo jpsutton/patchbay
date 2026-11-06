@@ -280,6 +280,9 @@ pub struct Live {
     pub busy: bool,
     /// Open permission requests.
     pub permissions: BTreeSet<String>,
+    /// Open questions the agent asked (AskUserQuestion). Absent from older hosts.
+    #[serde(default)]
+    pub questions: BTreeSet<String>,
     /// Unix ms of the last event.
     pub last: i64,
 }
@@ -287,7 +290,7 @@ pub struct Live {
 impl Live {
     /// Fold one Code event in. Returns whether what the list shows changed.
     pub fn apply(&mut self, payload: &Value, now: i64) -> bool {
-        let before = (self.status.clone(), self.busy, self.permissions.len());
+        let before = (self.status.clone(), self.busy, self.permissions.len(), self.questions.len());
         let ev = &payload["event"];
         let rid = ev["requestId"].as_str().map(str::to_owned);
         match ev["type"].as_str().unwrap_or_default() {
@@ -296,6 +299,7 @@ impl Live {
                 if self.status == "exited" {
                     self.busy = false;
                     self.permissions.clear();
+                    self.questions.clear();
                 }
             }
             "userPrompt" => self.busy = true,
@@ -306,11 +310,17 @@ impl Live {
                     self.permissions.remove(&r);
                 }
             }
+            "question" => self.questions.extend(rid),
+            "questionResolved" => {
+                if let Some(r) = rid {
+                    self.questions.remove(&r);
+                }
+            }
             _ => {}
         }
         let moved = now - self.last > 30_000;
         self.last = now;
-        before != (self.status.clone(), self.busy, self.permissions.len()) || moved
+        before != (self.status.clone(), self.busy, self.permissions.len(), self.questions.len()) || moved
     }
 }
 
@@ -445,5 +455,20 @@ mod tests {
         assert!(!l.apply(&json!({ "event": { "type": "update" } }), 4));
         assert!(l.apply(&json!({ "event": { "type": "permissionResolved", "requestId": "r" } }), 5));
         assert!(l.busy && l.permissions.is_empty());
+    }
+
+    #[test]
+    fn live_tracks_open_questions() {
+        let mut l = Live::default();
+        assert!(l.apply(&json!({ "event": { "type": "question", "requestId": "q" } }), 1));
+        assert_eq!(l.questions.len(), 1);
+        assert!(l.permissions.is_empty());
+        assert!(!l.apply(&json!({ "event": { "type": "update" } }), 2));
+        assert!(l.apply(&json!({ "event": { "type": "questionResolved", "requestId": "q" } }), 3));
+        assert!(l.questions.is_empty());
+        // An exiting agent takes its open questions with it.
+        l.apply(&json!({ "event": { "type": "question", "requestId": "q2" } }), 4);
+        assert!(l.apply(&json!({ "event": { "type": "status", "state": "exited" } }), 5));
+        assert!(l.questions.is_empty());
     }
 }
