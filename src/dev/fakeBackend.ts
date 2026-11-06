@@ -4,7 +4,7 @@ import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 import type { Channel } from "@tauri-apps/api/core";
 import { emptyParams, usesPatchbayModels } from "../lib/ipc";
-import { uuid } from "../lib/platform";
+import { isRemoteApp, uuid } from "../lib/platform";
 import { applyChange, type SidebarEntry } from "../lib/sidebarLayout";
 import type {
   MeshChatEvent,
@@ -387,20 +387,25 @@ function fakeReady(csid: string, loaded = false) {
     configOptions: fakeOptionsFor(csid),
     extensions: { statusLine: agentId === "grok", rewind: grok, patchbayModels: grok, steering: FAKE_STEERING.has(agentId), forceSend: true, cancelTool: agentId === "patchbay" },
   });
-  codeEmit(csid, {
-    type: "update",
-    update: {
-      sessionUpdate: "available_commands_update",
-      availableCommands: [
-        { name: "compact", description: "Summarize the conversation to free up context" },
-        { name: "context", description: "Show context window usage" },
-        { name: "model", description: "Switch model", input: { hint: "<model>" } },
-        { name: "review", description: "Review the current changes", input: { hint: "[focus]" } },
-      ],
-    },
-  });
+  // A phone never gets this event (its host answers `list_session_commands` instead).
+  if (!isRemoteApp()) {
+    codeEmit(csid, {
+      type: "update",
+      update: {
+        sessionUpdate: "available_commands_update",
+        availableCommands: DEMO_COMMANDS,
+      },
+    });
+  }
   codeEmit(csid, { type: "status", state: "ready", message: null });
 }
+
+const DEMO_COMMANDS = [
+  { name: "compact", description: "Summarize the conversation to free up context" },
+  { name: "context", description: "Show context window usage" },
+  { name: "model", description: "Switch model", input: { hint: "<model>" } },
+  { name: "review", description: "Review the current changes", input: { hint: "[focus]" } },
+];
 
 const cancelled = new Set<string>();
 
@@ -1635,6 +1640,7 @@ export function install() {
         case "get_code_transcript": return db.transcripts[a.id as string] ?? null;
         case "save_code_transcript": db.transcripts[a.id as string] = a.json as string; return null;
         case "list_project_files": await sleep(80); return DEMO_FILES;
+        case "list_session_commands": await sleep(80); return DEMO_COMMANDS;
         case "code_session_image": return "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
         case "list_mcp_servers": return db.mcp.map((m) => ({ ...m, config: { ...m.config, env: m.config.env.map((kv) => (kv.secret ? { ...kv, value: "", stored: !!kv.value } : kv)) } }));
         case "save_mcp_server": {

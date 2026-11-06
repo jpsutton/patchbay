@@ -1921,6 +1921,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
               onRestored={() => clearCodeRestore(session.id)}
               disabled={!ready}
               commands={s?.commands}
+              // A phone never sees the agent's events, so `commands` stays empty there: ask the host.
+              slashCommands={isRemoteApp() ? () => api.listSessionCommands(session.id) : undefined}
               mentionFiles={() => api.listProjectFiles(session.cwd, session.id)}
               onEditLast={() => {
                 if (!ready || working || !s) return;

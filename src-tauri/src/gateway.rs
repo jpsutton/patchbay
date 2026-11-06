@@ -36,6 +36,7 @@ const CODE_METHODS: &[&str] = &[
     "code.permission",
     "code.question",
     "code.files",
+    "code.commands",
     "code.image",
     "code.auto_title",
 ];

@@ -170,6 +170,9 @@ struct LiveAgent {
     /// was written has no other way to get it: the saved transcript doesn't hold it, and the
     /// event ring only reaches back to the last finished turn.
     plan: Option<serde_json::Value>,
+    /// The slash commands the agent last advertised (`available_commands_update`). A phone has no
+    /// event history to learn them from, so it asks for them (`code.commands`).
+    commands: Option<serde_json::Value>,
     /// Each tool call's latest status in this run of the agent. A window that missed events
     /// (see `code_resume`) learns from it which of the calls it still shows running have ended.
     tools: std::collections::HashMap<String, String>,
@@ -1004,6 +1007,11 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
                 CodeEvent::Update { update } if update["sessionUpdate"] == "plan" => {
                     live.entry(id).or_default().plan = Some(ev)
                 }
+                CodeEvent::Update { update } if update["sessionUpdate"] == "available_commands_update" => {
+                    if update["availableCommands"].is_array() {
+                        live.entry(id).or_default().commands = Some(update["availableCommands"].clone());
+                    }
+                }
                 CodeEvent::Update { update }
                     if matches!(update["sessionUpdate"].as_str(), Some("tool_call" | "tool_call_update")) =>
                 {
@@ -1817,6 +1825,27 @@ async fn code_start(state: &AppState, id: String) -> CmdResult<()> {
         return Ok(());
     }
     Ok(code_start_local(state, id).await?)
+}
+
+/// The slash commands a running session's agent advertises, cut down to what a menu shows (name,
+/// description, input hint) so a phone learns nothing else about the session. Empty while the agent
+/// hasn't advertised any yet, or isn't running.
+fn session_commands(state: &AppState, id: &str) -> serde_json::Value {
+    let live = state.live.lock().unwrap();
+    let commands = if state.code.is_running(id) { live.get(id).and_then(|l| l.commands.as_ref()) } else { None };
+    menu_commands(commands)
+}
+
+fn menu_commands(commands: Option<&serde_json::Value>) -> serde_json::Value {
+    let list = commands.and_then(|c| c.as_array()).into_iter().flatten().filter_map(|c| {
+        let name = c["name"].as_str().filter(|n| !n.is_empty())?;
+        let mut out = serde_json::json!({ "name": name, "description": c["description"].as_str().unwrap_or_default() });
+        if let Some(hint) = c["input"]["hint"].as_str() {
+            out["input"] = serde_json::json!({ "hint": hint });
+        }
+        Some(out)
+    });
+    serde_json::Value::Array(list.collect())
 }
 
 /// Catch-up for a window opening a running session: whether it runs and is mid-turn, plus the
@@ -2941,6 +2970,7 @@ impl mesh::RpcHandler for MeshRpc {
                 let files = tokio::task::spawn_blocking(move || files::list(std::path::Path::new(&s.cwd))).await??;
                 Ok(json!(files))
             }
+            "code.commands" => Ok(session_commands(state, &id()?)),
             "code.image" => {
                 let id = id()?;
                 ensure_local_host(state, &id)?;
@@ -3339,6 +3369,27 @@ fn force_send_needs_a_host_that_advertises_it() {
     assert!(!attach_has_force_send(&attach(true, serde_json::json!({ "steering": true }))));
     assert!(!attach_has_force_send(&attach(false, serde_json::json!({ "forceSend": true }))));
     assert!(!attach_has_force_send(&serde_json::json!({ "running": true, "events": [] })));
+}
+
+#[cfg(test)]
+#[test]
+fn menu_commands_keeps_only_what_a_menu_shows() {
+    let cmds = serde_json::json!([
+        { "name": "review", "description": "Review changes", "input": { "hint": "path", "extra": 1 }, "secret": "x" },
+        { "name": "compact", "description": "Compact" },
+        { "name": "", "description": "no name" },
+        { "description": "no name at all" },
+    ]);
+    assert_eq!(
+        menu_commands(Some(&cmds)),
+        serde_json::json!([
+            { "name": "review", "description": "Review changes", "input": { "hint": "path" } },
+            { "name": "compact", "description": "Compact" },
+        ])
+    );
+    // Nothing advertised yet, or not an array: an empty list, so the phone shows no menu.
+    assert_eq!(menu_commands(None), serde_json::json!([]));
+    assert_eq!(menu_commands(Some(&serde_json::json!("x"))), serde_json::json!([]));
 }
 
 /// Queue input for a remote terminal; false when `id` is local.
