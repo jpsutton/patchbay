@@ -32,7 +32,8 @@ import { MessageTime } from "../components/MessageTime";
 import { Markdown } from "../components/Markdown";
 import { FileLinkContext } from "../components/FileLink";
 import { EditMessage } from "../components/EditMessage";
-import { UsageBar } from "../components/UsageBar";
+import { UsageBar, fmtTokens } from "../components/UsageBar";
+import { coldCacheExpiredAt, isCacheCommand } from "./coldCache";
 import { MobilePlanUsage } from "../components/MobilePlanUsage";
 import { TerminalPane } from "../terminal/TerminalPane";
 import { QuestionCard } from "./QuestionCard";
@@ -1303,6 +1304,44 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     }
   };
 
+  /**
+   * Before a prompt leaves the composer: when the prompt cache has expired and the context is
+   * big, the whole context is re-cached at the cache-write price. Offer to compact first.
+   * Resolves false to keep the draft (the user cancelled); true to send.
+   */
+  const confirmColdCache = async (text: string): Promise<boolean> => {
+    if (!activeId) return true;
+    const st = useStore.getState().code[activeId];
+    // Mid-turn the message steers or queues, and the cache is in use.
+    if (!st || st.busy || isCacheCommand(text)) return true;
+    const expiredAt = coldCacheExpiredAt(st.usage?.cache, st.usage?.contextTokens, Date.now());
+    if (expiredAt == null) return true;
+    const when = new Date(expiredAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const { ok, alt } = await askConfirm({
+      title: "Prompt cache expired",
+      body:
+        `The cache expired at ${when}, so sending now re-caches about ${fmtTokens(st.usage?.contextTokens ?? 0)} tokens ` +
+        "at the cache-write price.\n\nCompacting first summarizes the conversation at the regular input price, " +
+        "so only the short summary is re-cached. Your message sends once it finishes.",
+      confirmLabel: "Compact first",
+      altLabel: "Send anyway",
+    });
+    if (alt) return true;
+    if (!ok) return false;
+    await send("/compact", []);
+    // The compaction is a turn of its own: wait it out so the message starts its own turn after it.
+    await new Promise<void>((resolve) => {
+      const idle = () => !useStore.getState().code[activeId]?.busy;
+      if (idle()) return resolve();
+      const unsubscribe = useStore.subscribe(() => {
+        if (!idle()) return;
+        unsubscribe();
+        resolve();
+      });
+    });
+    return true;
+  };
+
   const editAndResend = async (entryIndex: number, text: string, atts: Attachment[]): Promise<boolean> => {
     if (!activeId || !s) return false;
     const entry = s.entries[entryIndex];
@@ -1871,6 +1910,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
               seed={composerSeed}
               onStop={stopTurn}
               onSend={send}
+              beforeSend={confirmColdCache}
               onForceSend={forceSend ? (t, a, m) => send(t, a, m, true) : undefined}
               placeholder={
                 reconnecting

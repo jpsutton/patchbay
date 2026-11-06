@@ -329,6 +329,8 @@ export interface ConfirmRequest {
   title: string;
   body: string;
   confirmLabel?: string;
+  /** A second way to go on, between Cancel and the confirm button; it comes back as `alt` with `ok` false. */
+  altLabel?: string;
   danger?: boolean;
   checkbox?: { label: string; checked: boolean };
   /** A text field, e.g. for renaming; its value comes back in `text`. */
@@ -338,6 +340,8 @@ export interface ConfirmRequest {
 export interface ConfirmResult {
   ok: boolean;
   checked: boolean;
+  /** The `altLabel` button was pressed. */
+  alt?: boolean;
   text?: string;
 }
 

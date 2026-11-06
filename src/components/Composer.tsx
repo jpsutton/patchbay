@@ -162,6 +162,7 @@ export function Composer({
   restore,
   onRestored,
   onForceSend,
+  beforeSend,
   draftKey,
   seed,
 }: {
@@ -196,6 +197,11 @@ export function Composer({
    * Ctrl+Shift+Enter when Ctrl+Enter is the send key; idle, those keys keep their usual meaning.
    */
   onForceSend?: (text: string, attachments: Attachment[], mentions: string[]) => void | Promise<void>;
+  /**
+   * Asked before a send leaves the composer. Resolve false to keep the draft where it is (the user
+   * backed out); the composer ignores further sends until it settles.
+   */
+  beforeSend?: (text: string) => boolean | Promise<boolean>;
   /** The conversation or session the composer is typing into; each key keeps its own draft. */
   draftKey?: string;
   /** Puts this text in the composer. A new `id` applies again. `replace` overwrites a draft. */
@@ -477,9 +483,18 @@ export function Composer({
   const forcing = busy && !!onForceSend;
   const forceHint = forcing ? `${forceSendKeyLabel(sendKey)} sends now: stops the current turn` : null;
 
+  const asking = useRef(false);
   const submit = async (force = false) => {
-    if ((busy && !sendWhileBusy && !force) || disabled || adding > 0) return;
+    if ((busy && !sendWhileBusy && !force) || disabled || adding > 0 || asking.current) return;
     if (!text.trim() && atts.length === 0) return;
+    if (beforeSend) {
+      asking.current = true;
+      try {
+        if (!(await beforeSend(text))) return;
+      } finally {
+        asking.current = false;
+      }
+    }
     const t = text;
     const a = atts;
     // Only mentions still present in the text count.
