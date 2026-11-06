@@ -1,5 +1,6 @@
 import type { ReactNode, SVGProps } from "react";
 import type { AgentId } from "../lib/ipc";
+import { iconPx, useIconSize } from "../lib/iconSize";
 
 /**
  * Line icons drawn on Lucide's 24-unit grid (ISC license).
@@ -12,11 +13,18 @@ import type { AgentId } from "../lib/ipc";
  * Toolbar icons use the standard 18px size, which would scale those lines off the pixel grid.
  * They pass a second drawing, redrawn by hand on an 18-unit grid with 2-unit strokes on whole
  * coordinates, and render it 1:1 at 18px. Any other size scales the 24-grid drawing.
+ *
+ * The icon-size preference scales every icon here (lib/iconSize.ts). Medium draws the size asked
+ * for, as before. `fixed` opts an icon out, for ones that mimic something of a set size (window
+ * controls). The 9px agent badge and the status dots aren't drawn by this factory, so they never
+ * scale.
  */
-type IconProps = SVGProps<SVGSVGElement> & { size?: number | string };
+type IconProps = SVGProps<SVGSVGElement> & { size?: number | string; fixed?: boolean };
 
 function icon(paths: ReactNode, grid18?: ReactNode) {
-  return function Icon({ size = 18, strokeWidth = 2, ...rest }: IconProps) {
+  return function Icon({ size: asked = 18, strokeWidth = 2, fixed, ...rest }: IconProps) {
+    const level = useIconSize();
+    const size = fixed ? asked : iconPx(asked, level);
     const snapped = grid18 !== undefined && Number(size) === 18;
     return (
       <svg

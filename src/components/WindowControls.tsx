@@ -98,16 +98,16 @@ export function WindowControls() {
   return (
     <div className="ml-2 flex shrink-0 items-center gap-0.5 border-l border-border pl-2">
       <ControlButton label="Minimize" onClick={() => run(() => w().minimize(), "minimize")}>
-        <MinimizeIcon />
+        <MinimizeIcon fixed />
       </ControlButton>
       <ControlButton
         label={max ? "Restore" : "Maximize"}
         onClick={() => run(() => w().toggleMaximize(), "toggleMaximize")}
       >
-        {max ? <RestoreIcon /> : <MaximizeIcon />}
+        {max ? <RestoreIcon fixed /> : <MaximizeIcon fixed />}
       </ControlButton>
       <ControlButton label="Close" danger onClick={() => run(() => w().close(), "close")}>
-        <CloseIcon />
+        <CloseIcon fixed />
       </ControlButton>
     </div>
   );

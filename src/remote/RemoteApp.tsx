@@ -814,6 +814,39 @@ function Toggle({ label, sub, on, onChange }: { label: string; sub: string; on: 
   );
 }
 
+/** The icon-size preference, kept on this phone like the rest of its preferences. */
+function IconSizeRow() {
+  const size = useStore((s) => s.prefs.iconSize);
+  const update = useStore((s) => s.updatePrefs);
+  const setToast = useStore((s) => s.setToast);
+  const options = [
+    { value: "small", label: "Small" },
+    { value: "medium", label: "Medium" },
+    { value: "large", label: "Large" },
+  ] as const;
+  return (
+    <div className="flex items-center gap-3 py-2">
+      <span className="min-w-0 flex-1 text-[15px]">Icon size</span>
+      <div role="radiogroup" aria-label="Icon size" className="flex rounded-lg border border-line p-0.5">
+        {options.map((o) => (
+          <button
+            key={o.value}
+            role="radio"
+            aria-checked={size === o.value}
+            className={`h-8 rounded-md px-3 text-[13px] ${size === o.value ? "bg-panel-2 text-fg" : "text-muted active:bg-panel-2"}`}
+            onClick={async () => {
+              const err = await update({ iconSize: o.value });
+              if (err) setToast(err);
+            }}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function JoinRequests({ pending }: { pending: RemoteStatus["pending"] }) {
   const setToast = useStore((s) => s.setToast);
   const [busy, setBusy] = useState<string | null>(null);
@@ -929,6 +962,7 @@ function SettingsSheet({
             on={onlineHostsOnly}
             onChange={onOnlineHostsOnly}
           />
+          <IconSizeRow />
         </div>
         <div className="mt-6 font-mono text-[11px] uppercase tracking-[0.06em] text-faint">Reading</div>
         <div className="mt-2 rounded-xl border border-line bg-panel px-4">

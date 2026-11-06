@@ -874,6 +874,7 @@ export interface AgentEngine {
 export interface Preferences {
   theme: "system" | "light" | "dark";
   textSize: "small" | "default" | "large";
+  iconSize: "small" | "medium" | "large";
   sendKey: "enter" | "mod-enter";
   launchTab: "chat" | "code" | "last";
   notifications: boolean;
@@ -930,6 +931,7 @@ export interface Preferences {
 export const defaultPreferences: Preferences = {
   theme: "system",
   textSize: "default",
+  iconSize: "medium",
   sendKey: "enter",
   launchTab: "last",
   notifications: true,
