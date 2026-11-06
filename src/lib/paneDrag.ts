@@ -163,18 +163,33 @@ interface Spec {
   drop: (target: PaneDragTarget) => void;
 }
 
+/** The press captured at pointerdown. A touch drag is armed by a still hold, so `track` starts
+ * later than the React event is dispatched and `e.currentTarget` would already be null. */
+interface Press {
+  currentTarget: HTMLElement;
+  pointerId: number;
+  clientX: number;
+  clientY: number;
+}
+
+function pressOf(e: ReactPointerEvent<HTMLElement>): Press {
+  return { currentTarget: e.currentTarget, pointerId: e.pointerId, clientX: e.clientX, clientY: e.clientY };
+}
+
 /**
  * Follow the pointer from a press until it's released. Pointer events, not HTML5 drag: the window
- * intercepts native drops (tauri.conf.json, dragDropEnabled). Esc cancels.
+ * intercepts native drops (tauri.conf.json, dragDropEnabled). Esc cancels. On touch the drag is
+ * already armed by a still hold; from here we own the gesture, so keep the list from scrolling
+ * under the pill and Android's long-press `contextmenu` from opening a second menu over it.
  */
-function track(e: ReactPointerEvent<HTMLElement>, spec: Spec) {
-  const startX = e.clientX;
-  const startY = e.clientY;
+function track(press: Press, spec: Spec, touch = false) {
+  const startX = press.clientX;
+  const startY = press.clientY;
   let moved = false;
   let done = false;
   try {
     // Keeps the drag ours when the pointer leaves the window.
-    e.currentTarget.setPointerCapture(e.pointerId);
+    press.currentTarget.setPointerCapture(press.pointerId);
   } catch {
     /* the pointer is already gone */
   }
@@ -190,6 +205,21 @@ function track(e: ReactPointerEvent<HTMLElement>, spec: Spec) {
   document.body.style.setProperty("-webkit-user-select", "none");
   document.body.style.userSelect = "none";
 
+  // An armed touch drag owns the gesture: a non-passive touchmove keeps the browser from starting
+  // a scroll, and a capture-phase contextmenu guard stops Android's long-press menu. Both are
+  // added only once the hold has armed, so an ordinary swipe before then still scrolls the list.
+  const stopTouchScroll = (ev: TouchEvent) => {
+    if (ev.cancelable) ev.preventDefault();
+  };
+  const stopMenu = (ev: Event) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+  };
+  if (touch) {
+    document.addEventListener("touchmove", stopTouchScroll, { passive: false });
+    document.addEventListener("contextmenu", stopMenu, true);
+  }
+
   const finish = (commit: boolean, released = true) => {
     if (done) return;
     done = true;
@@ -199,12 +229,18 @@ function track(e: ReactPointerEvent<HTMLElement>, spec: Spec) {
     document.removeEventListener("pointerup", up);
     document.removeEventListener("pointercancel", cancel);
     document.removeEventListener("keydown", key, true);
+    document.removeEventListener("touchmove", stopTouchScroll);
+    document.removeEventListener("contextmenu", stopMenu, true);
     const target = usePaneDrag.getState().drag?.target ?? null;
     usePaneDrag.setState({ drag: null });
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
     document.body.style.removeProperty("-webkit-user-select");
-    if (!moved) return;
+    if (!moved) {
+      // An armed hold is not a tap: don't let its release open the row underneath.
+      if (touch && released) swallowNextClick();
+      return;
+    }
     if (released) swallowNextClick();
     else swallowClickAfterRelease();
     if (commit && target) spec.drop(target);
@@ -235,15 +271,22 @@ function track(e: ReactPointerEvent<HTMLElement>, spec: Spec) {
   document.addEventListener("keydown", key, true);
 }
 
+/** A still touch press of this long arms a drag (the iOS home-screen gesture). */
+const HOLD_MS = 400;
+/** Finger drift during the hold that still counts as holding, not scrolling. */
+const TOUCH_SLOP = 8;
+
 /**
  * Press on a session row, move past a few pixels, and the session follows the pointer; let go over
- * a pane to open or insert it beside the target.
+ * a pane to open or insert it beside the target. On touch, a still press-and-hold arms the drag
+ * first; an ordinary swipe is left to the browser so the session list keeps scrolling.
  */
 export function startSessionDrag(e: ReactPointerEvent<HTMLElement>, id: string, label: string) {
   // Plain primary-button presses only: modifiers select rows, and a button inside the row is a click.
-  if (e.button !== 0 || e.pointerType === "touch" || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
   if ((e.target as Element).closest("button, input")) return;
-  track(e, {
+  const press = pressOf(e);
+  const spec: Spec = {
     kind: "session",
     id,
     label,
@@ -259,7 +302,30 @@ export function startSessionDrag(e: ReactPointerEvent<HTMLElement>, id: string, 
         st.insertPaneAt(id, insertAt);
       }
     },
-  });
+  };
+  if (e.pointerType !== "touch") {
+    track(press, spec);
+    return;
+  }
+  // Touch: arm only after a still hold. A move before then is a scroll/swipe, so cancel the hold
+  // and never start `track` — the row keeps its normal touch-action and no drag is left behind.
+  let timer = 0;
+  const stopHolding = () => {
+    window.clearTimeout(timer);
+    document.removeEventListener("pointermove", holdMove);
+    document.removeEventListener("pointerup", stopHolding);
+    document.removeEventListener("pointercancel", stopHolding);
+  };
+  const holdMove = (ev: PointerEvent) => {
+    if (Math.hypot(ev.clientX - press.clientX, ev.clientY - press.clientY) > TOUCH_SLOP) stopHolding();
+  };
+  timer = window.setTimeout(() => {
+    stopHolding();
+    track(press, spec, true);
+  }, HOLD_MS);
+  document.addEventListener("pointermove", holdMove);
+  document.addEventListener("pointerup", stopHolding);
+  document.addEventListener("pointercancel", stopHolding);
 }
 
 /** What a Cmd/Ctrl-drag anywhere in a pane must leave alone: things that take a press themselves. */
@@ -274,7 +340,7 @@ export function startPaneDrag(e: ReactPointerEvent<HTMLElement>, id: string, lab
   if (!grip && (!isMod(e) || (e.target as Element).closest(INTERACTIVE))) return;
   // No text selection or focus change from a press that is a drag.
   e.preventDefault();
-  track(e, {
+  track(pressOf(e), {
     kind: "pane",
     id,
     label,
