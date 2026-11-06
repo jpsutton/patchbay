@@ -36,6 +36,7 @@ import {
   defaultPreferences,
 } from "./ipc";
 
+import { setIconSize } from "./iconSize";
 import { notifyInBackground } from "./notify";
 import { activityOf, strongest, type Activity } from "./activity";
 import { isRemoteApp } from "./platform";
@@ -1658,6 +1659,7 @@ export function applyUiPrefs(p: Preferences) {
   if (p.theme === "system") delete root.dataset.theme;
   else root.dataset.theme = p.theme;
   root.style.fontSize = TEXT_SIZE_PX[p.textSize] ?? TEXT_SIZE_PX.default;
+  setIconSize(p.iconSize);
 }
 
 /** True when this keydown should send, per the "send with" preference. */
