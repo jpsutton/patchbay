@@ -200,3 +200,69 @@ export function takeLiveProse(
   }
   return { texts, cursor: { next, spoken } };
 }
+
+/** The parts of one AskUserQuestion the ear needs. `AgentQuestion` fits this shape. */
+export interface SpeechQuestion {
+  prompt: string;
+  options: { label: string; description?: string | null }[];
+  multi?: boolean;
+  freeText?: boolean;
+  skippable?: boolean;
+}
+
+/**
+ * One question as speech: the prompt, then each option in the order the card shows them, then
+ * the hints the card renders. Returns markdown-ish text; `spokenText`/`speechFeed` do the usual
+ * clean-up, so links, emphasis and code in an agent's prompt read the same way as in a reply.
+ */
+export function questionSpeech(q: SpeechQuestion): string {
+  const lines = [q.prompt.trim()];
+  if (q.multi) lines.push("Choose any that apply.");
+  q.options.forEach((o, i) => {
+    const label = o.label.trim();
+    const desc = o.description?.trim();
+    lines.push(`Option ${i + 1}: ${label}${desc ? `. ${desc}` : ""}`);
+  });
+  if (q.freeText) lines.push("Or choose Something else and type your own answer.");
+  if (q.skippable) lines.push("You can skip this question.");
+  return lines.filter(Boolean).join("\n");
+}
+
+/** A whole form in order, for the automatic Listen path: one arrival is one reading. */
+export function questionFormSpeech(form: { questions: SpeechQuestion[] }): string {
+  return form.questions.map(questionSpeech).join("\n\n");
+}
+
+/** Where live reading of a session's question forms has got to. */
+export interface LiveQuestionCursor {
+  /** The session whose questions this tracks. */
+  id: string;
+  /** requestIds already accounted for: pending at join, spoken, or suppressed by Stop. */
+  seen: Set<string>;
+}
+
+/**
+ * The question forms that arrived since the last call. A form already pending when listening
+ * starts is history, not a new arrival — the same "join a turn mid-way, read nothing from
+ * history" rule `liveCursorNow`/`takeLiveProse` use. Each later arrival is returned exactly
+ * once, so re-renders and answering/skipping (which removes a form) never re-speak it.
+ */
+export function takeLiveQuestions(
+  questions: { requestId: string; form: { questions: SpeechQuestion[] } }[],
+  from: LiveQuestionCursor | null,
+  id: string,
+  listening: boolean,
+): { forms: { requestId: string; text: string }[]; cursor: LiveQuestionCursor | null } {
+  if (!listening) return { forms: [], cursor: null };
+  if (!from || from.id !== id) {
+    return { forms: [], cursor: { id, seen: new Set(questions.map((q) => q.requestId)) } };
+  }
+  const seen = new Set(from.seen);
+  const forms: { requestId: string; text: string }[] = [];
+  for (const q of questions) {
+    if (seen.has(q.requestId)) continue;
+    seen.add(q.requestId);
+    forms.push({ requestId: q.requestId, text: questionFormSpeech(q.form) });
+  }
+  return { forms, cursor: { id, seen } };
+}
