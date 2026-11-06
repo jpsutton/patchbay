@@ -99,7 +99,7 @@ impl AppState {
             .flatten()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| shares::DEFAULT_BASE_URL.to_owned());
-        let shares = Arc::new(shares::ShareRegistry::load(&data_dir, base_url));
+        let shares = Arc::new(shares::ShareRegistry::load(&data_dir, base_url, mesh.node_id().to_owned()));
         let state = AppState {
             db,
             data_dir,
@@ -3027,6 +3027,9 @@ impl mesh::RpcHandler for MeshRpc {
             "host.info" => Ok(gateway::host_info_local()),
             "code.create" => gateway::create_local(state, &p).map(|s| json!(s)),
             "fs.dirs" => gateway::list_dirs_local(p["path"].as_str()),
+            // Phase 2: a gateway relays a share fetch HERE (the owning node). Only the opaque
+            // token is accepted; expiry/revocation are enforced on this node, never the gateway.
+            "share.get" => Ok(json!(shares::fetch_local(&state.shares, param(&p, "token")?).await)),
             m if m.starts_with("remote.") => gateway::call(state, &from, m, &p).await,
             other => anyhow::bail!("unknown request {other}"),
         }

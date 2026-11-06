@@ -133,6 +133,14 @@ pub(crate) async fn call(state: &AppState, from: &str, method: &str, p: &Value) 
             }
             json!(tokio::task::spawn_blocking(move || attachments::thumbnail(&att)).await??)
         }
+        // Phase 2: an artifact share the phone wants to view. `nodeId` comes from the URL; only
+        // the opaque token is forwarded to the owning node, which decides validity. The phone
+        // renders the returned bytes in its embedded viewer (or falls back to the system browser).
+        "remote.share_get" => {
+            let node = s("nodeId")?;
+            let token = s("token")?;
+            json!(crate::shares::gateway_fetch(state, &node, &token).await)
+        }
         other => bail!("unknown request {other}"),
     })
 }

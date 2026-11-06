@@ -19,6 +19,12 @@
 //! Shares persist to `<data_dir>/shares.json` so they survive a restart. The URL's base comes from
 //! the per-node `artifacts.baseUrl` setting (default `http://127.0.0.1:4420`): Phase 2 can point
 //! it at the gateway proxy without changing anything here.
+//!
+//! Phase 2: the URL is `{base}/share/{nodeId}/{token}`. The node id lets a gateway route a fetch
+//! to the node that OWNS the token without replicating share records (no CRDT lag or revocation
+//! propagation). A gateway relays only the opaque token to the owning node over the existing mesh
+//! connection (`share.get` RPC); expiry/revocation are enforced THERE, never on the gateway. See
+//! `Fetch`, `route`, `relay` and `fetch_local` below.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -96,11 +102,20 @@ pub struct ShareRegistry {
     records: Mutex<HashMap<String, ShareRecord>>,
     file: PathBuf,
     base_url: String,
+    /// This node's mesh id, embedded in share URLs so a gateway can route a fetch back here.
+    node_id: String,
+}
+
+/// Public share URL. The node id is a 32-char hex mesh id (safe in a path); the token is opaque.
+fn share_url(base_url: &str, node_id: &str, token: &str) -> String {
+    format!("{}/share/{}/{}", base_url.trim_end_matches('/'), node_id, token)
 }
 
 impl ShareRegistry {
     /// Load persisted shares for `data_dir`, pruning expired/revoked ones so they are never served.
-    pub fn load(data_dir: &Path, base_url: String) -> Self {
+    /// `base_url` and `node_id` are re-applied to every stored URL, so a base-url change (or a
+    /// Phase-1 `/share/{token}` link recorded before this build) yields a current, routable link.
+    pub fn load(data_dir: &Path, base_url: String, node_id: String) -> Self {
         let file = data_dir.join(SHARES_FILE);
         let mut records = HashMap::new();
         if let Ok(text) = std::fs::read_to_string(&file) {
@@ -114,12 +129,24 @@ impl ShareRegistry {
                 }
             }
         }
-        let reg = ShareRegistry { records: Mutex::new(records), file, base_url };
-        // Persist the pruned set so expired records don't linger on disk.
+        for rec in records.values_mut() {
+            rec.url = share_url(&base_url, &node_id, &rec.token);
+        }
+        let reg = ShareRegistry { records: Mutex::new(records), file, base_url, node_id };
+        // Persist the pruned/refresh set so expired records don't linger and URLs stay current.
         if let Ok(map) = reg.records.lock() {
             let _ = reg.persist(&map);
         }
         reg
+    }
+
+    fn url_for(&self, token: &str) -> String {
+        share_url(&self.base_url, &self.node_id, token)
+    }
+
+    /// This node's mesh id (embedded in its share URLs).
+    pub fn node_id(&self) -> &str {
+        &self.node_id
     }
 
     /// Create a share for one file. `path` may be absolute, `~/…`, or relative to the session's
@@ -136,7 +163,7 @@ impl ShareRegistry {
         let now = crate::db::now_ms();
         let ttl = ttl_secs.unwrap_or(DEFAULT_TTL_SECS).max(1);
         let expires_at = now.saturating_add(ttl.saturating_mul(1000));
-        let url = format!("{}/share/{}", self.base_url.trim_end_matches('/'), token);
+        let url = self.url_for(&token);
         let rec = ShareRecord {
             token: token.clone(),
             path: canonical.to_string_lossy().into_owned(),
@@ -381,6 +408,126 @@ pub(crate) async fn handle(registry: &ShareRegistry, token: &str) -> Response {
     res
 }
 
+/// A serializable share fetch result relayed over the mesh. `headers` are the exact response
+/// headers from the OWNING node (sandbox CSP, nosniff, content-type, disposition); `body_b64` is
+/// the size-capped artifact bytes. A missing/expired/revoked token is a 404 with no bytes — the
+/// gateway can never turn a share request into a general file read because it forwards a token,
+/// never a path, and the owning node decides validity.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Fetch {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body_b64: String,
+}
+
+impl Fetch {
+    pub fn not_found() -> Self {
+        Fetch { status: 404, headers: Vec::new(), body_b64: String::new() }
+    }
+    pub fn is_ok(&self) -> bool {
+        self.status == 200
+    }
+}
+
+/// Largest artifact relayed through one mesh RPC (base64). Artifacts are reports/images/PDFs;
+/// this bounds buffering on the gateway and owning node. Larger files are simply not proxied.
+pub const MAX_SHARE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Owning node: resolve a token — enforcing expiry/revocation HERE — and read the single shared
+/// file. This is the only place share bytes are produced for a mesh client. Must never accept a
+/// path, only the opaque token.
+pub async fn fetch_local(registry: &ShareRegistry, token: &str) -> Fetch {
+    let Some(resolved) = registry.resolve(token) else {
+        return Fetch::not_found();
+    };
+    let bytes = match tokio::fs::read(&resolved.path).await {
+        Ok(b) => b,
+        Err(_) => return Fetch::not_found(),
+    };
+    if bytes.len() as u64 > MAX_SHARE_BYTES {
+        return Fetch::not_found();
+    }
+    use base64::Engine;
+    Fetch {
+        status: 200,
+        headers: resolved.headers.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect(),
+        body_b64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+    }
+}
+
+/// Where a gateway must send a share fetch, decided from the node id in the URL. Keeping this a
+/// pure function makes the routing rule testable without a live mesh.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Route {
+    /// The token belongs to this node: resolve locally.
+    Local,
+    /// Forward only the opaque token to this owning node over the mesh.
+    Forward(String),
+    /// Owning node is not connected: 404, no bytes.
+    Offline,
+}
+
+pub fn route(node: &str, self_node: &str, connected: bool) -> Route {
+    if node == self_node {
+        Route::Local
+    } else if !connected {
+        Route::Offline
+    } else {
+        Route::Forward(node.to_owned())
+    }
+}
+
+/// Relay a share fetch. `rpc` is `Mesh::rpc` (or a mock in tests): it forwards ONLY the opaque
+/// token to the owning node, which decides validity. Errors and offline nodes yield 404 with no
+/// bytes, so a revoked/expired share is 404 through the proxy exactly as it is on the host.
+pub async fn relay<F, Fut>(r: Route, token: &str, local: &ShareRegistry, rpc: F) -> Fetch
+where
+    F: FnOnce(String, String, serde_json::Value) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<serde_json::Value>>,
+{
+    match r {
+        Route::Local => fetch_local(local, token).await,
+        Route::Offline => Fetch::not_found(),
+        Route::Forward(node) => {
+            let params = serde_json::json!({ "token": token });
+            match rpc(node, "share.get".to_owned(), params).await {
+                Ok(v) => serde_json::from_value::<Fetch>(v).unwrap_or_else(|_| Fetch::not_found()),
+                Err(e) => {
+                    tracing::warn!("artifact share relay: {e:#}");
+                    Fetch::not_found()
+                }
+            }
+        }
+    }
+}
+
+/// Gateway: decide the route from the URL's node id and relay to the owning node over the mesh.
+/// Shared by the gateway's HTTP proxy route (`web.rs`) and the phone's `remote.share_get` RPC, so
+/// both surfaces enforce validity on the owning node and preserve the same headers.
+pub async fn gateway_fetch(state: &crate::AppState, node: &str, token: &str) -> Fetch {
+    let r = route(node, state.mesh.node_id(), state.mesh.connected(node));
+    relay(r, token, &state.shares, |n, m, p| async move { state.mesh.rpc(&n, &m, p).await }).await
+}
+
+/// Gateway HTTP proxy: turn a relayed `Fetch` into the response, preserving the owning node's
+/// sandboxed/nosniff headers end-to-end. A non-200 is an empty body (no bytes leaked).
+pub fn into_response(fetch: Fetch) -> Response {
+    let status = StatusCode::from_u16(fetch.status).unwrap_or(StatusCode::NOT_FOUND);
+    if status != StatusCode::OK {
+        return status.into_response();
+    }
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(&fetch.body_b64).unwrap_or_default();
+    let mut res = Response::new(Body::from(bytes));
+    let h = res.headers_mut();
+    for (name, value) in &fetch.headers {
+        if let (Ok(k), Ok(v)) = (HeaderName::from_bytes(name.as_bytes()), HeaderValue::from_str(value)) {
+            h.insert(k, v);
+        }
+    }
+    res
+}
+
 #[derive(Clone)]
 struct ShareState {
     registry: Arc<ShareRegistry>,
@@ -390,9 +537,25 @@ async fn share_handler(State(st): State<ShareState>, AxumPath(token): AxumPath<S
     handle(&st.registry, &token).await
 }
 
+/// Phase 2 shape on the standalone (loopback) server: the node id must be this node's, so a
+/// misrouted gateway URL can never resolve a local token here. The gateway (`web.rs`) instead
+/// relays `/share/{node_id}/{token}` to the owning node over the mesh.
+async fn share_node_handler(
+    State(st): State<ShareState>,
+    AxumPath((node_id, token)): AxumPath<(String, String)>,
+) -> Response {
+    if node_id != st.registry.node_id() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    handle(&st.registry, &token).await
+}
+
 fn router(registry: Arc<ShareRegistry>) -> Router {
     Router::new()
+        // Legacy Phase 1 shape: still works for the desktop flow and persisted links.
         .route("/share/{token}", get(share_handler))
+        // Phase 2 shape: node id in the path, resolved locally on the owning node.
+        .route("/share/{node_id}/{token}", get(share_node_handler))
         .with_state(ShareState { registry })
 }
 
@@ -436,8 +599,10 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
 
+    const NODE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
     fn registry(dir: &Path, base: &str) -> ShareRegistry {
-        ShareRegistry::load(dir, base.to_owned())
+        ShareRegistry::load(dir, base.to_owned(), NODE.to_owned())
     }
 
     fn write_file(dir: &Path, name: &str, body: &[u8]) -> PathBuf {
@@ -691,13 +856,161 @@ mod tests {
         let r = registry(&dir, custom);
         let info = r.create(&file.to_string_lossy(), None, None).unwrap();
         assert!(info.url.starts_with(&format!("{custom}/share/")), "{}", info.url);
-        assert_eq!(info.url, format!("{custom}/share/{}", info.token));
+        assert_eq!(info.url, format!("{custom}/share/{NODE}/{}", info.token));
         // Survives a restart (fresh registry instance reading the same file).
         let r2 = registry(&dir, custom);
         let listed = r2.list();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].url, info.url);
         assert!(r2.resolve(&info.token).is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ---------------- Phase 2: gateway routing / proxy ----------------
+
+    /// Stand-in for the owning node's `share.get` mesh RPC handler: it accepts ONLY a token and
+    /// resolves it on that node (expiry/revocation enforced there), never a path.
+    async fn owning_share_get(
+        owning: &ShareRegistry,
+        _node: String,
+        _method: String,
+        params: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let token = params["token"].as_str().unwrap_or_default();
+        Ok(serde_json::to_value(fetch_local(owning, token).await)?)
+    }
+
+    #[test]
+    fn route_picks_local_forward_or_offline() {
+        assert_eq!(route(NODE, NODE, true), Route::Local);
+        assert_eq!(route("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", NODE, true), Route::Forward("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()));
+        assert_eq!(route("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", NODE, false), Route::Offline);
+        // A node id that is not connected is never dialed.
+        assert_eq!(route(NODE, NODE, false), Route::Local);
+    }
+
+    #[tokio::test]
+    async fn relay_forwards_only_the_opaque_token() {
+        let dir = crate::test_support::short_dir("share-relay-token");
+        let gateway = registry(&dir, DEFAULT_BASE_URL);
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let s = seen.clone();
+        let canned = Fetch { status: 200, headers: vec![("x-test".into(), "yes".into())], body_b64: String::new() };
+        let expected = serde_json::to_value(&canned).unwrap();
+        let fetch = relay(Route::Forward("target-node".into()), "tok", &gateway, move |node, method, params| {
+            let s = s.clone();
+            async move {
+                *s.lock().unwrap() = vec![node, method, params.to_string()];
+                Ok::<_, anyhow::Error>(expected.clone())
+            }
+        })
+        .await;
+        assert_eq!(fetch.status, 200);
+        assert_eq!(fetch.headers, vec![("x-test".into(), "yes".into())]);
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen[0], "target-node", "routes to the owning node from the URL");
+        assert_eq!(seen[1], "share.get");
+        // The forwarded params contain ONLY a token — never a path or filename. The gateway is not
+        // a general file proxy.
+        let p: serde_json::Value = serde_json::from_str(&seen[2]).unwrap();
+        assert_eq!(p, serde_json::json!({ "token": "tok" }));
+        assert!(p.get("path").is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn expiry_and_revocation_are_404_through_the_proxy() {
+        let gw_dir = crate::test_support::short_dir("share-proxy-gw");
+        let host_dir = crate::test_support::short_dir("share-proxy-host");
+        let file = write_file(&host_dir, "report.html", b"<h1>from LT02</h1>");
+        let gateway = registry(&gw_dir, DEFAULT_BASE_URL);
+        let owning = Arc::new(registry(&host_dir, DEFAULT_BASE_URL));
+        let info = owning.create(&file.to_string_lossy(), None, None).unwrap();
+
+        // A valid fetch, relayed gateway -> owning node, streams the bytes with sandboxed headers.
+        async fn via(gateway: &ShareRegistry, token: &str, own: Arc<ShareRegistry>) -> Fetch {
+            relay(Route::Forward(NODE.into()), token, gateway, move |n, m, p| {
+                let own = own.clone();
+                async move { owning_share_get(&own, n, m, p).await }
+            })
+            .await
+        }
+        let ok = via(&gateway, &info.token, owning.clone()).await;
+        assert!(ok.is_ok(), "valid share resolves through the proxy");
+        assert!(ok.headers.iter().any(|(k, v)| k == "content-security-policy" && v == "sandbox"));
+        assert!(ok.headers.iter().any(|(k, v)| k == "x-content-type-options" && v == "nosniff"));
+        use base64::Engine;
+        let body = base64::engine::general_purpose::STANDARD.decode(&ok.body_b64).unwrap();
+        assert_eq!(&body[..], b"<h1>from LT02</h1>");
+
+        // The HTTP proxy response preserves those headers end-to-end.
+        let res = into_response(ok);
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(header(&res, "content-security-policy"), Some("sandbox"));
+        assert_eq!(header(&res, "x-content-type-options"), Some("nosniff"));
+        assert_eq!(&to_bytes(res.into_body(), usize::MAX).await.unwrap()[..], b"<h1>from LT02</h1>");
+
+        // Revoke on the OWNING node: the very same relay now 404s, with no bytes.
+        assert!(owning.revoke(&info.token));
+        let revoked = via(&gateway, &info.token, owning.clone()).await;
+        assert_eq!(revoked.status, 404);
+        assert!(revoked.body_b64.is_empty());
+        assert_eq!(into_response(revoked).status(), StatusCode::NOT_FOUND);
+
+        // Expiry on the OWNING node: also 404 through the proxy (server-side enforcement).
+        let info2 = owning.create(&file.to_string_lossy(), None, None).unwrap();
+        owning.force_expire(&info2.token);
+        let expired = via(&gateway, &info2.token, owning.clone()).await;
+        assert_eq!(expired.status, 404);
+        assert!(expired.body_b64.is_empty());
+
+        // A token that never existed is indistinguishable from revoked/expired.
+        let unknown = via(&gateway, "deadbeef", owning.clone()).await;
+        assert_eq!(unknown.status, 404);
+        let _ = std::fs::remove_dir_all(gw_dir);
+        let _ = std::fs::remove_dir_all(host_dir);
+    }
+
+    #[tokio::test]
+    async fn offline_and_rpc_errors_are_404_with_no_bytes() {
+        let dir = crate::test_support::short_dir("share-proxy-err");
+        let gateway = registry(&dir, DEFAULT_BASE_URL);
+        assert_eq!(relay(Route::Offline, "tok", &gateway, |_, _, _| async { unreachable!() }).await.status, 404);
+        let failed = relay(Route::Forward(NODE.into()), "tok", &gateway, |_, _, _| async {
+            Err::<serde_json::Value, _>(anyhow::anyhow!("host offline"))
+        })
+        .await;
+        assert_eq!(failed.status, 404);
+        assert!(failed.body_b64.is_empty());
+        let res = into_response(failed);
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        assert!(to_bytes(res.into_body(), usize::MAX).await.unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn router_serves_both_shapes_and_refuses_a_foreign_node() {
+        use tower::ServiceExt;
+        let dir = crate::test_support::short_dir("share-router-p2");
+        let file = write_file(&dir, "report.html", b"<p>hi</p>");
+        let r = Arc::new(registry(&dir, DEFAULT_BASE_URL));
+        let info = r.create(&file.to_string_lossy(), None, None).unwrap();
+        let req = |path: &str| {
+            axum::http::Request::builder().uri(path).body(Body::empty()).unwrap()
+        };
+        // Legacy Phase 1 shape still works.
+        let legacy = router(r.clone()).oneshot(req(&format!("/share/{}", info.token))).await.unwrap();
+        assert_eq!(legacy.status(), StatusCode::OK);
+        // Phase 2 shape with THIS node's id works.
+        let own = router(r.clone()).oneshot(req(&format!("/share/{NODE}/{}", info.token))).await.unwrap();
+        assert_eq!(own.status(), StatusCode::OK);
+        assert_eq!(header(&own, "content-security-policy"), Some("sandbox"));
+        // A different node id is refused locally (that's the gateway's job to relay).
+        let foreign = router(r.clone())
+            .oneshot(req(&format!("/share/cccccccccccccccccccccccccccccccc/{}", info.token)))
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

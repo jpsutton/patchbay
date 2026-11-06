@@ -54,7 +54,11 @@ pub async fn serve(state: AppState, events: Events, cfg: Config) -> Result<()> {
     // as a UI asset. The sandbox CSP lives in `shares.rs`.
     let app = Router::new()
         .route("/ws", get(ws))
+        // Phase 1: a share owned by THIS node, fetched by its bare token.
         .route("/share/{token}", get(share_file))
+        // Phase 2: gateway proxy. The node id in the URL names the owner; the gateway relays
+        // only the opaque token to that node over the mesh and enforces validity there.
+        .route("/share/{node_id}/{token}", get(share_proxy))
         .fallback(get(static_file))
         .with_state(ctx);
     let listener = tokio::net::TcpListener::bind(cfg.listen)
@@ -125,6 +129,18 @@ async fn conn(ctx: Ctx, socket: WebSocket) {
 /// the standalone desktop server so both surfaces behave identically.
 async fn share_file(State(ctx): State<Ctx>, AxumPath(token): AxumPath<String>) -> Response {
     crate::shares::handle(&ctx.state.shares, &token).await
+}
+
+/// Gateway proxy for a share owned by another node (or this one). `GET /share/{node_id}/{token}`
+/// forwards ONLY the token to the owning node over the existing mesh connection; that node enforces
+/// expiry/revocation and returns the bytes plus the sandboxed/nosniff headers, relayed verbatim.
+/// A wrong/expired/revoked token, an offline owner, or an RPC failure is a 404 with no bytes.
+async fn share_proxy(
+    State(ctx): State<Ctx>,
+    AxumPath((node_id, token)): AxumPath<(String, String)>,
+) -> Response {
+    let fetch = crate::shares::gateway_fetch(&ctx.state, &node_id, &token).await;
+    crate::shares::into_response(fetch)
 }
 
 async fn static_file(State(ctx): State<Ctx>, req: Request) -> Response {

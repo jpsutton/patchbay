@@ -1384,12 +1384,13 @@ export function install() {
         // by dev tooling; return a plausible capability without pretending to serve bytes.
         case "create_share": {
           const token = id();
+          // Phase 2 shape: node id in the path so a gateway can route the fetch to the owner.
           return {
             token,
             path: String(a.path),
             name: String(a.path).split(/[\\/]/).pop() || "file",
             mime: "text/html; charset=utf-8",
-            url: `http://127.0.0.1:4420/share/${token}`,
+            url: `http://127.0.0.1:4420/share/demo-node/${token}`,
             createdAt: now(),
             expiresAt: now() + 86_400_000,
           };
