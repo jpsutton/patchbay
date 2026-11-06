@@ -3,12 +3,14 @@ import { fileURLToPath } from "node:url";
 import { defineConfig, searchForWorkspaceRoot } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { appDefines } from "./scripts/appVersion.ts";
 
 const host = process.env.TAURI_DEV_HOST;
 const root = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  define: appDefines,
   clearScreen: false,
   server: {
     port: 1420,
