@@ -952,6 +952,16 @@ async fn list_project_files(r: Shared<'_>, session_id: Option<String>) -> CmdRes
     }
 }
 
+/// The slash commands the session's agent advertises, for the composer's `/` menu. Like the file
+/// list, the host answers (names, descriptions, hints only); empty before the agent has any.
+#[tauri::command]
+async fn list_session_commands(r: Shared<'_>, session_id: Option<String>) -> CmdResult<Value> {
+    match session_id {
+        Some(id) => r.code("code.commands", json!({ "id": id })).await,
+        None => Ok(json!([])),
+    }
+}
+
 /// Fetch one artifact share for the in-app viewer (Phase 2). The phone has no HTTP route to the
 /// gateway, so this goes over the mesh connection it already holds: `remote.share_get` asks the
 /// gateway, which relays ONLY the opaque token to the owning node (where expiry/revocation are
@@ -1131,6 +1141,7 @@ pub fn run() {
             code_usage,
             session_plan_usage,
             list_project_files,
+            list_session_commands,
             code_session_image,
             remote_share_fetch,
         ])

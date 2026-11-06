@@ -1169,6 +1169,8 @@ export const api = {
   saveCodeTranscript: (id: string, json: string) => invoke<void>("save_code_transcript", { id, json }),
   /** With `sessionId`, lists files on the node hosting that session. */
   listProjectFiles: (cwd: string, sessionId?: string) => invoke<string[]>("list_project_files", { cwd, sessionId }),
+  /** The slash commands a session's agent advertises, asked of its host (the phone has no events to learn them from). */
+  listSessionCommands: (sessionId: string) => invoke<AcpCommand[]>("list_session_commands", { sessionId }),
   /** A picture the reply linked, read on the computer that holds the session. A data URL. */
   codeSessionImage: (id: string, path: string) => invoke<string>("code_session_image", { id, path }),
 

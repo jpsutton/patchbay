@@ -11,6 +11,9 @@ import { ChipRows } from "./ChipSelect";
 import { isRemoteApp, isWeb } from "../lib/platform";
 
 const MAX_ATTACHMENTS = 10;
+/** How long fetched slash commands are reused, and how soon an empty answer is asked again. */
+const SLASH_TTL_MS = 60_000;
+const SLASH_EMPTY_RETRY_MS = 3_000;
 
 function fmtSize(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -155,6 +158,7 @@ export function Composer({
   trailing,
   warnNoVision,
   commands,
+  slashCommands,
   mentionFiles,
   onEditLast,
   sendWhileBusy,
@@ -180,6 +184,11 @@ export function Composer({
   warnNoVision?: boolean;
   /** Slash commands the agent advertises (Code tab). */
   commands?: AcpCommand[];
+  /**
+   * Asks for the commands when `commands` has none to give: the phone sees no agent events, so its
+   * host answers. Called when the draft starts with "/", then cached for the draft's session.
+   */
+  slashCommands?: () => Promise<AcpCommand[]>;
   /** Enables @-mentions of project files (Code tab). */
   mentionFiles?: () => Promise<string[]>;
   /** Up arrow in an empty composer. */
@@ -245,6 +254,30 @@ export function Composer({
     return () => clearTimeout(id);
   }, [seed]);
 
+  // Commands fetched through `slashCommands`, kept per `draftKey`. An agent often advertises its
+  // commands a beat after the session opens, so an empty answer is only trusted for a few seconds.
+  const [fetched, setFetched] = useState<{ key?: string; list: AcpCommand[]; at: number } | null>(null);
+  const fetchSlash = useRef(slashCommands);
+  fetchSlash.current = slashCommands;
+  const slashFetching = useRef(false);
+  const slashTyped = !!slashCommands && /^\/\S*$/.test(text);
+  useEffect(() => {
+    const fetchCommands = fetchSlash.current;
+    if (!slashTyped || !fetchCommands || slashFetching.current) return;
+    if (fetched && fetched.key === draftKey && Date.now() - fetched.at < (fetched.list.length ? SLASH_TTL_MS : SLASH_EMPTY_RETRY_MS)) return;
+    slashFetching.current = true;
+    fetchCommands()
+      .then((list) => (Array.isArray(list) ? list : []))
+      // A failed ask shows no menu, like an empty one, and is tried again on a later keystroke.
+      .catch(() => [] as AcpCommand[])
+      .then((list) => setFetched({ key: draftKey, list, at: Date.now() }))
+      .finally(() => {
+        slashFetching.current = false;
+      });
+  }, [slashTyped, text, fetched, draftKey]);
+  const slashList = fetched && fetched.key === draftKey ? fetched.list : undefined;
+  const menuCommands = commands?.length ? commands : slashList;
+
   useEffect(() => {
     if (!mention || !mentionFiles) return;
     // The file list is cheap to fetch but not free; reuse it for 30 s.
@@ -276,8 +309,8 @@ export function Composer({
         },
       }));
     }
-    if (commands?.length) {
-      return matchCommands(commands, text).map((c) => ({
+    if (menuCommands?.length) {
+      return matchCommands(menuCommands, text).map((c) => ({
         key: c.name,
         label: `/${c.name}`,
         hint: c.input?.hint,
@@ -289,7 +322,7 @@ export function Composer({
       }));
     }
     return [];
-  }, [mention, files, commands, text, caret]);
+  }, [mention, files, menuCommands, text, caret]);
   const menuOpen = items.length > 0 && !menuDismissed;
 
   useEffect(() => {
