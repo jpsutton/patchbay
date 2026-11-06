@@ -2,8 +2,9 @@ import { useState, type MouseEvent } from "react";
 import { api, errorText, type ShareInfo } from "../lib/ipc";
 import { isDesktopApp } from "../lib/platform";
 import { openExternal } from "../lib/external";
+import { useStore } from "../lib/store";
 import { copyText } from "./CopyButton";
-import { ArrowRightIcon, CopyIcon, GlobeIcon, TrashIcon } from "./icons";
+import { ArrowRightIcon, ChatIcon, CopyIcon, GlobeIcon, TrashIcon } from "./icons";
 
 /**
  * The explicit SHARE action on a generated-file row. Creating a share yields a URL rooted at the
@@ -52,6 +53,17 @@ export function FileShare({ path, cwd }: { path: string; cwd: string | null }) {
 
   const expires = share ? new Date(share.expiresAt).toLocaleString() : "";
 
+  /** Put the existing share into the current chat draft as a clickable markdown link. */
+  const addToChat = (e: MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!share) return;
+    // Escape the label so a filename with markdown punctuation can't break the link.
+    const label = share.name.replace(/[\\\[\]]/g, (c) => `\\${c}`).replace(/\r?\n/g, " ");
+    useStore.getState().insertIntoComposer(`[${label}](${share.url})`);
+    useStore.getState().setToast(`Added ${share.name} link to your chat draft`);
+  };
+
   return (
     <span
       className="ml-1 inline-flex shrink-0 items-center gap-1 align-middle font-sans"
@@ -91,6 +103,15 @@ export function FileShare({ path, cwd }: { path: string; cwd: string | null }) {
             aria-label="Copy link"
           >
             <CopyIcon size={12} />
+          </button>
+          <button
+            type="button"
+            className="inline-flex h-5 items-center gap-1 rounded border border-border px-1.5 text-[11px] text-muted hover:border-accent/50 hover:text-fg"
+            onClick={addToChat}
+            title="Add the share link to your chat draft as markdown"
+            aria-label="Add share link to chat draft"
+          >
+            <ChatIcon size={11} /> Add to chat
           </button>
           <button
             type="button"

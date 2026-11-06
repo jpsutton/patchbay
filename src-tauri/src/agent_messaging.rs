@@ -1,9 +1,10 @@
 //! Patchbay-owned MCP tool and its authenticated, local bridge into the running app.
 
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -17,6 +18,8 @@ const TOOL_LIST_SESSIONS: &str = "list_agent_sessions";
 const TOOL_LIST_QUEUED: &str = "list_queued_agent_messages";
 const TOOL_ACCEPT_QUEUED: &str = "accept_queued_agent_message";
 const TOOL_CREATE: &str = "create_agent_session";
+/// Share an artifact the agent generated inside its session folder (pb-20261105-18).
+const TOOL_SHARE: &str = "share_artifact";
 const MAX_LINE: usize = 64 * 1024;
 
 #[derive(Clone)]
@@ -183,6 +186,16 @@ async fn handle_bridge(
                 )
                 .await
             }
+            // Agent share tool (pb-20261105-18): confine to the source session's cwd, then reuse
+            // the ordinary share registry (token/expiry/revoke) unchanged. `source` was already
+            // loaded above; its `cwd` is the folder this agent runs in.
+            "share" => {
+                let args = request.arguments.as_ref().ok_or_else(|| anyhow!("arguments are required"))?;
+                let path = args["path"].as_str().ok_or_else(|| anyhow!("path is required"))?;
+                let canonical = confined_share_path(Path::new(&source.cwd), path)?;
+                let info = state.shares.create(&canonical.to_string_lossy(), None, None)?;
+                Ok(serde_json::to_value(info)?)
+            }
             "list_queued" => crate::list_queued_agent_messages(&state, &request.source_session_id).await,
             "accept_queued" => {
                 crate::accept_queued_agent_message(
@@ -326,6 +339,59 @@ pub(crate) fn delivery_note(delivery: &str) -> &'static str {
     }
 }
 
+/// Escape a filename for use as a markdown link label.
+fn markdown_label(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        match c {
+            '\\' | '[' | ']' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\r' | '\n' => out.push(' '),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The share tool's result. An MCP tool result is only seen by the model (and, as plain text, in
+/// the tool-call card), so it must hand the agent a ready-made markdown link and explicitly tell it
+/// to put that link in its visible reply — otherwise the share would be silent (pb-20261105-18).
+fn share_tool_result(ok: &Value) -> String {
+    let label = markdown_label(ok["name"].as_str().unwrap_or("artifact"));
+    let url = ok["url"].as_str().unwrap_or_default();
+    format!(
+        "Shared \"{label}\" as a read-only, time-limited link (revocable from the Share control).\n\
+         A tool result is not shown in the chat. You MUST include this markdown link verbatim in your \
+         visible reply to the user so the share is never silent:\n\
+         [{label}]({url})\n\
+         Do not report the share without the link."
+    )
+}
+
+/// Resolve an agent-named file to a canonical absolute path INSIDE the session's cwd. Agent
+/// shares are deliberately narrower than user shares (`create_share` accepts any explicit path):
+/// `..` escapes, absolute paths outside the folder, directories, missing files and symlinks that
+/// resolve outside the folder are all refused. The registry then reuses the normal token/expiry/
+/// revoke semantics untouched.
+fn confined_share_path(cwd: &Path, input: &str) -> Result<PathBuf> {
+    let root = cwd.canonicalize().context("session folder does not exist")?;
+    if !root.is_dir() {
+        bail!("session folder is not a directory");
+    }
+    let p = Path::new(input);
+    let joined = if p.is_absolute() { p.to_path_buf() } else { root.join(p) };
+    let canonical = joined.canonicalize().with_context(|| format!("cannot resolve {input}"))?;
+    if !canonical.starts_with(&root) {
+        bail!("only files inside the session folder can be shared");
+    }
+    if !canonical.is_file() {
+        bail!("only a regular file inside the session folder can be shared");
+    }
+    Ok(canonical)
+}
+
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
 }
@@ -387,6 +453,18 @@ fn tools_list_for(can_steer: bool) -> Value {
                 "model": { "type": "string", "description": "Optional model; defaults to your model." }
             },
             "required": ["cwd", "prompt"],
+            "additionalProperties": false
+        }
+    }));
+    tools.push(json!({
+        "name": TOOL_SHARE,
+        "description": "Share a file you generated INSIDE this session's folder so the user can open it as a read-only artifact. The path must resolve to a regular file inside the session's cwd; paths outside it, directories and symlinks that escape it are refused. The link is time-limited and revocable. A tool result is NOT shown in the chat: you MUST include the returned markdown link verbatim in your visible reply to the user, so a share you do not mention is never silent. Never share a file the user did not ask about.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Path of the file to share, absolute or relative to this session's folder." }
+            },
+            "required": ["path"],
             "additionalProperties": false
         }
     }));
@@ -495,6 +573,7 @@ pub(crate) async fn call_tool(
             None,
         ),
         TOOL_CREATE => ("create", None, None, None),
+        TOOL_SHARE => ("share", None, None, None),
         TOOL_LIST_SESSIONS => ("list", None, None, None),
         TOOL_LIST_QUEUED => ("list_queued", None, None, None),
         TOOL_ACCEPT_QUEUED => (
@@ -520,7 +599,7 @@ pub(crate) async fn call_tool(
         "targetSessionId": target_session_id,
         "message": message,
         "messageId": message_id,
-        "arguments": (name == TOOL_CREATE).then(|| params["arguments"].clone()),
+        "arguments": matches!(name, TOOL_CREATE | TOOL_SHARE).then(|| params["arguments"].clone()),
     });
     write.write_all(request.to_string().as_bytes()).await?;
     write.write_all(b"\n").await?;
@@ -536,6 +615,7 @@ pub(crate) async fn call_tool(
     }
     let text = match name {
         TOOL_ACCEPT_QUEUED => response["ok"]["text"].as_str().unwrap_or_default().to_owned(),
+        TOOL_SHARE => share_tool_result(&response["ok"]),
         _ => {
             let ok = &response["ok"];
             let delivery = ok["delivery"].as_str().unwrap_or("");
@@ -640,5 +720,82 @@ mod tests {
         assert!(delivery_note("queued").contains("do not resend"));
         assert!(delivery_note("duplicate").contains("do not resend"));
         assert!(delivery_note("sent").contains("accepted"));
+    }
+
+    #[test]
+    fn tools_list_offers_share_artifact_in_both_modes() {
+        for can_steer in [true, false] {
+            let list = tools_list_for(can_steer);
+            let tool = list["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == TOOL_SHARE)
+                .expect("share tool listed");
+            assert_eq!(tool["inputSchema"]["required"], json!(["path"]));
+            assert!(tool["inputSchema"]["properties"]["path"].is_object());
+        }
+    }
+
+    #[test]
+    fn share_result_carries_link_and_visibility_instruction() {
+        let ok = json!({ "name": "report.html", "url": "http://host/share/node/token" });
+        let text = share_tool_result(&ok);
+        assert!(text.contains("[report.html](http://host/share/node/token)"), "{text}");
+        assert!(text.contains("visible reply"), "{text}");
+        assert!(text.contains("never silent"), "{text}");
+        // The label is escaped so a filename with markdown punctuation can't break the link.
+        let tricky = json!({ "name": "a[b].html", "url": "http://host/x" });
+        assert!(share_tool_result(&tricky).contains("[a\\[b\\].html](http://host/x)"));
+    }
+
+    #[test]
+    fn markdown_label_escapes_punctuation() {
+        assert_eq!(markdown_label("a[b]c"), "a\\[b\\]c");
+        assert_eq!(markdown_label("a\\b"), "a\\\\b");
+        assert_eq!(markdown_label("a\nb"), "a b");
+    }
+
+    #[test]
+    fn confined_share_path_stays_inside_cwd() {
+        let dir = crate::test_support::short_dir("share-mcp");
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        let file = dir.join("nested/report.html");
+        std::fs::write(&file, b"hi").unwrap();
+        let canonical = std::fs::canonicalize(&file).unwrap();
+
+        // A relative path and an absolute path inside cwd both work.
+        assert_eq!(confined_share_path(&dir, "nested/report.html").unwrap(), canonical);
+        assert_eq!(confined_share_path(&dir, file.to_str().unwrap()).unwrap(), canonical);
+        // `..` escape, an absolute path outside, a directory, a missing file, and cwd itself fail.
+        assert!(confined_share_path(&dir, "../outside.html").is_err());
+        assert!(confined_share_path(&dir, "/etc/hosts").is_err());
+        assert!(confined_share_path(&dir, "nested").is_err());
+        assert!(confined_share_path(&dir, "missing.html").is_err());
+        assert!(confined_share_path(&dir, ".").is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_share_path_rejects_symlink_escape() {
+        let dir = crate::test_support::short_dir("share-mcp-sym");
+        let outside = crate::test_support::short_dir("share-mcp-outside");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("secret.html");
+        std::fs::write(&secret, b"secret").unwrap();
+        std::os::unix::fs::symlink(&secret, dir.join("link.html")).unwrap();
+        assert!(confined_share_path(&dir, "link.html").is_err(), "symlink escape refused");
+        // A symlink pointing to a file INSIDE cwd is fine (canonical target is inside root).
+        let inner = dir.join("inner.html");
+        std::fs::write(&inner, b"ok").unwrap();
+        std::os::unix::fs::symlink(&inner, dir.join("inner-link.html")).unwrap();
+        assert_eq!(
+            confined_share_path(&dir, "inner-link.html").unwrap(),
+            std::fs::canonicalize(&inner).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(outside);
     }
 }

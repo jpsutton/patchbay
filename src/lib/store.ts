@@ -387,6 +387,12 @@ interface Store {
   sessionInfoId: string | null;
   /** Phase 2: the artifact share URL open in the phone's embedded viewer (see ShareViewer.tsx). */
   shareUrl: string | null;
+  /**
+   * A one-shot request to append text to the active composer's draft (pb-20261105-18). A component
+   * anywhere in the transcript sets it; the mounted composer takes it atomically so split panes
+   * can't both insert the same text. See `Composer`'s `seed` insert mode.
+   */
+  composerInsert: { id: number; text: string } | null;
   /** Sidebar title filter. */
   sidebarQuery: string;
   providers: Provider[];
@@ -431,6 +437,10 @@ interface Store {
   setImportClaudeOpen: (o: boolean) => void;
   setSessionInfoId: (id: string | null) => void;
   setShareUrl: (url: string | null) => void;
+  /** Ask the active composer to append `text` to its draft as a markdown link. */
+  insertIntoComposer: (text: string) => void;
+  /** Take (and clear) the pending insert. Only the first composer to call gets it. */
+  takeComposerInsert: () => { id: number; text: string } | null;
   setSidebarQuery: (q: string) => void;
   setToast: (t: string | null) => void;
   setAlert: (a: Alert | null) => void;
@@ -1033,6 +1043,9 @@ function syncPanes(list: CodeSession[]) {
   if (next !== cur) applyPanes(next);
 }
 
+/** Monotonic id so two inserts in the same millisecond still look like different requests. */
+let nextComposerInsertId = 0;
+
 export const useStore = create<Store>((set, get) => ({
   mode: "chat",
   paletteOpen: false,
@@ -1106,6 +1119,7 @@ export const useStore = create<Store>((set, get) => ({
   importClaudeOpen: false,
   sessionInfoId: null,
   shareUrl: null,
+  composerInsert: null,
   sidebarQuery: "",
   providers: [],
   models: [],
@@ -1182,6 +1196,12 @@ export const useStore = create<Store>((set, get) => ({
   setImportClaudeOpen: (importClaudeOpen) => set({ importClaudeOpen }),
   setSessionInfoId: (sessionInfoId) => set({ sessionInfoId }),
   setShareUrl: (shareUrl) => set({ shareUrl }),
+  insertIntoComposer: (text) => set({ composerInsert: { id: ++nextComposerInsertId, text } }),
+  takeComposerInsert: () => {
+    const pending = get().composerInsert;
+    if (pending) set({ composerInsert: null });
+    return pending;
+  },
   setSidebarQuery: (sidebarQuery) => set({ sidebarQuery }),
   setToast: (toast) => set({ toast }),
   setAlert: (alert) => set({ alert }),

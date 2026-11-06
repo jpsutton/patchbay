@@ -280,9 +280,20 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
   const stream = useStore((s) => (activeId ? s.chatStreams[activeId] : undefined));
   const patchChatStream = useStore((s) => s.patchChatStream);
   const setToast = useStore((s) => s.setToast);
+  const composerInsert = useStore((s) => s.composerInsert);
+  const viewMode = useStore((s) => s.mode);
 
   const conv = conversations.find((c) => c.id === activeId) ?? null;
   const [messages, setMessages] = useState<Message[]>([]);
+  // A share-link action anywhere in the transcript asks to append markdown to this composer's
+  // draft (pb-20261105-18). Take it atomically so a split Code view can't insert it twice.
+  const [seed, setSeed] = useState<{ id: number; text: string; insert?: boolean } | null>(null);
+  useEffect(() => {
+    // ChatView and CodeView stay mounted (one is inert); only the active view consumes the insert.
+    if (!composerInsert || viewMode !== "chat") return;
+    const pending = useStore.getState().takeComposerInsert();
+    if (pending) setSeed({ id: pending.id, text: pending.text, insert: true });
+  }, [composerInsert, viewMode]);
   const [showSystem, setShowSystem] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
@@ -620,6 +631,7 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
       <div className="mx-auto w-full max-w-[var(--chat-width)] px-6 pb-3 pt-2">
         <Composer
           draftKey={`chat:${activeId ?? "new"}`}
+          seed={seed}
           busy={running}
           onEditLast={editLast}
           onStop={() => {

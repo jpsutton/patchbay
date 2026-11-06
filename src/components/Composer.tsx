@@ -213,8 +213,12 @@ export function Composer({
   beforeSend?: (text: string) => boolean | Promise<boolean>;
   /** The conversation or session the composer is typing into; each key keeps its own draft. */
   draftKey?: string;
-  /** Puts this text in the composer. A new `id` applies again. `replace` overwrites a draft. */
-  seed?: { id: number; text: string; replace?: boolean } | null;
+  /**
+   * Puts this text in the composer. A new `id` applies again. `replace` overwrites a draft;
+   * `insert` appends `text` at the end of the current draft instead (adding a share link without
+   * losing what the user already typed — pb-20261105-18).
+   */
+  seed?: { id: number; text: string; replace?: boolean; insert?: boolean } | null;
 }) {
   const [text, setText] = useState("");
   const [atts, setAtts] = useState<Attachment[]>([]);
@@ -243,6 +247,17 @@ export function Composer({
 
   useEffect(() => {
     if (!seed?.text) return;
+    if (seed.insert) {
+      // Keep the draft: append the link at the end, then put the caret after it.
+      setText((cur) => (cur.trim() ? `${cur.trimEnd()} ${seed.text}` : seed.text));
+      const id = window.setTimeout(() => {
+        const el = ref.current;
+        if (!el) return;
+        el.focus();
+        el.setSelectionRange(el.value.length, el.value.length);
+      }, 30);
+      return () => clearTimeout(id);
+    }
     setText((cur) => (!seed.replace && cur.trim() ? cur : seed.text));
     const pos = seed.text.length;
     const id = window.setTimeout(() => {
