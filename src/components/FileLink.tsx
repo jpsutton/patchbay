@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import { api, errorText } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { isRemoteApp, isWeb } from "../lib/platform";
+import { FileShare } from "./FileShare";
 
 /**
  * Where paths in a transcript live. A Code session resolves relative paths against its folder;
@@ -94,17 +95,21 @@ export function FileLink({
   const enabled = local && !inLink && canOpen();
   if (!useExists(path, cwd, enabled) || !path) return <>{children}</>;
   return (
-    <a
-      href="#"
-      className={`file-link ${className ?? ""}`}
-      title={`Open ${path}`}
-      onClick={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        openLocalPath(path, cwd);
-      }}
-    >
-      {children}
-    </a>
+    <>
+      <a
+        href="#"
+        className={`file-link ${className ?? ""}`}
+        title={`Open ${path}`}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          openLocalPath(path, cwd);
+        }}
+      >
+        {children}
+      </a>
+      {/* The explicit SHARE action on this generated-file row. Desktop-only (Phase 1). */}
+      <FileShare path={path} cwd={cwd} />
+    </>
   );
 }

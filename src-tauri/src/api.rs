@@ -132,6 +132,9 @@ commands! {
     add_attachment_bytes(name, data_base64);
     attachment_thumbnail(id);
     attachment_image(id);
+    create_share(path, cwd, ttl_secs);
+    list_shares();
+    revoke_share(token);
     list_code_sessions();
     create_code_session(cwd, model_ref, agent, host);
     list_agents(host);

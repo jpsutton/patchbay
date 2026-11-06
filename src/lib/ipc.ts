@@ -256,6 +256,24 @@ export interface Attachment {
   path: string;
 }
 
+/**
+ * An explicit, revocable, time-limited HTTP share of one file on a host (src-tauri/shares.rs).
+ * `url` is rooted at the per-node `artifacts.baseUrl` setting; clicking it opens the artifact in
+ * the system browser from an isolated, sandboxed origin.
+ */
+export interface ShareInfo {
+  token: string;
+  /** Canonicalized absolute path of the shared file. */
+  path: string;
+  name: string;
+  mime: string;
+  url: string;
+  /** Unix milliseconds. */
+  createdAt: number;
+  /** Unix milliseconds; after this the server refuses the token. */
+  expiresAt: number;
+}
+
 export interface Message {
   id: string;
   conversationId: string;
@@ -1092,6 +1110,11 @@ export const api = {
     invoke<Attachment>("add_attachment_bytes", { name, dataBase64 }),
   attachmentThumbnail: (id: string) => invoke<string>("attachment_thumbnail", { id }),
   attachmentImage: (id: string) => invoke<string>("attachment_image", { id }),
+
+  /** Explicitly share one generated file. `cwd` resolves relative paths (the session's folder). */
+  createShare: (path: string, cwd: string | null) => invoke<ShareInfo>("create_share", { path, cwd }),
+  listShares: () => invoke<ShareInfo[]>("list_shares"),
+  revokeShare: (token: string) => invoke<void>("revoke_share", { token }),
 
   listCodeSessions: () => invoke<CodeSession[]>("list_code_sessions"),
   /** With `host`, the session runs on that computer, in its folder `cwd`. */

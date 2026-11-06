@@ -17,6 +17,7 @@ mod mesh;
 mod portal_shortcuts;
 mod prefs;
 mod providers;
+pub mod shares;
 mod speech;
 mod terminal;
 mod usage;
@@ -71,6 +72,8 @@ pub struct AppState {
     remote_terms: Arc<std::sync::Mutex<std::collections::HashMap<String, RemoteTerm>>>,
     /// The native window's extras (quick-entry shortcut, title bar); `None` in the daemon.
     desktop: Arc<std::sync::OnceLock<Arc<dyn DesktopHooks>>>,
+    /// Explicit, revocable, expiring HTTP shares of files on this host (see `shares.rs`).
+    shares: Arc<shares::ShareRegistry>,
 }
 
 /// What only the desktop app can do. Preferences for these save everywhere, but apply only
@@ -88,6 +91,15 @@ impl AppState {
         mesh: Mesh,
         emit: mesh::node::UiSink,
     ) -> Self {
+        // The public base URL for share links is a per-node setting (default loopback). Phase 2
+        // can point it at the gateway proxy without changing the share mechanism.
+        let base_url = db
+            .get_setting(shares::BASE_URL_SETTING)
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| shares::DEFAULT_BASE_URL.to_owned());
+        let shares = Arc::new(shares::ShareRegistry::load(&data_dir, base_url));
         let state = AppState {
             db,
             data_dir,
@@ -101,6 +113,7 @@ impl AppState {
             live: Arc::default(),
             remote_terms: Arc::default(),
             desktop: Arc::default(),
+            shares,
         };
         state.code.plan.set_accounts(load_plan_accounts(&state.db));
         if let Some(r) = state.db.get_setting(PLAN_RESUME_KEY).ok().flatten().and_then(|j| serde_json::from_str(&j).ok()) {
@@ -606,6 +619,31 @@ async fn attachment_image(state: &AppState, id: String) -> CmdResult<String> {
         .ok_or_else(|| CmdError("attachment not found".into()))?;
     let dir = state.data_dir.clone();
     Ok(tokio::task::spawn_blocking(move || attachments::image_data_url(&dir, &att)).await??)
+}
+
+// ---------------- artifact shares ----------------
+//
+// An explicit share of one file on this host. `create_share` canonicalizes the path and returns a
+// URL rooted at the per-node `artifacts.baseUrl` setting; the same `AppState.shares` registry is
+// read by the HTTP route (`web.rs` / the standalone loopback server) to serve the bytes. Read-only,
+// time-limited, revocable: see `shares.rs` for the security model.
+
+async fn create_share(
+    state: &AppState,
+    path: String,
+    cwd: Option<String>,
+    ttl_secs: Option<i64>,
+) -> CmdResult<shares::ShareInfo> {
+    Ok(state.shares.create(&path, cwd.as_deref(), ttl_secs)?)
+}
+
+async fn list_shares(state: &AppState) -> CmdResult<Vec<shares::ShareInfo>> {
+    Ok(state.shares.list())
+}
+
+async fn revoke_share(state: &AppState, token: String) -> CmdResult<()> {
+    state.shares.revoke(&token);
+    Ok(())
 }
 
 // ---------------- code ----------------
@@ -3545,6 +3583,11 @@ pub fn open_locked_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow:
     let keys = Arc::new(mesh::keys::OsKeyStore::new(&data_dir));
     let mesh = Mesh::new(db.clone(), data_dir.clone(), keys)?;
     let state = AppState::new(db, data_dir, mesh.clone(), emit);
+    // A desktop app (or a daemon built without `web`) owns the data folder itself, so it must
+    // serve artifact shares from its own loopback HTTP server. A `web`-enabled daemon serves
+    // them from its main axum server instead (web.rs), and tests must not bind any port.
+    #[cfg(all(not(feature = "web"), not(test)))]
+    shares::spawn(&state);
     let (agent_messaging, message_listener) = agent_messaging::AgentMessagingBridge::bind()?;
     let _ = state.agent_message_bridge.set(agent_messaging.clone());
     agent_messaging.serve(message_listener, state.clone());

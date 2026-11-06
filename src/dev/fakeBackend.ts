@@ -1380,6 +1380,24 @@ export function install() {
           console.info("fake backend: open path", a.path, "in", a.cwd);
           (window as unknown as Record<string, unknown>).__lastOpenedPath = { path: a.path, cwd: a.cwd };
           return null;
+        // Artifact shares (shares.rs). The share button is desktop-only, so these are only hit
+        // by dev tooling; return a plausible capability without pretending to serve bytes.
+        case "create_share": {
+          const token = id();
+          return {
+            token,
+            path: String(a.path),
+            name: String(a.path).split(/[\\/]/).pop() || "file",
+            mime: "text/html; charset=utf-8",
+            url: `http://127.0.0.1:4420/share/${token}`,
+            createdAt: now(),
+            expiresAt: now() + 86_400_000,
+          };
+        }
+        case "list_shares":
+          return [];
+        case "revoke_share":
+          return null;
         // Set window.__fakeUpdate = { version, notes } before the first check to see the update button.
         case "update_check":
           return (window as unknown as Record<string, unknown>).__fakeUpdate ?? null;

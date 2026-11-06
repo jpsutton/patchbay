@@ -20,7 +20,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Request, State};
+use axum::extract::{Path as AxumPath, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -49,7 +49,14 @@ struct Ctx {
 
 pub async fn serve(state: AppState, events: Events, cfg: Config) -> Result<()> {
     let ctx = Ctx { state, events, ui_dir: Arc::new(cfg.ui_dir), token: cfg.token.into() };
-    let app = Router::new().route("/ws", get(ws)).fallback(get(static_file)).with_state(ctx);
+    // Share tokens are opaque capabilities; this route takes no path argument, so there is nothing
+    // to traverse. It is registered before the static fallback so `/share/<token>` is never treated
+    // as a UI asset. The sandbox CSP lives in `shares.rs`.
+    let app = Router::new()
+        .route("/ws", get(ws))
+        .route("/share/{token}", get(share_file))
+        .fallback(get(static_file))
+        .with_state(ctx);
     let listener = tokio::net::TcpListener::bind(cfg.listen)
         .await
         .with_context(|| format!("listening on {}", cfg.listen))?;
@@ -110,6 +117,14 @@ async fn conn(ctx: Ctx, socket: WebSocket) {
     });
     serve_session(ctx.state.clone(), events, std::pin::pin!(incoming), tx).await;
     writer.abort();
+}
+
+/// GET one explicitly-shared artifact. The high-entropy token is the only authentication; a
+/// wrong, expired or revoked token yields 404 with no bytes. All the security-sensitive logic
+/// (canonicalization, expiry, sandboxed headers, streaming) is in `shares::handle`, shared with
+/// the standalone desktop server so both surfaces behave identically.
+async fn share_file(State(ctx): State<Ctx>, AxumPath(token): AxumPath<String>) -> Response {
+    crate::shares::handle(&ctx.state.shares, &token).await
 }
 
 async fn static_file(State(ctx): State<Ctx>, req: Request) -> Response {
