@@ -444,10 +444,12 @@ pub async fn run(parent: &Arc<Session>, agent: &Arc<SubAgent>, cancel: &Cancella
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    use crate::proc::NoWindow;
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(dir)
         .args(args)
+        .no_window()
         .output()
         .map_err(|e| format!("cannot run git: {e}"))?;
     if !out.status.success() {

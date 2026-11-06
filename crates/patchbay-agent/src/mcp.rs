@@ -167,12 +167,14 @@ async fn connect_one(cfg: &Value) -> Result<McpServer, String> {
         "sse" => return Err("the legacy SSE transport is not supported; use streamable HTTP".into()),
         _ => {
             let program = cfg["command"].as_str().ok_or("no command")?;
+            use crate::proc::NoWindow;
             let mut cmd = tokio::process::Command::new(program);
             cmd.args(cfg["args"].as_array().into_iter().flatten().filter_map(Value::as_str))
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null())
-                .kill_on_drop(true);
+                .kill_on_drop(true)
+                .no_window();
             for (k, v) in pairs(&cfg["env"]) {
                 cmd.env(k, v);
             }

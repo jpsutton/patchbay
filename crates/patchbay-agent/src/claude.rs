@@ -799,6 +799,7 @@ async fn run_one<'a>(hook: &'a Hook, stdin: &str, cwd: &Path) -> (&'a Hook, Resu
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    crate::proc::NoWindow::no_window(&mut cmd);
     if let Some(root) = &hook.plugin_root {
         cmd.env("CLAUDE_PLUGIN_ROOT", root);
     }

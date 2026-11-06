@@ -68,11 +68,7 @@ fn git_env(dir: &Path, env: &[(&str, &std::ffi::OsStr)], args: &[&str]) -> Resul
     for (k, v) in env {
         cmd.env(k, v);
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
+    patchbay_agent::proc::NoWindow::no_window(&mut cmd);
     let out = cmd.output().context("running git")?;
     if !out.status.success() {
         bail!("git {}: {}", args.first().unwrap_or(&""), String::from_utf8_lossy(&out.stderr).trim());

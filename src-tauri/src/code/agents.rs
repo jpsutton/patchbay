@@ -618,11 +618,13 @@ fn detect(kind: AgentKind, overrides: &AgentPaths) -> AgentInfo {
 }
 
 fn version_of(program: &Path) -> Option<String> {
+    use patchbay_agent::proc::NoWindow;
     let mut child = std::process::Command::new(program)
         .arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
+        .no_window()
         .spawn()
         .ok()?;
     let t0 = std::time::Instant::now();
