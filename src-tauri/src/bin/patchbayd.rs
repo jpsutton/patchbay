@@ -367,6 +367,9 @@ async fn run(args: Args, data_dir: PathBuf, listen: String) -> Result<()> {
 
     #[cfg(feature = "web")]
     let server = if args.no_web {
+        // The web UI (and its /share route) is off, but shares still need a server: start the
+        // standalone loopback one from the same registry (shares.rs).
+        patchbay_lib::shares::spawn(&state);
         None
     } else {
         let addr: std::net::SocketAddr = listen.parse().with_context(|| format!("bad --listen address {listen}"))?;
