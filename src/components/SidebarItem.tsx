@@ -14,6 +14,7 @@ import {
   GitPullRequestIcon,
   hasAgentBadge,
   MessageCodeIcon,
+  MoreIcon,
   StarIcon,
   XIcon,
 } from "./icons";
@@ -128,7 +129,7 @@ export function SidebarItem({
 
   return (
     <div
-      className={`group mx-2 flex h-[34px] min-w-0 cursor-pointer items-center gap-2.5 rounded-lg pr-2 text-[14px] ${indent ? "pl-4" : "pl-2.5"} ${
+      className={`group mx-2 flex h-[34px] min-w-0 cursor-pointer select-none items-center gap-2.5 rounded-lg pr-2 text-[14px] [-webkit-touch-callout:none] ${indent ? "pl-4" : "pl-2.5"} ${
         selected
           ? `bg-accent/20 text-fg ${active ? "font-medium" : ""}`
           : active
@@ -210,6 +211,27 @@ export function SidebarItem({
           aria-label={`Delete ${title}`}
         >
           <XIcon size={14} />
+        </button>
+      )}
+      {menu && (
+        // Touch has no right-click (iOS long-press goes to Safari's own selection UI), so give
+        // coarse-pointer devices a tap-accessible ⋯ that opens the very same ContextMenu. Hidden
+        // on fine pointers, where the desktop right-click / Alt+click paths stay as they were.
+        <button
+          className="hidden h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted hover:bg-panel-2 hover:text-fg active:bg-panel-2 pointer-coarse:flex"
+          onClick={(e) => {
+            e.stopPropagation();
+            const r = e.currentTarget.getBoundingClientRect();
+            setMenuAt({ x: r.left, y: r.bottom });
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+          aria-haspopup="menu"
+          aria-expanded={menuAt !== null}
+          aria-label={`More actions for ${title}`}
+          title={`More actions for ${title}`}
+        >
+          <MoreIcon size={16} />
         </button>
       )}
     </div>
