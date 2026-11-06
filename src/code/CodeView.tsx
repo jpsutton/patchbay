@@ -61,10 +61,12 @@ import { useDragRegion, WindowControls } from "../components/WindowControls";
 import { isRemoteApp, uuid } from "../lib/platform";
 import {
   ActivityIcon,
+  AgentBadgeIcon,
   CheckIcon,
   ChevronRightIcon,
   CopyIcon,
   FileDiffIcon,
+  hasAgentBadge,
   InfoIcon,
   MonitorUpIcon,
   MoreIcon,
@@ -908,6 +910,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const sessions = useStore((s) => s.codeSessions);
   const state = useStore((s) => (activeId ? s.code[activeId] : undefined));
   const models = useStore((s) => s.models);
+  const providers = useStore((s) => s.providers);
   const pushCodeEntry = useStore((s) => s.pushCodeEntry);
   const setCodeBusy = useStore((s) => s.setCodeBusy);
   const clearCodeRestore = useStore((s) => s.clearCodeRestore);
@@ -1474,6 +1477,13 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
       {AGENT_LABELS[session.agent] ?? session.agent}
     </span>
   );
+  // Phone header badge: which agent runs this session, plus its provider when Patchbay routes it
+  // through a model. Other agents bring their own sign-in, where modelRef is only a default and
+  // must not be shown as the provider in use.
+  const agentName = AGENT_LABELS[session.agent] ?? session.agent;
+  const routedModel = usesPatchbayModels(session.agent) ? models.find((m) => m.id === session.modelRef) : undefined;
+  const providerName = routedModel ? providers.find((p) => p.id === routedModel.providerId)?.name : undefined;
+  const agentBadgeLabel = providerName ? `${agentName} · ${providerName}` : agentName;
   // A phone always gets a select: a segmented control doesn't fit beside the others.
   const modeControl =
     s?.modes && modes.length > 0 ? (
@@ -1610,6 +1620,17 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
       <header ref={headerRef} {...drag} className={`flex h-12 shrink-0 items-center gap-1 border-b border-line pr-3 ${leading ? "pl-1" : "pl-6"}`}>
         {leading}
         <Dot {...dot} title={dotLabel} role="img" aria-label={`Agent ${dotLabel}`} />
+        {/* The phone has no sidebar to name the agent, so show the same badge the desktop list does. */}
+        {remote && hasAgentBadge(session.agent) && (
+          <span
+            className="flex shrink-0 items-center justify-center rounded-full bg-panel p-[2px] text-muted"
+            role="img"
+            aria-label={agentBadgeLabel}
+            title={agentBadgeLabel}
+          >
+            <AgentBadgeIcon agent={session.agent} size={12} />
+          </span>
+        )}
         {/* The minimum is on this box, not the title: only then does a crowded header overflow (which is how
             `fitHeader` notices) instead of the title drawing over its neighbours. The last level lets it shrink. */}
         <div
