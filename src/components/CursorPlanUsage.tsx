@@ -86,7 +86,7 @@ export function CursorPlanUsageButton() {
   const grants = grantsLabel(limits);
   const freeOk = hasFreeCapacity(limits);
   const titleParts = [
-    rows.length > 0 ? `Cursor plan usage: ${rows.map((r) => `${r.label} ${Math.round(r.pct)}%`).join(", ")}` : "Cursor plan usage",
+    rows.length > 0 ? `Cursor plan usage: ${rows.map((r) => `${r.label} ${Math.round(r.pct)}% used`).join(", ")}` : "Cursor plan usage",
     bonus,
     grants,
   ].filter(Boolean);
@@ -130,7 +130,7 @@ export function CursorPlanUsageButton() {
         </span>
       )}
       {pct != null && rows.length === 0 && (
-        <span className={`meta ${t === "danger" ? "text-danger" : t === "warn" ? "text-warn" : ""}`}>{pct}%</span>
+        <span className={`meta ${t === "danger" ? "text-danger" : t === "warn" ? "text-warn" : ""}`}>{pct}% used</span>
       )}
     </button>
   );
@@ -144,7 +144,7 @@ function PoolRow({ label, pct, now, resetsAt }: { label: string; pct: number; no
       <div className="flex items-baseline justify-between">
         <span>{label}</span>
         <span className="meta text-faint">
-          {rounded}%
+          {rounded}% used
           {resetsAt != null && resetsAt > now ? ` · resets in ${fmtSpan(resetsAt - now)}` : ""}
         </span>
       </div>
