@@ -7,6 +7,7 @@ import { codeEventArrived, useStore } from "../lib/store";
 import { ChatView } from "../chat/ChatView";
 import { PaneHost } from "../code/PaneHost";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { ShareViewer } from "../components/ShareViewer";
 import { SessionInfoDialog } from "../code/SessionInfoDialog";
 import { ActionSheet, useHold, type ItemAction } from "../components/ItemMenu";
 import { chatActions, promptRename } from "../lib/itemActions";
@@ -563,6 +564,8 @@ function Main({
       )}
       <ConfirmDialog />
       <SessionInfoDialog />
+      {/* Phase 2: tapping a share link in chat opens the artifact in-app. */}
+      <ShareViewer />
       {toast && (
         <div className="pointer-events-none fixed inset-x-4 bottom-[calc(env(safe-area-inset-bottom)+16px)] z-50 flex justify-center">
           <div className="pointer-events-auto max-w-md rounded-xl border border-border bg-raised px-4 py-2.5 text-[14px] shadow-float">

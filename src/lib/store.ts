@@ -381,6 +381,8 @@ interface Store {
   importClaudeOpen: boolean;
   /** The Code session whose details dialog is open (see `code/SessionInfoDialog.tsx`). */
   sessionInfoId: string | null;
+  /** Phase 2: the artifact share URL open in the phone's embedded viewer (see ShareViewer.tsx). */
+  shareUrl: string | null;
   /** Sidebar title filter. */
   sidebarQuery: string;
   providers: Provider[];
@@ -424,6 +426,7 @@ interface Store {
   setNewSessionOpen: (o: boolean) => void;
   setImportClaudeOpen: (o: boolean) => void;
   setSessionInfoId: (id: string | null) => void;
+  setShareUrl: (url: string | null) => void;
   setSidebarQuery: (q: string) => void;
   setToast: (t: string | null) => void;
   setAlert: (a: Alert | null) => void;
@@ -1098,6 +1101,7 @@ export const useStore = create<Store>((set, get) => ({
   newSessionOpen: false,
   importClaudeOpen: false,
   sessionInfoId: null,
+  shareUrl: null,
   sidebarQuery: "",
   providers: [],
   models: [],
@@ -1173,6 +1177,7 @@ export const useStore = create<Store>((set, get) => ({
   setNewSessionOpen: (newSessionOpen) => set({ newSessionOpen }),
   setImportClaudeOpen: (importClaudeOpen) => set({ importClaudeOpen }),
   setSessionInfoId: (sessionInfoId) => set({ sessionInfoId }),
+  setShareUrl: (shareUrl) => set({ shareUrl }),
   setSidebarQuery: (sidebarQuery) => set({ sidebarQuery }),
   setToast: (toast) => set({ toast }),
   setAlert: (alert) => set({ alert }),

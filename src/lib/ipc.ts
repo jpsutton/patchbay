@@ -274,6 +274,16 @@ export interface ShareInfo {
   expiresAt: number;
 }
 
+/** Result of fetching a share through the gateway (phone's `remote_share_fetch` command). */
+export interface ShareFetch {
+  /** 200 = ok, 404 = expired/revoked/unknown/owner offline (no bytes). */
+  status: number;
+  /** Exact response headers from the owning node, as [name, value] pairs. */
+  headers: [string, string][];
+  /** Base64 artifact bytes (empty when status != 200). */
+  bodyB64: string;
+}
+
 export interface Message {
   id: string;
   conversationId: string;
@@ -1115,6 +1125,9 @@ export const api = {
   createShare: (path: string, cwd: string | null) => invoke<ShareInfo>("create_share", { path, cwd }),
   listShares: () => invoke<ShareInfo[]>("list_shares"),
   revokeShare: (token: string) => invoke<void>("revoke_share", { token }),
+  /** Phone only: fetch a share through the gateway / owning node for the in-app viewer. */
+  shareFetch: (nodeId: string, token: string) =>
+    invoke<ShareFetch>("remote_share_fetch", { nodeId, token }),
 
   listCodeSessions: () => invoke<CodeSession[]>("list_code_sessions"),
   /** With `host`, the session runs on that computer, in its folder `cwd`. */
