@@ -274,6 +274,7 @@ fn index(state: &AppState) -> Result<Value> {
             }
             l.busy = state.code.is_busy(&s.id);
             l.permissions = agents.get(&s.id).map(|a| a.permissions.iter().map(|(r, _)| r.clone()).collect()).unwrap_or_default();
+            l.questions = agents.get(&s.id).map(|a| a.questions.iter().map(|(r, _)| r.clone()).collect()).unwrap_or_default();
         }
     }
     Ok(json!({

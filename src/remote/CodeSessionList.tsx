@@ -13,8 +13,13 @@ export interface Live {
   status: string;
   busy: boolean;
   permissions: string[];
+  /** Open agent questions; absent from older hosts. */
+  questions?: string[];
   last: number;
 }
+
+/** Waiting on the user: an approval or an agent question. */
+export const liveNeedsYou = (l?: Live) => (l?.permissions.length ?? 0) > 0 || (l?.questions?.length ?? 0) > 0;
 
 const PROJECT_COLLAPSED_KEY = "patchbay.remote.codeProjectCollapsed";
 const HOST_COLLAPSED_KEY = "patchbay.remote.codeHostCollapsed";
@@ -362,7 +367,7 @@ function ProjectBlock({
 
 function SessionState({ live, online }: { live?: Live; online: boolean }) {
   if (!online) return <span className="text-[12px] text-faint">Offline</span>;
-  if (live && live.permissions.length > 0)
+  if (liveNeedsYou(live))
     return <span className="rounded-full bg-accent px-2 py-0.5 text-[12px] font-semibold text-accent-fg">Needs you</span>;
   if (live?.busy)
     return (

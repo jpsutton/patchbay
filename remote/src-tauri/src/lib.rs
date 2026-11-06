@@ -66,6 +66,8 @@ struct Remote {
     foreground: AtomicBool,
     /// Join requests (by node id) already announced with a notification.
     join_notified: Mutex<HashSet<String>>,
+    /// Open agent questions (`session\0request`) already announced with a notification.
+    question_notified: Mutex<HashSet<String>>,
     /// What the user chose on a join request's notification, until the window picks it up:
     /// `{ action: "open" | "approve" | "reject", nodeId }`.
     join_action: Mutex<Option<Value>>,
@@ -116,6 +118,23 @@ impl Remote {
         if let Err(e) = self.app.notification().builder().title(title).body(body).show() {
             tracing::debug!("notification: {e}");
         }
+    }
+
+    /// Announce an agent's question, once however many events or index refreshes repeat it.
+    fn notify_question(&self, session: &str, request: &str) {
+        if !self.question_notified.lock().unwrap().insert(format!("{session}\0{request}")) {
+            return;
+        }
+        self.notify("Agent has a question for you", &self.title_of("codeSessions", session));
+    }
+
+    /// Forget announced questions of `session` that are no longer open, so the set stays small.
+    fn retain_questions(&self, session: &str, open: &[&str]) {
+        let prefix = format!("{session}\0");
+        self.question_notified
+            .lock()
+            .unwrap()
+            .retain(|k| k.strip_prefix(&prefix).is_none_or(|r| open.contains(&r)));
     }
 
     /// Tell the user a node waits to join, with Approve and Decline in the notification shade and
@@ -208,6 +227,11 @@ impl Remote {
                 let id = payload["codeSessionId"].as_str().unwrap_or_default();
                 match payload["event"]["type"].as_str() {
                     Some("permission") => self.notify("Agent needs your approval", &self.title_of("codeSessions", id)),
+                    Some("question") => {
+                        if let Some(rid) = payload["event"]["requestId"].as_str() {
+                            self.notify_question(id, rid);
+                        }
+                    }
                     Some("promptDone") if payload["event"]["stopReason"] != "cancelled" => {
                         self.notify("Agent finished", &self.title_of("codeSessions", id))
                     }
@@ -221,6 +245,13 @@ impl Remote {
                 let followed = self.client.topics().contains(&rmt::session_topic(id));
                 if !followed && payload["live"]["permissions"].as_array().is_some_and(|p| !p.is_empty()) {
                     self.notify("Agent needs your approval", &self.title_of("codeSessions", id));
+                }
+                let open: Vec<&str> = payload["live"]["questions"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                self.retain_questions(id, &open);
+                if !followed {
+                    for rid in &open {
+                        self.notify_question(id, rid);
+                    }
                 }
                 self.emit("remote://live", payload);
             }
@@ -1006,6 +1037,7 @@ pub fn run() {
                 local: Mutex::new(local),
                 foreground: AtomicBool::new(true),
                 join_notified: Mutex::default(),
+                question_notified: Mutex::default(),
                 join_action: Mutex::default(),
             }));
             // Join requests come with Approve and Decline buttons; tapping any of them reports back.

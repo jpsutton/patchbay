@@ -330,7 +330,7 @@ function ModeToggle({ vertical }: { vertical?: boolean }) {
   const mode = useStore((s) => s.mode);
   const setMode = useStore((s) => s.setMode);
   // A Code session waiting on a permission lights the Code tab while you're in Chat.
-  const codeNeedsYou = useStore((s) => Object.values(s.code).some((c) => c.permissions.length > 0));
+  const codeNeedsYou = useStore((s) => Object.values(s.code).some((c) => c.permissions.length > 0 || c.questions.length > 0));
   const idx = MODES.findIndex((m) => m.mode === mode);
   // Wide and flat in the sidebar's top row, so it doesn't make that row taller; square in the rail.
   const size = vertical ? "h-8 w-10" : "h-[26px] w-[42px]";

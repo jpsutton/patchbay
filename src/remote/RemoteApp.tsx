@@ -13,7 +13,7 @@ import { ActionSheet, useHold, type ItemAction } from "../components/ItemMenu";
 import { chatActions, promptRename } from "../lib/itemActions";
 import { NewSessionSheet } from "./NewSession";
 import { ChatNodePicker } from "./ChatNodePicker";
-import { ArchivedRow, CodeSessionList, type Live } from "./CodeSessionList";
+import { ArchivedRow, CodeSessionList, liveNeedsYou, type Live } from "./CodeSessionList";
 import { fmtShort } from "../lib/format";
 import { Dot } from "../components/Dot";
 import { ReadAloudSettings } from "../settings/ReadAloudSettings";
@@ -362,8 +362,8 @@ function Main({
         hiddenAt.current = Date.now();
         const st = useStore.getState();
         const running =
-          Object.values(st.code).some((c) => c.busy || c.permissions.length > 0) ||
-          Object.values(liveRef.current).some((l) => l.busy || l.permissions.length > 0) ||
+          Object.values(st.code).some((c) => c.busy || c.permissions.length > 0 || c.questions.length > 0) ||
+          Object.values(liveRef.current).some((l) => l.busy || liveNeedsYou(l)) ||
           Object.values(st.chatStreams).some((c) => c.running);
         if (running && flag(STAY_KEY, true)) remote.keepAlive(true).catch(() => {});
         return;
@@ -631,7 +631,7 @@ function Home({
   const conversations = useStore((s) => s.conversations);
   const sessions = useStore((s) => s.codeSessions);
   const streams = useStore((s) => s.chatStreams);
-  const needsYou = sessions.filter((s) => (live[s.id]?.permissions.length ?? 0) > 0).length;
+  const needsYou = sessions.filter((s) => liveNeedsYou(live[s.id])).length;
 
   const [sheet, setSheet] = useState<{ title: string; actions: ItemAction[] } | null>(null);
   const [showArchived, setShowArchived] = useState(false);
