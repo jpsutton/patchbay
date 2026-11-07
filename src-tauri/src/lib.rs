@@ -2403,14 +2403,17 @@ async fn ensure_remote_force_send(state: &AppState, host: &str, id: &str) -> any
     Ok(())
 }
 
-/// Send a queued prompt now: the running turn is cancelled and the prompt goes next.
+/// Send a queued prompt now: the running turn is cancelled and the prompt goes next. A message
+/// steered into the running turn comes out of it; one that is not waiting any more is an error
+/// the UI shows, so the button never does nothing.
 async fn code_send_now(state: &AppState, id: String, prompt_id: String) -> CmdResult<()> {
     if let Some(host) = remote_host(state, &id)? {
         ensure_remote_force_send(state, &host, &id).await?;
         state.mesh.rpc(&host, "code.send_now", serde_json::json!({ "id": id, "promptId": prompt_id })).await?;
         return Ok(());
     }
-    Ok(state.code.send(&id, AgentCmd::SendNow { prompt_id })?)
+    state.code.send_now(&id, &prompt_id).await?;
+    Ok(())
 }
 
 async fn code_prompt(
@@ -2955,7 +2958,7 @@ impl mesh::RpcHandler for MeshRpc {
             "code.send_now" => {
                 ensure_local_host(state, &id()?)?;
                 let prompt_id = param(&p, "promptId")?.to_owned();
-                state.code.send(&id()?, AgentCmd::SendNow { prompt_id }).map(|_| Value::Null)
+                state.code.send_now(&id()?, &prompt_id).await.map(|_| Value::Null)
             }
             "code.set_model" => code_set_model_local(state, &id()?, param(&p, "modelId")?.to_owned()).await.map(|_| Value::Null),
             "code.set_config_option" => {

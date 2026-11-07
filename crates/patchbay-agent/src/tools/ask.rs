@@ -20,7 +20,8 @@ impl Tool for AskUserQuestion {
             description: "Ask the user one or more multiple-choice questions when you are blocked on a \
 decision only they can make (which of two approaches, a name, a scope). Do not use it for things you \
 can find out yourself or for approval of a plan. Give two to four options per question; put the one \
-you recommend first and say so in its label. When you ask several questions they appear in one form: \
+you recommend first and say so in its label. Set `multiSelect` when a question's options are independent \
+picks rather than either/or. When you ask several questions they appear in one form: \
 the user can move back and forth, change earlier answers, then send. They can always skip a question, \
 type their own answer, or answer in chat instead."
                 .into(),
@@ -45,7 +46,8 @@ type their own answer, or answer in chat instead."
                                         },
                                         "required": ["label"]
                                     }
-                                }
+                                },
+                                "multiSelect": {"type": "boolean", "description": "Set true for independent 'pick all that apply' options; omit for mutually exclusive ones"}
                             },
                             "required": ["question", "options"]
                         }
@@ -70,36 +72,10 @@ type their own answer, or answer in chat instead."
     }
 
     async fn run(&self, input: Value, ctx: &ToolCtx) -> ToolOutput {
-        let Some(raw_questions) = input["questions"].as_array().filter(|q| !q.is_empty()) else {
-            return ToolOutput::error("questions must be a non-empty list");
+        let (form_questions, prompts) = match build_form(&input) {
+            Ok(built) => built,
+            Err(e) => return ToolOutput::error(e),
         };
-        let mut form_questions = Vec::new();
-        let mut prompts = Vec::new();
-        for q in raw_questions.iter().take(4) {
-            let (Some(text), Some(options)) = (q["question"].as_str(), q["options"].as_array()) else {
-                return ToolOutput::error("each question needs `question` and `options`");
-            };
-            let opts: Vec<Value> = options
-                .iter()
-                .filter_map(|o| {
-                    let label = o["label"].as_str()?;
-                    let mut item = json!({ "label": label });
-                    if let Some(d) = o["description"].as_str().filter(|s| !s.is_empty()) {
-                        item["description"] = json!(d);
-                    }
-                    Some(item)
-                })
-                .collect();
-            if opts.len() < 2 {
-                return ToolOutput::error("each question needs at least two options");
-            }
-            prompts.push(text.to_owned());
-            let mut item = json!({ "question": text, "options": opts });
-            if let Some(h) = q["header"].as_str().filter(|s| !s.is_empty()) {
-                item["header"] = json!(h);
-            }
-            form_questions.push(item);
-        }
 
         // One form for every question: Patchbay's QuestionCard pages with ‹ › when length > 1.
         // `from_ext` treats any `*ask_user_question*` client method as this Grok-shaped payload.
@@ -134,6 +110,48 @@ type their own answer, or answer in chat instead."
     }
 }
 
+/// The form items and prompts for `input`, or the error the tool should report.
+///
+/// Pure so the outgoing payload shape is testable without a live session. `multiSelect` is copied
+/// through only when true; a missing or false field leaves the item clean and `grok_question`
+/// defaults it to single-choice either way.
+fn build_form(input: &Value) -> Result<(Vec<Value>, Vec<String>), String> {
+    let Some(raw_questions) = input["questions"].as_array().filter(|q| !q.is_empty()) else {
+        return Err("questions must be a non-empty list".into());
+    };
+    let mut form_questions = Vec::new();
+    let mut prompts = Vec::new();
+    for q in raw_questions.iter().take(4) {
+        let (Some(text), Some(options)) = (q["question"].as_str(), q["options"].as_array()) else {
+            return Err("each question needs `question` and `options`".into());
+        };
+        let opts: Vec<Value> = options
+            .iter()
+            .filter_map(|o| {
+                let label = o["label"].as_str()?;
+                let mut item = json!({ "label": label });
+                if let Some(d) = o["description"].as_str().filter(|s| !s.is_empty()) {
+                    item["description"] = json!(d);
+                }
+                Some(item)
+            })
+            .collect();
+        if opts.len() < 2 {
+            return Err("each question needs at least two options".into());
+        }
+        prompts.push(text.to_owned());
+        let mut item = json!({ "question": text, "options": opts });
+        if let Some(h) = q["header"].as_str().filter(|s| !s.is_empty()) {
+            item["header"] = json!(h);
+        }
+        if bool_arg(q, "multiSelect") {
+            item["multiSelect"] = json!(true);
+        }
+        form_questions.push(item);
+    }
+    Ok((form_questions, prompts))
+}
+
 /// One question's line in the tool result, from a Grok-shaped ask_user_question reply.
 fn format_answer(prompt: &str, answers: &Map<String, Value>, notes: &Map<String, Value>) -> String {
     let note = notes
@@ -162,8 +180,7 @@ fn format_answer(prompt: &str, answers: &Map<String, Value>, notes: &Map<String,
 
 #[cfg(test)]
 mod tests {
-    use super::format_answer;
-    use serde_json::{Map, Value, json};
+    use super::*;
 
     fn maps(answers: &[(&str, Value)], notes: &[(&str, &str)]) -> (Map<String, Value>, Map<String, Value>) {
         let mut a = Map::new();
@@ -208,5 +225,63 @@ mod tests {
     fn multi_select_joins_labels() {
         let (a, n) = maps(&[("Which?", json!(["Alpha", "Beta"]))], &[]);
         assert_eq!(format_answer("Which?", &a, &n), "\"Which?\" = \"Alpha\", \"Beta\"");
+    }
+
+    #[test]
+    fn spec_advertises_multi_select_as_optional() {
+        let spec = AskUserQuestion.spec();
+        let item = &spec.parameters["properties"]["questions"]["items"];
+        assert_eq!(item["properties"]["multiSelect"]["type"], "boolean");
+        let desc = item["properties"]["multiSelect"]["description"].as_str().unwrap();
+        assert!(desc.contains("pick all that apply"), "{desc}");
+        assert!(desc.contains("mutually exclusive"), "{desc}");
+        // Optional: single-choice stays the default.
+        assert!(
+            !item["required"].as_array().unwrap().iter().any(|r| r == "multiSelect"),
+            "multiSelect must not be required"
+        );
+    }
+
+    #[test]
+    fn build_form_forwards_multi_select_only_when_true() {
+        let input = json!({
+            "questions": [
+                {
+                    "question": "Which labs did you touch?",
+                    "multiSelect": true,
+                    "options": [{ "label": "Alpha" }, { "label": "Beta" }]
+                },
+                {
+                    "question": "Which one ships first?",
+                    "header": "Order",
+                    "options": [
+                        { "label": "Alpha", "description": "Recommended" },
+                        { "label": "Beta" }
+                    ]
+                }
+            ]
+        });
+        let (items, prompts) = build_form(&input).unwrap();
+        assert_eq!(prompts, ["Which labs did you touch?", "Which one ships first?"]);
+        assert_eq!(items[0]["multiSelect"], json!(true));
+        assert!(items[1].get("multiSelect").is_none(), "single-choice items stay clean");
+        // Header, labels and descriptions ride along untouched.
+        assert_eq!(items[1]["header"], json!("Order"));
+        assert_eq!(items[0]["options"], json!([{ "label": "Alpha" }, { "label": "Beta" }]));
+        assert_eq!(items[1]["options"][0]["description"], json!("Recommended"));
+        assert!(items[1]["options"][1].get("description").is_none());
+    }
+
+    #[test]
+    fn build_form_rejects_the_same_bad_shapes_as_before() {
+        assert_eq!(build_form(&json!({})).unwrap_err(), "questions must be a non-empty list");
+        assert_eq!(
+            build_form(&json!({ "questions": [{ "question": "One?" }] })).unwrap_err(),
+            "each question needs `question` and `options`"
+        );
+        assert_eq!(
+            build_form(&json!({ "questions": [{ "question": "One?", "options": [{ "label": "A" }] }] })).unwrap_err(),
+            "each question needs at least two options"
+        );
     }
 }

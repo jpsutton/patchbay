@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Choice, Deferred, Row } from "./PreferencesPage";
 import { Toggle } from "../components/Toggle";
 import { input } from "./ProviderPage";
+import { setListen } from "../components/ReadAloudButton";
 import { primeAudio, speakText, systemVoices, type SpeechVoice } from "../lib/speech";
 import { isAndroidApp, isRemoteApp } from "../lib/platform";
 import { useStore } from "../lib/store";
@@ -97,8 +98,12 @@ export function ReadAloudSettings() {
           ]}
         />
       </Row>
-      <Row label="Listen to new replies" hint="Speak new replies while that chat or session is the one on screen. A chat reads the finished reply. A Code session reads each message as the agent finishes it, so you hear the steps along the way.">
-        <Toggle label="Listen to new replies" checked={prefs.readAloudListen} onChange={(v) => set("readAloudListen", v)} />
+      <Row label="Listen to new replies" hint="One setting for every chat and session, but only the one on screen reads its replies aloud; the others stay quiet. A chat reads the finished reply. A Code session reads each message as the agent finishes it, so you hear the steps along the way. Turning this off stops the audio at once.">
+        <Toggle
+          label="Listen to new replies"
+          checked={prefs.readAloudListen}
+          onChange={(v) => void setListen(v).then((err) => err && setToast(err))}
+        />
       </Row>
       {!isRemoteApp() && (
         <Row
