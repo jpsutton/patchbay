@@ -212,7 +212,9 @@ do with one Grep or Read."
             r.refuse(&WITHHELD);
             r
         } else {
-            let mut registry = Registry::builtin(settings.web_fetch, parent.host.web_search_key().is_some());
+            let model_id = parent.state.lock().await.model_id.clone();
+            let search = parent.host.web_search_key().is_some() || parent.host.native_web_search(&model_id);
+            let mut registry = Registry::builtin(settings.web_fetch, search);
             if kind != Kind::Explore {
                 for t in parent.mcp.lock().await.tools() {
                     registry.push(t);

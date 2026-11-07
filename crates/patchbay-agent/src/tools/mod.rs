@@ -161,6 +161,11 @@ impl Registry {
         self.refused.extend(names.iter().map(|n| (*n).to_owned()));
     }
 
+    /// Whether the tool named `name` is on offer.
+    pub fn offers(&self, name: &str) -> bool {
+        self.tools.iter().any(|t| t.spec().name == name)
+    }
+
     /// Keep only the tools whose name `keep` accepts.
     pub fn retain(&mut self, keep: impl Fn(&str) -> bool) {
         self.tools.retain(|t| keep(&t.spec().name));
