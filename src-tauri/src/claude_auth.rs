@@ -77,15 +77,28 @@ pub fn resolve_dir(dir: Option<&str>) -> Result<PathBuf> {
 /// True when `key` is a config-directory path fallback, not Claude Code's portable
 /// `<accountUuid>:<organizationUuid>`. Path keys are machine-local: the same login on another
 /// computer has a different path, so the mesh must not keep them as separate accounts.
+/// A Windows drive path counts even on unix receivers, where `Path::is_absolute` says no.
 pub fn is_path_account_key(key: &str) -> bool {
-    key.starts_with("~/") || Path::new(key).is_absolute()
+    let b = key.as_bytes();
+    let drive = b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/');
+    key.starts_with("~/") || Path::new(key).is_absolute() || drive
 }
 
 /// The Claude account a config directory is signed in to, as a key that is the same on every
 /// computer (`<accountUuid>:<organizationUuid>`, from Claude Code's `.claude.json`), and the
 /// organization's name. Falls back to the directory's path when Claude Code hasn't recorded one.
+///
+/// The profile alone is not enough to name the account: the usage a session reports comes from
+/// the login in the credentials store (file or Keychain), and after a re-sign-in the two can
+/// disagree — `.claude.json` still describing the previous login. Keying a report by that stale
+/// profile records one account's numbers under another account's key, and every session on that
+/// key (the usage guard included) then counts against it. When the stored login's rate-limit
+/// tier matches neither of the profile's tiers, the directory's own path is used instead: the
+/// account is left unidentified rather than misidentified, and the logins stay apart until the
+/// profile catches up (the portable key returns, and `fold_plan_accounts` merges the history on
+/// the next load).
 pub fn account(dir: &Path) -> (String, Option<String>) {
-    static SEEN: std::sync::Mutex<BTreeMap<PathBuf, (SystemTime, String, Option<String>)>> =
+    static SEEN: std::sync::Mutex<BTreeMap<PathBuf, (SystemTime, String, Option<String>, Vec<String>)>> =
         std::sync::Mutex::new(BTreeMap::new());
     let fallback = || (dir.to_string_lossy().into_owned(), None);
     // `~/.claude` keeps it beside the directory; any other directory, inside it.
@@ -94,22 +107,99 @@ pub fn account(dir: &Path) -> (String, Option<String>) {
         _ => dir.join(".claude.json"),
     };
     // Claude Code rewrites the file often: a read that lands mid-write keeps the last account seen.
-    let last = || SEEN.lock().unwrap().get(&file).map(|(_, key, name)| (key.clone(), name.clone()));
-    let Ok(modified) = std::fs::metadata(&file).and_then(|m| m.modified()) else { return last().unwrap_or_else(fallback) };
+    let last = || SEEN.lock().unwrap().get(&file).map(|(_, key, name, tiers)| (key.clone(), name.clone(), tiers.clone()));
+    // A profile identity, cross-checked against the login this directory actually stores: a
+    // login whose tier the profile doesn't carry names a different account, so the path is used.
+    let checked = |key: String, name: Option<String>, tiers: Vec<String>| -> (String, Option<String>) {
+        if let Some(tier) = login_plan_tier(dir)
+            && !tiers.is_empty()
+            && !tiers.iter().any(|t| t == &tier)
+        {
+            return fallback();
+        }
+        (key, name)
+    };
+    let Ok(modified) = std::fs::metadata(&file).and_then(|m| m.modified()) else {
+        return last().map_or_else(fallback, |(k, n, t)| checked(k, n, t));
+    };
     // The file can run to megabytes, so read it again only when it changes.
-    if let Some((at, key, name)) = SEEN.lock().unwrap().get(&file)
+    let (key, name, tiers) = if let Some((at, key, name, tiers)) = SEEN.lock().unwrap().get(&file)
         && *at == modified
     {
-        return (key.clone(), name.clone());
-    }
-    let Some(v) = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else {
-        return last().unwrap_or_else(fallback);
+        (key.clone(), name.clone(), tiers.clone())
+    } else {
+        let Some(v) = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else {
+            return last().map_or_else(fallback, |(k, n, t)| checked(k, n, t));
+        };
+        let a = &v["oauthAccount"];
+        let (Some(user), Some(org)) = (a["accountUuid"].as_str(), a["organizationUuid"].as_str()) else { return fallback() };
+        let (key, name) = (format!("{user}:{org}"), a["organizationName"].as_str().map(str::to_owned));
+        let tiers = [a["userRateLimitTier"].as_str(), a["organizationRateLimitTier"].as_str()]
+            .into_iter()
+            .flatten()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        SEEN.lock().unwrap().insert(file.clone(), (modified, key.clone(), name.clone(), tiers.clone()));
+        (key, name, tiers)
     };
-    let a = &v["oauthAccount"];
-    let (Some(user), Some(org)) = (a["accountUuid"].as_str(), a["organizationUuid"].as_str()) else { return fallback() };
-    let (key, name) = (format!("{user}:{org}"), a["organizationName"].as_str().map(str::to_owned));
-    SEEN.lock().unwrap().insert(file, (modified, key.clone(), name.clone()));
-    (key, name)
+    checked(key, name, tiers)
+}
+
+/// The rate-limit tier the login stored for `dir` reports: from the credentials file when it
+/// holds a Claude login, otherwise (macOS) Claude Code's Keychain item. A file that exists but
+/// holds only MCP logins is not this directory's login — on macOS that one lives in the
+/// Keychain. Cached for a minute: `account` asks on every plan report and prompt, and a
+/// Keychain read is not free (nor free of a one-time macOS authorization ask for a login this
+/// app has never read).
+fn login_plan_tier(dir: &Path) -> Option<String> {
+    static TIERS: std::sync::RwLock<BTreeMap<PathBuf, (std::time::Instant, Option<SystemTime>, Option<String>)>> =
+        std::sync::RwLock::new(BTreeMap::new());
+    const TTL: std::time::Duration = std::time::Duration::from_secs(60);
+    let file = dir.join(".credentials.json");
+    // The file's mtime is the re-sign-in signal; the Keychain has none, hence the time bound.
+    let mtime = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
+    let now = std::time::Instant::now();
+    if let Ok(g) = TIERS.read()
+        && let Some((at, fm, tier)) = g.get(dir)
+        && *fm == mtime
+        && now.duration_since(*at) < TTL
+    {
+        return tier.clone();
+    }
+    let tier = read_login_tier(dir);
+    if let Ok(mut g) = TIERS.write() {
+        g.insert(dir.to_owned(), (now, mtime, tier.clone()));
+    }
+    tier
+}
+
+fn read_login_tier(dir: &Path) -> Option<String> {
+    let file = dir.join(".credentials.json");
+    if let Ok(raw) = std::fs::read_to_string(&file)
+        && let Ok(v) = serde_json::from_str::<Value>(&raw)
+        && let Some(o) = v.get("claudeAiOauth")
+    {
+        // The file holds this directory's login: its tier is the answer, present or not.
+        return o.get("rateLimitTier").and_then(Value::as_str).map(str::to_owned);
+    }
+    keychain_login_tier(dir)
+}
+
+/// The login Claude Code keeps in the Keychain (macOS), where the default directory keeps its
+/// Claude login even when a credentials file exists holding only MCP logins.
+#[cfg(all(target_os = "macos", not(test)))]
+fn keychain_login_tier(dir: &Path) -> Option<String> {
+    let (root, _) = Store::locate(dir).ok()?.read().ok()?;
+    root.get("claudeAiOauth")
+        .and_then(|o| o.get("rateLimitTier"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// Tests must not touch the developer's Keychain; elsewhere than macOS there is none.
+#[cfg(not(all(target_os = "macos", not(test))))]
+fn keychain_login_tier(_dir: &Path) -> Option<String> {
+    None
 }
 
 /// Where a config directory's login lives.
@@ -447,8 +537,79 @@ mod tests {
     fn path_account_key_detects_config_dir_fallbacks() {
         assert!(is_path_account_key("/home/molly/.claude"));
         assert!(is_path_account_key("~/foo/.claude"));
+        // A Windows member's path key counts as machine-local on a unix receiver too.
+        assert!(is_path_account_key(r"C:\Users\DavidFrazer\.claude"));
         assert!(!is_path_account_key("d6f72690-3451-4e35-afa6-d653c2ce62ad:25c4ff7e-72e8-4c05-b845-c761306a53cc"));
         assert!(!is_path_account_key("u2:o2"));
+    }
+
+    /// A stored login whose rate-limit tier the profile doesn't describe is a different
+    /// account than the profile claims: the directory's path is used instead, so reports
+    /// from that login never land under the profile's account key.
+    #[test]
+    fn a_login_the_profile_does_not_describe_stays_unidentified() {
+        let dir = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let profile = serde_json::json!({ "oauthAccount": {
+            "accountUuid": "u1", "organizationUuid": "o1", "organizationName": "Team",
+            "userRateLimitTier": "default_claude_max_5x", "organizationRateLimitTier": "default_raven"
+        }});
+        let login = |tier: &str| {
+            serde_json::json!({ "claudeAiOauth": {
+                "accessToken": "t", "refreshToken": "r", "expiresAt": 1, "rateLimitTier": tier
+            }})
+            .to_string()
+        };
+        std::fs::write(dir.join(".claude.json"), profile.to_string()).unwrap();
+        std::fs::write(dir.join(".credentials.json"), login("default_claude_max_5x")).unwrap();
+        assert_eq!(account(&dir).0, "u1:o1", "a matching tier: the portable account");
+        assert_eq!(account(&dir).1.as_deref(), Some("Team"));
+        // Re-signed into another plan; `.claude.json` still describes the old login. The
+        // credentials' mtime is the re-sign-in signal, so move it explicitly (writes in a
+        // test can share a timestamp on coarse filesystems).
+        let bump = |at: std::time::SystemTime| {
+            let f = std::fs::File::options().write(true).open(dir.join(".credentials.json")).unwrap();
+            f.set_modified(at).unwrap();
+        };
+        std::fs::write(dir.join(".credentials.json"), login("default_claude_ai")).unwrap();
+        let later = SystemTime::now() + std::time::Duration::from_secs(10);
+        bump(later);
+        assert_eq!(
+            account(&dir),
+            (dir.to_string_lossy().into_owned(), None),
+            "a login the profile doesn't describe: never the profile's key"
+        );
+        // The login catches up with the profile: the portable key returns.
+        std::fs::write(dir.join(".credentials.json"), login("default_claude_max_5x")).unwrap();
+        bump(later + std::time::Duration::from_secs(10));
+        assert_eq!(account(&dir).0, "u1:o1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No credentials at all (or a profile without tiers) leaves the profile's key alone:
+    /// there is nothing to contradict it.
+    #[test]
+    fn without_a_readable_login_the_profile_key_stands() {
+        let dir = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let profile = serde_json::json!({ "oauthAccount": {
+            "accountUuid": "u1", "organizationUuid": "o1", "userRateLimitTier": "default_claude_max_5x"
+        }});
+        std::fs::write(dir.join(".claude.json"), profile.to_string()).unwrap();
+        assert_eq!(account(&dir).0, "u1:o1");
+        // A profile that names no tiers cannot be contradicted.
+        let bare = serde_json::json!({ "oauthAccount": { "accountUuid": "u2", "organizationUuid": "o2" } });
+        let dir2 = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir2).unwrap();
+        std::fs::write(dir2.join(".claude.json"), bare.to_string()).unwrap();
+        std::fs::write(
+            dir2.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"t","refreshToken":"r","expiresAt":1,"rateLimitTier":"pro"}}"#,
+        )
+        .unwrap();
+        assert_eq!(account(&dir2).0, "u2:o2");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
     }
 
     #[test]
