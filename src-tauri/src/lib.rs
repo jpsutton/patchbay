@@ -1462,7 +1462,17 @@ async fn poll_antigravity_plan(state: &AppState) {
         code::antigravity_plan::AntigravityAuthKind::Oauth => {}
     }
     let Some(auth) = code::antigravity_plan::load_auth(&state.code.antigravity_plan).await else {
-        tracing::debug!("antigravity plan: no local Google OAuth login");
+        tracing::debug!("antigravity plan: no readable local Google OAuth login");
+        // No usable login (disk sources missing/invalid and the keychain fallback denied or
+        // deferred): record the `unavailable` report instead of retrying — and therefore
+        // re-prompting — every TICK. Fresh for FRESH_SECS, so the loop itself backs off too.
+        let limits = code::antigravity_plan::AntigravityPlanLimits::unavailable(
+            "unreadable".into(),
+            None,
+            "Could not read or refresh the Antigravity Google login from disk or the keychain. Sign in again in Antigravity to see plan usage.".into(),
+            now,
+        );
+        adopt_antigravity_plan(state, limits, true);
         return;
     };
     if state
@@ -1648,13 +1658,39 @@ fn plan_account(state: &AppState, prefs: &prefs::Preferences, id: &str) -> Optio
     }
 }
 
+/// What a usage-limit message calls an account: the Claude login providers that run on it,
+/// else the account's own name (an organization), else this computer's default sign-in,
+/// else the key itself. The panel's labels can differ (it leads with "Claude Code login" for
+/// the default); a stop message has to say which login ran out, so the provider comes first.
+fn plan_account_label(state: &AppState, account: &str) -> String {
+    let providers = state.db.list_providers().unwrap_or_default();
+    let names: Vec<&str> = providers
+        .iter()
+        .filter(|(p, _)| p.auth_mode == db::AuthMode::ClaudeLogin && provider_plan_account(p).as_deref() == Some(account))
+        .map(|(p, _)| p.name.as_str())
+        .collect();
+    if !names.is_empty() {
+        return names.join(", ");
+    }
+    if let Some(name) = state.code.plan.account(account).name {
+        return name;
+    }
+    if account == default_plan_account().0 {
+        return "Claude Code login".to_owned();
+    }
+    account.to_owned()
+}
+
 /// Cancel every running turn on a Claude plan account past its usage limit. The agent stops
 /// cleanly, its session stays resumable, and queued prompts go back to their composers.
 fn enforce_plan_limit(state: &AppState) {
     let prefs = prefs::load(&state.db);
     let now = code::plan_limits::now();
     for id in state.code.busy_sessions() {
-        let Some(hit) = plan_account(state, &prefs, &id).and_then(|(a, _)| state.code.plan.hit(&a, &prefs.usage_limit, now)) else {
+        let Some((account, _)) = plan_account(state, &prefs, &id) else {
+            continue;
+        };
+        let Some(hit) = state.code.plan.hit(&account, &prefs.usage_limit, now) else {
             continue;
         };
         if !state.code.plan.start_stopping(&id) {
@@ -1665,7 +1701,8 @@ fn enforce_plan_limit(state: &AppState) {
             state.code.plan.turn_ended(&id);
             continue;
         }
-        let mut message = format!("Stopped. {}", hit.message(prefs.usage_limit.percent, now));
+        let label = plan_account_label(state, &account);
+        let mut message = format!("Stopped. {}", hit.message(prefs.usage_limit.percent, now, &label));
         if prefs.usage_limit.auto_resume {
             state.code.plan.schedule_resume(&id, hit.resets_at);
             save_resumes(state);
@@ -2006,10 +2043,16 @@ async fn code_prompt_local(
 ) -> anyhow::Result<code::acp::Delivery> {
     ensure_local_host(state, &id)?;
     let prefs = prefs::load(&state.db);
-    if let Some(hit) =
-        plan_account(state, &prefs, &id).and_then(|(a, _)| state.code.plan.hit(&a, &prefs.usage_limit, code::plan_limits::now()))
+    // The session's own account, and no other: a report recorded under a different account's
+    // key can never stop this prompt (PlanGuard::hit answers only for the key asked for).
+    if let Some((account, _)) = plan_account(state, &prefs, &id)
+        && let Some(hit) = state.code.plan.hit(&account, &prefs.usage_limit, code::plan_limits::now())
     {
-        anyhow::bail!("Not sent. {}", hit.message(prefs.usage_limit.percent, code::plan_limits::now()));
+        let label = plan_account_label(state, &account);
+        anyhow::bail!(
+            "Not sent. {}",
+            hit.message(prefs.usage_limit.percent, code::plan_limits::now(), &label)
+        );
     }
     if on_cursor_session(state, &id)
         && let Some(hit) = state.code.cursor_plan.hit(&prefs.cursor_usage_limit, code::cursor_plan::now())

@@ -1071,6 +1071,8 @@ mod tests {
 
     #[test]
     fn antigravity_auth_status_parses_settings_and_clears() {
+        // Holds GEMINI_HOME for the whole test: another test swaps the same variable.
+        let _env = crate::test_support::gemini_home_lock();
         let dir = std::env::temp_dir().join(format!("gemini-test-{}", crate::db::new_id()));
         let settings = dir.join("antigravity-acp").join("settings.json");
         std::fs::create_dir_all(settings.parent().unwrap()).unwrap();

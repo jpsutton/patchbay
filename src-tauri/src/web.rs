@@ -126,9 +126,10 @@ async fn conn(ctx: Ctx, socket: WebSocket) {
 /// GET one explicitly-shared artifact. The high-entropy token is the only authentication; a
 /// wrong, expired or revoked token yields 404 with no bytes. All the security-sensitive logic
 /// (canonicalization, expiry, sandboxed headers, streaming) is in `shares::handle`, shared with
-/// the standalone desktop server so both surfaces behave identically.
-async fn share_file(State(ctx): State<Ctx>, AxumPath(token): AxumPath<String>) -> Response {
-    crate::shares::handle(&ctx.state.shares, &token).await
+/// the standalone desktop server so both surfaces behave identically — including the `Accept`
+/// negotiation that serves a small HTML error page to browsers instead of an empty body.
+async fn share_file(State(ctx): State<Ctx>, AxumPath(token): AxumPath<String>, headers: HeaderMap) -> Response {
+    crate::shares::handle(&ctx.state.shares, &token, &headers).await
 }
 
 /// Gateway proxy for a share owned by another node (or this one). `GET /share/{node_id}/{token}`
@@ -138,9 +139,10 @@ async fn share_file(State(ctx): State<Ctx>, AxumPath(token): AxumPath<String>) -
 async fn share_proxy(
     State(ctx): State<Ctx>,
     AxumPath((node_id, token)): AxumPath<(String, String)>,
+    headers: HeaderMap,
 ) -> Response {
     let fetch = crate::shares::gateway_fetch(&ctx.state, &node_id, &token).await;
-    crate::shares::into_response(fetch)
+    crate::shares::into_response(fetch, &headers)
 }
 
 async fn static_file(State(ctx): State<Ctx>, req: Request) -> Response {

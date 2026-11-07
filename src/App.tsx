@@ -19,6 +19,7 @@ import {
 import { codeEventArrived, remoteHost, resyncRemoteCode, useStore, type Mode } from "./lib/store";
 import { goBack, goForward, resetHistory, useHistory } from "./lib/history";
 import { isRemoteApp } from "./lib/platform";
+import { hasUsage } from "./lib/sessionUsage";
 import { initZoom, zoomIn, zoomOut, zoomReset } from "./lib/zoom";
 import { ChatView } from "./chat/ChatView";
 import { newSessionIn } from "./code/CodeView";
@@ -44,6 +45,7 @@ import { AlertToast, MeshChip, MeshPopover, MeshRailButton } from "./components/
 import { PlanUsageBlade, PlanUsageButton } from "./components/PlanUsage";
 import { AntigravityPlanUsageBlade, AntigravityPlanUsageButton } from "./components/AntigravityPlanUsage";
 import { CursorPlanUsageBlade, CursorPlanUsageButton } from "./components/CursorPlanUsage";
+import { SessionUsageBlade, SessionUsageButton } from "./components/SessionUsage";
 import { Dot } from "./components/Dot";
 import {
   ArrowLeftIcon,
@@ -501,7 +503,9 @@ function useSessionPlanKind() {
   return planKindForSession(mode, session, prefs, providers, models);
 }
 
-/** Claude, Cursor, or Antigravity plan gauge button for the open Code session — never two. */
+/** Claude, Cursor, or Antigravity plan gauge button for the open Code session — never two.
+ * A session whose agent has no plan window (Grok, Patchbay's own agent, an ACP agent) gets the
+ * session-usage gauge in this slot instead. */
 function SessionPlanUsageButton() {
   const planOpen = useStore((s) => s.planOpen);
   const cursorPlanOpen = useStore((s) => s.cursorPlanOpen);
@@ -510,25 +514,41 @@ function SessionPlanUsageButton() {
   const setCursorPlanOpen = useStore((s) => s.setCursorPlanOpen);
   const setAntigravityPlanOpen = useStore((s) => s.setAntigravityPlanOpen);
   const kind = useSessionPlanKind();
+  const mode = useStore((s) => s.mode);
+  const sessionId = useStore((s) => s.activeCodeSessionId);
+  const session = useStore((s) => s.codeSessions.find((x) => x.id === sessionId));
+  const usage = useStore((s) => (sessionId ? s.code[sessionId]?.usage : undefined));
+  const sessionUsageOpen = useStore((s) => s.sessionUsageOpen);
+  const setSessionUsageOpen = useStore((s) => s.setSessionUsageOpen);
 
   useEffect(() => {
     if (kind !== "claude" && planOpen) setPlanOpen(false);
     if (kind !== "cursor" && cursorPlanOpen) setCursorPlanOpen(false);
     if (kind !== "antigravity" && antigravityPlanOpen) setAntigravityPlanOpen(false);
+    // The usage pane belongs to a plan-less Code session with something to show; a plan kind, or
+    // another tab, takes the slot — and so does a session whose agent has reported nothing yet.
+    const usageSlot =
+      kind === null && mode === "code" && !!session && hasUsage(usage?.totals ?? null, usage?.contextTokens ?? null);
+    if (!usageSlot && sessionUsageOpen) setSessionUsageOpen(false);
   }, [
     kind,
+    mode,
+    session,
+    usage,
     planOpen,
     cursorPlanOpen,
     antigravityPlanOpen,
+    sessionUsageOpen,
     setPlanOpen,
     setCursorPlanOpen,
     setAntigravityPlanOpen,
+    setSessionUsageOpen,
   ]);
 
   if (kind === "claude") return <PlanUsageButton />;
   if (kind === "cursor") return <CursorPlanUsageButton />;
   if (kind === "antigravity") return <AntigravityPlanUsageButton />;
-  return null;
+  return <SessionUsageButton />;
 }
 
 /** In-flow mesh / usage pane above the footer; only one open at a time via store mutex. */
@@ -539,6 +559,7 @@ function SidebarStatusPane() {
       {kind === "claude" && <PlanUsageBlade />}
       {kind === "cursor" && <CursorPlanUsageBlade />}
       {kind === "antigravity" && <AntigravityPlanUsageBlade />}
+      {kind === null && <SessionUsageBlade />}
       <MeshPopover />
     </>
   );
@@ -706,11 +727,15 @@ export default function App() {
       .then(() => {
         const s = useStore.getState();
         if (s.models.length === 0) s.setSettingsOpen(true);
-        // Fake-backend preview: `?sidebarPane=mesh|plan|cursor|antigravity` opens that sidebar pane.
+        // Fake-backend preview: `?sidebarPane=mesh|plan|cursor|antigravity|usage` opens that sidebar pane.
         const pane = new URLSearchParams(location.search).get("sidebarPane");
-        if (pane === "mesh" || pane === "plan" || pane === "cursor" || pane === "antigravity") {
+        if (pane === "mesh" || pane === "plan" || pane === "cursor" || pane === "antigravity" || pane === "usage") {
           s.setMode("code");
-          if (pane === "plan" || pane === "cursor" || pane === "antigravity") {
+          if (pane === "usage") {
+            // A session with no plan window: the slot this pane exists for.
+            const match = s.codeSessions.find((x) => planKindForSession("code", x, s.prefs, s.providers, s.models) === null);
+            if (match) s.selectCodeSession(match.id);
+          } else if (pane === "plan" || pane === "cursor" || pane === "antigravity") {
             const want = pane === "plan" ? "claude-code" : pane === "cursor" ? "cursor" : "antigravity";
             const match = s.codeSessions.find((x) => x.agent === want);
             if (match) s.selectCodeSession(match.id);
@@ -718,6 +743,7 @@ export default function App() {
           if (pane === "mesh") s.setMeshPopoverOpen(true);
           else if (pane === "plan") s.setPlanOpen(true);
           else if (pane === "cursor") s.setCursorPlanOpen(true);
+          else if (pane === "usage") s.setSessionUsageOpen(true);
           else s.setAntigravityPlanOpen(true);
         }
       })
