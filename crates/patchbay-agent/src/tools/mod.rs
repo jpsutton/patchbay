@@ -1,5 +1,7 @@
 //! The tools the agent offers the model.
 
+use std::collections::VecDeque;
+use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -208,39 +210,89 @@ pub fn bool_arg(input: &Value, key: &str) -> bool {
 
 // --- paths ---
 
-/// `p` with `.` and `..` folded away, no filesystem access.
-pub fn lexical(p: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for c in p.components() {
-        match c {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::CurDir => {}
-            c => out.push(c),
-        }
-    }
-    out
+/// Whether `p` lies inside `root`.
+///
+/// Both are resolved the way the filesystem resolves them ([`resolve`]), so a symlink
+/// followed by `..` leaves for where the link points instead of staying in the directory
+/// that holds the link — the escape `Session::may_read` gates on.
+pub fn inside(root: &Path, p: &Path) -> bool {
+    resolve(p).starts_with(&resolve(root))
 }
 
-/// Whether `p` lies inside `root`, following symlinks as far as the path exists.
-pub fn inside(root: &Path, p: &Path) -> bool {
-    let root = root.canonicalize().unwrap_or_else(|_| lexical(root));
-    let p = lexical(p);
-    let mut existing = p.clone();
-    let mut tail = Vec::new();
-    while !existing.exists() {
-        match existing.file_name() {
-            Some(n) => tail.push(n.to_owned()),
-            None => break,
-        }
-        if !existing.pop() {
-            break;
+/// One step of [`resolve`], owned so a symlink's target can be spliced in front of the
+/// steps still to come.
+enum Step {
+    Prefix(OsString),
+    Root(OsString),
+    /// `.`: the directory already resolved.
+    Here,
+    /// `..`: the directory above.
+    Parent,
+    Name(OsString),
+}
+
+impl Step {
+    fn of(c: Component<'_>) -> Step {
+        match &c {
+            Component::Prefix(p) => Step::Prefix(p.as_os_str().to_os_string()),
+            Component::RootDir => Step::Root(c.as_os_str().to_os_string()),
+            Component::CurDir => Step::Here,
+            Component::ParentDir => Step::Parent,
+            Component::Normal(n) => Step::Name(n.to_os_string()),
         }
     }
-    let mut real = existing.canonicalize().unwrap_or(existing);
-    real.extend(tail.iter().rev());
-    real.starts_with(&root)
+}
+
+/// `p` as the filesystem would see it: every step applied to the path resolved so far,
+/// and every symlink followed before the next step — `..` in particular — is applied, so
+/// `link/..` moves to where the link points rather than to the directory holding it.
+/// Steps that do not exist yet stay as they are, so a file about to be written is judged
+/// by the path it will have; a path that exists ends up canonicalized, which settles
+/// case on a case-insensitive filesystem.
+fn resolve(p: &Path) -> PathBuf {
+    // A relative path means "from here", and `..` may climb out of here.
+    let mut real = if p.is_absolute() {
+        PathBuf::new()
+    } else {
+        std::env::current_dir().map(|d| d.canonicalize().unwrap_or(d)).unwrap_or_default()
+    };
+    // Splice a link's target in front of the steps still to come, so the rest of the path
+    // lands where the link points. The budget bounds links that point at each other; past
+    // it the link stays by name, which can only ever make `inside` answer no.
+    let mut hops = 64;
+    let mut queue: VecDeque<Step> = p.components().map(Step::of).collect();
+    while let Some(step) = queue.pop_front() {
+        match step {
+            Step::Prefix(d) => real = PathBuf::from(d),
+            Step::Root(r) => {
+                // On Windows the root completes the drive named just above it; anywhere
+                // else it is the path's own root and replaces what came before it.
+                if !real.has_root() && matches!(real.components().next(), Some(Component::Prefix(_))) {
+                    real.push(r);
+                } else {
+                    real = PathBuf::from(r);
+                }
+            }
+            Step::Here => {}
+            Step::Parent => {
+                real.pop();
+            }
+            Step::Name(n) => {
+                real.push(n);
+                if hops > 0
+                    && std::fs::symlink_metadata(&real).is_ok_and(|m| m.file_type().is_symlink())
+                    && let Ok(target) = std::fs::read_link(&real)
+                {
+                    hops -= 1;
+                    real.pop();
+                    let mut target: VecDeque<Step> = target.components().map(Step::of).collect();
+                    target.append(&mut queue);
+                    queue = target;
+                }
+            }
+        }
+    }
+    real.canonicalize().unwrap_or(real)
 }
 
 /// `p` relative to `root` when inside it, for short display.
@@ -291,6 +343,41 @@ mod tests {
         assert!(inside(&root, &root.join("a/../b.txt")));
         assert!(!inside(&root, &root.join("../outside.txt")));
         assert!(!inside(&root, Path::new("/etc/passwd")));
+    }
+
+    /// A symlink inside the root plus `..` must not walk out of it. The filesystem
+    /// resolves `root/link/..` as "wherever the link points, then up one", so judging
+    /// `link/..` as if it sat in `root` hands out paths that live outside the root —
+    /// this is the gap `Session::may_read` inherits, since it gates on `inside`.
+    #[test]
+    #[cfg(unix)]
+    fn a_symlink_cannot_smuggle_dotdot_out_of_root() {
+        let base = std::env::temp_dir().join(format!("pb-inside-{}", uuid::Uuid::new_v4()));
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        std::fs::write(base.join("stolen.txt"), "secret").unwrap();
+        std::os::unix::fs::symlink(base.join("outside"), root.join("link")).unwrap();
+
+        // `root/link/../stolen.txt` is `outside/../stolen.txt` = `base/stolen.txt`: outside
+        // the root, and the file is really there, so a read through it would succeed.
+        assert!(!inside(&root, &root.join("link/../stolen.txt")), "symlink + .. escaped the root");
+        // The link alone names a path outside the root too.
+        assert!(!inside(&root, &root.join("link/anything.txt")));
+
+        // A dangling link is still a link: its target is where an access would land.
+        std::os::unix::fs::symlink(base.join("nowhere"), root.join("dangling")).unwrap();
+        assert!(!inside(&root, &root.join("dangling")), "a dangling link points outside");
+        assert!(!inside(&root, &root.join("dangling/../stolen.txt")));
+
+        // What is genuinely inside still passes, `..` and all.
+        assert!(inside(&root, &root.join("nested/file.txt")));
+        assert!(inside(&root, &root.join("nested/../nested/file.txt")));
+        assert!(inside(&root, &root));
+        // A link that points back inside stays inside.
+        std::os::unix::fs::symlink(root.join("nested"), root.join("inlink")).unwrap();
+        assert!(inside(&root, &root.join("inlink/file.txt")));
+        assert!(inside(&root, &root.join("inlink/../nested/file.txt")));
     }
 
     #[test]

@@ -122,6 +122,18 @@ pub fn sessions_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("agent").join("sessions")
 }
 
+/// Whether `id` is shaped like a session id this agent mints: a canonical UUID, the
+/// only form `session/new` ever writes. `session/load` takes the id from the client
+/// and turns it straight into a file path, so anything else — a separator, `..`, an
+/// empty string — is refused before it reaches the filesystem.
+pub fn valid_session_id(id: &str) -> bool {
+    id.len() == 36
+        && id.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
+}
+
 /// Where a session's subagents keep their transcripts (`<agent id>.jsonl`) and `status.json`.
 /// Apart from `sessions/`, so they never show up as sessions of their own.
 pub fn subagents_dir(data_dir: &Path, session_id: &str) -> PathBuf {
@@ -204,6 +216,27 @@ mod tests {
             .collect();
         assert_eq!(texts, ["one", "three"]);
         assert_eq!(kept.iter().filter(|e| matches!(e, Entry::Tool { .. })).count(), 1);
+    }
+
+    #[test]
+    fn session_ids_are_uuids_only() {
+        assert!(valid_session_id("0b91d1a5-9d5e-4a2b-8c3f-1e2d3c4b5a69"));
+        // Nothing that could name a different file, or climb out of the sessions dir.
+        for bad in [
+            "",
+            "..",
+            "../secrets",
+            "../../etc/passwd",
+            "a/b",
+            "a\\b",
+            "0b91d1a5-9d5e-4a2b-8c3f-1e2d3c4b5a69/../x",
+            "0b91d1a59d5e4a2b8c3f1e2d3c4b5a69.jsonl",
+            "0b91d1a59d5e-4a2b-8c3f-1e2d3c4b5a69",
+            "0b91d1a5-9d5e-4a2b-8c3f-1e2d3c4b5a6x",
+            "has spaces",
+        ] {
+            assert!(!valid_session_id(bad), "{bad:?} should not be a session id");
+        }
     }
 
     #[test]
