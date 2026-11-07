@@ -1458,7 +1458,17 @@ async fn poll_antigravity_plan(state: &AppState) {
         code::antigravity_plan::AntigravityAuthKind::Oauth => {}
     }
     let Some(auth) = code::antigravity_plan::load_auth(&state.code.antigravity_plan).await else {
-        tracing::debug!("antigravity plan: no local Google OAuth login");
+        tracing::debug!("antigravity plan: no readable local Google OAuth login");
+        // No usable login (disk sources missing/invalid and the keychain fallback denied or
+        // deferred): record the `unavailable` report instead of retrying — and therefore
+        // re-prompting — every TICK. Fresh for FRESH_SECS, so the loop itself backs off too.
+        let limits = code::antigravity_plan::AntigravityPlanLimits::unavailable(
+            "unreadable".into(),
+            None,
+            "Could not read or refresh the Antigravity Google login from disk or the keychain. Sign in again in Antigravity to see plan usage.".into(),
+            now,
+        );
+        adopt_antigravity_plan(state, limits, true);
         return;
     };
     if state

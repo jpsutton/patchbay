@@ -10,6 +10,16 @@ pub fn short_dir(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("pb-{tag}-{}", &id[..8]))
 }
 
+/// Serialize the tests that set `GEMINI_HOME`. `std::env::set_var` (edition 2024: `unsafe`)
+/// is process-global: two tests swapping it at once would read each other's directories —
+/// one could even clear `auth` from the other's settings file mid-test. Hold this for the
+/// whole test, including the `remove_var` at the end.
+pub fn gemini_home_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A poisoned lock still serializes: the previous holder's panic already failed its test.
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Raise this process's open-file limit to what the system allows. A shell on macOS starts at
 /// 256, too few for the mesh tests, which run several app instances with their runtimes,
 /// databases and sockets in one process while cargo runs tests in parallel. Once per process.
