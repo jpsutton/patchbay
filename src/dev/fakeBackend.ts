@@ -196,6 +196,12 @@ const fakeLive = new Set<string>();
 const fakeLabel = (agent: string) => FAKE_AGENTS.find((x) => x.id === agent)?.label ?? agent;
 /** Agents that take a message mid-turn (the rest queue it behind the turn, as the backend does). */
 const FAKE_STEERING = new Set(["patchbay", "grok", "claude-code", "codex"]);
+/**
+ * Agents whose host keeps a forced send steered in instead of cancelling the turn (acp.rs
+ * `force_steers`: Claude Code and Patchbay's own agent), where `session/cancel` would kill a
+ * backgrounded shell. Only Send now's steered path is modelled here.
+ */
+const FAKE_FORCE_STEERS = new Set(["claude-code", "patchbay"]);
 /** Sessions mid-turn, and the prompts queued behind each turn. */
 const fakeTurns = new Set<string>();
 const fakeQueues: Record<string, { promptId: string; text: string; mentions: string[] }[]> = {};
@@ -1604,19 +1610,37 @@ export function install() {
           return null;
         }
         case "code_unqueue": {
-          const q = fakeQueues[a.id as string] ?? [];
-          const i = q.findIndex((x) => x.promptId === a.promptId);
+          const id = a.id as string;
+          const pid = a.promptId as string;
+          const q = fakeQueues[id] ?? [];
+          const i = q.findIndex((x) => x.promptId === pid);
           if (i >= 0) {
             q.splice(i, 1);
-            codeEmit(a.id as string, { type: "unqueued", promptIds: [a.promptId as string], restore: false });
+            codeEmit(id, { type: "unqueued", promptIds: [pid], restore: false });
+            return null;
+          }
+          // Like the host: a steered message waiting in the running turn comes out with it.
+          const st = fakeSteered[id] ?? [];
+          const j = st.findIndex((x) => x.promptId === pid);
+          if (j >= 0) {
+            st.splice(j, 1);
+            codeEmit(id, { type: "unqueued", promptIds: [pid], restore: false });
           }
           return null;
         }
         case "code_send_now": {
-          const q = (fakeQueues[a.id as string] ??= []);
+          const id = a.id as string;
+          const q = (fakeQueues[id] ??= []);
           const i = q.findIndex((x) => x.promptId === a.promptId);
-          const st = fakeSteered[a.id as string] ?? [];
+          const st = fakeSteered[id] ?? [];
           const j = st.findIndex((x) => x.promptId === a.promptId);
+          // Like the host: a message that is not waiting any more is an error the UI shows, and
+          // these agents steer instead of cancelling, so one already in the running turn cannot
+          // come out of it (acp.rs `force_steers`).
+          if (i < 0 && j < 0) throw "that message is no longer waiting to be sent";
+          if (j >= 0 && FAKE_FORCE_STEERS.has(db.code.find((x) => x.id === id)?.agent ?? "")) {
+            throw "that message is already in the running turn; wait for the agent to take it, or stop the turn";
+          }
           if (i >= 0 && fakeTurns.has(a.id as string)) {
             q.unshift(...q.splice(i, 1));
             fakeInterrupt(a.id as string);

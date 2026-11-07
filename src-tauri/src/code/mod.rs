@@ -304,6 +304,21 @@ impl CodeManager {
         rx.await.map_err(|_| anyhow!("agent stopped"))?
     }
 
+    /// "Send now": a queued prompt goes next (the running turn is cancelled), or one steered
+    /// into the running turn is taken out of it. Says what it did, or why it could not, so the
+    /// button never does nothing.
+    pub async fn send_now(&self, code_session_id: &str, prompt_id: &str) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.send(
+            code_session_id,
+            AgentCmd::SendNow {
+                prompt_id: prompt_id.to_owned(),
+                reply: Some(reply),
+            },
+        )?;
+        rx.await.map_err(|_| anyhow!("agent stopped"))?
+    }
+
     pub async fn set_model(&self, code_session_id: &str, model_id: String) -> Result<()> {
         let (reply, rx) = oneshot::channel();
         self.send(code_session_id, AgentCmd::SetModel { model_id, reply })?;
