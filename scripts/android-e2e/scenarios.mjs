@@ -148,7 +148,17 @@ const scenarios = [
       // The fork holds the conversation before that message: one user message fewer.
       await until(`${before - 1} user messages in the fork`, 60_000, async () => (await forks()) === before - 1);
       await setComposer(page, "");
-      // The scenarios after this one look at the seeded session, not its fork.
+      // Fork session, from the header: the whole conversation, so as many user messages as the source.
+      const forkTitle = new RegExp(`${esc} \\(fork\\)`);
+      await openSession(ctx);
+      await until("the source's Fork from here buttons again", 60_000, async () => (await forks()) === before);
+      if (forkTitle.test(await page.text())) throw new Error("the source session already shows a fork's title");
+      await until("the Fork session button", 10_000, () => click(page, '[aria-label^="Fork session"]'));
+      await waitText(page, "the whole-session fork's title", forkTitle);
+      await until(`${before} user messages in the whole-session fork`, 60_000, async () => (await forks()) === before);
+      const draft = await page.evalJs(`document.querySelector('textarea')?.value ?? ''`);
+      if (draft) throw new Error(`a whole-session fork should open with an empty composer, not "${draft}"`);
+      // The scenarios after this one look at the seeded session, not its forks.
       await openSession(ctx);
     },
   },

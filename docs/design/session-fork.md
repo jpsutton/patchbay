@@ -5,7 +5,7 @@ Status: built for Patchbay's own agent. Other agents: see the table below.
 ## What the user gets
 
 - **Fork from here**, an action on each user message in the Code view. It makes a new Code session with the conversation *before* that message, on the same computer, agent, model, folder and approval mode, titled "<source title> (fork)". The message itself goes into the new session's composer, unsent, so it can be edited and sent. The original session stays as it was. It is "edit and resend" without losing the branch you came from.
-- **Fork session**, in the session's menu: the same, with the whole conversation and an empty composer. A second branch to try something in while the first keeps its state.
+- **Fork session**, a git-fork button in the session's header (in a narrow split pane, an item in its "more" menu): the same, with the whole conversation and an empty composer. A second branch to try something in while the first keeps its state.
 
 Both show only while the agent is ready and idle, and only when it advertises `extensions.fork`.
 
@@ -66,7 +66,8 @@ A fork from the end has the same history as its source. Anthropic keys the cache
 - Agent (`tests/e2e.rs`, mock LLM, `a_session_forks_at_a_prompt_or_at_the_end`): three prompts; fork at index 1 and at the end; an index with no prompt is refused; each fork replays what it should; the fork at a message takes a new prompt and the source never sees it.
 - Store (`store.rs`): `a_fork_cuts_like_a_rewind_and_leaves_request_records_behind`, `a_rewind_after_a_compaction_counts_the_summary`.
 - App smoke (`cargo test --lib smoke_code_fork -- --ignored`): through `CodeManager`, the copy loads in a new Code session with the first exchange and without the second.
-- Not automated: the UI, and the phone path. Fork from here and Fork session were type-checked, not clicked through; the phone's `code_fork` was compiled, not run against a gateway.
+- Phone, end to end (`scripts/android-e2e/scenarios.mjs`, scenario `fork`): the phone app, against a node and agent built from the branch, forks from the last message (toast, "(fork)" title, the message in the composer, one user message fewer) and then from the header's Fork session (the whole conversation, empty composer).
+- By hand, in a browser against an isolated `patchbayd --data-dir` with the mock model: fork from a message, the source unchanged, a whole-session fork, a fork surviving an agent restart, and the compaction-then-rewind fix after a restart. Not automated: the desktop's narrow-pane "more" menu entry, and a phone reaching the host through a separate gateway computer.
 
 ## Open questions
 

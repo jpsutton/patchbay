@@ -1731,6 +1731,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
       f,
       f === "markdown" ? codeToMarkdown(session, s.entries, s.toolCalls) : codeToJson(session, s.entries, s.toolCalls),
     );
+  // The whole conversation into a new session: a header button, or a "more" item in a narrow pane.
+  const canForkSession = !!s?.extensions.fork && ready && !working && s.entries.length > 0;
   const moreActions: ItemAction[] = [
     ...(level >= 3
       ? [
@@ -1756,9 +1758,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
         ]
       : []),
     ...(showMove && !working ? [{ label: "Move to another computer…", onSelect: () => setMoving("move") }] : []),
-    ...(s?.extensions.fork && ready && !working && s.entries.length > 0
-      ? [{ label: "Fork session", onSelect: () => void forkSession(null) }]
-      : []),
+    ...(canForkSession ? [{ label: "Fork session", onSelect: () => void forkSession(null) }] : []),
     { label: "Session info…", onSelect: () => useStore.getState().setSessionInfoId(session.id) },
     { label: "Restart the agent", onSelect: () => start(session.id) },
   ];
@@ -1838,6 +1838,11 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
         {showMove && level < 2 && (
           <HeaderButton label="Move to another computer" disabled={working} onClick={() => setMoving("move")}>
             <MonitorUpIcon />
+          </HeaderButton>
+        )}
+        {canForkSession && level < 2 && (
+          <HeaderButton label="Fork session: a new session with this whole conversation" onClick={() => void forkSession(null)}>
+            <ForkIcon />
           </HeaderButton>
         )}
         {!remote && level < 3 && (
