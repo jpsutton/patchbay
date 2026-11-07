@@ -73,7 +73,7 @@ searches that need several rounds, search step by step yourself."
     }
 
     fn needs_permission(&self, input: &Value, session: &Session) -> bool {
-        !inside(&session.cwd, &search_root(input, session))
+        !session.may_read(&search_root(input, session))
     }
 
     async fn run(&self, input: Value, ctx: &ToolCtx) -> ToolOutput {
@@ -380,7 +380,7 @@ braces and parentheses). Respects .gitignore. `output_mode` is `files_with_match
     }
 
     fn needs_permission(&self, input: &Value, session: &Session) -> bool {
-        !inside(&session.cwd, &search_root(input, session))
+        !session.may_read(&search_root(input, session))
     }
 
     async fn run(&self, input: Value, ctx: &ToolCtx) -> ToolOutput {

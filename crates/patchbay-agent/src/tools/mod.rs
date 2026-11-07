@@ -100,6 +100,31 @@ pub trait Tool: Send + Sync {
 
 pub struct Registry {
     tools: Vec<Arc<dyn Tool>>,
+    /// Offered to the model but refused when called (see [`Registry::refuse`]).
+    refused: Vec<String>,
+}
+
+/// A tool still offered to the model but refused when called: a fork keeps the main agent's exact
+/// tool list so its request shares the main agent's cached prefix.
+struct Refused(Arc<dyn Tool>);
+
+#[async_trait]
+impl Tool for Refused {
+    fn spec(&self) -> ToolSpec {
+        self.0.spec()
+    }
+    fn kind(&self) -> &'static str {
+        self.0.kind()
+    }
+    fn title(&self, input: &Value) -> String {
+        self.0.title(input)
+    }
+    fn allowed_in_plan(&self) -> bool {
+        self.0.allowed_in_plan()
+    }
+    async fn run(&self, _input: Value, ctx: &ToolCtx) -> ToolOutput {
+        ToolOutput::error(ctx.session.prompts().msg("fork_refused", &[("name", &self.0.spec().name)]))
+    }
 }
 
 impl Registry {
@@ -128,7 +153,12 @@ impl Registry {
         if web_search {
             tools.push(Arc::new(web::WebSearch));
         }
-        Registry { tools }
+        Registry { tools, refused: Vec::new() }
+    }
+
+    /// Keep offering the tools named in `names`, but refuse every call to them.
+    pub fn refuse(&mut self, names: &[&str]) {
+        self.refused.extend(names.iter().map(|n| (*n).to_owned()));
     }
 
     /// Keep only the tools whose name `keep` accepts.
@@ -141,7 +171,11 @@ impl Registry {
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.iter().find(|t| t.spec().name == name).cloned()
+        let t = self.tools.iter().find(|t| t.spec().name == name).cloned()?;
+        if self.refused.iter().any(|r| r == name) {
+            return Some(Arc::new(Refused(t)));
+        }
+        Some(t)
     }
 
     /// The tools to offer, with minified descriptions when `p` asks for them.
@@ -234,6 +268,21 @@ pub fn clip_middle(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refused_tools_stay_offered() {
+        let all = Registry::builtin(false, false);
+        let mut fork = Registry::builtin(false, false);
+        fork.refuse(&["Task", "AskUserQuestion"]);
+        let names = |r: &Registry| r.specs(false, crate::prompts::Prompts::new(false)).into_iter().map(|s| s.name).collect::<Vec<_>>();
+        // Same list, same order: the fork's request keeps the main agent's cached prefix.
+        assert_eq!(names(&all), names(&fork));
+        // A refused tool comes back wrapped; the rest are the registry's own.
+        let task = fork.get("Task").unwrap();
+        assert!(!Arc::ptr_eq(&task, &fork.get("Task").unwrap()));
+        assert_eq!(task.spec().name, "Task");
+        assert!(Arc::ptr_eq(&fork.get("Read").unwrap(), &fork.get("Read").unwrap()));
+    }
 
     #[test]
     fn insideness_folds_dotdot() {

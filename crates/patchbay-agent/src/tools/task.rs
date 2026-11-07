@@ -44,8 +44,11 @@ async fn conclude(parent: &Arc<Session>, agent: &Arc<SubAgent>, result: Result<S
             text.push_str(&format!("\n\n{note}"));
         }
     }
+    // The report is the subagent's own account; its transcript says what it actually did.
+    if let Some(path) = agent.child.store.file_path() {
+        text.push_str(&format!("\n\n{}", parent.prompts().msg("subagent_transcript", &[("path", &path.display().to_string())])));
+    }
     *agent.status.lock().unwrap() = status.clone();
-    let _ = parent;
     (status, text)
 }
 
@@ -202,23 +205,32 @@ do with one Grep or Read."
 
         let settings = parent.host.settings();
         let p = parent.prompts();
-        let mut registry = Registry::builtin(settings.web_fetch, parent.host.web_search_key().is_some());
-        if kind != Kind::Explore {
-            for t in parent.mcp.lock().await.tools() {
-                registry.push(t);
+        let registry = if kind == Kind::Fork {
+            // Exactly the main agent's tools, in its order: the tool list heads the cached prefix,
+            // so dropping any of them would make the fork pay to cache the whole conversation again.
+            let mut r = crate::turn::registry_for(parent).await;
+            r.refuse(&WITHHELD);
+            r
+        } else {
+            let mut registry = Registry::builtin(settings.web_fetch, parent.host.web_search_key().is_some());
+            if kind != Kind::Explore {
+                for t in parent.mcp.lock().await.tools() {
+                    registry.push(t);
+                }
             }
-        }
-        if !setup.skills.is_empty() {
-            registry.push(Arc::new(super::skill::Skill));
-        }
-        let allowed = custom.as_ref().and_then(|c| c.tools.clone());
-        registry.retain(|n| {
-            if kind == Kind::Explore {
-                READ_ONLY.contains(&n) || n == "Skill"
-            } else {
-                !WITHHELD.contains(&n) && allowed.as_ref().is_none_or(|a| a.iter().any(|x| x == n))
+            if !setup.skills.is_empty() {
+                registry.push(Arc::new(super::skill::Skill));
             }
-        });
+            let allowed = custom.as_ref().and_then(|c| c.tools.clone());
+            registry.retain(|n| {
+                if kind == Kind::Explore {
+                    READ_ONLY.contains(&n) || n == "Skill"
+                } else {
+                    !WITHHELD.contains(&n) && allowed.as_ref().is_none_or(|a| a.iter().any(|x| x == n))
+                }
+            });
+            registry
+        };
         let extras = prompt::Extras { claude: settings.claude.clone(), skills: &setup.skills };
 
         let model_id = parent.state.lock().await.model_id.clone();
@@ -271,6 +283,7 @@ do with one Grep or Read."
             child,
             system,
             registry,
+            cache_key: (kind == Kind::Fork).then(|| parent.id.clone()),
             status: std::sync::Mutex::new(Status::Running),
             inbox: Default::default(),
             cancel: std::sync::Mutex::new(CancellationToken::new()),

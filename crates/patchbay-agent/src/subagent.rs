@@ -174,6 +174,8 @@ pub struct SubAgent {
     pub child: Arc<Session>,
     pub system: Vec<SystemBlock>,
     pub registry: Registry,
+    /// A fork's requests carry the main agent's cache key, since they share its prefix.
+    pub cache_key: Option<String>,
     pub status: Mutex<Status>,
     /// Messages for it to read before its next request.
     pub inbox: Mutex<Vec<String>>,
@@ -395,7 +397,13 @@ pub async fn run(parent: &Arc<Session>, agent: &Arc<SubAgent>, cancel: &Cancella
         let mc = parent.model_client(&model_id).await?;
         let mut system = mc.system_prefix.clone();
         system.extend(agent.system.clone());
-        let request = Request { system, messages, tools: agent.registry.specs(false, child.prompts()), ..Default::default() };
+        let request = Request {
+            system,
+            messages,
+            tools: agent.registry.specs(false, child.prompts()),
+            cache_key: agent.cache_key.clone(),
+            ..Default::default()
+        };
         live.step();
         live.set("waiting for the model");
         let response = match mc.client.complete(&request, cancel, |_| live.touch()).await {

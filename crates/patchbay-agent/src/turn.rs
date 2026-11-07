@@ -133,16 +133,34 @@ async fn reminders(session: &Session, model_name: &str) -> Option<Part> {
     (!notes.is_empty()).then(|| Part::Text(prompt::reminder(&notes.join("\n\n"))))
 }
 
-/// The tools and the request for the next model call over `messages`. The prompt cache keys on
-/// this exactly, so everything that builds a request for the session's history goes through here:
-/// a refresh of the cache is only a refresh when it matches the real request.
-pub(crate) async fn build_request(
-    session: &Arc<Session>,
-    mc: &ModelClient,
-    model_id: &str,
-    mode: Mode,
-    messages: Vec<Message>,
-) -> (Registry, Request) {
+/// From this size on, every step's results tell the model how big its context is. Below it the
+/// number would only add noise; above it, every further read costs on every later step, and the
+/// model should weigh a targeted search, a fresh session or `/compact` against reading more.
+const CONTEXT_NOTE_TOKENS: u64 = 100_000;
+
+/// The context-size note for a step's results, once the context is big enough to matter.
+fn context_note(context: u64, window: Option<u64>, compact_percent: u8, p: crate::prompts::Prompts) -> Option<String> {
+    if context < CONTEXT_NOTE_TOKENS {
+        return None;
+    }
+    let k = |n: u64| format!("{}k", n / 1000);
+    Some(match window.filter(|w| *w > 0) {
+        Some(w) => p.msg(
+            "context_size_window",
+            &[
+                ("context", &k(context)),
+                ("window", &k(w)),
+                ("percent", &(context * 100 / w).to_string()),
+                ("compact", &compact_percent.to_string()),
+            ],
+        ),
+        None => p.msg("context_size", &[("context", &k(context))]),
+    })
+}
+
+/// The main agent's tools, in the order it offers them. A fork offers the same list, so its
+/// requests share the main agent's cached prefix.
+pub(crate) async fn registry_for(session: &Arc<Session>) -> Registry {
     let settings = session.host.settings();
     let setup = session.claude();
     let mcp = session.mcp.lock().await.clone();
@@ -158,6 +176,22 @@ pub(crate) async fn build_request(
         registry.retain(|n| n != "Task");
         registry.push(Arc::new(crate::tools::task::Task { custom }));
     }
+    registry
+}
+
+/// The tools and the request for the next model call over `messages`. The prompt cache keys on
+/// this exactly, so everything that builds a request for the session's history goes through here:
+/// a refresh of the cache is only a refresh when it matches the real request.
+pub(crate) async fn build_request(
+    session: &Arc<Session>,
+    mc: &ModelClient,
+    model_id: &str,
+    mode: Mode,
+    messages: Vec<Message>,
+) -> (Registry, Request) {
+    let settings = session.host.settings();
+    let setup = session.claude();
+    let registry = registry_for(session).await;
     let mut system = mc.system_prefix.clone();
     let model_name = session.host.models().into_iter().find(|m| m.id == model_id).map(|m| m.name).unwrap_or(model_id.to_owned());
     let extras = prompt::Extras { claude: settings.claude.clone(), skills: &setup.skills };
@@ -504,6 +538,10 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
         if let Some(r) = reminders(&session, &model_name).await {
             parts.push(r);
         }
+        let context = session.state.lock().await.context_tokens;
+        if let Some(n) = context_note(context, mc.context_window, percent, session.prompts()) {
+            parts.push(Part::Text(prompt::reminder(&n)));
+        }
         parts.extend(notes_part(&session.agents.drain_notes(), session.prompts()));
         parts.extend(session.agents.stalled_note(session.prompts()));
         parts.extend(session.take_steered(false));
@@ -772,6 +810,18 @@ async fn run_call(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_note_only_for_a_big_context() {
+        let p = crate::prompts::Prompts::new(false);
+        assert!(context_note(99_999, Some(200_000), 85, p).is_none());
+        let n = context_note(120_000, Some(200_000), 85, p).unwrap();
+        assert!(n.starts_with("Context: 120k of 200k tokens (60%)"), "{n}");
+        assert!(n.contains("summarized at 85%"), "{n}");
+        let n = context_note(150_000, None, 85, p).unwrap();
+        assert!(n.starts_with("Context: 150k tokens."), "{n}");
+        assert!(context_note(150_000, Some(0), 85, p).unwrap().starts_with("Context: 150k tokens."));
+    }
 
     #[test]
     fn only_a_call_the_limit_cut_short_is_held_back() {
