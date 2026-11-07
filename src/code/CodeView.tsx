@@ -2195,7 +2195,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             <aside
               role="dialog"
               aria-modal="true"
-              aria-label={blade === "activity" ? "Activity" : "Changes"}
+              aria-label={blade === "activity" ? "Activity" : blade === "files" ? "Files" : "Changes"}
               className="absolute right-0 top-0 bottom-0 z-40 flex w-[88%] max-w-[420px] flex-col border-l border-line bg-bg shadow-2xl"
             >
               {bladePanel}
