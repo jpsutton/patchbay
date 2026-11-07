@@ -7,10 +7,10 @@
 // Rust crates come from Cargo.lock for every target platform, so one file
 // covers the Linux, Windows, macOS and Android builds. Dev-dependencies are left out.
 // Identical license texts are printed once, with the packages that use them.
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { runSync } from './tool-invocation.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const out = join(root, 'THIRD_PARTY_NOTICES.md');
@@ -29,7 +29,7 @@ function licenseFiles(dir) {
 // Rust: walk the resolve graph from each app (the desktop app, and the phone app in remote/)
 // through normal and build edges. All features, so optional builds (patchbayd's web UI) count.
 function cratesOf(dir, rootName) {
-  const meta = JSON.parse(execFileSync('cargo', ['metadata', '--format-version', '1', '--locked', '--all-features'], {
+  const meta = JSON.parse(runSync('cargo', ['metadata', '--format-version', '1', '--locked', '--all-features'], {
     cwd: join(root, dir),
     encoding: 'utf8',
     maxBuffer: 256 * 1024 * 1024,
@@ -64,7 +64,7 @@ const crates = [...allCrates.values()]
   }));
 
 // npm: production dependencies, as pnpm resolves them.
-const npmByLicense = JSON.parse(execFileSync('pnpm', ['licenses', 'list', '--prod', '--json'], {
+const npmByLicense = JSON.parse(runSync('pnpm', ['licenses', 'list', '--prod', '--json'], {
   cwd: root,
   encoding: 'utf8',
   maxBuffer: 64 * 1024 * 1024,
