@@ -11,6 +11,14 @@
 //! the user's refresh token already on the machine). They are never embedded in this repo. Never
 //! log access or refresh tokens.
 //!
+//! Sources are read in `AUTH_SOURCE_ORDER`: the disk files agy itself writes first, the login
+//! keychain item last. That item was created by Google's client with its own code signature in
+//! its ACL, so a read from Patchbay raises SecurityAgent's authorization dialog and blocks the
+//! calling thread until somebody answers it — indefinitely on a machine nobody is sitting at.
+//! Every source read therefore runs in `spawn_blocking`, the keychain read is single-flight
+//! with an exponential failure backoff, and a resolved login is cached (`AUTH_CACHE_SECS`) so
+//! the quota poll neither re-reads sources nor re-prompts every `TICK`.
+//!
 //! `gemini-api-key` auth has no OAuth quota: the poller records an `unavailable` report instead.
 //! Reports fan out over the mesh tagged with the account id so peers on the same Google login can
 //! skip re-polling.
@@ -231,6 +239,10 @@ pub struct AntigravityPlanGuard {
     blade_open: AtomicBool,
     /// In-memory refreshed access token so we do not rewrite Antigravity's credential store.
     refreshed: Mutex<Option<CachedToken>>,
+    /// Login last resolved from the sources, so the poll does not re-read them every `TICK`.
+    auth: Mutex<Option<CachedAuth>>,
+    /// Single-flight + failure backoff for the last-resort keychain read.
+    keychain: Mutex<KeychainFallback>,
 }
 
 #[derive(Clone)]
@@ -238,6 +250,31 @@ struct CachedToken {
     access_token: String,
     /// Unix seconds when this access token should be treated as expired.
     expires_at: i64,
+}
+
+struct CachedAuth {
+    auth: AntigravityAuth,
+    /// Unix seconds when `auth` was read from the sources.
+    resolved_at: i64,
+}
+
+/// How long a resolved login is reused before the sources are read again. Far longer than
+/// `TICK`, so the poll stops re-reading sources every 30 seconds; short enough that a
+/// re-login (possibly with a different account) reaches the poller reasonably soon.
+const AUTH_CACHE_SECS: i64 = 600;
+
+/// State of the keychain fallback: one read at a time, never inside its failure backoff.
+#[derive(Default)]
+struct KeychainFallback {
+    /// A read is held in `spawn_blocking` right now — possibly forever behind an unanswered
+    /// SecurityAgent dialog. No second attempt is ever started, so at most one dialog can be
+    /// up and at most one blocking thread can be held; a task dropped mid-read leaves the
+    /// slot taken, which fails safe (no further prompts).
+    in_flight: bool,
+    /// Consecutive failed attempts (denied, cancelled, or no such item).
+    failures: u32,
+    /// Unix seconds before the keychain may be tried again.
+    next_attempt_at: i64,
 }
 
 impl AntigravityPlanGuard {
@@ -280,6 +317,47 @@ impl AntigravityPlanGuard {
 
     fn store_cached(&self, access_token: String, expires_at: i64) {
         *self.refreshed.lock().unwrap() = Some(CachedToken { access_token, expires_at });
+    }
+
+    /// The cached login while it is younger than `AUTH_CACHE_SECS`.
+    fn cached_auth(&self, now: i64) -> Option<AntigravityAuth> {
+        let slot = self.auth.lock().unwrap();
+        let cached = slot.as_ref()?;
+        (now.saturating_sub(cached.resolved_at) < AUTH_CACHE_SECS).then(|| cached.auth.clone())
+    }
+
+    /// Remember a login resolved from the sources; only successful loads are cached.
+    fn store_auth(&self, auth: AntigravityAuth, now: i64) {
+        *self.auth.lock().unwrap() = Some(CachedAuth { auth, resolved_at: now });
+    }
+
+    /// Take the single keychain attempt slot when the backoff allows one. False while an
+    /// attempt is in flight or inside the backoff window: the caller must not touch the
+    /// keychain then, because that read can raise a modal prompt and block until answered.
+    fn keychain_begin_attempt(&self, now: i64) -> bool {
+        let mut k = self.keychain.lock().unwrap();
+        if k.in_flight || now < k.next_attempt_at {
+            return false;
+        }
+        k.in_flight = true;
+        true
+    }
+
+    /// The keychain read succeeded: an item we can read stops being a problem.
+    fn keychain_attempt_succeeded(&self) {
+        let mut k = self.keychain.lock().unwrap();
+        k.in_flight = false;
+        k.failures = 0;
+        k.next_attempt_at = 0;
+    }
+
+    /// The keychain read failed (denied/cancelled/absent): back off exponentially so the poll
+    /// never re-prompts every `TICK`.
+    fn keychain_attempt_failed(&self, now: i64) {
+        let mut k = self.keychain.lock().unwrap();
+        k.in_flight = false;
+        k.failures = k.failures.saturating_add(1);
+        k.next_attempt_at = now + keychain_backoff_secs(k.failures);
     }
 }
 
@@ -333,17 +411,27 @@ fn gemini_home() -> Option<PathBuf> {
 }
 
 /// Read a usable access token (refreshing when stale). `None` when there is no OAuth login.
+///
+/// The sources are resolved at most once per `AUTH_CACHE_SECS` — never once per `TICK` — and
+/// never on a runtime thread: file reads and the last-resort keychain read both run in
+/// `spawn_blocking` (see `resolve_auth`), so a slow volume or an unanswered keychain dialog
+/// cannot freeze the app, its commands, or the mesh.
 pub async fn load_auth(guard: &AntigravityPlanGuard) -> Option<AntigravityAuth> {
     let now = now();
-    if let Some(access) = guard.cached_access(now) {
-        // Still need account identity from disk.
-        if let Some(mut auth) = read_auth_sources() {
-            auth.access_token = access;
-            auth.access_expires_at = None;
-            return Some(auth);
+    let mut auth = match guard.cached_auth(now) {
+        Some(auth) => auth,
+        None => {
+            let auth = resolve_auth(guard).await?;
+            guard.store_auth(auth.clone(), now);
+            auth
         }
+    };
+    if let Some(access) = guard.cached_access(now) {
+        // Identity comes from the resolved login; the refreshed access token wins over it.
+        auth.access_token = access;
+        auth.access_expires_at = None;
+        return Some(auth);
     }
-    let mut auth = read_auth_sources()?;
     if auth.access_expires_at.is_some_and(|t| t > now + 60) {
         return Some(auth);
     }
@@ -371,16 +459,99 @@ pub async fn load_auth(guard: &AntigravityPlanGuard) -> Option<AntigravityAuth> 
     }
 }
 
-fn read_auth_sources() -> Option<AntigravityAuth> {
-    if let Some(auth) = read_keychain_auth() {
-        return Some(auth);
-    }
-    if let Some(auth) = read_cli_token_file() {
-        return Some(auth);
-    }
-    read_oauth_creds()
+/// Where a login can be read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthSource {
+    /// `~/.gemini/antigravity-cli/antigravity-oauth-token`, written by agy.
+    CliTokenFile,
+    /// `~/.gemini/oauth_creds.json`, written by the Antigravity IDE.
+    OauthCreds,
+    /// The login keychain item (`gemini`/`antigravity`). Google's client created it with its
+    /// own code signature in the ACL, so a read from Patchbay raises SecurityAgent's
+    /// authorization dialog and blocks the calling thread until someone answers it — forever
+    /// on a machine nobody is sitting at. A last resort only, and only off the runtime.
+    Keychain,
 }
 
+/// Sources in resolution order: what agy itself writes on disk first (cheap, prompt-free),
+/// the keychain last. Reading the keychain before the disk files — the original order this
+/// module shipped with — made every quota poll a modal prompt on any machine where the
+/// item's ACL no longer matched Patchbay's signature, which a rebuild of
+/// `/Applications` guarantees; unanswered, each prompt blocked a runtime worker until the
+/// dialog was answered.
+const AUTH_SOURCE_ORDER: [AuthSource; 3] =
+    [AuthSource::CliTokenFile, AuthSource::OauthCreds, AuthSource::Keychain];
+
+/// Seconds to wait before touching the keychain again after `failures` failed attempts.
+/// Exponential and always longer than `TICK`: a denied or unanswered prompt must never
+/// become a prompt every 30 seconds.
+fn keychain_backoff_secs(failures: u32) -> i64 {
+    match failures {
+        0 => 0,
+        1 => 300,    // 5 min
+        2 => 1_800,  // 30 min
+        3 => 21_600, // 6 h
+        _ => 86_400, // a day
+    }
+}
+
+/// Resolve the login for the poll: disk sources first, the keychain only when both are
+/// missing or invalid. Every read runs in `spawn_blocking` — the keychain read goes through
+/// `SecItemCopyMatching`, which blocks its thread until SecurityAgent's dialog is answered
+/// (Apple: "SecItemCopyMatching blocks the calling thread"), and this runs on the shared
+/// async runtime that serves every command, background loop, and the mesh.
+async fn resolve_auth(guard: &AntigravityPlanGuard) -> Option<AntigravityAuth> {
+    let disk = tokio::task::spawn_blocking(read_disk_auth).await.ok().flatten();
+    if disk.is_some() {
+        return disk;
+    }
+    // Both disk sources missing/invalid: the keychain may prompt, so it is gated — one
+    // attempt at a time, and never inside a failure backoff. While the gate is closed the
+    // poll records `unavailable` (see `poll_antigravity_plan`) instead of retrying.
+    let now = now();
+    if !guard.keychain_begin_attempt(now) {
+        tracing::debug!("antigravity plan: keychain fallback deferred (in flight or backing off)");
+        return None;
+    }
+    let read = tokio::task::spawn_blocking(read_keychain_auth).await;
+    match read.ok().flatten() {
+        Some(auth) => {
+            guard.keychain_attempt_succeeded();
+            Some(auth)
+        }
+        None => {
+            guard.keychain_attempt_failed(now);
+            None
+        }
+    }
+}
+
+/// The login from the disk sources only — everything in `AUTH_SOURCE_ORDER` before the
+/// keychain — so this can never raise a prompt.
+fn read_disk_auth() -> Option<AntigravityAuth> {
+    select_auth(&AUTH_SOURCE_ORDER[..AUTH_SOURCE_ORDER.len() - 1], read_auth_source)
+}
+
+/// The first source that yields a login. Factored out of `resolve_auth` so tests can prove
+/// the ordering with a fake reader: no real keyring, no prompt.
+fn select_auth(
+    order: &[AuthSource],
+    mut read: impl FnMut(AuthSource) -> Option<AntigravityAuth>,
+) -> Option<AntigravityAuth> {
+    order.iter().find_map(|&source| read(source))
+}
+
+fn read_auth_source(source: AuthSource) -> Option<AntigravityAuth> {
+    match source {
+        AuthSource::CliTokenFile => read_cli_token_file(),
+        AuthSource::OauthCreds => read_oauth_creds(),
+        AuthSource::Keychain => read_keychain_auth(),
+    }
+}
+
+/// The login keychain item. **Blocks the calling thread** until SecurityAgent's dialog is
+/// answered (or returns an error when the item is absent/denied): callers must gate it
+/// (single-flight + backoff, see `resolve_auth`) and run it in `spawn_blocking`.
 fn read_keychain_auth() -> Option<AntigravityAuth> {
     let raw = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
         .ok()?
@@ -864,5 +1035,147 @@ mod tests {
         let blob = b"pad999000111222-aaaaaaaaaaaaaaaaaaaaaaaaaaaa.apps.googleusercontent.com\0end";
         let ids = find_google_client_ids(blob);
         assert_eq!(ids, vec!["999000111222-aaaaaaaaaaaaaaaaaaaaaaaaaaaa.apps.googleusercontent.com".to_owned()]);
+    }
+
+    fn fake_auth(account: &str) -> AntigravityAuth {
+        AntigravityAuth {
+            access_token: "access".into(),
+            refresh_token: Some("refresh".into()),
+            access_expires_at: None,
+            account_id: account.into(),
+            email: Some(account.into()),
+        }
+    }
+
+    /// Regression (pb-20261107-01): the disk sources agy writes must be preferred over the
+    /// keychain item, which raises a modal SecurityAgent prompt for any signature but
+    /// Google's. Proven with a fake reader — no real keyring is ever touched.
+    #[test]
+    fn disk_sources_are_preferred_over_the_keychain() {
+        assert_eq!(
+            AUTH_SOURCE_ORDER,
+            [AuthSource::CliTokenFile, AuthSource::OauthCreds, AuthSource::Keychain]
+        );
+        // With a disk login present the keychain reader is never consulted: no prompt.
+        let mut seen = Vec::new();
+        let auth = select_auth(&AUTH_SOURCE_ORDER, |source| {
+            seen.push(source);
+            (source == AuthSource::OauthCreds).then(|| fake_auth("disk@example"))
+        })
+        .unwrap();
+        assert_eq!(auth.account_id, "disk@example");
+        assert_eq!(seen, vec![AuthSource::CliTokenFile, AuthSource::OauthCreds], "keychain untouched");
+        // Only when both disk sources miss does the keychain get its turn.
+        let mut seen = Vec::new();
+        let auth = select_auth(&AUTH_SOURCE_ORDER, |source| {
+            seen.push(source);
+            (source == AuthSource::Keychain).then(|| fake_auth("keychain@example"))
+        })
+        .unwrap();
+        assert_eq!(auth.account_id, "keychain@example");
+        assert_eq!(seen, AUTH_SOURCE_ORDER, "the keychain is the last resort");
+        // Nothing readable anywhere: no login, and the poll's disk-only view never includes
+        // the keychain (that is `resolve_auth`'s gated step).
+        assert!(select_auth(&AUTH_SOURCE_ORDER, |_| None).is_none());
+        assert_eq!(
+            &AUTH_SOURCE_ORDER[..AUTH_SOURCE_ORDER.len() - 1],
+            &[AuthSource::CliTokenFile, AuthSource::OauthCreds]
+        );
+    }
+
+    /// Regression (pb-20261107-01): a denied/cancelled keychain read must back off instead of
+    /// re-prompting every `TICK`, and a read in flight must never start a second one.
+    #[test]
+    fn keychain_failure_backs_off_instead_of_prompting_every_tick() {
+        // A backoff that does not outlive the poll interval would re-prompt every tick.
+        assert!(keychain_backoff_secs(1) > TICK.as_secs() as i64);
+        assert!(keychain_backoff_secs(5) >= keychain_backoff_secs(4), "never shrinks");
+
+        let g = AntigravityPlanGuard::default();
+        let mut t = 1_000_000;
+        assert!(g.keychain_begin_attempt(t), "first attempt allowed");
+        assert!(
+            !g.keychain_begin_attempt(t + 1),
+            "single-flight: an unanswered dialog never starts a second read"
+        );
+        g.keychain_attempt_failed(t);
+        for secs in [TICK.as_secs() as i64, 2 * TICK.as_secs() as i64, keychain_backoff_secs(1) - 1] {
+            assert!(!g.keychain_begin_attempt(t + secs), "tick +{secs}s must not retry the keychain");
+        }
+        t += keychain_backoff_secs(1);
+        assert!(g.keychain_begin_attempt(t), "retried once the backoff elapsed");
+        g.keychain_attempt_failed(t);
+        for secs in [TICK.as_secs() as i64, keychain_backoff_secs(2) - 1] {
+            assert!(!g.keychain_begin_attempt(t + secs), "a second failure backs off further");
+        }
+        t += keychain_backoff_secs(2);
+        assert!(g.keychain_begin_attempt(t));
+        g.keychain_attempt_succeeded();
+        assert!(g.keychain_begin_attempt(t + 1), "a successful read clears the backoff");
+    }
+
+    /// Regression (pb-20261107-01): with OAuth configured but no readable login, the poll
+    /// records the existing `unavailable` report kind — and neither re-reads the keychain
+    /// (the gate is pre-failed here, so this test can never reach a real keyring) nor
+    /// re-polling every tick (the fresh report gates the loop).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn poll_records_unavailable_without_retrying_the_keychain_every_tick() {
+        let _env = crate::test_support::gemini_home_lock();
+        // OAuth configured, no token files on disk: the login is unreadable.
+        let gemini = std::env::temp_dir().join(format!("pb-gemini-{}", &crate::db::new_id()[..8]));
+        std::fs::create_dir_all(gemini.join("antigravity-acp")).unwrap();
+        std::fs::write(
+            gemini.join("antigravity-acp").join("settings.json"),
+            br#"{"auth": {"type": "oauth-personal"}}"#,
+        )
+        .unwrap();
+        unsafe { std::env::set_var("GEMINI_HOME", &gemini) };
+
+        let dir = crate::test_support::short_dir("agpoll");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = std::sync::Arc::new(crate::db::Db::open(&dir.join("db.sqlite")).unwrap());
+        let mesh = crate::mesh::Mesh::new(
+            db.clone(),
+            dir.clone(),
+            std::sync::Arc::new(crate::mesh::keys::MemKeyStore::default()),
+        )
+        .unwrap();
+        let emit: crate::mesh::node::UiSink = std::sync::Arc::new(|_: &str, _: Value| {});
+        let state = crate::AppState::new(db, dir.clone(), mesh, emit);
+        state.code.antigravity_plan.set_blade_open(true);
+        // The keychain fallback has already failed once (denied): the gate under test. This
+        // is also what keeps the test from ever reaching the real keyring, which on a
+        // machine that has the item would raise the very modal dialog this bug is about.
+        state.code.antigravity_plan.keychain_attempt_failed(now());
+
+        crate::poll_antigravity_plan(&state).await;
+        let first = state.code.antigravity_plan.latest().expect("an `unavailable` report is recorded");
+        assert!(first.unavailable.is_some(), "records the existing `unavailable` report kind");
+        assert!(first.is_fresh(now()), "fresh for FRESH_SECS: the loop skips it next tick");
+        {
+            let k = state.code.antigravity_plan.keychain.lock().unwrap();
+            assert_eq!(k.failures, 1, "no second keychain attempt was made");
+            assert!(!k.in_flight, "no keychain read is pending");
+        }
+
+        // Even once the report goes stale and the poll really runs again, the backoff still
+        // refuses the keychain: only the prompt-free disk sources are consulted.
+        let mut stale = first.clone();
+        stale.observed_at = now() - FRESH_SECS - 1;
+        state.code.antigravity_plan.record(stale);
+        crate::poll_antigravity_plan(&state).await;
+        assert!(
+            state.code.antigravity_plan.latest().unwrap().unavailable.is_some(),
+            "the `unavailable` report is recorded again"
+        );
+        assert_eq!(
+            state.code.antigravity_plan.keychain.lock().unwrap().failures,
+            1,
+            "the stale re-poll did not retry the keychain"
+        );
+
+        unsafe { std::env::remove_var("GEMINI_HOME") };
+        let _ = std::fs::remove_dir_all(&gemini);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
