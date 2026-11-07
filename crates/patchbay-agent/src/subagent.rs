@@ -397,13 +397,14 @@ pub async fn run(parent: &Arc<Session>, agent: &Arc<SubAgent>, cancel: &Cancella
         let mc = parent.model_client(&model_id).await?;
         let mut system = mc.system_prefix.clone();
         system.extend(agent.system.clone());
-        let request = Request {
+        let mut request = Request {
             system,
             messages,
             tools: agent.registry.specs(false, child.prompts()),
             cache_key: agent.cache_key.clone(),
             ..Default::default()
         };
+        turn::use_native_search(parent.host.as_ref(), &model_id, &agent.registry, &mut request);
         live.step();
         live.set("waiting for the model");
         let response = match mc.client.complete(&request, cancel, |_| live.touch()).await {

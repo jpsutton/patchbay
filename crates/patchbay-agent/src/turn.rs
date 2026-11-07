@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use patchbay_llm::{Event, Message, Part, Request, Role, StopReason, ToolCall, ToolResult};
+use patchbay_llm::{Event, Message, Part, Request, Role, StopReason, SystemBlock, ToolCall, ToolResult};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
@@ -164,7 +164,9 @@ pub(crate) async fn registry_for(session: &Arc<Session>) -> Registry {
     let settings = session.host.settings();
     let setup = session.claude();
     let mcp = session.mcp.lock().await.clone();
-    let mut registry = Registry::builtin(settings.web_fetch, session.host.web_search_key().is_some());
+    let model_id = session.state.lock().await.model_id.clone();
+    let search = session.host.web_search_key().is_some() || session.host.native_web_search(&model_id);
+    let mut registry = Registry::builtin(settings.web_fetch, search);
     for t in mcp.tools() {
         registry.push(t);
     }
@@ -177,6 +179,21 @@ pub(crate) async fn registry_for(session: &Arc<Session>) -> Registry {
         registry.push(Arc::new(crate::tools::task::Task { custom }));
     }
     registry
+}
+
+/// Tells the model it can search the web when its provider does the searching.
+const NATIVE_SEARCH_HINT: &str = "You can search the web for current information. After answering from search \
+results, end with a \"Sources:\" list of Markdown links to the pages you used.";
+
+/// Where the model's provider has its own web search and `registry` offers `WebSearch`, offer the
+/// provider's search in place of that tool: the provider runs it inside the same reply, with no
+/// Brave key. A registry without `WebSearch` (a subagent kept off the web) gets no search.
+pub(crate) fn use_native_search(host: &dyn crate::host::Host, model_id: &str, registry: &Registry, request: &mut Request) {
+    if registry.offers("WebSearch") && host.native_web_search(model_id) {
+        request.tools.retain(|t| t.name != "WebSearch");
+        request.system.push(SystemBlock::new(NATIVE_SEARCH_HINT));
+        request.web_search = true;
+    }
 }
 
 /// The tools and the request for the next model call over `messages`. The prompt cache keys on
@@ -196,13 +213,14 @@ pub(crate) async fn build_request(
     let model_name = session.host.models().into_iter().find(|m| m.id == model_id).map(|m| m.name).unwrap_or(model_id.to_owned());
     let extras = prompt::Extras { claude: settings.claude.clone(), skills: &setup.skills };
     system.extend(prompt::system_blocks(&session.cwd, &model_name, &settings.instructions, mode, session.prompts(), &extras));
-    let request = Request {
+    let mut request = Request {
         system,
         messages,
         tools: registry.specs(mode == Mode::Plan, session.prompts()),
         cache_key: Some(session.id.clone()),
         ..Default::default()
     };
+    use_native_search(session.host.as_ref(), model_id, &registry, &mut request);
     (registry, request)
 }
 
@@ -411,7 +429,8 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
                     Event::Retrying { attempt, max, reason } => {
                         session.text_chunk("agent_thought_chunk", &format!("Retrying ({attempt}/{max}): {reason}\n"))
                     }
-                    Event::ToolCall(_) | Event::Search(_) => {}
+                    Event::Search(q) => session.text_chunk("agent_thought_chunk", &format!("Searching the web: {q}\n")),
+                    Event::ToolCall(_) => {}
                 }
             })
             .await;
@@ -810,6 +829,78 @@ async fn run_call(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A host whose provider has a web search of its own.
+    struct NativeSearchHost;
+
+    #[async_trait::async_trait]
+    impl crate::host::Host for NativeSearchHost {
+        fn models(&self) -> Vec<crate::host::ModelInfo> {
+            Vec::new()
+        }
+        async fn model_client(&self, _model_id: &str) -> Result<crate::host::ModelClient, String> {
+            Err("not used".into())
+        }
+        fn data_dir(&self) -> std::path::PathBuf {
+            std::env::temp_dir()
+        }
+        fn native_web_search(&self, _model_id: &str) -> bool {
+            true
+        }
+    }
+
+    /// The provider's own search replaces the WebSearch tool, and only where the tool was on
+    /// offer in the first place.
+    #[test]
+    fn native_search_replaces_the_web_search_tool() {
+        let host = NativeSearchHost;
+        let registry = crate::tools::Registry::builtin(true, true);
+        let mut request = Request {
+            tools: registry.specs(false, crate::prompts::Prompts::new(false)),
+            ..Default::default()
+        };
+        assert!(request.tools.iter().any(|t| t.name == "WebSearch"));
+        use_native_search(&host, "m", &registry, &mut request);
+        assert!(!request.tools.iter().any(|t| t.name == "WebSearch"), "WebSearch should be gone");
+        assert!(request.web_search, "the provider's search should be on");
+        assert!(request.system.iter().any(|b| b.text.contains("Sources:")));
+
+        // A registry without WebSearch (a subagent kept off the web) gets no search.
+        let off = crate::tools::Registry::builtin(true, false);
+        let mut request = Request {
+            tools: off.specs(false, crate::prompts::Prompts::new(false)),
+            ..Default::default()
+        };
+        use_native_search(&host, "m", &off, &mut request);
+        assert!(!request.web_search, "no search without the tool on offer");
+        assert!(!request.system.iter().any(|b| b.text.contains("Sources:")));
+    }
+
+    /// A model whose provider has no search of its own keeps the Brave tool.
+    #[test]
+    fn a_model_without_native_search_keeps_the_brave_tool() {
+        struct NoNativeHost;
+        #[async_trait::async_trait]
+        impl crate::host::Host for NoNativeHost {
+            fn models(&self) -> Vec<crate::host::ModelInfo> {
+                Vec::new()
+            }
+            async fn model_client(&self, _model_id: &str) -> Result<crate::host::ModelClient, String> {
+                Err("not used".into())
+            }
+            fn data_dir(&self) -> std::path::PathBuf {
+                std::env::temp_dir()
+            }
+        }
+        let registry = crate::tools::Registry::builtin(true, true);
+        let mut request = Request {
+            tools: registry.specs(false, crate::prompts::Prompts::new(false)),
+            ..Default::default()
+        };
+        use_native_search(&NoNativeHost, "m", &registry, &mut request);
+        assert!(request.tools.iter().any(|t| t.name == "WebSearch"), "Brave should stay");
+        assert!(!request.web_search);
+    }
 
     #[test]
     fn context_note_only_for_a_big_context() {
