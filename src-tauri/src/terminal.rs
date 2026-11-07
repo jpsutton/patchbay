@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use anyhow::{Result, anyhow};
@@ -36,6 +37,11 @@ struct Term {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+    /// False once the terminal was closed on purpose (a respawn or the user closing it). Such a
+    /// death is our own doing, so its exit is never reported: the shell we killed reports code 1
+    /// (it died to a signal), and a remote UI can't tell that exit from its new shell's — it would
+    /// mark the fresh shell exited and respawn in a loop.
+    wanted: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -97,6 +103,8 @@ impl TerminalManager {
         let killer = child.clone_killer();
         let mut reader = pty.master.try_clone_reader()?;
         let writer = pty.master.take_writer()?;
+        let wanted = Arc::new(AtomicBool::new(true));
+        let report_exit = wanted.clone();
 
         std::thread::spawn(move || {
             let mut buf = [0u8; 16 * 1024];
@@ -113,7 +121,9 @@ impl TerminalManager {
                 }
             }
             let code = child.wait().ok().map(|s| s.exit_code());
-            sink(TermEvent::Exit { code });
+            if report_exit.load(Ordering::Acquire) {
+                sink(TermEvent::Exit { code });
+            }
         });
 
         self.terms.lock().unwrap().insert(
@@ -122,6 +132,7 @@ impl TerminalManager {
                 master: pty.master,
                 writer,
                 killer,
+                wanted,
             },
         );
         Ok(())
@@ -149,12 +160,14 @@ impl TerminalManager {
 
     pub fn close(&self, id: &str) {
         if let Some(mut t) = self.terms.lock().unwrap().remove(id) {
+            t.wanted.store(false, Ordering::Release);
             let _ = t.killer.kill();
         }
     }
 
     pub fn close_all(&self) {
         for (_, mut t) in self.terms.lock().unwrap().drain() {
+            t.wanted.store(false, Ordering::Release);
             let _ = t.killer.kill();
         }
     }
@@ -202,6 +215,39 @@ mod tests {
         terms.write("t", "echo again-$((40+2))\n").unwrap();
         let (out, exited) = read_until(&rx, Some("again-42"));
         assert!(!exited && out.contains("again-42"), "{out}");
+        terms.close("t");
+    }
+
+    /// Respawning over a live shell kills it, and the shell we killed dies to a signal, which
+    /// reports as code 1. Its exit must never reach the UI: it carries the same terminal id as
+    /// the replacement, which would take the fresh shell for exited and respawn in a loop.
+    #[test]
+    fn respawning_over_a_live_shell_hides_its_exit() {
+        crate::test_support::raise_fd_limit();
+        let terms = TerminalManager::default();
+        let cwd = std::env::temp_dir();
+        let cwd = cwd.to_str().unwrap();
+        let (s1, rx1) = sink();
+        terms.open("t", cwd, Some("/bin/sh"), 80, 24, s1).unwrap();
+        terms.write("t", "sleep 60\n").unwrap();
+        // Let the first shell get started before it is replaced.
+        std::thread::sleep(Duration::from_millis(300));
+
+        let (s2, rx2) = sink();
+        terms.open("t", cwd, Some("/bin/sh"), 80, 24, s2).unwrap();
+        terms.write("t", "echo second-$((40+2))\n").unwrap();
+        let (out, exited) = read_until(&rx2, Some("second-42"));
+        assert!(!exited && out.contains("second-42"), "{out}");
+
+        // The killed first shell may still echo, but its death says nothing: however long we
+        // wait, no Exit reaches its sink.
+        loop {
+            match rx1.recv_timeout(Duration::from_millis(500)) {
+                Ok(TermEvent::Data { .. }) => continue,
+                Ok(ev) => panic!("the killed shell reported {ev:?}"),
+                Err(mpsc::RecvTimeoutError::Timeout) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
         terms.close("t");
     }
 }
