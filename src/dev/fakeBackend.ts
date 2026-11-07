@@ -1819,7 +1819,15 @@ export function install() {
           return null;
         }
         case "code_rewind": await sleep(150); return null;
-        case "code_usage": return { totals: { ...fakeUsage }, contextTokens: null, contextWindow: 128000, autoCompactPercent: 85 };
+        // Stored totals, as if the session had already run: the sidebar's usage gauge and the
+        // composer's bar have something to show without a turn first.
+        case "code_usage":
+          return {
+            totals: { ...fakeUsage, input: 41_000, cachedRead: 30_000, output: 1_800 },
+            contextTokens: 24_000,
+            contextWindow: 128_000,
+            autoCompactPercent: 85,
+          };
         case "plan_accounts": {
           // `?plan=two` adds a second, lightly used account.
           const latest = fakePlanLimits();
