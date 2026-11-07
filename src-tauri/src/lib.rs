@@ -672,15 +672,19 @@ async fn create_code_session(
     let p = serde_json::json!({ "host": host, "cwd": cwd, "modelRef": model_ref, "agent": agent });
     let created = gateway::on_host(state, &p, "code.create").await?;
     let id = created["id"].as_str().ok_or_else(|| CmdError("the host returned no session".into()))?;
-    // The host's new row reaches this computer through mesh sync; wait for it, so the caller
-    // can open the session from its list.
+    wait_for_session_row(state, id, &host).await
+}
+
+/// A session row another computer just made, once mesh sync has brought it here, so the caller
+/// can open the session from its list.
+async fn wait_for_session_row(state: &AppState, id: &str, host: &str) -> CmdResult<CodeSession> {
     for _ in 0..100 {
         if let Some(s) = state.db.get_code_session(id)? {
             return Ok(s);
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    Err(CmdError(format!("the session started on {}, but hasn't reached this computer yet", state.mesh.member_name(&host))))
+    Err(CmdError(format!("the session started on {}, but hasn't reached this computer yet", state.mesh.member_name(host))))
 }
 
 /// Claude Code's sessions on this computer, from every account it is signed in with (the default
@@ -2598,6 +2602,32 @@ async fn code_rewind(
     Ok(state.code.rewind(&id, ordinal, preview, revert_files).await?)
 }
 
+/// Fork a Code session into a new one on the same computer, agent, model and folder: the
+/// conversation up to (not including) the user prompt at transcript position `ordinal`, or all of
+/// it. The new session loads the copy when it starts. See docs/design/session-fork.md.
+async fn code_fork(state: &AppState, id: String, ordinal: Option<usize>, preview: String) -> CmdResult<CodeSession> {
+    if let Some(host) = remote_host(state, &id)? {
+        let params = serde_json::json!({ "id": id, "ordinal": ordinal, "preview": preview });
+        let made = state.mesh.rpc(&host, "code.fork", params).await?;
+        let new_id = made["id"].as_str().ok_or_else(|| CmdError("the host returned no session".into()))?;
+        return wait_for_session_row(state, new_id, &host).await;
+    }
+    Ok(code_fork_local(state, &id, ordinal, preview).await?)
+}
+
+async fn code_fork_local(state: &AppState, id: &str, ordinal: Option<usize>, preview: String) -> anyhow::Result<CodeSession> {
+    ensure_local_host(state, id)?;
+    let src = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
+    let agent_session = state.code.fork(id, ordinal, preview).await?;
+    let s = state.db.create_code_session(&src.cwd, src.model_ref.as_deref(), &src.agent, &src.permission_mode)?;
+    state.db.update_code_session(&s.id, Some(&agent_session), None, None)?;
+    if let Some(m) = &src.agent_model {
+        state.db.set_code_session_agent_model(&s.id, m)?;
+    }
+    state.db.set_code_session_title(&s.id, &format!("{} (fork)", src.title), true)?;
+    Ok(state.db.get_code_session(&s.id)?.unwrap_or(s))
+}
+
 async fn code_usage(state: &AppState, id: String) -> CmdResult<usage::UsageView> {
     Ok(state.db.code_usage(&id)?.view())
 }
@@ -2956,6 +2986,11 @@ impl mesh::RpcHandler for MeshRpc {
                 let preview = p["preview"].as_str().unwrap_or_default().to_owned();
                 let revert = p["revertFiles"].as_bool().unwrap_or(false);
                 state.code.rewind(&id()?, ordinal, preview, revert).await.map(|_| Value::Null)
+            }
+            "code.fork" => {
+                let ordinal = p["ordinal"].as_u64().map(|o| o as usize);
+                let preview = p["preview"].as_str().unwrap_or_default().to_owned();
+                code_fork_local(state, &id()?, ordinal, preview).await.map(|s| json!({ "id": s.id }))
             }
             "code.permission" => {
                 let opt = p["optionId"].as_str().map(str::to_owned);
