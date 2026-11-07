@@ -424,6 +424,7 @@ function UserEntry({
   onEdit,
   onReuse,
   onSendNow,
+  onCancelPending,
 }: {
   e: Extract<Entry, { kind: "user" }>;
   editing: boolean;
@@ -433,6 +434,8 @@ function UserEntry({
   onReuse?: () => void;
   /** Steered in and not read yet: stop the turn and send it as a prompt of its own. */
   onSendNow?: () => void;
+  /** Steered in and not read yet: take it back before the agent acts on it. */
+  onCancelPending?: () => void;
 }) {
   if (editing && onEdit) {
     return (
@@ -483,6 +486,16 @@ function UserEntry({
               title="Stop the current turn and send this now"
             >
               Send now
+            </button>
+          )}
+          {onCancelPending && (
+            <button
+              className="flex h-6 w-6 items-center justify-center rounded-md text-muted hover:bg-panel-2 hover:text-fg"
+              onClick={onCancelPending}
+              title="Don't send"
+              aria-label="Cancel pending message"
+            >
+              <XIcon size={12} />
             </button>
           )}
         </div>
@@ -560,6 +573,7 @@ const EntryView = memo(function EntryView({
   canReuse,
   onReuse,
   onSendNow,
+  onCancelPending,
   sessionId,
 }: {
   e: Entry;
@@ -582,6 +596,8 @@ const EntryView = memo(function EntryView({
   onReuse?: (i: number) => void;
   /** Send now for a steered message still waiting; given the prompt id. */
   onSendNow?: (promptId: string) => void;
+  /** Take back a steered message still waiting; given the prompt id. */
+  onCancelPending?: (promptId: string) => void;
   sessionId: string;
 }) {
   switch (e.kind) {
@@ -594,6 +610,7 @@ const EntryView = memo(function EntryView({
           onEdit={canEdit && onEdit ? (t, a) => onEdit(i, t, a) : undefined}
           onReuse={canReuse && onReuse ? () => onReuse(i) : undefined}
           onSendNow={e.pending && e.promptId && onSendNow ? () => onSendNow(e.promptId!) : undefined}
+          onCancelPending={e.pending && e.promptId && onCancelPending ? () => onCancelPending(e.promptId!) : undefined}
         />
       );
     case "agent":
@@ -1037,6 +1054,14 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     [activeId],
   );
 
+  // A steered message the agent hasn't read: take it back before it acts on it.
+  const onCancelPending = useCallback(
+    (promptId: string) => {
+      if (activeId) api.codeUnqueue(activeId, promptId).catch((e) => setToast(errorText(e)));
+    },
+    [activeId],
+  );
+
   // The header's badge needs the count even with the panel shut, so this always runs; the key
   // keeps it from redoing the work when only text or non-diff tool output changed.
   const changesCache = useRef<{ key: unknown[]; value: FileChange[] } | null>(null);
@@ -1457,6 +1482,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             canReuse={canReuse && i === lastUser && e.kind === "user" && !!e.text}
             onReuse={onReuse}
             onSendNow={forceSend ? onSendNow : undefined}
+            onCancelPending={onCancelPending}
             sessionId={session.id}
           />
         )),
