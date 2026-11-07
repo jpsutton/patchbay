@@ -1,7 +1,17 @@
 /**
  * Run: node --experimental-strip-types src/lib/spokenText.selftest.ts
  */
-import { liveCursorNow, proseSinceLastUser, speechChunks, speechSegments, spokenText, takeLiveProse } from "./spokenText.ts";
+import {
+  liveCursorNow,
+  proseSinceLastUser,
+  questionFormSpeech,
+  questionSpeech,
+  speechChunks,
+  speechSegments,
+  spokenText,
+  takeLiveProse,
+  takeLiveQuestions,
+} from "./spokenText.ts";
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(msg);
@@ -77,5 +87,57 @@ assert(got.texts.join("|").trim() === "And a late tail.", `late text speaks only
 assert(takeLiveProse(turn, got.cursor, true).texts.length === 0, "nothing read twice");
 assert(takeLiveProse([{ kind: "user" }], { next: 9, spoken: 3 }, true).texts.length === 0, "a cut-back list is safe");
 assert(liveCursorNow([{ kind: "user" }, { kind: "agent", text: "mid" }]).next === 1, "joining mid-message reads that message");
+
+// Question forms: the serializer reads the prompt, every option, and the card's hints.
+const q1 = {
+  prompt: "**Where** should we deploy [first](https://example.com)?",
+  options: [
+    { label: "Staging", description: "Safer, slower" },
+    { label: "Production", description: null },
+  ],
+  multi: true,
+  freeText: true,
+  skippable: true,
+};
+const q1text = questionSpeech(q1);
+const q1spoken = spokenText(q1text);
+assert(q1spoken.includes("Where should we deploy first?"), `prompt cleaned by spokenText: ${q1spoken}`);
+assert(q1spoken.includes("Choose any that apply."), "multi-select hint");
+assert(q1spoken.includes("Option 1: Staging. Safer, slower"), `option + description: ${q1spoken}`);
+assert(q1spoken.includes("Option 2: Production"), "second option");
+assert(q1spoken.includes("Something else"), "free-text hint");
+assert(q1spoken.includes("You can skip this question."), "skip hint");
+assert(!q1spoken.includes("https://") && !q1spoken.includes("**"), "markdown stripped");
+
+const q2 = { prompt: "Pick one.", options: [{ label: "Yes" }, { label: "No" }] };
+const q2text = questionSpeech(q2);
+assert(!q2text.includes("Choose any"), "no multi hint when single-select");
+assert(!q2text.includes("Something else"), "no free-text hint when absent");
+const formText = questionFormSpeech({ questions: [q1, q2] });
+assert(formText.startsWith(q1text) && formText.includes("Pick one."), "whole form keeps both questions in order");
+
+// Live question reading: pending-at-join is history, a new arrival is spoken once.
+type QForm = { requestId: string; form: { questions: typeof q1[] } };
+const form = (requestId: string): QForm => ({ requestId, form: { questions: [q1] } });
+const pending = [form("r1")];
+let qc = takeLiveQuestions(pending, null, "s1", true);
+assert(qc.forms.length === 0, "a question pending when the view opens is not spoken");
+qc = takeLiveQuestions(pending, qc.cursor, "s1", true);
+assert(qc.forms.length === 0, "no double-speak on re-render");
+const arrived = [...pending, form("r2")];
+qc = takeLiveQuestions(arrived, qc.cursor, "s1", true);
+assert(qc.forms.length === 1 && qc.forms[0].requestId === "r2", `one new arrival is spoken once: ${JSON.stringify(qc.forms.map((f) => f.requestId))}`);
+assert(qc.forms[0].text === questionFormSpeech(form("r2").form), "the arrival carries the form's speech text");
+qc = takeLiveQuestions(arrived, qc.cursor, "s1", true);
+assert(qc.forms.length === 0, "an arrival is never spoken twice");
+// Answering / skipping removes the form; that must not trigger speech.
+qc = takeLiveQuestions([], qc.cursor, "s1", true);
+assert(qc.forms.length === 0, "answering/skipping a question triggers no speech");
+// Not listening, a session change, and a rejoin all re-baseline to history.
+assert(takeLiveQuestions(arrived, qc.cursor, "s1", false).cursor === null, "not listening clears the cursor");
+const rejoined = takeLiveQuestions(arrived, qc.cursor, "s2", true);
+assert(rejoined.forms.length === 0, "rejoining under a new session reads nothing from history");
+const idleThenActive = takeLiveQuestions(arrived, null, "s1", true);
+assert(idleThenActive.forms.length === 0, "a fresh cursor baselines everything pending");
 
 console.log("spokenText.selftest: ok");

@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { api, errorText, type AgentQuestion, type AgentQuestionAnswer, type AgentQuestionForm } from "../lib/ipc";
 import { useStore } from "../lib/store";
+import { questionSpeech } from "../lib/spokenText";
+import { ReadAloudButton } from "../components/ReadAloudButton";
 
 /**
  * One agent's questions, one at a time. Skip leaves that question out. Something else is an
@@ -78,6 +80,10 @@ export function QuestionCard({
       <div className="flex items-center gap-2">
         <span className="signal-pulse h-2 w-2 rounded-full bg-accent" />
         <span className="text-xs font-medium text-accent-ink">Question</span>
+        <span className="flex-1" />
+        {/* Always visible (no hover on touch), matching the message-row speaker button. Reads the
+            question currently on the card, not the whole form: the card shows one at a time. */}
+        <ReadAloudButton id={`question:${requestId}:${q.id}`} text={questionSpeech(q)} />
       </div>
       <div className="flex items-start gap-3">
         <p className="min-w-0 flex-1 text-[15px] leading-6">{q.prompt}</p>
