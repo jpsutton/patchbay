@@ -30,7 +30,7 @@ export function pathOf(text: string): string | null {
 }
 
 /** Whether links can open anything here: only the desktop app reaches this computer's files. */
-function canOpen(): boolean {
+export function canOpen(): boolean {
   return !isWeb() && !isRemoteApp();
 }
 

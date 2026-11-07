@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { api } from "../lib/ipc";
 import { useStore } from "../lib/store";
+import { canOpen, FileLinkContext, openLocalPath } from "../components/FileLink";
 import { normalizePath, type FileChange } from "./changes";
 import {
   CheckIcon,
@@ -81,6 +82,9 @@ export function FilesPanel({
   const [expanded, setExpanded] = useState<Set<string> | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState("");
+  // Opening needs the session's files on this computer and the desktop app (as file links do).
+  const { local } = useContext(FileLinkContext);
+  const opens = local && canOpen();
 
   useEffect(() => {
     let cancelled = false;
@@ -180,9 +184,7 @@ export function FilesPanel({
                   }`}
                   style={{ paddingLeft: 8 + (depth + 1) * 14 }}
                   onClick={() => toggleFile(f)}
-                  onDoubleClick={() => {
-                    api.openLocalPath(f, cwd).catch(() => {});
-                  }}
+                  onDoubleClick={opens ? () => openLocalPath(f, cwd) : undefined}
                   title={f}
                 >
                   <span
@@ -287,8 +289,7 @@ export function FilesPanel({
           )}
         </div>
         <div className="mt-1.5 text-[11px] leading-snug text-faint">
-          Lists files the agent can see — honors .gitignore, skips hidden files. Double-click opens a
-          file.
+          Lists files the agent can see — honors .gitignore, skips hidden files.{opens && " Double-click opens a file."}
         </div>
       </div>
     </div>
