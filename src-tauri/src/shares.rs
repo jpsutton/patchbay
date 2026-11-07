@@ -25,6 +25,11 @@
 //! propagation). A gateway relays only the opaque token to the owning node over the existing mesh
 //! connection (`share.get` RPC); expiry/revocation are enforced THERE, never on the gateway. See
 //! `Fetch`, `route`, `relay` and `fetch_local` below.
+//!
+//! Error responses on the share route are negotiated from the request's `Accept` header: a client
+//! that explicitly includes `text/html` gets a tiny self-contained error page (no token, node id
+//! or error detail in it); every other client — including one sending only `*/*` — gets the bare
+//! status with an empty body, exactly as before. See `error_response`.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -34,7 +39,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, anyhow, bail};
 use axum::body::Body;
 use axum::extract::{Path as AxumPath, State};
-use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -387,16 +392,81 @@ fn build_headers(mime: &str, name: &str) -> Vec<(&'static str, String)> {
     ]
 }
 
-/// The whole HTTP route. Returns 404 with an empty body for any invalid token (no bytes leaked),
-/// otherwise streams the file (never buffered in full) with the sandboxed/nosniff headers.
-pub(crate) async fn handle(registry: &ShareRegistry, token: &str) -> Response {
+/// Does this client explicitly want HTML? Exact-substring semantics on the `Accept` header: the
+/// value must contain `text/html` somewhere. `*/*` (curl, downloaders, iOS's speculative fetch)
+/// and a missing/ambiguous `Accept` do NOT count — those clients keep the empty-body 404 and can
+/// never be handed a page they would save as a file.
+pub(crate) fn accepts_html(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(header::ACCEPT)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .any(|v| v.contains("text/html"))
+}
+
+/// The share-route error page: tiny, self-contained, inline CSS only (no external assets).
+/// Deliberately static — no token, node id, path or error reason appears anywhere in it, so a
+/// failure can never echo a capability URL or internal detail into a rendered page, a download
+/// or browser history.
+const SHARE_ERROR_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Link expired / host unreachable</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+         background: #f5f5f4; color: #1c1917; font-family: system-ui, -apple-serif, sans-serif; }
+  main { max-width: 34rem; padding: 2rem; text-align: center; }
+  h1 { font-size: 1.4rem; font-weight: 600; margin: 0 0 .75rem; }
+  p { margin: 0; line-height: 1.5; color: #57534e; }
+</style>
+</head>
+<body>
+<main>
+<h1>Link expired / host unreachable</h1>
+<p>This link has expired or is no longer available, or the host sharing it is unreachable right now.
+If you were just sent this link, try again in a moment; otherwise ask the sender for a fresh one.</p>
+</main>
+</body>
+</html>
+"#;
+
+/// A share-route error response, negotiated from the request's `Accept` header. A client that
+/// explicitly asked for `text/html` gets the small self-contained page above with the same
+/// sandbox/nosniff/no-store headers as a served artifact (so iOS renders it instead of saving
+/// `<token>.txt`). Every other client gets exactly what it got before: the bare status with an
+/// empty body — no bytes, no content-type.
+pub(crate) fn error_response(status: StatusCode, headers: &HeaderMap) -> Response {
+    if !accepts_html(headers) {
+        return status.into_response();
+    }
+    let mut res = Response::new(Body::from(SHARE_ERROR_HTML));
+    *res.status_mut() = status;
+    let h = res.headers_mut();
+    for (name, value) in [
+        ("content-type", "text/html; charset=utf-8"),
+        ("content-security-policy", "sandbox"),
+        ("x-content-type-options", "nosniff"),
+        ("cache-control", "no-store"),
+        ("referrer-policy", "no-referrer"),
+    ] {
+        h.insert(HeaderName::from_static(name), HeaderValue::from_static(value));
+    }
+    res
+}
+
+/// The whole HTTP route. Returns 404 for any invalid token (no bytes leaked; a client that asked
+/// for HTML sees the small error page instead — see `error_response`), otherwise streams the file
+/// (never buffered in full) with the sandboxed/nosniff headers.
+pub(crate) async fn handle(registry: &ShareRegistry, token: &str, headers: &HeaderMap) -> Response {
     let Some(resolved) = registry.resolve(token) else {
-        return StatusCode::NOT_FOUND.into_response();
+        return error_response(StatusCode::NOT_FOUND, headers);
     };
     // The file may have disappeared between resolve() and here; treat that as a missing share.
     let file = match tokio::fs::File::open(&resolved.path).await {
         Ok(f) => f,
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+        Err(_) => return error_response(StatusCode::NOT_FOUND, headers),
     };
     let mut res = Response::new(Body::from_stream(ReaderStream::new(file)));
     let h = res.headers_mut();
@@ -510,11 +580,12 @@ pub async fn gateway_fetch(state: &crate::AppState, node: &str, token: &str) -> 
 }
 
 /// Gateway HTTP proxy: turn a relayed `Fetch` into the response, preserving the owning node's
-/// sandboxed/nosniff headers end-to-end. A non-200 is an empty body (no bytes leaked).
-pub fn into_response(fetch: Fetch) -> Response {
+/// sandboxed/nosniff headers end-to-end. A non-200 follows the same Accept negotiation as the
+/// local route (`error_response`): HTML page only when explicitly asked for, empty body otherwise.
+pub fn into_response(fetch: Fetch, headers: &HeaderMap) -> Response {
     let status = StatusCode::from_u16(fetch.status).unwrap_or(StatusCode::NOT_FOUND);
     if status != StatusCode::OK {
-        return status.into_response();
+        return error_response(status, headers);
     }
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD.decode(&fetch.body_b64).unwrap_or_default();
@@ -533,8 +604,12 @@ struct ShareState {
     registry: Arc<ShareRegistry>,
 }
 
-async fn share_handler(State(st): State<ShareState>, AxumPath(token): AxumPath<String>) -> Response {
-    handle(&st.registry, &token).await
+async fn share_handler(
+    State(st): State<ShareState>,
+    AxumPath(token): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    handle(&st.registry, &token, &headers).await
 }
 
 /// Phase 2 shape on the standalone (loopback) server: the node id must be this node's, so a
@@ -543,11 +618,12 @@ async fn share_handler(State(st): State<ShareState>, AxumPath(token): AxumPath<S
 async fn share_node_handler(
     State(st): State<ShareState>,
     AxumPath((node_id, token)): AxumPath<(String, String)>,
+    headers: HeaderMap,
 ) -> Response {
     if node_id != st.registry.node_id() {
-        return StatusCode::NOT_FOUND.into_response();
+        return error_response(StatusCode::NOT_FOUND, &headers);
     }
-    handle(&st.registry, &token).await
+    handle(&st.registry, &token, &headers).await
 }
 
 fn router(registry: Arc<ShareRegistry>) -> Router {
@@ -657,7 +733,7 @@ mod tests {
             "nosniff"
         );
 
-        let res = handle(&r, &info.token).await;
+        let res = handle(&r, &info.token, &HeaderMap::new()).await;
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(header(&res, "content-type"), Some("text/html; charset=utf-8"));
         assert_eq!(header(&res, "content-security-policy"), Some("sandbox"));
@@ -677,7 +753,7 @@ mod tests {
         let info = r.create(&file.to_string_lossy(), None, None).unwrap();
         // Opaque tokens: a made-up token, a path, and an empty token (no directory listing) all fail.
         for bad in ["deadbeef", &info.token[..info.token.len() - 1], "../etc/passwd", "/etc/passwd", ""] {
-            let res = handle(&r, bad).await;
+            let res = handle(&r, bad, &HeaderMap::new()).await;
             assert_eq!(res.status(), StatusCode::NOT_FOUND, "token {bad:?}");
             let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
             assert!(body.is_empty(), "no bytes for {bad:?}");
@@ -697,7 +773,7 @@ mod tests {
         assert!(r.resolve_at(&info.token, info.expires_at + 1).is_none());
         // Advance the clock past expiry: the route must now refuse with no bytes.
         r.force_expire(&info.token);
-        let res = handle(&r, &info.token).await;
+        let res = handle(&r, &info.token, &HeaderMap::new()).await;
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
         assert!(to_bytes(res.into_body(), usize::MAX).await.unwrap().is_empty());
         let _ = std::fs::remove_dir_all(dir);
@@ -726,7 +802,7 @@ mod tests {
         assert!(r.resolve("oldtoken").is_none(), "expired record pruned/not served");
         assert!(r.resolve("revokedtoken").is_none(), "revoked record pruned/not served");
         // A wrong/expired token never yields bytes through the route.
-        let res = handle(&r, "oldtoken").await;
+        let res = handle(&r, "oldtoken", &HeaderMap::new()).await;
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
         assert!(to_bytes(res.into_body(), usize::MAX).await.unwrap().is_empty());
         let _ = std::fs::remove_dir_all(dir);
@@ -741,7 +817,7 @@ mod tests {
         assert!(r.resolve(&info.token).is_some());
         assert!(r.revoke(&info.token));
         assert!(r.resolve(&info.token).is_none());
-        assert_eq!(handle(&r, &info.token).await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(handle(&r, &info.token, &HeaderMap::new()).await.status(), StatusCode::NOT_FOUND);
         assert!(!r.revoke(&info.token), "already gone");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -784,13 +860,13 @@ mod tests {
         // Sharing a symlink canonicalizes to its real target, so the record never holds a link.
         let info = r.create(&link.to_string_lossy(), None, None).unwrap();
         assert_eq!(info.path, canonical(&real));
-        assert!(handle(&r, &info.token).await.status().is_success());
+        assert!(handle(&r, &info.token, &HeaderMap::new()).await.status().is_success());
 
         // swapping the shared path for a symlink to a DIFFERENT file is refused at serve time.
         std::fs::remove_file(&real).unwrap();
         std::os::unix::fs::symlink(&other, &real).unwrap();
         assert!(r.resolve(&info.token).is_none(), "re-canonicalize caught the symlink swap");
-        assert_eq!(handle(&r, &info.token).await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(handle(&r, &info.token, &HeaderMap::new()).await.status(), StatusCode::NOT_FOUND);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -944,7 +1020,7 @@ mod tests {
         assert_eq!(&body[..], b"<h1>from LT02</h1>");
 
         // The HTTP proxy response preserves those headers end-to-end.
-        let res = into_response(ok);
+        let res = into_response(ok, &HeaderMap::new());
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(header(&res, "content-security-policy"), Some("sandbox"));
         assert_eq!(header(&res, "x-content-type-options"), Some("nosniff"));
@@ -955,7 +1031,7 @@ mod tests {
         let revoked = via(&gateway, &info.token, owning.clone()).await;
         assert_eq!(revoked.status, 404);
         assert!(revoked.body_b64.is_empty());
-        assert_eq!(into_response(revoked).status(), StatusCode::NOT_FOUND);
+        assert_eq!(into_response(revoked, &HeaderMap::new()).status(), StatusCode::NOT_FOUND);
 
         // Expiry on the OWNING node: also 404 through the proxy (server-side enforcement).
         let info2 = owning.create(&file.to_string_lossy(), None, None).unwrap();
@@ -982,9 +1058,78 @@ mod tests {
         .await;
         assert_eq!(failed.status, 404);
         assert!(failed.body_b64.is_empty());
-        let res = into_response(failed);
+        let res = into_response(failed, &HeaderMap::new());
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
         assert!(to_bytes(res.into_body(), usize::MAX).await.unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ---------------- Error-page Accept negotiation (pb-20261106-12) ----------------
+
+    /// Request headers carrying (or not carrying) an `Accept` value.
+    fn accept(accept: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Some(v) = accept {
+            h.insert(header::ACCEPT, HeaderValue::from_str(v).unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn html_error_page_needs_an_explicit_text_html_accept() {
+        // Exact-substring semantics: `*/*` (the "ambiguous" case) does NOT count as text/html.
+        assert!(accepts_html(&accept(Some("text/html"))));
+        assert!(accepts_html(&accept(Some(
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        ))));
+        assert!(!accepts_html(&accept(Some("*/*"))));
+        assert!(!accepts_html(&accept(Some("application/json, */*;q=0.8"))));
+        assert!(!accepts_html(&accept(None)));
+    }
+
+    #[tokio::test]
+    async fn share_route_errors_negotiate_html_vs_empty_body() {
+        let dir = crate::test_support::short_dir("share-err-html");
+        let file = write_file(&dir, "report.html", b"<h1>secret</h1>");
+        let r = registry(&dir, DEFAULT_BASE_URL);
+        let info = r.create(&file.to_string_lossy(), None, None).unwrap();
+        let bad = format!("{}x", &info.token[..info.token.len() - 1]);
+
+        let browserish = accept(Some("text/html,application/xhtml+xml,*/*;q=0.8"));
+        let generic = accept(Some("*/*"));
+        let none = accept(None);
+
+        // Branch 1 — the client explicitly asked for HTML: a tiny self-contained page carrying the
+        // same sandbox/nosniff/no-store headers as a served artifact, with no token, node id or
+        // error detail anywhere in it. Both surfaces (local route, gateway proxy) behave alike.
+        for res in [
+            handle(&r, &bad, &browserish).await,
+            into_response(Fetch::not_found(), &browserish),
+        ] {
+            assert_eq!(res.status(), StatusCode::NOT_FOUND);
+            assert_eq!(header(&res, "content-type"), Some("text/html; charset=utf-8"));
+            assert_eq!(header(&res, "content-security-policy"), Some("sandbox"));
+            assert_eq!(header(&res, "x-content-type-options"), Some("nosniff"));
+            assert_eq!(header(&res, "cache-control"), Some("no-store"));
+            let body = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+            let page = std::str::from_utf8(&body).unwrap();
+            assert!(page.contains("Link expired / host unreachable"), "human-readable error");
+            assert!(page.contains("<style>"), "self-contained: inline CSS only");
+            assert!(!page.contains("http://") && !page.contains("https://"), "no external assets");
+            assert!(!page.contains(bad.as_str()) && !page.contains(&info.token), "no token echo");
+            assert!(!page.contains("404") && !page.contains(NODE), "no internal detail");
+        }
+
+        // Branch 2 — absent or ambiguous Accept: today's contract is preserved exactly — 404 with
+        // an empty body and no content-type, so nothing that iOS could save as `<token>.txt` is
+        // ever handed back to a non-HTML client.
+        for h in [generic, none] {
+            for res in [handle(&r, &bad, &h).await, into_response(Fetch::not_found(), &h)] {
+                assert_eq!(res.status(), StatusCode::NOT_FOUND);
+                assert!(header(&res, "content-type").is_none());
+                assert!(to_bytes(res.into_body(), usize::MAX).await.unwrap().is_empty());
+            }
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 
