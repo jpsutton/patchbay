@@ -148,6 +148,8 @@ const scenarios = [
       // The fork holds the conversation before that message: one user message fewer.
       await until(`${before - 1} user messages in the fork`, 60_000, async () => (await forks()) === before - 1);
       await setComposer(page, "");
+      // The scenarios after this one look at the seeded session, not its fork.
+      await openSession(ctx);
     },
   },
   {
