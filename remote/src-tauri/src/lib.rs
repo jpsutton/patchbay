@@ -905,6 +905,14 @@ async fn code_rewind(r: Shared<'_>, id: String, ordinal: u64, preview: String, r
     Ok(())
 }
 
+/// Fork a session into a new one on its host; returns the new session's row, which the gateway's
+/// list may not have yet.
+#[tauri::command]
+async fn code_fork(r: Shared<'_>, id: String, ordinal: Option<u64>, preview: String) -> CmdResult<Value> {
+    r.forget_index();
+    r.code("code.fork", json!({ "id": id, "ordinal": ordinal, "preview": preview })).await
+}
+
 #[tauri::command]
 async fn code_permission_respond(
     r: Shared<'_>,
@@ -1136,6 +1144,7 @@ pub fn run() {
             code_set_permission_mode,
             code_set_config_option,
             code_rewind,
+            code_fork,
             code_permission_respond,
             code_question_respond,
             code_usage,

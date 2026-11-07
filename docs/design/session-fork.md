@@ -48,6 +48,7 @@ In memory, a compaction leaves the summary as message 0, and `PromptRec::msg_ind
 - `code_fork(id, ordinal?, preview)` in `src-tauri/src/lib.rs`. A session hosted on another computer is forked there (mesh RPC `code.fork`, also open to phones through the gateway), and the caller waits for the new row to arrive by sync, as `create_code_session` does.
 - `code_fork_local` sends `AgentCmd::Fork` (refused unless `extensions.fork`, like `AgentCmd::Rewind`). In `acp.rs`, the transcript ordinal maps to a prompt index through `patchbay/rewind/points` and `pick_rewind_point`, as for rewind. It then creates the `code_sessions` row (agent, `model_ref`, `agent_model`, folder and approval mode from the source) with `acp_session_id` set to the copy, so starting it loads the copy.
 - The UI (`CodeView.tsx`, `forkSession`) seeds the new session's composer draft (`seedDraft` in `Composer.tsx`) with the message and its attachments, then opens it.
+- Phones run the same `CodeView`. Their backend's `code_fork` (`remote/src-tauri/src/lib.rs`) sends `code.fork` through the gateway (`remote.code`, allowed by `CODE_METHODS`) to the session's host, whose reply is the new session's full row. The gateway's session list can lag the host, so the UI adds the row itself when the refreshed list doesn't have it yet, as the phone's New session sheet does.
 
 ## Files
 
@@ -65,7 +66,7 @@ A fork from the end has the same history as its source. Anthropic keys the cache
 - Agent (`tests/e2e.rs`, mock LLM, `a_session_forks_at_a_prompt_or_at_the_end`): three prompts; fork at index 1 and at the end; an index with no prompt is refused; each fork replays what it should; the fork at a message takes a new prompt and the source never sees it.
 - Store (`store.rs`): `a_fork_cuts_like_a_rewind_and_leaves_request_records_behind`, `a_rewind_after_a_compaction_counts_the_summary`.
 - App smoke (`cargo test --lib smoke_code_fork -- --ignored`): through `CodeManager`, the copy loads in a new Code session with the first exchange and without the second.
-- Not automated: the UI. Fork from here and Fork session were type-checked, not clicked through.
+- Not automated: the UI, and the phone path. Fork from here and Fork session were type-checked, not clicked through; the phone's `code_fork` was compiled, not run against a gateway.
 
 ## Open questions
 

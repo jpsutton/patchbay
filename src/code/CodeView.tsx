@@ -1425,6 +1425,10 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
       const made = await api.codeFork(activeId, ordinal, entry?.text ?? "");
       if (entry) seedDraft(`code:${made.id}`, entry.text, entry.attachments ?? []);
       await refreshCodeSessions();
+      // A phone's gateway can list sessions before the host's new row reaches it: show it anyway.
+      if (!useStore.getState().codeSessions.some((x) => x.id === made.id)) {
+        useStore.setState((cur) => ({ codeSessions: [made, ...cur.codeSessions] }));
+      }
       useStore.getState().selectCodeSession(made.id);
       setToast("Forked into a new session. Both sessions work in the same folder.");
     } catch (e) {

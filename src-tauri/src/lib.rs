@@ -2990,7 +2990,7 @@ impl mesh::RpcHandler for MeshRpc {
             "code.fork" => {
                 let ordinal = p["ordinal"].as_u64().map(|o| o as usize);
                 let preview = p["preview"].as_str().unwrap_or_default().to_owned();
-                code_fork_local(state, &id()?, ordinal, preview).await.map(|s| json!({ "id": s.id }))
+                code_fork_local(state, &id()?, ordinal, preview).await.map(|s| json!(s))
             }
             "code.permission" => {
                 let opt = p["optionId"].as_str().map(str::to_owned);
