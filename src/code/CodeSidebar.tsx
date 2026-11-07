@@ -387,6 +387,14 @@ export function CodeSidebar() {
 
   const item = (s: CodeSession, inPinned: boolean) => {
     const st = code[s.id];
+    // Signed out: the agent waits on a sign-in, so nothing runs for the user — the first turn
+    // never gets past "starting", and mid-session the agent refuses prompts. The row would
+    // still light green "agent running" for both; the session's own view instead carries the
+    // SignInCard (and drops "Starting agent…" for this same state), and Settings and the
+    // composer present a sign-in as plain text. So the row stays neutral: no light, no
+    // dimming. Attention stays with real permission/question requests — `authRequired` never
+    // touches those, so a sign-in can't light it.
+    const signedOut = !!st?.auth;
     // Live tool calls show a new edit or commit before the turn ends and it's saved.
     const live = st ? activityOf(Object.values(st.toolCalls)) : null;
     return (
@@ -399,12 +407,12 @@ export function CodeSidebar() {
         subtitle={inPinned ? basename(s.cwd) : undefined}
         active={s.id === activeId || panes.includes(s.id)}
         selected={picked.has(s.id) && s.archivedAt == null}
-        busy={st?.busy}
+        busy={signedOut ? false : st?.busy}
         attention={(st?.permissions.length ?? 0) > 0 || (st?.questions.length ?? 0) > 0}
         meta={fmtShort(s.updatedAt)}
         host={prefs.groupByProject ? hostLabel(s) : undefined}
         pinned={s.pinned}
-        status={st && (st.status === "ready" || st.status === "starting") ? "running" : "idle"}
+        status={!signedOut && st && (st.status === "ready" || st.status === "starting") ? "running" : "idle"}
         onPointerDown={s.archivedAt == null ? (e) => startSessionDrag(e, s.id, s.title) : undefined}
         onSelect={async (e) => {
           // Alt+click opens the session beside the open one.
