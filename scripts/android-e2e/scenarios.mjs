@@ -124,6 +124,33 @@ const scenarios = [
     },
   },
   {
+    name: "fork",
+    needs: () => source("src/code/CodeView.tsx", "Fork from here"),
+    note: "Fork from here on the phone opens a new session with the earlier conversation and the message in its composer",
+    async run(ctx) {
+      const { page } = ctx;
+      const title = ctx.seed.session.title;
+      await openSession(ctx);
+      const forks = () => page.evalJs(`document.querySelectorAll('[aria-label="Fork from here"]').length`);
+      // Fork shows only while the agent is idle; the turns before this one may still be ending.
+      await until("two Fork from here buttons", 60_000, async () => (await forks()) >= 2);
+      const before = await forks();
+      const text = await page.evalJs(
+        `(() => { const b = [...document.querySelectorAll('[aria-label="Fork from here"]')].pop(); const t = b?.closest('.group')?.querySelector('.whitespace-pre-wrap')?.textContent ?? ''; b?.click(); return t; })()`,
+      );
+      if (!text) throw new Error("could not read and click the last user message's Fork from here");
+      await waitText(page, "the fork toast", /Forked into a new session/);
+      const esc = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      await waitText(page, "the fork's title", new RegExp(`${esc} \\(fork\\)`));
+      await until("the message in the fork's composer", 15_000, async () =>
+        (await page.evalJs(`document.querySelector('textarea')?.value ?? ''`)).includes(text.trim()),
+      );
+      // The fork holds the conversation before that message: one user message fewer.
+      await until(`${before - 1} user messages in the fork`, 60_000, async () => (await forks()) === before - 1);
+      await setComposer(page, "");
+    },
+  },
+  {
     name: "session-info",
     needs: () => source("src/code/SessionInfoDialog.tsx"),
     note: "the info dialog shows both session ids; with host info, the host's version and OS",
