@@ -45,6 +45,7 @@ import { WorkingIndicator } from "./WorkingIndicator";
 import { SubagentsPanel } from "./SubagentsPanel";
 import { TranscriptRows, type TranscriptRow } from "./TranscriptRows";
 import { DiffView, diffStats } from "./DiffView";
+import { FilesPanel } from "./FilesPanel";
 import { changesKey, collectChanges, normalizePath, type FileChange } from "./changes";
 import { todoPlanOf } from "../lib/todoPlan";
 import { CopyButton, copyText } from "../components/CopyButton";
@@ -68,6 +69,7 @@ import {
   ChevronRightIcon,
   CopyIcon,
   FileDiffIcon,
+  FolderIcon,
   hasAgentBadge,
   InfoIcon,
   MonitorUpIcon,
@@ -737,7 +739,7 @@ function backgroundLabel(tc: AcpToolCall): string {
   return ((toolDescription(tc) ?? tc.title) || "a command").split("\n")[0];
 }
 
-/** The right blade (Activity, Changes): its width is kept between runs. */
+/** The right blade (Activity, Changes, Files): its width is kept between runs. */
 const BLADE_WIDTH_KEY = "patchbay.bladeWidth";
 const BLADE_DEFAULT = 440;
 const BLADE_MIN = 320;
@@ -966,18 +968,18 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const session = sessions.find((s) => s.id === activeId) ?? null;
 
   const [showTerm, setShowTerm] = useState(false);
-  const [blade, setBlade] = useState<"activity" | "changes" | null>(null);
+  const [blade, setBlade] = useState<"activity" | "changes" | "files" | null>(null);
   const [bladeWidth, setBladeWidth] = useState(() => loadWidth(BLADE_WIDTH_KEY, BLADE_DEFAULT, BLADE_MIN, BLADE_MAX));
   const [termMounted, setTermMounted] = useState<Record<string, boolean>>({});
   const [editingIdx, setEditingIdx] = useState<number | null>(null);
   /** Fills the composer after Stop, or appends a share link from a transcript row. */
-  const [composerSeed, setComposerSeed] = useState<{ id: number; text: string; replace?: boolean; insert?: boolean } | null>(null);
+  const [composerSeed, setComposerSeed] = useState<{ id: number; text: string; replace?: boolean; insert?: boolean; mentions?: string[] } | null>(null);
   // A share-link action in a file row appends markdown to this pane's composer. Take it
   // atomically so only one split pane inserts it (pb-20261105-18).
   useEffect(() => {
     if (!composerInsert || !insertViewActive || !insertPaneFocused) return;
     const pending = useStore.getState().takeComposerInsert();
-    if (pending) setComposerSeed({ id: pending.id, text: pending.text, insert: true });
+    if (pending) setComposerSeed({ id: pending.id, text: pending.text, insert: true, mentions: pending.mentions });
   }, [composerInsert, insertViewActive, insertPaneFocused]);
   const [moving, setMoving] = useState<"move" | "takeOver" | null>(null);
   /** The header's "more" menu in a narrow pane: where it opens, when it's open. */
@@ -1318,6 +1320,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
       <ActivityPanel plan={s?.plan ?? []} jobs={jobs} onClose={() => setBlade(null)} />
     ) : blade === "changes" ? (
       <ChangesPanel changes={changes} cwd={session.cwd} onClose={() => setBlade(null)} />
+    ) : blade === "files" ? (
+      <FilesPanel cwd={session.cwd} sessionId={session.id} changes={changes} onClose={() => setBlade(null)} />
     ) : null;
   const sideBySideBlade = viewWidth >= 600;
   const minBladeForView = Math.min(BLADE_MIN, Math.max(260, Math.round(viewWidth * 0.4)));
@@ -1737,6 +1741,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
       ? [
           { label: outstanding ? `Activity: plan and jobs (${outstanding})` : "Activity: plan and jobs", onSelect: () => setBlade(blade === "activity" ? null : "activity") },
           { label: changes.length ? `Changes (${changes.length})` : "Changes", onSelect: () => setBlade(blade === "changes" ? null : "changes") },
+          { label: "Files", onSelect: () => setBlade(blade === "files" ? null : "files") },
           ...(!remote && !hostOffline
             ? [
                 {
@@ -1832,6 +1837,15 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
           onClick={() => setBlade(blade === "changes" ? null : "changes")}
         >
           <FileDiffIcon />
+        </HeaderButton>
+        )}
+        {level < 3 && (
+        <HeaderButton
+          label="Files"
+          active={blade === "files"}
+          onClick={() => setBlade(blade === "files" ? null : "files")}
+        >
+          <FolderIcon />
         </HeaderButton>
         )}
         {showMove && level < 2 && (
