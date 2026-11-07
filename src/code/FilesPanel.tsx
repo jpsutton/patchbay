@@ -151,7 +151,8 @@ export function FilesPanel({
   const basename = cwd.split(/[\\/]/).filter(Boolean).pop() ?? cwd;
 
   const renderDir = (dir: TreeDir, depth: number): ReactNode => {
-    const open = q ? true : effectiveExpanded.has(dir.path);
+    // The root has no row of its own to toggle, so it is always open.
+    const open = q || dir.path === "" ? true : effectiveExpanded.has(dir.path);
     const visibleFiles = dir.files.filter((f) => !q || f.toLowerCase().includes(q));
     const visibleDirs = dir.dirs.filter((d) => !q || dirMatches(d, q));
     if (q && visibleFiles.length === 0 && visibleDirs.length === 0) return null;
