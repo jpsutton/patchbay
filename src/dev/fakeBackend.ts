@@ -391,7 +391,7 @@ function fakeReady(csid: string, loaded = false) {
       ? null
       : { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] },
     configOptions: fakeOptionsFor(csid),
-    extensions: { statusLine: agentId === "grok", rewind: grok, patchbayModels: grok, steering: FAKE_STEERING.has(agentId), forceSend: true, cancelTool: agentId === "patchbay" },
+    extensions: { statusLine: agentId === "grok", rewind: grok, fork: agentId === "patchbay", patchbayModels: grok, steering: FAKE_STEERING.has(agentId), forceSend: true, cancelTool: agentId === "patchbay" },
   });
   // A phone never gets this event (its host answers `list_session_commands` instead).
   if (!isRemoteApp()) {
@@ -1819,6 +1819,14 @@ export function install() {
           return null;
         }
         case "code_rewind": await sleep(150); return null;
+        case "code_fork": {
+          // The copy's conversation isn't simulated: the fork opens empty, with its title and settings.
+          await sleep(150);
+          const src = db.code.find((x) => x.id === a.id)!;
+          const s: CodeSession = { ...src, id: id(), acpSessionId: null, title: `${src.title} (fork)`, pinned: false, createdAt: now(), updatedAt: now(), activity: null };
+          db.code.push(s);
+          return s;
+        }
         // Stored totals, as if the session had already run: the sidebar's usage gauge and the
         // composer's bar have something to show without a turn first.
         case "code_usage":

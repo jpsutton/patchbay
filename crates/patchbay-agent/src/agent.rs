@@ -231,6 +231,7 @@ impl Agent {
                 Ok(json!({"rewind_points": points}))
             }
             "patchbay/rewind/execute" => self.rewind(&params).await,
+            "patchbay/fork" => self.fork(&params),
             // Stop one running tool call; the turn goes on and the model sees it was stopped.
             "patchbay/cancel_tool" => {
                 let s = self.need_session(&params)?;
@@ -305,6 +306,33 @@ impl Agent {
         } else {
             Err(RpcError::internal(format!("could not restore some files: {}", failed.join("; "))))
         }
+    }
+
+    /// `patchbay/fork`: copy this session into a new stored one and return its id, which
+    /// `session/load` then opens. With `targetPromptIndex` (a rewind point) the copy stops just
+    /// before that prompt, as a rewind there would; without it, it has the whole conversation. The
+    /// source is not changed. Files are not touched: the fork works in the folder as it is now.
+    fn fork(&self, params: &Value) -> Result<Value, RpcError> {
+        let s = self.need_session(params)?;
+        if s.busy.load(Ordering::SeqCst) {
+            return Err(RpcError::invalid_params("a turn is running; stop it first"));
+        }
+        let keep = match params["targetPromptIndex"].as_u64() {
+            None => None,
+            Some(t) => {
+                let prompts = s.prompts.lock().unwrap();
+                Some(prompts.get(t as usize).ok_or_else(|| RpcError::invalid_params("no fork point for that prompt"))?.msg_index)
+            }
+        };
+        let entries = crate::store::fork_entries(&s.store.load(), keep);
+        if !entries.iter().any(|e| matches!(e, crate::store::Entry::Meta { .. })) {
+            return Err(RpcError::internal("this session has nothing stored to fork yet"));
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        crate::store::Store::new(&self.host.data_dir(), &id)
+            .create_with(&entries)
+            .map_err(|e| RpcError::internal(format!("could not write the fork: {e}")))?;
+        Ok(json!({"sessionId": id}))
     }
 
     /// `session/steering`: a message for the running turn, read before its next model request.

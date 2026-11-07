@@ -125,6 +125,7 @@ function featureList(i: SessionInfoInput): string[] {
   if (caps?.mcpCapabilities?.sse) out.push("MCP over SSE");
   if (ext?.steering) out.push("mid-turn steering");
   if (ext?.rewind) out.push("rewind");
+  if (ext?.fork) out.push("fork");
   if (ext?.statusLine) out.push("status line");
   return out;
 }

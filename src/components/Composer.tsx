@@ -147,6 +147,11 @@ type Draft = { text: string; atts: Attachment[]; mentions: string[] };
 /** Unsent composer contents per `draftKey`, so each conversation or session keeps its own. */
 const drafts = new Map<string, Draft>();
 
+/** Put `text` (and `atts`) in the composer of `key` before it is shown: a fork from a message. */
+export function seedDraft(key: string, text: string, atts: Attachment[] = []) {
+  drafts.set(key, { text, atts, mentions: [] });
+}
+
 export function Composer({
   onSend,
   onStop,

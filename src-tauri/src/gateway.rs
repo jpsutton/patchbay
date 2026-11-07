@@ -33,6 +33,7 @@ const CODE_METHODS: &[&str] = &[
     "code.set_permission_mode",
     "code.set_agent",
     "code.rewind",
+    "code.fork",
     "code.permission",
     "code.question",
     "code.files",

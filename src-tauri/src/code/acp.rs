@@ -303,6 +303,13 @@ pub enum AgentCmd {
         revert_files: bool,
         reply: oneshot::Sender<Result<()>>,
     },
+    /// Copy the session into a new agent session and reply with its id: up to (not including)
+    /// the `ordinal`-th user prompt, or whole when `ordinal` is `None`. The session is unchanged.
+    Fork {
+        ordinal: Option<usize>,
+        preview: String,
+        reply: oneshot::Sender<Result<String>>,
+    },
     /// Sign in with one of the methods from `CodeEvent::AuthRequired`. Before the session
     /// starts, replies once it is up; mid-session, once the agent accepts the sign-in.
     Authenticate {
@@ -2044,6 +2051,14 @@ async fn run(
                         };
                         let _ = reply.send(r);
                     }
+                    AgentCmd::Fork { ordinal, preview, reply } => {
+                        let r = if extensions.fork {
+                            fork(&conn, &session_id, ordinal, &preview).await
+                        } else {
+                            Err(anyhow!("this agent can't fork a session"))
+                        };
+                        let _ = reply.send(r);
+                    }
                     AgentCmd::Authenticate { reply, .. } if !auth_lost.get() => {
                         let _ = reply.send(Err(anyhow!("the agent is already signed in")));
                     }
@@ -2164,6 +2179,9 @@ fn refuse_until_signed_in(cmd: AgentCmd) {
         | AgentCmd::SetMode { reply, .. }
         | AgentCmd::SetConfigOption { reply, .. }
         | AgentCmd::Rewind { reply, .. } => {
+            let _ = reply.send(Err(anyhow!("the agent isn't signed in yet")));
+        }
+        AgentCmd::Fork { reply, .. } => {
             let _ = reply.send(Err(anyhow!("the agent isn't signed in yet")));
         }
         AgentCmd::Authenticate { reply, .. } => {
@@ -2498,6 +2516,22 @@ async fn rewind(
     )
     .await?;
     Ok(())
+}
+
+/// Copy the session with Patchbay's `patchbay/fork`, up to the prompt at transcript position
+/// `ordinal` (mapped to a prompt index the way a rewind maps it) or whole. Returns the new agent
+/// session id, for a new Code session to load.
+async fn fork(conn: &acp::ClientSideConnection, session_id: &str, ordinal: Option<usize>, preview: &str) -> Result<String> {
+    let mut params = json!({ "sessionId": session_id });
+    if let Some(ordinal) = ordinal {
+        let points = ext(conn, "patchbay/rewind/points", json!({ "sessionId": session_id })).await?;
+        let mut points: Vec<RewindPoint> = serde_json::from_value(points["rewind_points"].clone()).unwrap_or_default();
+        points.sort_by_key(|p| p.prompt_index);
+        let target = pick_rewind_point(&points, ordinal, preview).ok_or_else(|| anyhow!("no fork point for that message"))?;
+        params["targetPromptIndex"] = json!(target);
+    }
+    let r = ext(conn, "patchbay/fork", params).await?;
+    r["sessionId"].as_str().map(str::to_owned).ok_or_else(|| anyhow!("the agent returned no session"))
 }
 
 fn norm(s: &str) -> String {

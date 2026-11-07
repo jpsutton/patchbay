@@ -163,6 +163,7 @@ commands! {
     code_set_mode(id, mode_id);
     code_set_permission_mode(id, mode);
     code_rewind(id, ordinal, preview, revert_files);
+    code_fork(id, ordinal, preview);
     code_usage(id);
     plan_accounts();
     cursor_plan_limits();

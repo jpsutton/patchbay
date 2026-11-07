@@ -543,6 +543,8 @@ export type PromptDelivery = "sent" | "steered" | "queued";
 export interface AgentExtensions {
   statusLine: boolean;
   rewind: boolean;
+  /** The session can be forked into a new one, at a message or at the end. */
+  fork?: boolean;
   /** Runs on Patchbay's providers and models: a change to them needs a restart to apply. */
   patchbayModels?: boolean;
   /** A message sent mid-turn joins the running turn; otherwise it waits for the turn to end. */
@@ -1213,6 +1215,9 @@ export const api = {
     invoke<void>("code_authenticate", { id, methodId, apiKey: apiKey ?? null }),
   codeRewind: (id: string, ordinal: number, preview: string, revertFiles: boolean) =>
     invoke<void>("code_rewind", { id, ordinal, preview, revertFiles }),
+  /** A new session with this one's conversation before the `ordinal`-th prompt, or all of it with null. */
+  codeFork: (id: string, ordinal: number | null, preview: string) =>
+    invoke<CodeSession>("code_fork", { id, ordinal, preview }),
   codeUsage: (id: string) => invoke<UsageView>("code_usage", { id }),
   planAccounts: () => invoke<PlanAccount[]>("plan_accounts"),
   cursorPlanLimits: () => invoke<CursorPlanLimits | null>("cursor_plan_limits"),

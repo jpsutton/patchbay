@@ -386,6 +386,47 @@ async fn rewind_drops_prompts_and_restores_files() {
 
 #[tokio::test]
 #[ignore]
+async fn a_session_forks_at_a_prompt_or_at_the_end() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::Anthropic, cwd.join("data"));
+    let sid = open(&mut acp, &cwd).await;
+    prompt(&mut acp, &sid, "first FORK-A").await;
+    prompt(&mut acp, &sid, "second FORK-B").await;
+    prompt(&mut acp, &sid, "third FORK-C").await;
+
+    // At prompt 1: the fork has the first exchange only. At the end: all three.
+    let at = acp.call("patchbay/fork", json!({"sessionId": sid, "targetPromptIndex": 1})).await;
+    let at = at["sessionId"].as_str().unwrap().to_owned();
+    let end = acp.call("patchbay/fork", json!({"sessionId": sid})).await;
+    let end = end["sessionId"].as_str().unwrap().to_owned();
+    assert!(at != sid && end != sid && at != end);
+    let err = acp.call_err("patchbay/fork", json!({"sessionId": sid, "targetPromptIndex": 9})).await;
+    assert!(err.contains("no fork point"), "{err}");
+
+    async fn replayed(cwd: &PathBuf, id: &str) -> String {
+        let mut a = Acp::start(WireFormat::Anthropic, cwd.join("data"));
+        a.call("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await;
+        a.call("session/load", json!({"sessionId": id, "cwd": cwd, "mcpServers": []})).await;
+        a.text_of("user_message_chunk")
+    }
+    let t = replayed(&cwd, &at).await;
+    assert!(t.contains("FORK-A") && !t.contains("FORK-B") && !t.contains("FORK-C"), "{t}");
+    let t = replayed(&cwd, &end).await;
+    assert!(t.contains("FORK-A") && t.contains("FORK-B") && t.contains("FORK-C"), "{t}");
+
+    // The fork goes on by itself; the source never sees it.
+    let mut f = Acp::start(WireFormat::Anthropic, cwd.join("data"));
+    f.call("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await;
+    f.call("session/load", json!({"sessionId": at, "cwd": cwd, "mcpServers": []})).await;
+    let r = prompt(&mut f, &at, "branch FORK-D").await;
+    assert_eq!(r["stopReason"], "end_turn");
+    let t = replayed(&cwd, &sid).await;
+    assert!(t.contains("FORK-C") && !t.contains("FORK-D"), "{t}");
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
 async fn stopping_a_tool_call_or_job_that_is_not_running_does_nothing() {
     let cwd = workdir();
     let mut acp = Acp::start(WireFormat::Anthropic, cwd.join("data"));

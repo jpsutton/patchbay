@@ -26,7 +26,7 @@ import {
   type Entry,
 } from "../lib/store";
 import { HostBadge, MoveDialog, OfflineHostBanner } from "./HostControls";
-import { Composer } from "../components/Composer";
+import { Composer, seedDraft } from "../components/Composer";
 import { loadWidth, ResizeHandle, saveWidth } from "../components/ResizeHandle";
 import { MessageTime } from "../components/MessageTime";
 import { Markdown } from "../components/Markdown";
@@ -74,6 +74,7 @@ import {
   MoreIcon,
   PaperclipIcon,
   PencilIcon,
+  ForkIcon,
   PlusIcon,
   RestartIcon,
   SlidersIcon,
@@ -426,6 +427,7 @@ function UserEntry({
   onReuse,
   onSendNow,
   onCancelPending,
+  onFork,
 }: {
   e: Extract<Entry, { kind: "user" }>;
   editing: boolean;
@@ -437,6 +439,8 @@ function UserEntry({
   onSendNow?: () => void;
   /** Steered in and not read yet: take it back before the agent acts on it. */
   onCancelPending?: () => void;
+  /** A new session with the conversation before this message, and this message in its composer. */
+  onFork?: () => void;
 }) {
   if (editing && onEdit) {
     return (
@@ -513,6 +517,17 @@ function UserEntry({
             {isRemoteApp() && "Edit"}
           </button>
         )}
+        {onFork && (
+          <button
+            className={`flex h-7 items-center justify-center rounded-md hover:bg-panel-2 hover:text-fg ${isRemoteApp() ? "gap-1 px-1.5 text-xs" : "w-7"}`}
+            onClick={onFork}
+            title="Fork from here: a new session with the conversation before this message"
+            aria-label="Fork from here"
+          >
+            <ForkIcon size={14} />
+            {isRemoteApp() && "Fork"}
+          </button>
+        )}
         {e.text && <CopyButton text={e.text} icon={<CopyIcon size={14} />} />}
         {isRemoteApp() && e.at != null && <MessageTime at={e.at} />}
       </div>
@@ -575,6 +590,8 @@ const EntryView = memo(function EntryView({
   onReuse,
   onSendNow,
   onCancelPending,
+  canFork,
+  onFork,
   sessionId,
 }: {
   e: Entry;
@@ -599,6 +616,9 @@ const EntryView = memo(function EntryView({
   onSendNow?: (promptId: string) => void;
   /** Take back a steered message still waiting; given the prompt id. */
   onCancelPending?: (promptId: string) => void;
+  /** The agent can fork the session here (`onFork` must be stable). */
+  canFork?: boolean;
+  onFork?: (i: number) => void;
   sessionId: string;
 }) {
   switch (e.kind) {
@@ -612,6 +632,7 @@ const EntryView = memo(function EntryView({
           onReuse={canReuse && onReuse ? () => onReuse(i) : undefined}
           onSendNow={e.pending && e.promptId && onSendNow ? () => onSendNow(e.promptId!) : undefined}
           onCancelPending={e.pending && e.promptId && onCancelPending ? () => onCancelPending(e.promptId!) : undefined}
+          onFork={canFork && onFork && !e.pending ? () => onFork(i) : undefined}
         />
       );
     case "agent":
@@ -1038,6 +1059,9 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     (i: number, text: string, atts: Attachment[]) => editRef.current?.(i, text, atts) ?? Promise.resolve(false),
     [],
   );
+  // Likewise for `forkSession`, at a message.
+  const forkRef = useRef<(i: number | null) => Promise<void>>(null);
+  const onFork = useCallback((i: number) => void forkRef.current?.(i), []);
   // Phone, agent without rewind: put an earlier prompt back in the composer to edit and resend.
   const onReuse = useCallback(
     (i: number) => {
@@ -1426,6 +1450,33 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
 
   editRef.current = editAndResend;
 
+  /**
+   * Fork into a new session: at a user message (the conversation before it, with the message in
+   * the new session's composer to edit and send) or, with null, the whole conversation. The source
+   * session is unchanged; both work in the same folder.
+   */
+  const forkSession = async (entryIndex: number | null) => {
+    if (!activeId || !s) return;
+    const entry = entryIndex == null ? null : s.entries[entryIndex];
+    if (entry && entry.kind !== "user") return;
+    const ordinal = entryIndex == null ? null : s.entries.slice(0, entryIndex).filter((x) => x.kind === "user").length;
+    try {
+      const made = await api.codeFork(activeId, ordinal, entry?.text ?? "");
+      if (entry) seedDraft(`code:${made.id}`, entry.text, entry.attachments ?? []);
+      await refreshCodeSessions();
+      // A phone's gateway can list sessions before the host's new row reaches it: show it anyway.
+      if (!useStore.getState().codeSessions.some((x) => x.id === made.id)) {
+        useStore.setState((cur) => ({ codeSessions: [made, ...cur.codeSessions] }));
+      }
+      useStore.getState().selectCodeSession(made.id);
+      setToast("Forked into a new session. Both sessions work in the same folder.");
+    } catch (e) {
+      setToast(`Could not fork: ${errorText(e)}`);
+    }
+  };
+
+  forkRef.current = forkSession;
+
   // The transcript as rows, mounted only near the viewport: earlier agents' part, the cached
   // history, the plan, then this agent's entries.
   const rows: TranscriptRow[] = [];
@@ -1473,6 +1524,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   }
   if (s && (ready || !s.history)) {
     const canEdit = ready && !working && !!s.extensions.rewind;
+    const canFork = ready && !working && !!s.extensions.fork;
     // Only the last prompt can be put back in the composer, and only when the agent can't rewind.
     const lastUser = s.entries.findLastIndex((x) => x.kind === "user");
     const canReuse = remote && ready && !working && !s.extensions.rewind;
@@ -1497,6 +1549,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             onReuse={onReuse}
             onSendNow={forceSend ? onSendNow : undefined}
             onCancelPending={onCancelPending}
+            canFork={canFork && e.kind === "user"}
+            onFork={onFork}
             sessionId={session.id}
           />
         )),
@@ -1676,6 +1730,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
       f,
       f === "markdown" ? codeToMarkdown(session, s.entries, s.toolCalls) : codeToJson(session, s.entries, s.toolCalls),
     );
+  // The whole conversation into a new session: a header button, or a "more" item in a narrow pane.
+  const canForkSession = !!s?.extensions.fork && ready && !working && s.entries.length > 0;
   const moreActions: ItemAction[] = [
     ...(level >= 3
       ? [
@@ -1701,6 +1757,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
         ]
       : []),
     ...(showMove && !working ? [{ label: "Move to another computer…", onSelect: () => setMoving("move") }] : []),
+    ...(canForkSession ? [{ label: "Fork session", onSelect: () => void forkSession(null) }] : []),
     { label: "Session info…", onSelect: () => useStore.getState().setSessionInfoId(session.id) },
     { label: "Restart the agent", onSelect: () => start(session.id) },
   ];
@@ -1780,6 +1837,11 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
         {showMove && level < 2 && (
           <HeaderButton label="Move to another computer" disabled={working} onClick={() => setMoving("move")}>
             <MonitorUpIcon />
+          </HeaderButton>
+        )}
+        {canForkSession && level < 2 && (
+          <HeaderButton label="Fork session: a new session with this whole conversation" onClick={() => void forkSession(null)}>
+            <ForkIcon />
           </HeaderButton>
         )}
         {!remote && level < 3 && (

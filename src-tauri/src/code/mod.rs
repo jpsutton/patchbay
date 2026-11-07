@@ -362,6 +362,13 @@ impl CodeManager {
         rx.await.map_err(|_| anyhow!("agent stopped"))?
     }
 
+    /// Copy the session into a new agent session (see `AgentCmd::Fork`); returns its id.
+    pub async fn fork(&self, code_session_id: &str, ordinal: Option<usize>, preview: String) -> Result<String> {
+        let (reply, rx) = oneshot::channel();
+        self.send(code_session_id, AgentCmd::Fork { ordinal, preview, reply })?;
+        rx.await.map_err(|_| anyhow!("agent stopped"))?
+    }
+
     /// Sign in with one of the agent's advertised methods. Resolves once the session is up.
     pub async fn authenticate(
         &self,

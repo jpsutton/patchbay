@@ -477,6 +477,101 @@ fn smoke_code_rewind() {
     assert!(users.is_empty(), "history not truncated: {users:?}");
 }
 
+/// Fork: a new Code session made from the agent's copy loads the conversation up to the chosen
+/// prompt, through the same path `code_fork` takes.
+#[test]
+#[ignore]
+fn smoke_code_fork() {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    use crate::code::CodeManager;
+    use crate::code::acp::{AgentCmd, CodeEvent, Envelope, Sink};
+
+    let root = std::env::temp_dir().join("patchbay-smoke-fork");
+    let _ = std::fs::remove_dir_all(&root);
+    let data_dir = root.join("data");
+    let proj = root.join("proj");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(&proj).unwrap();
+    let db = Arc::new(Db::open(&data_dir.join("db.sqlite")).unwrap());
+    db.upsert_provider(
+        &Provider {
+            id: "p".into(),
+            name: "mock".into(),
+            kind: ProviderKind::OpenaiChat,
+            base_url: mock_url(),
+            has_key: false,
+            auth_mode: Default::default(),
+            claude_config_dir: None,
+        },
+        Some("test-key"),
+    )
+    .unwrap();
+    db.upsert_model(&Model {
+        id: "m".into(),
+        provider_id: "p".into(),
+        model_id: "mock-agent".into(),
+        display_name: "Mock agent".into(),
+        vision: true,
+        context_window: Some(32000),
+        params: Default::default(),
+    })
+    .unwrap();
+    let session = db.create_code_session(proj.to_str().unwrap(), Some("m"), "patchbay", "default").unwrap();
+
+    let manager = Arc::new(CodeManager::default());
+    let events: Arc<Mutex<Vec<Envelope>>> = Arc::default();
+    let make_sink = || -> Sink {
+        let events = events.clone();
+        Arc::new(move |env: Envelope| events.lock().unwrap().push(env))
+    };
+    let wait_count = |pred: &dyn Fn(&CodeEvent) -> bool, n: usize, what: &str| {
+        let t0 = Instant::now();
+        while events.lock().unwrap().iter().filter(|e| pred(&e.event)).count() < n {
+            assert!(t0.elapsed() < Duration::from_secs(90), "timed out: {what}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let is_done = |e: &CodeEvent| matches!(e, CodeEvent::PromptDone { .. });
+    let user_text = || -> String {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match &e.event {
+                CodeEvent::Update { update } if update["sessionUpdate"] == "user_message_chunk" => {
+                    Some(update["content"]["text"].as_str().unwrap_or("").to_owned())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+
+    manager.start(make_sink(), db.clone(), &data_dir, &session.id, None).unwrap();
+    wait_count(&|e| matches!(e, CodeEvent::Status { state, .. } if state == "ready"), 1, "ready");
+    manager.send(&session.id, AgentCmd::prompt("first FORK-A")).unwrap();
+    wait_count(&is_done, 1, "first prompt");
+    manager.send(&session.id, AgentCmd::prompt("second FORK-B")).unwrap();
+    wait_count(&is_done, 2, "second prompt");
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let copy = rt.block_on(manager.fork(&session.id, Some(1), "second FORK-B".into())).expect("fork");
+    manager.stop(&session.id);
+
+    // What code_fork_local does with the copy.
+    let fork = db.create_code_session(&session.cwd, Some("m"), "patchbay", "default").unwrap();
+    db.update_code_session(&fork.id, Some(&copy), None, None).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    events.lock().unwrap().clear();
+    manager.start(make_sink(), db.clone(), &data_dir, &fork.id, None).unwrap();
+    wait_count(&|e| matches!(e, CodeEvent::SessionReady { loaded: true, .. }), 1, "fork loaded");
+    std::thread::sleep(Duration::from_millis(300));
+    let text = user_text();
+    manager.stop(&fork.id);
+    assert!(text.contains("FORK-A") && !text.contains("FORK-B"), "{text}");
+}
+
 /// Saved rules answer permission requests, and configured MCP servers reach the agent.
 #[test]
 #[ignore]

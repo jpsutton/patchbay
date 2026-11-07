@@ -162,6 +162,9 @@ pub struct Extensions {
     pub status_line: bool,
     /// Grok Build's `x.ai/rewind/*` methods, behind "edit and resend".
     pub rewind: bool,
+    /// Copy the session into a new one, whole or up to a prompt (`patchbay/fork`). Patchbay's own
+    /// agent only: ACP's `session/fork` takes no message position (docs/design/session-fork.md).
+    pub fork: bool,
     /// Runs on Patchbay's providers and models, so a change to them needs a restart to apply.
     pub patchbay_models: bool,
     /// Grok Build's `x.ai/interject`, which steers a message into the running turn.
@@ -823,6 +826,7 @@ fn prepare_patchbay(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSess
         ext: Extensions {
             patchbay_models: true,
             rewind: true,
+            fork: true,
             cancel_tool: true,
             force_steers: true,
             background_tools: true,
@@ -876,7 +880,7 @@ fn prepare_grok(
         args,
         env,
         env_remove: vec!["XAI_API_KEY".into(), "GROK_CODE_XAI_API_KEY".into()],
-        ext: Extensions { status_line: true, rewind: true, patchbay_models: true, interject: true, steering: false, force_send: false, cancel_tool: false, force_steers: false, background_tools: false },
+        ext: Extensions { status_line: true, rewind: true, fork: false, patchbay_models: true, interject: true, steering: false, force_send: false, cancel_tool: false, force_steers: false, background_tools: false },
         session_meta,
         initial_model: None,
         login_hint: "",
