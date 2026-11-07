@@ -133,6 +133,8 @@ jobs:
         run: node src/lib/speech.selftest.mjs
       - name: Sticky-scroll pin decision
         run: node --experimental-strip-types src/lib/stickyScroll.selftest.ts
+      - name: Notices gate spawn portability (pb-20261106-13)
+        run: node scripts/tool-invocation.selftest.mjs
       - name: Third-party notices are up to date
         run: pnpm notices && git diff --exit-code -- THIRD_PARTY_NOTICES.md
 

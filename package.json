@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit",
     "tauri": "tauri",
     "notices": "node scripts/third-party-notices.mjs",
-    "ci": "bash scripts/ci/check-notices.sh"
+    "ci": "node scripts/tool-invocation.selftest.mjs && bash scripts/ci/check-notices.sh"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",
