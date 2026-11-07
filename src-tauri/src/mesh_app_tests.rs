@@ -765,7 +765,8 @@ async fn usage_limit_stops_claude_turns() {
     assert_eq!(notices(), 1);
     let ev = a.events.lock().unwrap().iter().rev().find(|(_, p)| p["event"]["type"] == "notice").cloned().unwrap();
     let text = ev.1["event"]["message"].as_str().unwrap().to_owned();
-    assert!(text.starts_with("Stopped. You have used 96% of your Claude plan's 5-hour limit"), "{text}");
+    let label = crate::plan_account_label(&a.state, &crate::default_plan_account().0);
+    assert!(text.starts_with(&format!("Stopped. You have used 96% of {label}'s 5-hour limit")), "{text}");
 
     // A session on another Claude account runs on: that account's usage is its own.
     let teams = db::Provider {
@@ -840,6 +841,98 @@ async fn usage_limit_stops_claude_turns() {
     let latest = |acct: &str| again.code.plan.account(acct).latest.and_then(|l| l.five_hour).map(|w| w.utilization);
     assert_eq!(latest(&crate::default_plan_account().0), Some(0.97));
     assert_eq!(latest("/tmp/pb-other-claude"), Some(0.2));
+}
+
+/// Two accounts in one guard, constructed directly: a session is stopped only by its own
+/// account's report — never by another account's 99%, and never at all when its own account
+/// has no report. This is the contract `PlanGuard` states ("Accounts never count against
+/// each other"), pinned at the prompt gate where a violation would actually block a send.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_is_gated_only_by_its_own_accounts_report() {
+    use code::acp::{AgentCmd, Delivery};
+    use code::plan_limits::{PlanLimits, Window, now};
+    let a = node("alpha-own-account");
+    let cwd = a.dir.to_string_lossy().into_owned();
+    let resets = now() + 3600;
+    let observed = now() - 60;
+    // Account A over the limit, account B well under it — recorded straight into the guard.
+    a.state.code.plan.record(
+        "acct-a:org-a",
+        Some("Alpha".into()),
+        PlanLimits { five_hour: Some(Window { utilization: 0.99, resets_at: resets }), observed_at: observed, ..Default::default() },
+    );
+    a.state.code.plan.record(
+        "acct-b:org-b",
+        Some("Beta".into()),
+        PlanLimits { five_hour: Some(Window { utilization: 0.05, resets_at: resets }), observed_at: observed, ..Default::default() },
+    );
+    // One provider per account: each config directory's `.claude.json` names its account, so
+    // sessions bound to a provider resolve to exactly that key (and account C has no report).
+    let provider = |id: &str, name: &str, account: (&str, &str)| {
+        let dir = a.dir.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let profile = serde_json::json!({ "oauthAccount": {
+            "accountUuid": account.0, "organizationUuid": account.1, "organizationName": name
+        }});
+        std::fs::write(dir.join(".claude.json"), profile.to_string()).unwrap();
+        a.state
+            .db
+            .upsert_provider(
+                &db::Provider {
+                    id: id.into(),
+                    name: name.into(),
+                    kind: db::ProviderKind::Anthropic,
+                    base_url: "https://api.anthropic.com/v1".into(),
+                    has_key: false,
+                    auth_mode: db::AuthMode::ClaudeLogin,
+                    claude_config_dir: Some(dir.to_string_lossy().into_owned()),
+                },
+                None,
+            )
+            .unwrap();
+        let model = db::Model {
+            id: format!("m-{id}"),
+            provider_id: id.into(),
+            model_id: "claude-x".into(),
+            display_name: name.into(),
+            vision: false,
+            context_window: None,
+            params: Default::default(),
+        };
+        a.state.db.upsert_model(&model).unwrap();
+        model.id
+    };
+    // A session on a provider, with a test agent that answers its prompts.
+    let on = |model: &str| {
+        let s = a.state.db.create_code_session(&cwd, Some(model), "patchbay", "default").unwrap();
+        let mut rx = a.state.code.attach_test_agent(&s.id);
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                if let AgentCmd::Prompt { reply, .. } = cmd
+                    && let Some(reply) = reply
+                {
+                    let _ = reply.send(Ok(Delivery::Sent));
+                }
+            }
+        });
+        s.id
+    };
+    let model_a = provider("prov-a", "Claude Alpha", ("acct-a", "org-a"));
+    let model_b = provider("prov-b", "Claude Beta", ("acct-b", "org-b"));
+    let model_c = provider("prov-c", "Claude Gamma", ("acct-c", "org-c"));
+    let sa = on(&model_a);
+    let sb = on(&model_b);
+    let sc = on(&model_c);
+    let chans: crate::api::ChanFactory = Arc::new(|_| None);
+    let prompt = |id: String| crate::api::call(&a.state, "code_prompt", json!({ "id": id, "text": "more", "attachmentIds": [] }), &chans);
+
+    // A reads A's own 99% — and the message names A's account, not a generic "your Claude plan".
+    let err = prompt(sa).await.unwrap_err();
+    assert!(err.0.starts_with("Not sent. You have used 99% of Claude Alpha's 5-hour limit"), "{}", err.0);
+    // B reads B's 5%: another account's 99% never stops this session.
+    prompt(sb).await.expect("B is not gated by A's numbers");
+    // C has no report of its own: no report, no block — never another account's numbers.
+    prompt(sc).await.expect("an account with no report is not blocked by another's");
 }
 
 /// Plan usage one member sees reaches the others, a member that was away catches up when it
