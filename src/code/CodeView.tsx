@@ -33,6 +33,7 @@ import { Markdown } from "../components/Markdown";
 import { FileLinkContext } from "../components/FileLink";
 import { EditMessage } from "../components/EditMessage";
 import { UsageBar, fmtTokens } from "../components/UsageBar";
+import { sessionModel, sessionModelRef } from "../components/SessionUsage";
 import { coldCacheExpiredAt, isCacheCommand } from "./coldCache";
 import { MobilePlanUsage } from "../components/MobilePlanUsage";
 import { TerminalPane } from "../terminal/TerminalPane";
@@ -1312,12 +1313,10 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
           : "Starting agent…"
         : null;
   const acpModels = s?.models;
-  // Patchbay's own agent and Grok Build run on Patchbay's models (`pb-<id>`); other agents bring their own.
-  const patchbayModels = usesPatchbayModels(session.agent);
-  const currentModelRef = patchbayModels
-    ? (acpModels?.currentModelId?.replace(/^pb-/, "") ?? session.modelRef)
-    : (acpModels?.currentModelId ?? session.agentModel);
-  const model = patchbayModels ? models.find((m) => m.id === currentModelRef) : undefined;
+  // Which catalog model this session runs on: Patchbay's own agent and Grok Build follow the
+  // catalog (`pb-<id>` model ids); the other agents bring a model the catalog doesn't price or size.
+  const currentModelRef = sessionModelRef(session, acpModels?.currentModelId);
+  const model = sessionModel(session, acpModels?.currentModelId, models);
   const configOptions = (s?.configOptions ?? []).filter((o) => o.type === "select");
 
   const setConfigOption = async (o: AcpConfigOption, value: string) => {

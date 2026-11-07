@@ -420,6 +420,11 @@ interface Store {
   /** Last Antigravity plan report from the Cloud Code quota poll or a mesh peer. */
   antigravityPlanLimits: AntigravityPlanLimits | null;
   antigravityPlanOpen: boolean;
+  /**
+   * The sidebar's usage pane for the open Code session when its agent has no plan window (Grok,
+   * Patchbay's own agent, an ACP agent); see components/SessionUsage.
+   */
+  sessionUsageOpen: boolean;
   prefs: Preferences;
   loadPrefs: () => Promise<void>;
   /** Preferences someone saved on this backend (another window or browser tab): show them here. */
@@ -452,6 +457,7 @@ interface Store {
   setCursorPlanOpen: (o: boolean) => void;
   setAntigravityPlanLimits: (l: AntigravityPlanLimits | null) => void;
   setAntigravityPlanOpen: (o: boolean) => void;
+  setSessionUsageOpen: (o: boolean) => void;
   refreshCatalog: () => Promise<void>;
   setDefaultModel: (ref: string) => Promise<void>;
   refreshConversations: () => Promise<void>;
@@ -1146,6 +1152,7 @@ export const useStore = create<Store>((set, get) => ({
   cursorPlanOpen: false,
   antigravityPlanLimits: null,
   antigravityPlanOpen: false,
+  sessionUsageOpen: false,
   confirm: null,
   prefs: defaultPreferences,
   loadPrefs: async () => {
@@ -1213,29 +1220,41 @@ export const useStore = create<Store>((set, get) => ({
   setMeshPopoverOpen: (meshPopoverOpen) =>
     set(
       meshPopoverOpen
-        ? { meshPopoverOpen, planOpen: false, cursorPlanOpen: false, antigravityPlanOpen: false }
+        ? { meshPopoverOpen, planOpen: false, cursorPlanOpen: false, antigravityPlanOpen: false, sessionUsageOpen: false }
         : { meshPopoverOpen },
     ),
   setPlanAccounts: (planAccounts) => set({ planAccounts }),
   setPlanOpen: (planOpen) =>
     set(
       planOpen
-        ? { planOpen, meshPopoverOpen: false, cursorPlanOpen: false, antigravityPlanOpen: false }
+        ? { planOpen, meshPopoverOpen: false, cursorPlanOpen: false, antigravityPlanOpen: false, sessionUsageOpen: false }
         : { planOpen },
     ),
   setCursorPlanLimits: (cursorPlanLimits) => set({ cursorPlanLimits }),
   setCursorPlanOpen: (cursorPlanOpen) =>
     set(
       cursorPlanOpen
-        ? { cursorPlanOpen, meshPopoverOpen: false, planOpen: false, antigravityPlanOpen: false }
+        ? { cursorPlanOpen, meshPopoverOpen: false, planOpen: false, antigravityPlanOpen: false, sessionUsageOpen: false }
         : { cursorPlanOpen },
     ),
   setAntigravityPlanLimits: (antigravityPlanLimits) => set({ antigravityPlanLimits }),
   setAntigravityPlanOpen: (antigravityPlanOpen) =>
     set(
       antigravityPlanOpen
-        ? { antigravityPlanOpen, meshPopoverOpen: false, planOpen: false, cursorPlanOpen: false }
+        ? { antigravityPlanOpen, meshPopoverOpen: false, planOpen: false, cursorPlanOpen: false, sessionUsageOpen: false }
         : { antigravityPlanOpen },
+    ),
+  setSessionUsageOpen: (sessionUsageOpen) =>
+    set(
+      sessionUsageOpen
+        ? {
+            sessionUsageOpen,
+            meshPopoverOpen: false,
+            planOpen: false,
+            cursorPlanOpen: false,
+            antigravityPlanOpen: false,
+          }
+        : { sessionUsageOpen },
     ),
 
   refreshCatalog: async () => {

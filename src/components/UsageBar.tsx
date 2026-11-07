@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CacheClock, Tokens } from "../lib/ipc";
+import { contextPct, hasUsage, usageToneClass } from "../lib/sessionUsage";
 import { isRemoteApp } from "../lib/platform";
 
 export function fmtTokens(n: number): string {
@@ -14,7 +15,20 @@ function fmtCost(usd: number): string {
   return usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
 }
 
-type DetailRow = { label: string; value: string };
+export type DetailRow = { label: string; value: string };
+
+/**
+ * What to say about cost: what the provider reported, else the estimate from the model's prices,
+ * and the label that goes with it (`$0.07` reported, `~$0.07` estimated, null when neither).
+ */
+export function usageCost(
+  totals: Tokens | null | undefined,
+  estimated: number | null | undefined,
+): { reported: number | null; cost: number | null; label: string | null } {
+  const reported = totals?.costUsd != null && totals.costUsd > 0 ? totals.costUsd : null;
+  const cost = reported ?? (estimated != null && estimated > 0 ? estimated : null);
+  return { reported, cost, label: cost == null ? null : `${reported != null ? "" : "~"}${fmtCost(cost)}` };
+}
 
 /**
  * One-line usage summary under a composer: session token totals on the left, a context-window
@@ -46,10 +60,9 @@ export function UsageBar({
   const [sheetOpen, setSheetOpen] = useState(false);
   const cacheNote = useCacheNote(cache ?? null, contextTokens);
   const hasTotals = !!totals && (totals.input > 0 || totals.output > 0);
-  if (!hasTotals && contextTokens == null) return <div className="h-5" />;
+  if (!hasUsage(totals, contextTokens)) return <div className="h-5" />;
 
-  const reported = totals?.costUsd != null && totals.costUsd > 0 ? totals.costUsd : null;
-  const cost = reported ?? (estimatedCostUsd != null && estimatedCostUsd > 0 ? estimatedCostUsd : null);
+  const { reported, cost } = usageCost(totals, estimatedCostUsd);
   const fresh = totals ? Math.max(0, totals.input - totals.cachedRead - totals.cacheWrite) : 0;
   const detail = totals
     ? [
@@ -70,11 +83,9 @@ export function UsageBar({
         .join("\n")
     : "";
 
-  const pct =
-    contextTokens != null && contextWindow ? Math.min(100, (contextTokens / contextWindow) * 100) : null;
+  const pct = contextPct(contextTokens, contextWindow);
   const limit = autoCompactPercent ?? 90;
-  const tone =
-    pct == null ? "stroke-muted" : pct >= limit ? "stroke-danger" : pct >= limit * 0.75 ? "stroke-warn" : "stroke-live";
+  const tone = usageToneClass(pct, limit);
   const ctxTitle = [
     contextTokens == null
       ? "Context fill is reported after the next model call"
@@ -169,7 +180,7 @@ export function UsageBar({
   );
 }
 
-function usageDetailRows({
+export function usageDetailRows({
   totals,
   hasTotals,
   fresh,
@@ -285,7 +296,7 @@ function fmtClock(ms: number): string {
  * prompt that arrives after the cache expires at the cache-write price for the whole context, and
  * `/keepwarm` refreshes it. Null while no cache clock is known.
  */
-function useCacheNote(cache: CacheClock | null, contextTokens: number | null): string | null {
+export function useCacheNote(cache: CacheClock | null, contextTokens: number | null): string | null {
   const lastAt = cache?.lastAt ?? null;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -311,7 +322,7 @@ const RING_R = 5.5;
 const RING_C = 2 * Math.PI * RING_R;
 
 /** The context window as a ring filling clockwise from the top, with a tick where it auto-compacts. */
-function ContextRing({ pct, tone, compactAt }: { pct: number; tone: string; compactAt: number | null }) {
+export function ContextRing({ pct, tone, compactAt }: { pct: number; tone: string; compactAt: number | null }) {
   const tick = compactAt != null ? (compactAt / 100) * 2 * Math.PI : null;
   return (
     <svg
