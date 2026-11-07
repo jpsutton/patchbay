@@ -353,6 +353,16 @@ impl Session {
         crate::store::subagents_dir(&self.host.data_dir(), &self.id).join("status.json")
     }
 
+    /// Whether reading `p` needs no approval: it is in the working directory, or it is this
+    /// session's own history (its transcript or its subagents'), which summaries point the model at.
+    pub fn may_read(&self, p: &std::path::Path) -> bool {
+        use crate::tools::inside;
+        let data = self.host.data_dir();
+        inside(&self.cwd, p)
+            || inside(&crate::store::sessions_dir(&data).join(format!("{}.jsonl", self.id)), p)
+            || inside(&crate::store::subagents_dir(&data, &self.id), p)
+    }
+
     /// Show the subagents' state: to the client, as a `subagents_update`, and in `status.json`.
     pub fn publish_agents(&self) {
         self.agents.write_status(&self.agents_status_path());

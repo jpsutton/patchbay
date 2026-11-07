@@ -146,6 +146,11 @@ impl Store {
         self.path.is_file()
     }
 
+    /// The file, once something has been written to it: what a summary points the model at.
+    pub fn file_path(&self) -> Option<&Path> {
+        (!self.disabled && self.exists()).then_some(self.path.as_path())
+    }
+
     pub fn append(&self, entry: &Entry) {
         if self.disabled {
             return;

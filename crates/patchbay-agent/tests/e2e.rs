@@ -566,7 +566,15 @@ async fn a_fork_starts_from_the_conversation() {
     let sid = open(&mut acp, &cwd).await;
     let r = prompt(&mut acp, &sid, "branch off !fork").await;
     assert_eq!(r["stopReason"], "end_turn");
-    assert!(acp.text_of("agent_message_chunk").contains("FORK-OK"), "{}", acp.text_of("agent_message_chunk"));
+    let text = acp.text_of("agent_message_chunk");
+    assert!(text.contains("FORK-OK"), "{text}");
+    // The fork is offered exactly the main agent's tools, so its request shares the cached prefix.
+    let offered = |t: &str| t.split("tools offered: ").nth(1).and_then(|s| s.split_whitespace().next()).map(str::to_owned);
+    let fork_tools = offered(&text).expect("the fork's echo names its tool count");
+    prompt(&mut acp, &sid, "!tools").await;
+    let all = acp.text_of("agent_message_chunk");
+    let names = all.rsplit("tool names: ").next().unwrap().lines().next().unwrap();
+    assert_eq!(fork_tools, names.split(", ").count().to_string(), "{names}");
     let _ = std::fs::remove_dir_all(cwd);
 }
 

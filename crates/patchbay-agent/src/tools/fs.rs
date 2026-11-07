@@ -91,7 +91,7 @@ come back as cells. Give an absolute path. For a large file read only the part y
     }
 
     fn needs_permission(&self, input: &Value, session: &Session) -> bool {
-        str_arg(input, "file_path").is_none_or(|p| !inside(&session.cwd, &session.resolve(p)))
+        str_arg(input, "file_path").is_none_or(|p| !session.may_read(&session.resolve(p)))
     }
 
     async fn run(&self, input: Value, ctx: &ToolCtx) -> ToolOutput {
