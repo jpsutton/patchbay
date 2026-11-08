@@ -30,9 +30,24 @@ trap 'gpgconf --kill all; rm -rf "$work"' EXIT
 mkdir -m 700 "$GNUPGHOME"
 pages="$work/pages"
 mkdir -p "$pages"
-# Start from what is published, so the older versions stay listed.
+# Start from what is published, so the older versions stay listed. A failed fetch must not
+# be read as a first publish: that would rebuild the index from only the new packages and
+# force-push a tree wiping every published package and the F-Droid tree on this branch.
 if git -C "$src" fetch --depth 1 "$remote" gh-pages 2>/dev/null; then
     git -C "$src" archive FETCH_HEAD | tar -x -C "$pages"
+    if [ -z "$(ls -A "$pages")" ]; then
+        echo "apt-repo.sh: the fetched gh-pages tree is empty; refusing to force-push over what is published" >&2
+        exit 1
+    fi
+elif refs=$(git -C "$src" ls-remote --heads "$remote" gh-pages 2>&1); then
+    if [ -n "$refs" ]; then
+        echo "apt-repo.sh: git fetch of gh-pages failed although the branch exists; refusing to force-push a rebuilt tree: $refs" >&2
+        exit 1
+    fi
+    # The branch is genuinely absent: a first publish, where an empty $pages is correct.
+else
+    echo "apt-repo.sh: fetch failed and gh-pages existence cannot be checked; refusing to force-push: $refs" >&2
+    exit 1
 fi
 gpg --batch --quiet --import <<<"$PATCHBAY_GPG_KEY"
 fpr=$(gpg --batch --with-colons --list-secret-keys | awk -F: '/^fpr/ {print $10; exit}')
