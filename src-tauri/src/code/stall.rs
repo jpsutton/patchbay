@@ -1,6 +1,6 @@
 //! Turns that go quiet (pb-20261107-17). An agent can hold `session/prompt` open with nothing
-//! more to say: opencode does when it suspends a session at a usage limit, and the turn then
-//! looks busy for hours. Every event a session's agent sends counts as activity; a turn with
+//! more to say: opencode did when its free-tier model hit a usage limit mid-turn, and the turn
+//! then looked busy for hours. Every event a session's agent sends counts as activity; a turn with
 //! none for `Preferences::stall_notice_minutes` is marked stalled once, until the agent sends
 //! anything again or the turn ends. Nothing is cancelled: a long shell command or slow thinking
 //! looks the same from here, so the user decides.
