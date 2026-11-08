@@ -1762,14 +1762,30 @@ fn check_stalls(state: &AppState) {
     let limit = std::time::Duration::from_secs(u64::from(minutes) * 60);
     for (id, quiet) in state.code.stall.due(&busy, std::time::Instant::now(), limit) {
         tracing::info!("stalled turn: {id} quiet for {}s", quiet.as_secs());
+        let mut message = code::stall::notice(quiet);
+        if let Some(why) = stall_cause(state, &id) {
+            message = format!("{message}\n\n{why}");
+        }
         on_code_event(
             state,
             code::acp::Envelope {
                 code_session_id: id,
-                event: code::acp::CodeEvent::Stalled { message: code::stall::notice(quiet), quiet_secs: quiet.as_secs() },
+                event: code::acp::CodeEvent::Stalled { message, quiet_secs: quiet.as_secs() },
             },
         );
     }
+}
+
+/// What the agent's own records say about a stalled turn, for agents that keep them where
+/// Patchbay can read them: opencode (pb-20261107-18). `None` whenever there's nothing to read.
+fn stall_cause(state: &AppState, id: &str) -> Option<String> {
+    let session = state.db.get_code_session(id).ok()??;
+    if session.agent != code::agents::AgentKind::Opencode.id() {
+        return None;
+    }
+    let acp = session.acp_session_id?;
+    let readout = code::opencode_state::read(&code::opencode_state::db_path()?, &acp)?;
+    Some(code::opencode_state::describe(&readout))
 }
 
 /// How often sessions waiting on the usage limit are checked for resuming.

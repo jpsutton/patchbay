@@ -38,14 +38,19 @@ All eight speak ACP (over stdio, or in memory for Patchbay's own), so one client
 
 ## Quiet turns
 
-An agent can hold `session/prompt` open with nothing more to say; opencode does when it suspends a
-session at a usage limit, and the turn then looks busy indefinitely. The host counts every event a
+An agent can hold `session/prompt` open with nothing more to say; opencode did when its free-tier
+model hit a usage limit mid-turn, and the turn then looked busy for hours. The host counts every event a
 session's agent sends as activity (`code::stall`). Every 30 s it checks busy sessions that aren't
 waiting on a person (permission, question, sign-in); one quiet for `stallNoticeMinutes` (default
 10, 0 = off; per computer, since the host runs the check) gets one `stalled` event: an info line in
 the transcript, a warn light in the sidebar and "Gone quiet" in the phone's list, and `stalled` from
 `list_agent_sessions`. A window that opens the session meanwhile gets it replayed. The agent's next
 event, or the turn ending, clears it. Nothing is cancelled: a long command looks the same.
+
+For opencode sessions the notice also quotes the newest error opencode recorded in that turn, by the
+session or one of its subagents (`code::opencode_state`, read-only from `opencode.db`; nothing when
+there is none or the schema isn't the one it knows). `session_v2.time_suspended` is not used: opencode
+stamps it whenever a background shell wakes a turn, so it says nothing about limits.
 
 ## Messaging between Code sessions
 
