@@ -58,8 +58,9 @@ export type Mode = "chat" | "code";
 
 export type Entry =
   /** `promptId`: names the prompt in its `userPrompt` events, so each shows once. `pending`: steered
-   *  into the running turn, and the agent has not taken a step since (see `readSteers`). */
-  | { kind: "user"; text: string; attachments?: Attachment[]; promptId?: string; at?: number; pending?: boolean }
+   *  into the running turn, and the agent has not taken a step since (see `readSteers`). `waitFor`:
+   *  the tool calls that were running when it came in; the agent reads it once they are done. */
+  | { kind: "user"; text: string; attachments?: Attachment[]; promptId?: string; at?: number; pending?: boolean; waitFor?: string[] }
   | { kind: "agent"; text: string; at?: number }
   /** An image the agent sent in its reply (an ACP image block). */
   | { kind: "image"; data: string; mimeType: string; from?: "user" }
@@ -614,17 +615,24 @@ function endRunning(calls: Record<string, AcpToolCall>, status: "completed" | "f
 /** `entries` with no steered message waiting on the agent: its turn is over. */
 function noPending(entries: Entry[]): Entry[] {
   return entries.some((x) => x.kind === "user" && x.pending)
-    ? entries.map((x) => (x.kind === "user" && x.pending ? { ...x, pending: false } : x))
+    ? entries.map((x) => (x.kind === "user" && x.pending ? { ...x, pending: false, waitFor: undefined } : x))
     : entries;
 }
 
 /**
  * Steered messages the agent has probably read: it takes one in before its next model request, so
  * once a tool call after the message has finished and the agent goes on, it is no longer waiting.
- * ACP says nothing when a steer is read, so this is a guess from the transcript.
+ * A message that came in while tool calls ran is read as soon as those finish and the agent goes
+ * on: those calls sit above it in the transcript, so the rule above would only fire a whole step
+ * later, long after the model has seen it. ACP says nothing when a steer is read, so this is a
+ * guess from the transcript.
  */
 function readSteers(s: CodeState): CodeState {
   if (!s.entries.some((x) => x.kind === "user" && x.pending)) return s;
+  const done = (id: string) => {
+    const status = s.toolCalls[id]?.status;
+    return status === undefined || status === "completed" || status === "failed";
+  };
   let stepped = false;
   let entries = s.entries;
   for (let i = entries.length - 1; i >= 0; i--) {
@@ -632,9 +640,9 @@ function readSteers(s: CodeState): CodeState {
     if (x.kind === "tool") {
       const status = s.toolCalls[x.id]?.status;
       if (status === "completed" || status === "failed") stepped = true;
-    } else if (x.kind === "user" && x.pending && stepped) {
+    } else if (x.kind === "user" && x.pending && (stepped || (x.waitFor?.length && x.waitFor.every(done)))) {
       if (entries === s.entries) entries = [...entries];
-      entries[i] = { ...x, pending: false };
+      entries[i] = { ...x, pending: false, waitFor: undefined };
     }
   }
   return entries === s.entries ? s : { ...s, entries };
@@ -966,7 +974,14 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
                   attachments,
                   promptId: pid,
                   ...(e.replay || s.status !== "ready" ? {} : { at: Date.now() }),
-                  ...(e.delivery === "steered" && !e.replay ? { pending: true } : {}),
+                  ...(e.delivery === "steered" && !e.replay
+                    ? {
+                        pending: true,
+                        waitFor: Object.values(s.toolCalls)
+                          .filter(isRunning)
+                          .map((tc) => tc.toolCallId),
+                      }
+                    : {}),
                 },
               ],
           queued,
