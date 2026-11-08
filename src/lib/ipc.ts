@@ -609,6 +609,8 @@ export type CodeEvent =
   | { type: "config"; models: AcpModels | null; modes: AcpModes | null; configOptions: AcpConfigOption[] | null }
   | { type: "autoApproved"; toolCallId: string; description: string }
   | { type: "notice"; message: string }
+  /** Patchbay's own: the turn has had nothing from the agent for the stall limit. Nothing was cancelled. */
+  | { type: "stalled"; message: string; quietSecs: number }
   | { type: "update"; update: AcpUpdate }
   | { type: "permission"; requestId: string; request: AcpPermissionRequest }
   | { type: "permissionResolved"; requestId: string }
@@ -901,6 +903,8 @@ export interface Preferences {
   cursorUsageLimit: { enabled: boolean; percent: number; autoResume: boolean };
   /** Archive Code sessions this many days after their last prompt, unless pinned; null = never. */
   autoArchiveDays: number | null;
+  /** Say so, and mark the session, when a turn has had nothing from its agent this many minutes; 0 = off. */
+  stallNoticeMinutes: number;
   permissionMode: "default" | "auto" | "always-approve";
   agentInstructions: string;
   webFetch: boolean;
@@ -950,6 +954,7 @@ export const defaultPreferences: Preferences = {
   usageLimit: { enabled: true, percent: 95, autoResume: false },
   cursorUsageLimit: { enabled: false, percent: 95, autoResume: false },
   autoArchiveDays: null,
+  stallNoticeMinutes: 10,
   permissionMode: "default",
   agentInstructions: "",
   webFetch: false,

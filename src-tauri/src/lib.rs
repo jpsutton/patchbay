@@ -176,6 +176,8 @@ struct LiveAgent {
     /// Each tool call's latest status in this run of the agent. A window that missed events
     /// (see `code_resume`) learns from it which of the calls it still shows running have ended.
     tools: std::collections::HashMap<String, String>,
+    /// The `stalled` event while the turn stays quiet, so a window opening it then sees why.
+    stalled: Option<serde_json::Value>,
 }
 
 /// Errors cross the IPC boundary as plain strings.
@@ -982,7 +984,15 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
             let mut live = state.live.lock().unwrap();
             let id = env.code_session_id.clone();
             let ev = serde_json::to_value(&env.event).unwrap_or_default();
+            // Anything but our own stall report is a sign of life (`code::stall`).
+            if !matches!(env.event, CodeEvent::Stalled { .. })
+                && state.code.stall.touch(&id)
+                && let Some(l) = live.get_mut(&id)
+            {
+                l.stalled = None;
+            }
             match &env.event {
+                CodeEvent::Stalled { .. } => live.entry(id).or_default().stalled = Some(ev),
                 CodeEvent::SessionReady { .. } => {
                     let l = live.entry(id).or_default();
                     l.ready = Some(ev);
@@ -1050,8 +1060,9 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
                         l.questions.retain(|(r, _)| r != request_id);
                     }
                 }
-                CodeEvent::Status { state, .. } if state == "exited" => {
+                CodeEvent::Status { state: s, .. } if s == "exited" => {
                     live.remove(&id);
+                    state.code.stall.forget(&id);
                 }
                 _ => {}
             }
@@ -1715,6 +1726,52 @@ fn enforce_plan_limit(state: &AppState) {
     }
 }
 
+/// Whether the session's turn is held up by a person: an open permission request or question,
+/// or a sign-in.
+fn waiting_on_person(state: &AppState, id: &str) -> bool {
+    state.live.lock().unwrap().get(id).is_some_and(|l| !l.permissions.is_empty() || !l.questions.is_empty() || l.auth.is_some())
+}
+
+/// What a session hosted here is doing, for `list_agent_sessions`.
+fn session_activity(state: &AppState, id: &str) -> code::stall::Activity {
+    code::stall::activity(
+        state.code.is_running(id),
+        state.code.is_busy(id),
+        waiting_on_person(state, id),
+        state.code.stall.is_stalled(id),
+    )
+}
+
+/// Report turns that have gone quiet past `stall_notice_minutes` (0 = off), once each, in their
+/// transcript. Nothing is cancelled (`code::stall`).
+fn check_stalls(state: &AppState) {
+    let minutes = prefs::load(&state.db).stall_notice_minutes;
+    if minutes == 0 {
+        return;
+    }
+    let busy: Vec<(String, bool)> = state
+        .code
+        .busy_sessions()
+        .into_iter()
+        .filter(|id| state.code.is_running(id))
+        .map(|id| {
+            let waiting = waiting_on_person(state, &id) || state.code.pending.lock().unwrap().values().any(|(s, _)| *s == id);
+            (id, waiting)
+        })
+        .collect();
+    let limit = std::time::Duration::from_secs(u64::from(minutes) * 60);
+    for (id, quiet) in state.code.stall.due(&busy, std::time::Instant::now(), limit) {
+        tracing::info!("stalled turn: {id} quiet for {}s", quiet.as_secs());
+        on_code_event(
+            state,
+            code::acp::Envelope {
+                code_session_id: id,
+                event: code::acp::CodeEvent::Stalled { message: code::stall::notice(quiet), quiet_secs: quiet.as_secs() },
+            },
+        );
+    }
+}
+
 /// How often sessions waiting on the usage limit are checked for resuming.
 const RESUME_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 /// Waits this long past a window's reset before prompting, so the plan has really lifted.
@@ -1903,6 +1960,9 @@ fn code_attach_local(state: &AppState, id: &str) -> serde_json::Value {
         events.extend(l.questions.iter().map(|(_, e)| e.clone()));
         events.extend(l.usage.clone());
         events.extend(l.plan.clone());
+        if state.code.is_busy(id) {
+            events.extend(l.stalled.clone());
+        }
     }
     serde_json::json!({ "running": running, "busy": state.code.is_busy(id), "events": events })
 }
@@ -2132,13 +2192,22 @@ pub(crate) fn list_agent_sessions(state: &AppState, source_session_id: &str) -> 
         .filter(|session| session.archived_at.is_none())
         .map(|session| {
             let host = session.host_node.unwrap_or_default();
+            // Only this node knows what its own agents are doing; another host's are unknown (null).
+            let here = host == state.mesh.node_id();
+            let (activity, last_activity_at) = if here {
+                (serde_json::json!(session_activity(state, &session.id).as_str()), serde_json::json!(state.code.stall.last_activity_ms(&session.id)))
+            } else {
+                (serde_json::Value::Null, serde_json::Value::Null)
+            };
             serde_json::json!({
                 "sessionId": session.id,
                 "title": session.title,
                 "agent": session.agent,
                 "hostNode": host,
                 "hostName": state.mesh.member_name(&host),
-                "online": host == state.mesh.node_id() || state.mesh.connected(&host),
+                "online": here || state.mesh.connected(&host),
+                "activity": activity,
+                "lastActivityAt": last_activity_at,
             })
         })
         .collect();
@@ -3749,6 +3818,13 @@ pub fn open_locked_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow:
         }
     });
     let cursor_poller = state.clone();
+    let stall_watch = state.clone();
+    api::spawn(async move {
+        loop {
+            tokio::time::sleep(code::stall::TICK).await;
+            check_stalls(&stall_watch);
+        }
+    });
     api::spawn(async move {
         loop {
             tokio::time::sleep(code::cursor_plan::TICK).await;

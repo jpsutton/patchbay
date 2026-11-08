@@ -14,6 +14,7 @@ pub mod cursor_plan;
 pub mod permissions;
 pub mod plan_limits;
 pub mod questions;
+pub mod stall;
 pub mod titles;
 pub mod wire;
 
@@ -49,6 +50,8 @@ pub struct CodeManager {
     pub plan: plan_limits::PlanGuard,
     pub cursor_plan: cursor_plan::CursorPlanGuard,
     pub antigravity_plan: antigravity_plan::AntigravityPlanGuard,
+    /// Turns the agent has gone quiet in (`stall`).
+    pub stall: stall::StallWatch,
     /// Tests: `start` attaches a stand-in agent and hands its commands out here instead of spawning one.
     #[cfg(test)]
     pub test_started: Mutex<Option<mpsc::UnboundedSender<(String, mpsc::UnboundedReceiver<AgentCmd>)>>>,

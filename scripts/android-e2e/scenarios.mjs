@@ -5,8 +5,9 @@
 //   scenarios.mjs --seed FILE --src DIR [--only a,b]     (--list prints the names)
 //
 // A scenario that needs code the checked-out source does not have is SKIPPED, not failed, so the
-// same suite runs on every branch. Exit 1 when any scenario FAILED; skipped ones are not a failure.
-// `adb` picks the device from ANDROID_SERIAL. Needs Node 22 or newer.
+// same suite runs on every branch. Exit 1 when any scenario FAILED, or when --only names no
+// scenario at all; skipped ones are not a failure. `adb` picks the device from ANDROID_SERIAL.
+// Needs Node 22 or newer.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -225,6 +226,11 @@ async function run() {
   if (!args.seed) throw new Error("--seed is required");
   const seed = JSON.parse(readFileSync(args.seed, "utf8"));
   const only = args.only ? new Set(args.only.split(",")) : null;
+  // A --only that matches nothing would run zero scenarios and exit 0; fail before touching
+  // the phone, naming what was asked for.
+  if (only && !scenarios.some((s) => only.has(s.name))) {
+    throw new Error(`--only matched no scenario; asked for: ${[...only].join(", ")} (scenarios.mjs --list prints the names)`);
+  }
   let page = await main(await attach());
   const ctx = {
     seed,
