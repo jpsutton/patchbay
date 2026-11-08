@@ -1777,15 +1777,21 @@ fn check_stalls(state: &AppState) {
 }
 
 /// What the agent's own records say about a stalled turn, for agents that keep them where
-/// Patchbay can read them: opencode (pb-20261107-18). `None` whenever there's nothing to read.
+/// Patchbay can read them: opencode (pb-20261107-18, pb-20261107-25). `None` for other agents.
+/// For opencode it always says something: when its state can't be read, that is said too, so a
+/// failed read never passes for "nothing found".
 fn stall_cause(state: &AppState, id: &str) -> Option<String> {
+    use code::opencode_state::{Readout, db_path, describe, read};
     let session = state.db.get_code_session(id).ok()??;
     if session.agent != code::agents::AgentKind::Opencode.id() {
         return None;
     }
-    let acp = session.acp_session_id?;
-    let readout = code::opencode_state::read(&code::opencode_state::db_path()?, &acp)?;
-    Some(code::opencode_state::describe(&readout))
+    let readout = match (session.acp_session_id, db_path()) {
+        (Some(acp), Some(path)) => read(&path, &acp),
+        (None, _) => Readout::Unreadable("Patchbay has no opencode session id for it".into()),
+        (_, None) => Readout::Unreadable("there is no home directory to find opencode's database in".into()),
+    };
+    Some(describe(&readout))
 }
 
 /// How often sessions waiting on the usage limit are checked for resuming.
