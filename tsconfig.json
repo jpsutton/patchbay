@@ -15,6 +15,5 @@
     "noEmit": true,
     "types": ["vite/client"]
   },
-  "include": ["src"],
-  "exclude": ["src/**/*.selftest.ts"]
+  "include": ["src"]
 }
