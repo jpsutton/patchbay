@@ -8,14 +8,16 @@
  *    (advisor Option E said "re-collects"; the code does not — pin the snapshot).
  * 3. Empty / missing waitFor falls back to the old stepped rule.
  */
-import type { AcpToolCall, CodeState, Entry } from "./store";
+import type { CodeState, Entry } from "./store";
 import { readSteers } from "./readSteers.ts";
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(`readSteers selftest failed: ${msg}`);
 }
 
-const state = (entries: Entry[], toolCalls: Record<string, Partial<AcpToolCall>>): CodeState =>
+type ToolStub = { toolCallId?: string; status?: string; background?: boolean };
+
+const state = (entries: Entry[], toolCalls: Record<string, ToolStub>): CodeState =>
   ({ entries, toolCalls }) as CodeState;
 
 function pendingOf(s: CodeState): Extract<Entry, { kind: "user" }> | undefined {
@@ -24,7 +26,7 @@ function pendingOf(s: CodeState): Extract<Entry, { kind: "user" }> | undefined {
 }
 
 /** Mirrors store's isRunning filter used when a steer snapshots waitFor. */
-function runningToolIds(toolCalls: Record<string, Partial<AcpToolCall> & { toolCallId?: string }>): string[] {
+function runningToolIds(toolCalls: Record<string, ToolStub>): string[] {
   return Object.values(toolCalls)
     .filter((tc) => !tc.background && (tc.status === "pending" || tc.status === "in_progress"))
     .map((tc) => tc.toolCallId!)
