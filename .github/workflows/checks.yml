@@ -1,7 +1,6 @@
 # Checks on every pull request (into staging and into release): static checks,
-# the frontend's typecheck, build and notices, and the phone app's build. The
-# Rust unit tests on Linux run only on release PRs (staging collects many
-# changes before a release, and a full cold build takes about 20 minutes).
+# the frontend's typecheck, build and notices, the phone app's build, and the
+# Rust unit tests on Linux.
 # No packages; build.yml does those for release PRs.
 #
 # A pull request that only touches docs skips the heavy jobs. They still report
@@ -44,6 +43,14 @@ jobs:
           if [ -z "$PR" ] || [ "$CHANGED" -ge 3000 ]; then
             source=true
           else
+            # The api call must be a plain command whose failure this step sees: inside the
+            # while-read loop's process substitution its exit status is invisible under
+            # set -e, and a failed call would read as "docs only" and skip every test job.
+            if ! files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" \
+                           -q '.[] | .filename, (.previous_filename // empty)'); then
+              echo "::error::gh api could not list the changed files of PR #$PR; refusing to guess source=false"
+              exit 1
+            fi
             # Renames list both names, so moving a source file into docs/ counts.
             while IFS= read -r f; do
               case $f in
@@ -51,8 +58,7 @@ jobs:
                 docs/*|*.md|LICENSE|NOTICE) ;;
                 *) source=true ;;
               esac
-            done < <(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" \
-                       -q '.[] | .filename, (.previous_filename // empty)')
+            done <<< "$files"
           fi
           echo "source=$source" >> "$GITHUB_OUTPUT"
           [ "$source" = true ] || echo "Docs only: skipping the build and test jobs" >> "$GITHUB_STEP_SUMMARY"
@@ -138,13 +144,10 @@ jobs:
       - name: Third-party notices are up to date
         run: pnpm notices && git diff --exit-code -- THIRD_PARTY_NOTICES.md
 
-  # Skipped on staging PRs; a skipped job still satisfies the required check.
   linux:
     needs: changes
     # Runs unless changes found docs only; if changes itself failed, this still runs.
-    if: >-
-      ${{ !cancelled() && needs.changes.outputs.source != 'false' &&
-          (github.event_name != 'pull_request' || github.base_ref == 'release') }}
+    if: ${{ !cancelled() && needs.changes.outputs.source != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
