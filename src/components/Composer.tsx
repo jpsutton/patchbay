@@ -223,7 +223,7 @@ export function Composer({
    * `insert` appends `text` at the end of the current draft instead (adding a share link without
    * losing what the user already typed — pb-20261105-18).
    */
-  seed?: { id: number; text: string; replace?: boolean; insert?: boolean } | null;
+  seed?: { id: number; text: string; replace?: boolean; insert?: boolean; mentions?: string[] } | null;
 }) {
   const [text, setText] = useState("");
   const [atts, setAtts] = useState<Attachment[]>([]);
@@ -255,6 +255,11 @@ export function Composer({
     if (seed.insert) {
       // Keep the draft: append the link at the end, then put the caret after it.
       setText((cur) => (cur.trim() ? `${cur.trimEnd()} ${seed.text}` : seed.text));
+      // A seed can carry @-mentions (e.g. from the Files blade): record them so
+      // submit counts them. Text alone is not enough — mentions are tracked
+      // separately, and only those still in the text are sent.
+      const seedMentions = seed.mentions;
+      if (seedMentions) setMentions((m) => Array.from(new Set([...m, ...seedMentions])));
       const id = window.setTimeout(() => {
         const el = ref.current;
         if (!el) return;

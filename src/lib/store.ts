@@ -393,7 +393,7 @@ interface Store {
    * anywhere in the transcript sets it; the mounted composer takes it atomically so split panes
    * can't both insert the same text. See `Composer`'s `seed` insert mode.
    */
-  composerInsert: { id: number; text: string } | null;
+  composerInsert: { id: number; text: string; mentions?: string[] } | null;
   /** Sidebar title filter. */
   sidebarQuery: string;
   providers: Provider[];
@@ -443,10 +443,10 @@ interface Store {
   setImportClaudeOpen: (o: boolean) => void;
   setSessionInfoId: (id: string | null) => void;
   setShareUrl: (url: string | null) => void;
-  /** Ask the active composer to append `text` to its draft as a markdown link. */
-  insertIntoComposer: (text: string) => void;
+  /** Ask the active composer to append `text` to its draft. `mentions` registers @-mentioned files alongside the text. */
+  insertIntoComposer: (text: string, mentions?: string[]) => void;
   /** Take (and clear) the pending insert. Only the first composer to call gets it. */
-  takeComposerInsert: () => { id: number; text: string } | null;
+  takeComposerInsert: () => { id: number; text: string; mentions?: string[] } | null;
   setSidebarQuery: (q: string) => void;
   setToast: (t: string | null) => void;
   setAlert: (a: Alert | null) => void;
@@ -1208,7 +1208,8 @@ export const useStore = create<Store>((set, get) => ({
   setImportClaudeOpen: (importClaudeOpen) => set({ importClaudeOpen }),
   setSessionInfoId: (sessionInfoId) => set({ sessionInfoId }),
   setShareUrl: (shareUrl) => set({ shareUrl }),
-  insertIntoComposer: (text) => set({ composerInsert: { id: ++nextComposerInsertId, text } }),
+  insertIntoComposer: (text, mentions) =>
+    set({ composerInsert: { id: ++nextComposerInsertId, text, mentions } }),
   takeComposerInsert: () => {
     const pending = get().composerInsert;
     if (pending) set({ composerInsert: null });
