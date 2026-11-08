@@ -6,7 +6,7 @@ A **mesh** links the Patchbay installs on your computers. Once they are linked:
 - API keys and MCP secrets sync too, encrypted. Each computer stores them in its own system keychain.
 - A chat reply that is still streaming on one computer streams on every other computer as well.
 - You can drive a Code session that runs on another computer: send prompts, answer permission requests, switch models and modes, and stop it.
-- You can move a Code session to another computer, with its uncommitted changes. If the computer running a session goes offline, another computer can take the session over from its last checkpoint.
+- You can move a Code session to another computer, with its uncommitted changes. If the computer running a session goes offline, another computer can take the session over with its conversation, in a folder it already has.
 
 Nothing goes through a cloud service. Your computers connect to each other directly.
 
@@ -75,13 +75,13 @@ A folder that isn't a git repository is copied as a whole, up to 512 MB.
 
 ## When a computer goes offline
 
-After every turn of a Code session, the other computers in the mesh fetch a **checkpoint**: the project's files as they are, and the agent's session history. Only what changed since the last checkpoint is transferred.
+A session's conversation is synced to every computer in the mesh. Its project files are not: they are copied only when you move the session while the old computer is online. Patchbay never replicates a working folder to other computers by itself.
 
-If the computer running a session goes offline, the session shows a banner on the others. Click **Take over here** and choose a folder. The session continues from the last checkpoint this computer received. At most the turn that was still running is lost.
+If the computer running a session goes offline, the session shows a banner on the others. Click **Take over here** and choose a folder that already exists on this computer. The session continues there with its conversation, and the agent is given the earlier conversation as context. The files in that folder are used as they are, and the old computer's files and the agent's own session history stay where they were. To keep the files, move the session before its computer goes offline.
 
 Patchbay never takes a session over by itself. It can't tell a computer that has gone offline from one that is cut off from the rest of the network.
 
-If the old computer comes back, it sees that the session moved and stops its agent. Any work it did after the checkpoint is kept in the project as a git ref named `refs/patchbay/orphaned/<session>-<time>`. Nothing is thrown away. To look at that work:
+If the old computer comes back, it sees that the session moved and stops its agent. Any work it did since is kept in the project as a git ref named `refs/patchbay/orphaned/<session>-<time>`. Nothing is thrown away. To look at that work:
 
 ```bash
 git for-each-ref refs/patchbay/orphaned

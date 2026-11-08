@@ -181,7 +181,6 @@ commands! {
     code_question_respond(request_id, answers, id);
     code_move(id, target, cwd);
     code_take_over(id, cwd);
-    code_checkpoints();
     mesh_status();
     mesh_create(passphrase, name);
     mesh_join(url, passphrase, name);

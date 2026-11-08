@@ -63,8 +63,6 @@ pub struct AppState {
     agent_message_bridge: Arc<std::sync::OnceLock<agent_messaging::AgentMessagingBridge>>,
     /// Sends an event to this node's window.
     emit: mesh::node::UiSink,
-    /// Sessions whose checkpoint is being fetched right now.
-    pulling: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Per running session: the events a newly attached viewer needs to catch up.
     live: Arc<std::sync::Mutex<std::collections::HashMap<String, LiveAgent>>>,
     /// Terminals of sessions on other nodes, shown here: terminal id -> output channel and
@@ -109,12 +107,13 @@ impl AppState {
             mesh: mesh.clone(),
             agent_message_bridge: Arc::default(),
             emit: emit.clone(),
-            pulling: Arc::default(),
             live: Arc::default(),
             remote_terms: Arc::default(),
             desktop: Arc::default(),
             shares,
         };
+        // Nothing is in flight yet, so whatever a crashed or failed transfer left in the inbox is garbage.
+        let _ = std::fs::remove_dir_all(handoff::inbox(&state.data_dir));
         state.code.plan.set_accounts(load_plan_accounts(&state.db));
         if let Some(r) = state.db.get_setting(PLAN_RESUME_KEY).ok().flatten().and_then(|j| serde_json::from_str(&j).ok()) {
             state.code.plan.set_resumes(r);
@@ -897,8 +896,7 @@ fn ensure_local_host(state: &AppState, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Agent events go to this window and, live, to every other node. A finished turn also tells
-/// the other nodes to fetch a checkpoint, so the session survives this node going away.
+/// Agent events go to this window and, live, to every other node.
 fn code_sink(state: &AppState) -> code::acp::Sink {
     let state = state.clone();
     Arc::new(move |env| on_code_event(&state, env))
@@ -1066,10 +1064,6 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
                 }
                 _ => {}
             }
-        }
-        if matches!(env.event, CodeEvent::PromptDone { .. }) {
-            let p = serde_json::json!({ "id": env.code_session_id, "host": mesh.node_id() });
-            mesh.broadcast_event("mesh://checkpoint", p);
         }
         // Stamped with its point, so phones and windows can resume from it.
         let v = mesh.broadcast_event(code::acp::EVENT, serde_json::to_value(&env).unwrap_or_default());
@@ -2826,19 +2820,21 @@ fn local_commits(cwd: &str) -> Vec<String> {
     }
 }
 
-/// Host side: package a session for another node (`kind` = handoff | checkpoint).
+/// Host side: package a session for another node (`kind` = handoff).
 async fn package_local(state: &AppState, id: &str, kind: &str, have: Vec<String>) -> anyhow::Result<serde_json::Value> {
     ensure_local_host(state, id)?;
-    if kind == "handoff" {
-        if state.code.is_busy(id) {
-            anyhow::bail!("the agent is in the middle of a turn; move the session once it finishes");
-        }
-        state.code.set_moving(id, true);
-        // Let the agent flush its session files before they're copied.
-        let code = state.code.clone();
-        let sid = id.to_owned();
-        tokio::task::spawn_blocking(move || code.stop_and_wait(&sid, std::time::Duration::from_secs(5))).await?;
+    // Older computers asked for `checkpoint` packages after every turn; the workspace is only copied on a move.
+    if kind != "handoff" {
+        anyhow::bail!("only a move copies the working folder");
     }
+    if state.code.is_busy(id) {
+        anyhow::bail!("the agent is in the middle of a turn; move the session once it finishes");
+    }
+    state.code.set_moving(id, true);
+    // Let the agent flush its session files before they're copied.
+    let code = state.code.clone();
+    let sid = id.to_owned();
+    tokio::task::spawn_blocking(move || code.stop_and_wait(&sid, std::time::Duration::from_secs(5))).await?;
     let s = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("no such session"))?;
     let (dir, home, kind2) = (state.data_dir.clone(), agent_home(state), kind.to_owned());
     let res = tokio::task::spawn_blocking(move || handoff::package(&dir, &home, &s, &kind2, &have)).await?;
@@ -2854,11 +2850,19 @@ async fn package_local(state: &AppState, id: &str, kind: &str, have: Vec<String>
     }
 }
 
-/// Copy a package's files from `host` into a local inbox directory.
+/// Copy a package's files from `host` into a local inbox directory. A failed copy leaves nothing behind.
 async fn fetch_package(state: &AppState, host: &str, token: &str, meta: &handoff::Meta) -> anyhow::Result<PathBuf> {
-    use base64::Engine;
     let dir = handoff::inbox(&state.data_dir).join(token);
-    tokio::fs::create_dir_all(&dir).await?;
+    let res = fetch_package_files(state, host, token, meta, &dir).await;
+    if res.is_err() {
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+    res.map(|_| dir)
+}
+
+async fn fetch_package_files(state: &AppState, host: &str, token: &str, meta: &handoff::Meta, dir: &std::path::Path) -> anyhow::Result<()> {
+    use base64::Engine;
+    tokio::fs::create_dir_all(dir).await?;
     for name in &meta.files {
         let mut f = tokio::fs::File::create(dir.join(name)).await?;
         let mut offset = 0u64;
@@ -2875,7 +2879,7 @@ async fn fetch_package(state: &AppState, host: &str, token: &str, meta: &handoff
             }
         }
     }
-    Ok(dir)
+    Ok(())
 }
 
 /// Target side: pull session `id` from its host into `cwd` here and take over the lease.
@@ -2885,7 +2889,7 @@ async fn import_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Result<O
     let host = s.host_node.clone().filter(|h| h != &me).ok_or_else(|| anyhow::anyhow!("this session already runs here"))?;
     let host_name = state.mesh.member_name(&host);
     if !state.mesh.connected(&host) {
-        anyhow::bail!("{host_name} is offline; use Take over to continue from its last checkpoint");
+        anyhow::bail!("{host_name} is offline; use Take over to continue the conversation here");
     }
     let r = state
         .mesh
@@ -2898,8 +2902,9 @@ async fn import_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Result<O
         let (home, target, from) = (agent_home(state), PathBuf::from(cwd), host_name.clone());
         let m = meta.clone();
         let d = dir.clone();
-        let (restored, note) = tokio::task::spawn_blocking(move || handoff::unpack(&d, &m, &home, &target, &from)).await??;
+        let unpacked = tokio::task::spawn_blocking(move || handoff::unpack(&d, &m, &home, &target, &from)).await;
         let _ = tokio::fs::remove_dir_all(&dir).await;
+        let (restored, note) = unpacked??;
         finish_takeover(state, &s, cwd, restored, &host_name)?;
         Ok(note)
     }
@@ -2933,7 +2938,9 @@ async fn code_move(state: &AppState, id: String, target: String, cwd: String) ->
     Ok(r.as_str().map(str::to_owned))
 }
 
-/// Continue a session here from the last checkpoint this node holds, when its host is gone.
+/// Continue a session here when its host is gone. Only the conversation (already synced here)
+/// comes along: the host's working folder can't be copied while it is offline, so the session
+/// carries on in a folder that already exists on this computer.
 async fn take_over_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Result<Option<String>> {
     let s = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("no such session"))?;
     let me = state.mesh.node_id().to_owned();
@@ -2942,69 +2949,18 @@ async fn take_over_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Resul
     if state.mesh.connected(&host) {
         anyhow::bail!("{host_name} is online; move the session instead");
     }
-    let (dir, home, target) = (state.data_dir.clone(), agent_home(state), PathBuf::from(cwd));
-    let (sid, from) = (id.to_owned(), host_name.clone());
-    let (restored, note) = if handoff::checkpoint(&state.data_dir, id).is_some() {
-        tokio::task::spawn_blocking(move || handoff::restore_checkpoint(&dir, &home, &sid, &target, &from)).await??
-    } else if target.is_dir() {
-        (false, Some(format!("No checkpoint from {host_name} reached this computer, so only the conversation came along.")))
-    } else {
-        anyhow::bail!("no checkpoint from {host_name} is here and {} doesn't exist", target.display());
-    };
-    finish_takeover(state, &s, cwd, restored, &host_name)?;
-    Ok(note)
+    let target = std::path::Path::new(cwd);
+    if !target.is_dir() {
+        anyhow::bail!("{} doesn't exist; choose a folder that already exists on this computer", target.display());
+    }
+    finish_takeover(state, &s, cwd, false, &host_name)?;
+    Ok(Some(format!(
+        "{host_name} is offline, so only the conversation came along. The files in {cwd} are whatever is on this computer."
+    )))
 }
 
 async fn code_take_over(state: &AppState, id: String, cwd: String) -> CmdResult<Option<String>> {
     Ok(take_over_local(state, &id, cwd.trim()).await?)
-}
-
-/// Checkpoints of other nodes' sessions this node holds: session id -> taken at (ms).
-async fn code_checkpoints(state: &AppState) -> CmdResult<std::collections::HashMap<String, i64>> {
-    let mut out = std::collections::HashMap::new();
-    for s in state.db.list_code_sessions()? {
-        if let Some(m) = handoff::checkpoint(&state.data_dir, &s.id) {
-            out.insert(s.id, m.created_at);
-        }
-    }
-    Ok(out)
-}
-
-/// Fetch the latest checkpoint of a session hosted on `host`.
-async fn pull_checkpoint(state: AppState, id: String, host: String) {
-    if !state.pulling.lock().unwrap().insert(id.clone()) {
-        return;
-    }
-    let mut have = handoff::checkpoint_have(&state.data_dir, &id);
-    let mut result = Err(anyhow::anyhow!("not attempted"));
-    for _ in 0..2 {
-        result = async {
-            let r = state
-                .mesh
-                .rpc_long(&host, "code.package", serde_json::json!({ "id": id, "kind": "checkpoint", "have": have }))
-                .await?;
-            let token = r["token"].as_str().unwrap_or_default().to_owned();
-            let meta: handoff::Meta = serde_json::from_value(r["meta"].clone())?;
-            let dir = fetch_package(&state, &host, &token, &meta).await;
-            let _ = state.mesh.rpc(&host, "code.package_done", serde_json::json!({ "id": id, "token": token, "moved": false })).await;
-            let dir = dir?;
-            let data = state.data_dir.clone();
-            let d = dir.clone();
-            tokio::task::spawn_blocking(move || handoff::store_checkpoint(&data, &d, &meta)).await??;
-            let _ = tokio::fs::remove_dir_all(&dir).await;
-            anyhow::Ok(())
-        }
-        .await;
-        // The host may have pruned what we had: retry once with a full copy.
-        if result.is_ok() || have.is_empty() {
-            break;
-        }
-        have.clear();
-    }
-    if let Err(e) = result {
-        tracing::warn!("mesh: checkpoint of {id}: {e:#}");
-    }
-    state.pulling.lock().unwrap().remove(&id);
 }
 
 // ---------------- mesh ----------------
@@ -3290,13 +3246,7 @@ impl mesh::RpcHandler for MeshRpc {
                 l.account_id = id.to_owned();
             }
             adopt_antigravity_plan(&self.state, l, false);
-            return;
         }
-        if name != "mesh://checkpoint" {
-            return;
-        }
-        let (Some(id), Some(host)) = (payload["id"].as_str(), payload["host"].as_str()) else { return };
-        tokio::spawn(pull_checkpoint(self.state.clone(), id.to_owned(), host.to_owned()));
     }
 
     fn greeting(&self) -> Vec<(String, serde_json::Value)> {

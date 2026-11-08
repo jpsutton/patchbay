@@ -782,11 +782,6 @@ async fn get_code_transcript(r: Shared<'_>, id: String) -> CmdResult<Value> {
 #[tauri::command]
 fn save_code_transcript() {}
 
-#[tauri::command]
-fn code_checkpoints() -> Value {
-    json!({})
-}
-
 /// Follow the session and catch up: the host's replay plus what happened since its last turn.
 #[tauri::command]
 async fn code_attach(r: Shared<'_>, id: String) -> CmdResult<Value> {
@@ -1130,7 +1125,6 @@ pub fn run() {
             host_info,
             get_code_transcript,
             save_code_transcript,
-            code_checkpoints,
             code_attach,
             code_start,
             code_is_running,
