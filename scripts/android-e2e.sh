@@ -737,8 +737,9 @@ cmd=${1:-help}
 # runs wipe each other's seed.json (pb-20261107-24) and the e2e is load-sensitive anyway. mkdir is atomic and
 # portable (macOS has no flock); a lock whose pid is dead is stale and taken over. Fail fast: a pre-push gate
 # that queued behind a ten-minute run would look hung, so the refused side says who holds it and what to do.
+E2E_LOCK=$E2E_DIR/lock # script-level so the EXIT trap can still see it
 take_lock() {
-    local lock=$E2E_DIR/lock holder
+    local holder lock=$E2E_LOCK
     mkdir -p "$E2E_DIR"
     until mkdir "$lock" 2>/dev/null; do
         holder=$(cat "$lock/pid" 2>/dev/null || true)
@@ -747,7 +748,7 @@ take_lock() {
     done
     printf '%s\n' "$$" >"$lock/pid"
     printf '%s\n' "$cmd $* (from $top)" >"$lock/cmd"
-    trap "rm -rf '$lock'" EXIT
+    trap 'rm -rf "$E2E_LOCK"' EXIT
 }
 case "$cmd" in doctor | status | logs | help | -h | --help) ;; *) take_lock "$@" ;; esac
 case "$cmd" in
