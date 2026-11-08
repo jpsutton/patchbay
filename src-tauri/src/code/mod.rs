@@ -9,6 +9,7 @@ pub mod grok_config;
 pub mod import_claude;
 pub mod mcp;
 pub mod native;
+pub mod opencode_state;
 pub mod antigravity_plan;
 pub mod cursor_plan;
 pub mod permissions;

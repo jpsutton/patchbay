@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
+use patchbay_agent::proc::search_dirs;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -296,37 +297,11 @@ pub struct Launch {
 /// User overrides from Settings: agent id -> executable path.
 pub type AgentPaths = BTreeMap<String, String>;
 
-/// PATH plus the user-level bin directories a desktop launch may leave out of it.
-fn search_dirs() -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    if let Some(home) = home_dir() {
-        for d in [".local/bin", "bin", ".npm-global/bin", ".bun/bin", ".opencode/bin", ".cursor/bin", ".volta/bin"] {
-            dirs.push(home.join(d));
-        }
-    }
-    if cfg!(unix) {
-        dirs.push("/usr/local/bin".into());
-        dirs.push("/opt/homebrew/bin".into());
-    }
-    dirs
-}
-
 /// PATH for an agent process: the program's own directory first (an npm shim's `node` usually
 /// sits beside it), then [`search_dirs`]. Without this, a shim found in `~/.npm-global/bin`
 /// fails with "env: node: No such file" when Patchbay was started from a desktop entry.
 fn child_path(program: &Path) -> Option<String> {
-    let mut dirs = Vec::new();
-    if let Some(dir) = program.parent().filter(|d| !d.as_os_str().is_empty()) {
-        dirs.push(dir.to_path_buf());
-    }
-    for d in search_dirs() {
-        if !dirs.contains(&d) {
-            dirs.push(d);
-        }
-    }
-    std::env::join_paths(dirs).ok().map(|p| p.to_string_lossy().into_owned())
+    patchbay_agent::proc::child_path(program.parent())
 }
 
 /// Locate an executable on [`search_dirs`].
