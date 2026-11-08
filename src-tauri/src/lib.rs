@@ -115,6 +115,8 @@ impl AppState {
             desktop: Arc::default(),
             shares,
         };
+        // Nothing is in flight yet, so whatever a crashed or failed transfer left in the inbox is garbage.
+        let _ = std::fs::remove_dir_all(handoff::inbox(&state.data_dir));
         state.code.plan.set_accounts(load_plan_accounts(&state.db));
         if let Some(r) = state.db.get_setting(PLAN_RESUME_KEY).ok().flatten().and_then(|j| serde_json::from_str(&j).ok()) {
             state.code.plan.set_resumes(r);
@@ -2854,11 +2856,19 @@ async fn package_local(state: &AppState, id: &str, kind: &str, have: Vec<String>
     }
 }
 
-/// Copy a package's files from `host` into a local inbox directory.
+/// Copy a package's files from `host` into a local inbox directory. A failed copy leaves nothing behind.
 async fn fetch_package(state: &AppState, host: &str, token: &str, meta: &handoff::Meta) -> anyhow::Result<PathBuf> {
-    use base64::Engine;
     let dir = handoff::inbox(&state.data_dir).join(token);
-    tokio::fs::create_dir_all(&dir).await?;
+    let res = fetch_package_files(state, host, token, meta, &dir).await;
+    if res.is_err() {
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+    res.map(|_| dir)
+}
+
+async fn fetch_package_files(state: &AppState, host: &str, token: &str, meta: &handoff::Meta, dir: &std::path::Path) -> anyhow::Result<()> {
+    use base64::Engine;
+    tokio::fs::create_dir_all(dir).await?;
     for name in &meta.files {
         let mut f = tokio::fs::File::create(dir.join(name)).await?;
         let mut offset = 0u64;
@@ -2875,7 +2885,7 @@ async fn fetch_package(state: &AppState, host: &str, token: &str, meta: &handoff
             }
         }
     }
-    Ok(dir)
+    Ok(())
 }
 
 /// Target side: pull session `id` from its host into `cwd` here and take over the lease.
@@ -2898,8 +2908,9 @@ async fn import_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Result<O
         let (home, target, from) = (agent_home(state), PathBuf::from(cwd), host_name.clone());
         let m = meta.clone();
         let d = dir.clone();
-        let (restored, note) = tokio::task::spawn_blocking(move || handoff::unpack(&d, &m, &home, &target, &from)).await??;
+        let unpacked = tokio::task::spawn_blocking(move || handoff::unpack(&d, &m, &home, &target, &from)).await;
         let _ = tokio::fs::remove_dir_all(&dir).await;
+        let (restored, note) = unpacked??;
         finish_takeover(state, &s, cwd, restored, &host_name)?;
         Ok(note)
     }
@@ -2990,8 +3001,9 @@ async fn pull_checkpoint(state: AppState, id: String, host: String) {
             let dir = dir?;
             let data = state.data_dir.clone();
             let d = dir.clone();
-            tokio::task::spawn_blocking(move || handoff::store_checkpoint(&data, &d, &meta)).await??;
+            let stored = tokio::task::spawn_blocking(move || handoff::store_checkpoint(&data, &d, &meta)).await;
             let _ = tokio::fs::remove_dir_all(&dir).await;
+            stored??;
             anyhow::Ok(())
         }
         .await;

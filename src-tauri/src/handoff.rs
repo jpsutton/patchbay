@@ -338,8 +338,17 @@ pub fn store_checkpoint(data_dir: &Path, dir: &Path, meta: &Meta) -> Result<()> 
             std::fs::create_dir_all(&mirror)?;
             git(&mirror, &["init", "-q", "--bare"])?;
         }
+        // A fetch that ran out of disk or was killed leaves its partial pack behind.
+        if let Ok(rd) = std::fs::read_dir(mirror.join("objects").join("pack")) {
+            for e in rd.flatten() {
+                if e.file_name().to_string_lossy().starts_with("tmp_") {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
         let src = dir.join("workspace.bundle");
         git(&mirror, &["fetch", "-q", &src.to_string_lossy(), &format!("+{r}:{r}", r = g.reference)])?;
+        compact_mirror(&mirror);
     }
     for f in ["agent.tar", "workspace.tar"] {
         let p = dir.join(f);
@@ -352,6 +361,19 @@ pub fn store_checkpoint(data_dir: &Path, dir: &Path, meta: &Meta) -> Result<()> 
     }
     std::fs::write(keep.join("meta.json"), serde_json::to_vec_pretty(meta)?)?;
     Ok(())
+}
+
+/// Every checkpoint adds a pack, and the ref moving on strands the old snapshot's objects in
+/// the older ones. Once a few pile up, repack what the ref still reaches into one pack and
+/// drop the rest (`-a -d` without `-A` deletes unreachable objects instead of loosening them).
+fn compact_mirror(mirror: &Path) {
+    let packs = git(mirror, &["count-objects", "-v"])
+        .ok()
+        .and_then(|out| out.lines().find_map(|l| l.strip_prefix("packs:").and_then(|n| n.trim().parse::<u32>().ok())))
+        .unwrap_or(0);
+    if packs >= 3 {
+        let _ = git(mirror, &["repack", "-a", "-d", "-q"]);
+    }
 }
 
 /// The latest checkpoint this node holds for a session.
