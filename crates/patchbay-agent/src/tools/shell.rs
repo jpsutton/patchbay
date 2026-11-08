@@ -121,6 +121,10 @@ fn spawn_shell(
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("NO_COLOR", "1")
         .kill_on_drop(true);
+    // The same PATH as the ACP agents get: a desktop launch's bare one finds no user tools.
+    if let Some(path) = crate::proc::child_path(None) {
+        cmd.env("PATH", path);
+    }
     crate::proc::NoWindow::no_window(&mut cmd);
     #[cfg(unix)]
     cmd.process_group(0);
@@ -547,5 +551,15 @@ mod tests {
         finished(&mut run).await;
         assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), "/");
         let _ = std::fs::remove_file(file);
+    }
+
+    #[tokio::test]
+    async fn the_shell_gets_the_extended_path() {
+        let dir = std::env::temp_dir();
+        let mut run = spawn_shell("printf %s \"$PATH\"", &dir, None, None).unwrap();
+        assert_eq!(finished(&mut run).await, 0);
+        let path = run.output();
+        assert_eq!(Some(path.trim()), crate::proc::child_path(None).as_deref(), "the shell's PATH");
+        assert!(path.split(':').any(|d| d == "/opt/homebrew/bin"), "{path}");
     }
 }
