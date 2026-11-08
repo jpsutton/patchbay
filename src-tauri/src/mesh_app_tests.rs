@@ -717,6 +717,67 @@ async fn attach_replays_latest_plan() {
     assert_eq!(got[0]["update"]["entries"][0]["content"], "decode the archive");
 }
 
+/// pb-20261107-17: a turn with nothing from its agent past the limit is reported once (a
+/// `stalled` event in its transcript, replayed to a window that opens it, and `stalled` in
+/// `list_agent_sessions`), never cancelled, and cleared by the agent's next word.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quiet_turn_is_reported_stalled_once_and_cleared_by_activity() {
+    use code::acp::CodeEvent;
+    let a = node("alpha-stall");
+    let s = a.state.db.create_code_session(&a.dir.to_string_lossy(), None, "opencode", "default").unwrap();
+    let mut rx = a.state.code.attach_test_agent(&s.id);
+    let stalls = || {
+        a.events.lock().unwrap().iter().filter(|(n, p)| n == code::acp::EVENT && p["event"]["type"] == "stalled").count()
+    };
+    let activity = || {
+        let listed = list_agent_sessions(&a.state, &s.id).unwrap();
+        let me = listed.as_array().unwrap().iter().find(|x| x["sessionId"] == s.id.as_str()).cloned().unwrap();
+        (me["activity"].as_str().unwrap_or_default().to_owned(), me["lastActivityAt"].clone())
+    };
+    let replayed = || {
+        code_attach_local(&a.state, &s.id)["events"].as_array().unwrap().iter().any(|e| e["type"] == "stalled")
+    };
+    assert_eq!(activity().0, "idle");
+
+    // Mid-turn, and the agent's last word was eleven minutes ago.
+    a.state.code.set_busy(&s.id, true);
+    emit(&a, &s.id, chunk("merging now"));
+    assert_eq!(activity().0, "running");
+    assert!(activity().1.is_i64(), "last activity is reported");
+    let ago = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(11 * 60)).unwrap();
+    a.state.code.stall.touch_at(&s.id, ago, 1);
+    check_stalls(&a.state);
+    assert_eq!(stalls(), 1);
+    assert_eq!(activity().0, "stalled");
+    assert!(replayed(), "a window opening it now sees why");
+    check_stalls(&a.state);
+    assert_eq!(stalls(), 1, "reported once");
+    assert!(rx.try_recv().is_err(), "nothing was sent to the agent: no cancel");
+    assert!(a.state.code.is_busy(&s.id), "the turn is left running");
+
+    // The agent speaks again: no longer stalled, and nothing to replay.
+    emit(&a, &s.id, chunk("done"));
+    assert_eq!(activity().0, "running");
+    assert!(!replayed());
+
+    // Waiting on a person is never a stall.
+    a.state.code.stall.touch_at(&s.id, ago, 1);
+    emit(&a, &s.id, CodeEvent::Question { request_id: "q1".into(), form: json!({}) });
+    a.state.code.stall.touch_at(&s.id, ago, 1);
+    check_stalls(&a.state);
+    assert_eq!(stalls(), 1);
+    assert_eq!(activity().0, "waiting");
+
+    // Off at 0.
+    emit(&a, &s.id, CodeEvent::QuestionResolved { request_id: "q1".into() });
+    let mut p = prefs::load(&a.state.db);
+    p.stall_notice_minutes = 0;
+    prefs::save(&a.state.db, &p).unwrap();
+    a.state.code.stall.touch_at(&s.id, ago, 1);
+    check_stalls(&a.state);
+    assert_eq!(stalls(), 1, "off");
+}
+
 /// The usage guard: a Claude Code turn past the plan limit is cancelled once, with a notice, and
 /// new prompts are refused until the window resets. Sessions on other agents run on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -44,6 +44,7 @@ import { loadStringList, saveStringList } from "./manualOrder";
 import * as paneLogic from "./panes";
 import { isForegroundUpdate } from "./codeWorking";
 import { chunkChars, phaseOf, type Phase } from "./workingStatus";
+import { trackStall } from "./stall";
 import { adoptEarlier } from "./earlierHistory";
 import { appendUserChunk } from "./harness";
 import { planUpdateOf } from "./todoPlan";
@@ -126,6 +127,8 @@ export interface CodeState {
   approvalGaps: string[];
   /** The agent waits for a sign-in: before it starts a session, or mid-session. */
   auth: { message: string; methods: AuthChoice[] } | null;
+  /** The host reported this turn quiet that many seconds ago (`lib/stall.ts`); null otherwise. */
+  stalled: number | null;
   /** Prompts waiting for the running turn to end. */
   queued: QueuedPrompt[];
   /** Queued prompts this window sent that a stop dropped, for its composer to take back. */
@@ -188,6 +191,7 @@ const emptyCode = (): CodeState => ({
   extensions: { statusLine: false, rewind: false },
   approvalGaps: [],
   auth: null,
+  stalled: null,
   queued: [],
   restore: null,
   autoApproved: {},
@@ -818,6 +822,14 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
     case "notice":
       next = { ...s, entries: [...s.entries, { kind: "info", text: e.message }] };
       break;
+    case "stalled":
+      // A replay of the same report (a window catching up) doesn't add a second line.
+      next =
+        s.stalled != null
+          ? { ...s, stalled: e.quietSecs }
+          : { ...s, stalled: e.quietSecs, entries: [...s.entries, { kind: "info", text: e.message }] };
+      if (s.stalled == null) notifyCode(id, "has gone quiet");
+      break;
     case "unrecognized": {
       // Repeats of the same kind in a turn (an unknown chunk type, say) show as one line, with
       // the latest payload, even with other entries between them.
@@ -1363,7 +1375,7 @@ export const useStore = create<Store>((set, get) => ({
     let restart = false;
     for (const e of events) {
       if (e.type === "title") title = e.title;
-      else s = trackTurn(s, stepCodeEvent(id, s, e));
+      else s = trackStall(e.type, trackTurn(s, stepCodeEvent(id, s, e)));
       if (e.type === "promptDone" || e.type === "permissionResolved") restart = true;
     }
     // One store update for the whole batch: each one re-renders the open transcript.

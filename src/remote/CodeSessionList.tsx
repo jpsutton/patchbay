@@ -15,6 +15,8 @@ export interface Live {
   permissions: string[];
   /** Open agent questions; absent from older hosts. */
   questions?: string[];
+  /** Mid-turn with nothing from the agent for the host's stall limit; absent from older hosts. */
+  stalled?: boolean;
   last: number;
 }
 
@@ -369,6 +371,13 @@ function SessionState({ live, online }: { live?: Live; online: boolean }) {
   if (!online) return <span className="text-[12px] text-faint">Offline</span>;
   if (liveNeedsYou(live))
     return <span className="rounded-full bg-accent px-2 py-0.5 text-[12px] font-semibold text-accent-fg">Needs you</span>;
+  if (live?.busy && live.stalled)
+    return (
+      <span className="flex items-center gap-1.5 text-[12px] text-warn">
+        <Dot size={6} className="text-warn" />
+        Gone quiet
+      </span>
+    );
   if (live?.busy)
     return (
       <span className="flex items-center gap-1.5 text-[12px] text-live">

@@ -86,6 +86,14 @@ pub enum CodeEvent {
     Notice {
         message: String,
     },
+    /// Patchbay's own: the turn has had nothing from the agent for the stall limit
+    /// (`code::stall`). Shown like a notice and marks the session stalled until the agent sends
+    /// anything else. Nothing is cancelled.
+    #[serde(rename_all = "camelCase")]
+    Stalled {
+        message: String,
+        quiet_secs: u64,
+    },
     #[serde(rename_all = "camelCase")]
     PromptDone {
         stop_reason: Value,
