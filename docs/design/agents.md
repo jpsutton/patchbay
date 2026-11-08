@@ -36,10 +36,23 @@ All eight speak ACP (over stdio, or in memory for Patchbay's own), so one client
 - DB: `code_sessions.agent` (default `grok` for rows made before the built-in agent; new sessions use the `defaultAgent` preference, `patchbay` by default) and `code_sessions.agent_model`. ACP session ids only mean something to the agent that made them, so switching agents starts a new ACP session (next section).
 - Preferences: `defaultAgent` and `agentPaths` (id -> executable). Changing `agentPaths` restarts idle sessions, like the other agent settings.
 
+## Quiet turns
+
+An agent can hold `session/prompt` open with nothing more to say; opencode does when it suspends a
+session at a usage limit, and the turn then looks busy indefinitely. The host counts every event a
+session's agent sends as activity (`code::stall`). Every 30 s it checks busy sessions that aren't
+waiting on a person (permission, question, sign-in); one quiet for `stallNoticeMinutes` (default
+10, 0 = off; per computer, since the host runs the check) gets one `stalled` event: an info line in
+the transcript, a warn light in the sidebar and "Gone quiet" in the phone's list, and `stalled` from
+`list_agent_sessions`. A window that opens the session meanwhile gets it replayed. The agent's next
+event, or the turn ending, clears it. Nothing is cancelled: a long command looks the same.
+
 ## Messaging between Code sessions
 
 Each running session receives a Patchbay-owned MCP server through ACP's `mcpServers` field. Its
-`list_agent_sessions` tool discovers unarchived sessions by title and host; `send_agent_message`
+`list_agent_sessions` tool discovers unarchived sessions by title and host, with `activity`
+(`running`, `waiting`, `stalled`, `idle`, `stopped`) and `lastActivityAt` for sessions on the
+caller's own computer (null for other hosts); `send_agent_message`
 addresses one session by id. The MCP child uses a short-lived request to a loopback listener owned
 by the Patchbay process. A per-session random token and the source session id accompany that
 request; Patchbay checks that the source session is hosted on the sending member.

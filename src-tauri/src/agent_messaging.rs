@@ -423,7 +423,7 @@ fn tools_list_for(can_steer: bool) -> Value {
     let mut tools = vec![
         json!({
             "name": TOOL_LIST_SESSIONS,
-            "description": "List unarchived Patchbay Code sessions in this mesh so you can find a recipient by title and node.",
+            "description": "List unarchived Patchbay Code sessions in this mesh so you can find a recipient by title and node. For sessions on the same computer as you, `activity` says what each is doing (running, waiting on a person, stalled = mid-turn with nothing from its agent for a while, idle, or stopped) and `lastActivityAt` when its agent last sent anything (Unix ms); both are null for sessions on other computers.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         }),
         json!({

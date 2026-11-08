@@ -649,6 +649,22 @@ export function AgentsPage({ list, onOpen }: { list: AgentList; onOpen: (id: Age
           }}
         />
       </Row>
+      <Row
+        label="Flag quiet turns after (minutes)"
+        hint="When an agent sends nothing for this long in the middle of a turn, say so in the session and mark it in the sidebar. A usage limit or a lost connection can leave a turn hanging like this. Patchbay doesn't stop the turn; a long command looks the same. 0 = off."
+      >
+        <Deferred
+          value={String(prefs.stallNoticeMinutes)}
+          placeholder="10"
+          mono
+          width="w-24"
+          onCommit={(v) => {
+            const t = v.trim();
+            if (!/^\d+$/.test(t)) return Promise.resolve("Enter a whole number (0 = off)");
+            return update({ stallNoticeMinutes: Number(t) });
+          }}
+        />
+      </Row>
       <div className="pt-3">
         <div className="text-sm">Custom instructions</div>
         <div className="mt-0.5 text-xs text-muted">

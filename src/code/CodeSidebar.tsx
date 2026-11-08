@@ -409,6 +409,7 @@ export function CodeSidebar() {
         selected={picked.has(s.id) && s.archivedAt == null}
         busy={signedOut ? false : st?.busy}
         attention={(st?.permissions.length ?? 0) > 0 || (st?.questions.length ?? 0) > 0}
+        stalled={!signedOut && !!st?.busy && st.stalled != null}
         meta={fmtShort(s.updatedAt)}
         host={prefs.groupByProject ? hostLabel(s) : undefined}
         pinned={s.pinned}
