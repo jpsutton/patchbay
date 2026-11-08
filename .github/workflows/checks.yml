@@ -1,6 +1,6 @@
 # Checks on every pull request (into staging and into release): static checks,
-# the frontend's typecheck, build and notices, the phone app's build, and the
-# Rust unit tests on Linux.
+# the frontend's typecheck, build, selftests and notices, the phone app's build,
+# and the Rust unit tests on Linux.
 # No packages; build.yml does those for release PRs.
 #
 # A pull request that only touches docs skips the heavy jobs. They still report
@@ -135,12 +135,10 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - name: Speech routing and queue regression
-        run: node src/lib/speech.selftest.mjs
-      - name: Sticky-scroll pin decision
-        run: node --experimental-strip-types src/lib/stickyScroll.selftest.ts
-      - name: Notices gate spawn portability (pb-20261106-13)
-        run: node scripts/tool-invocation.selftest.mjs
+      # Every selftest in the repo, not a hand-picked three (pb-20261107-16):
+      # scripts/selftests.mjs discovers them, runs them, and fails naming the file.
+      - name: All selftests (pb-20261107-16)
+        run: node scripts/selftests.mjs
       - name: Third-party notices are up to date
         run: pnpm notices && git diff --exit-code -- THIRD_PARTY_NOTICES.md
 
