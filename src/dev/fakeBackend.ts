@@ -1979,10 +1979,6 @@ export function install() {
           Object.assign(s, { hostNode: ME, cwd: a.cwd as string, epoch: s.epoch + 1 });
           return null;
         }
-        case "code_checkpoints": {
-          const s = db.code.find((x) => x.hostNode === "n-old");
-          return s ? { [s.id]: now() - 3_600_000 } : {};
-        }
         case "mesh_status": return mesh;
         case "mesh_create": meshMember(); mesh.name = (a.name as string) || mesh.name; mesh.members[0].name = mesh.name; mesh.members = mesh.members.slice(0, 1); meshStatusChanged(); return null;
         case "mesh_join": {

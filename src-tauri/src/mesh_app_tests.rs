@@ -1,5 +1,5 @@
 //! Two app instances in one process, linked by a real mesh on localhost: moving a Code session,
-//! checkpoints, taking over from an offline host, and remote terminals.
+//! taking over from an offline host, and remote terminals.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -69,7 +69,7 @@ fn host_of(n: &Node, id: &str) -> Option<String> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn move_checkpoint_take_over_and_orphaned_work() {
+async fn move_take_over_and_orphaned_work() {
     let (a, b) = (node("alpha"), node("bravo"));
     link(&a, &b).await;
     let (an, bn) = (a.state.mesh.node_id().to_owned(), b.state.mesh.node_id().to_owned());
@@ -97,20 +97,26 @@ async fn move_checkpoint_take_over_and_orphaned_work() {
     // A's checkout is untouched.
     assert_eq!(std::fs::read_to_string(proj_a.join("app.txt")).unwrap(), "v2, not committed\n");
 
-    // A turn on B ends: A fetches a checkpoint.
+    // A turn on B ends. Nothing is copied to A: the working folder only moves when asked.
     std::fs::write(proj_b.join("app.txt"), "v3 from bravo\n").unwrap();
     code_sink(&b.state)(code::acp::Envelope {
         code_session_id: s.id.clone(),
         event: code::acp::CodeEvent::PromptDone { stop_reason: json!("end_turn") },
     });
-    until("checkpoint on A", 20, || handoff::checkpoint(&a.dir, &s.id).is_some()).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(!a.dir.join("mesh").join("mirrors").exists());
+    assert!(!a.dir.join("mesh").join("checkpoints").exists());
 
-    // B vanishes; A takes over from the checkpoint into a fresh folder.
+    // B vanishes; A takes over with the conversation only, in a folder it already has.
     b.state.mesh.stop();
     until("A notices B is gone", 40, || !a.state.mesh.connected(&bn)).await;
     let proj_a2 = a.dir.join("proj2");
-    take_over_local(&a.state, &s.id, &proj_a2.to_string_lossy()).await.unwrap();
-    assert_eq!(std::fs::read_to_string(proj_a2.join("app.txt")).unwrap(), "v3 from bravo\n");
+    assert!(take_over_local(&a.state, &s.id, &proj_a2.to_string_lossy()).await.is_err(), "the folder must exist");
+    std::fs::create_dir_all(&proj_a2).unwrap();
+    let note = take_over_local(&a.state, &s.id, &proj_a2.to_string_lossy()).await.unwrap();
+    assert!(note.is_some());
+    assert!(!proj_a2.join("app.txt").exists());
+    assert!(a.state.db.get_setting(&format!("mesh.handoff.{}", s.id)).unwrap().is_some());
     assert_eq!(host_of(&a, &s.id).as_deref(), Some(an.as_str()));
     let epoch = a.state.db.get_code_session(&s.id).unwrap().unwrap().epoch;
     assert_eq!(epoch, 2);

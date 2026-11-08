@@ -1256,8 +1256,6 @@ export const api = {
   /** Move a session to `target` into folder `cwd` there; resolves to a note for the user, if any. */
   codeMove: (id: string, target: string, cwd: string) => invoke<string | null>("code_move", { id, target, cwd }),
   codeTakeOver: (id: string, cwd: string) => invoke<string | null>("code_take_over", { id, cwd }),
-  /** Session id -> when the checkpoint this node holds was taken. */
-  codeCheckpoints: () => invoke<Record<string, number>>("code_checkpoints"),
 
   meshStatus: () => invoke<MeshStatus>("mesh_status"),
   meshCreate: (passphrase: string, name: string) => invoke<void>("mesh_create", { passphrase, name }),

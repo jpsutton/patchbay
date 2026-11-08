@@ -189,8 +189,8 @@ Claude plan usage (the 5-hour and weekly windows, see `code/plan_limits.rs`) arr
 ## 5. Surviving a dead host
 
 - **Transcript:** synced continuously.
-- **Checkpoints:** when a turn ends, the host announces it (`mesh://checkpoint`). Every member then pulls a fresh package of kind `checkpoint`, sending the snapshot commit it already holds, so the bundle carries only what changed. Members keep the git objects in a per-session bare mirror (`mesh/mirrors/<id>.git`) and the agent state and metadata in `mesh/checkpoints/<id>/`.
-- **Take over:** `code_take_over(id, cwd)` works only while the host is offline. It restores the latest local checkpoint from the mirror the same way as a move, then takes the lease at `epoch + 1`. At most the turn that was running is lost.
+- **No replication of the working folder:** the host never announces turns for other members to pull. Workspace files and agent state travel only in a move (section above), while the source is online. Older versions broadcast `mesh://checkpoint` after every turn; receivers now ignore it, and a host refuses `code.package` for any kind but `handoff`. Their old `mesh/mirrors` and `mesh/checkpoints` directories are unused and can be deleted.
+- **Take over:** `code_take_over(id, cwd)` works only while the host is offline. It needs `cwd` to exist on this node, queues the hand-off note built from the synced transcript (the agent state is not available), then takes the lease at `epoch + 1`. The folder is used as it is.
 
 Take-over is manual, because the mesh can't tell a dead host from a network partition. When the old host reconnects, sync shows that it lost the lease without a move it started. It stops the agent and commits whatever is in the working tree to `refs/patchbay/orphaned/<session>-<ms>`, then tells the user.
 

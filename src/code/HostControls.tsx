@@ -96,7 +96,7 @@ export function MoveDialog({
         </div>
         <p className="text-xs leading-5 text-muted">
           {takeOver
-            ? `${hostName} is offline. The session continues here from the last checkpoint this computer received, losing only a turn that was still running. If ${hostName} comes back, it keeps any later work on a separate git ref.`
+            ? `${hostName} is offline, so its files can't be copied. The conversation continues here, in a folder that already exists on this computer. If ${hostName} comes back, it keeps any later work on a separate git ref.`
             : `The agent stops briefly while its work moves. Uncommitted changes come along; ${hostName}'s branch and files stay as they are.`}
         </p>
         {!takeOver && (
@@ -116,8 +116,9 @@ export function MoveDialog({
           <span className="text-muted">Folder on {takeOver ? "this computer" : targetName || "that computer"}</span>
           <input className={`${input} font-mono text-xs`} value={cwd} onChange={(e) => setCwd(e.target.value)} />
           <span className="text-[12px] text-faint">
-            An existing checkout of the same repository is reused; it must have no uncommitted changes. A missing
-            folder is created.
+            {takeOver
+              ? "The folder must already exist. Its files are used as they are."
+              : "An existing checkout of the same repository is reused; it must have no uncommitted changes. A missing folder is created."}
           </span>
         </label>
         {error && (
@@ -145,27 +146,15 @@ export function MoveDialog({
 /** Shown in a session whose host is offline. */
 export function OfflineHostBanner({ session, onTakeOver }: { session: CodeSession; onTakeOver: () => void }) {
   const mesh = useStore((s) => s.mesh);
-  const [checkpoint, setCheckpoint] = useState<number | null>(null);
   const host = remoteHost(session, mesh);
   const offline = !!host && !memberOnline(mesh, host);
-  useEffect(() => {
-    if (!offline) return;
-    api
-      .codeCheckpoints()
-      .then((c) => setCheckpoint(c[session.id] ?? null))
-      .catch(() => {});
-  }, [offline, session.id]);
   if (!offline) return null;
   return (
     <div className="flex items-center gap-3 rounded-lg border border-line bg-panel px-3 py-2.5 text-xs">
       <MonitorIcon size={16} />
       <div className="min-w-0 flex-1 text-muted">
         <span className="text-fg">{memberName(mesh, host)}</span> runs this session and is offline.
-        {isRemoteApp()
-          ? " Take it over from another computer to keep working."
-          : checkpoint
-            ? ` A checkpoint from ${new Date(checkpoint).toLocaleString()} is on this computer.`
-            : ""}
+        {isRemoteApp() ? " Take it over from another computer to keep working." : ""}
       </div>
       {!isRemoteApp() && (
         <button className="shrink-0 rounded-md bg-accent px-3 py-1.5 font-medium text-accent-fg" onClick={onTakeOver}>
