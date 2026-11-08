@@ -1158,6 +1158,7 @@ async fn phone_decides_join_requests_waiting_on_any_computer() {
     .await;
     a.state.mesh.approve(&pid).await.unwrap();
     until("phone online", 10, || p.client.status()["phase"] == "online").await;
+    until("B knows the phone", 10, || members::get(&b.state.db, &pid).unwrap().is_some()).await;
 
     // C asks B; the phone, whichever of them it is connected through, is told and approves.
     until("B listens", 5, || b.state.mesh.bound_port().is_some()).await;
