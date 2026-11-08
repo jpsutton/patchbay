@@ -732,6 +732,25 @@ usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
 
 cmd=${1:-help}
 [ $# -gt 0 ] && shift
+
+# One run at a time: every command that touches $E2E_DIR state or the emulator takes this lock, because two
+# runs wipe each other's seed.json (pb-20261107-24) and the e2e is load-sensitive anyway. mkdir is atomic and
+# portable (macOS has no flock); a lock whose pid is dead is stale and taken over. Fail fast: a pre-push gate
+# that queued behind a ten-minute run would look hung, so the refused side says who holds it and what to do.
+E2E_LOCK=$E2E_DIR/lock # script-level so the EXIT trap can still see it
+take_lock() {
+    local holder lock=$E2E_LOCK
+    mkdir -p "$E2E_DIR"
+    until mkdir "$lock" 2>/dev/null; do
+        holder=$(cat "$lock/pid" 2>/dev/null || true)
+        if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then rm -rf "$lock"; continue; fi
+        die "another android-e2e run holds $lock (pid ${holder:-unknown}, $(cat "$lock/cmd" 2>/dev/null || echo '?')); two runs wipe each other's seed. Wait for it to finish, or stop it (kill ${holder:-<pid>}), then retry."
+    done
+    printf '%s\n' "$$" >"$lock/pid"
+    printf '%s\n' "$cmd $* (from $top)" >"$lock/cmd"
+    trap 'rm -rf "$E2E_LOCK"' EXIT
+}
+case "$cmd" in doctor | status | logs | help | -h | --help) ;; *) take_lock "$@" ;; esac
 case "$cmd" in
     doctor) cmd_doctor ;;
     setup) cmd_setup "$@" ;;
