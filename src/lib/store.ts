@@ -45,6 +45,7 @@ import * as paneLogic from "./panes";
 import { isForegroundUpdate } from "./codeWorking";
 import { chunkChars, phaseOf, type Phase } from "./workingStatus";
 import { adoptEarlier } from "./earlierHistory";
+import { appendText } from "./streamText";
 import { appendUserChunk } from "./harness";
 import { planUpdateOf } from "./todoPlan";
 import { applyChange, type LayoutChange, type SidebarEntry } from "./sidebarLayout";
@@ -539,16 +540,6 @@ const MAX_RAW = 20_000;
 export function rawText(raw: unknown): string {
   const json = JSON.stringify(raw, null, 2) ?? "null";
   return json.length > MAX_RAW ? `${json.slice(0, MAX_RAW)}\n…[${json.length - MAX_RAW} more characters]` : json;
-}
-
-function appendText(entries: Entry[], kind: "agent" | "thought" | "user", text: string, at?: number): Entry[] {
-  if (!text) return entries;
-  const last = entries[entries.length - 1];
-  if (last && last.kind === kind) {
-    return [...entries.slice(0, -1), { ...last, text: last.text + text }];
-  }
-  if ((kind === "agent" || kind === "user") && at) return [...entries, { kind, text, at }];
-  return [...entries, { kind, text } as Entry];
 }
 
 type TerminalMeta = {
