@@ -47,10 +47,23 @@ the transcript, a warn light in the sidebar and "Gone quiet" in the phone's list
 `list_agent_sessions`. A window that opens the session meanwhile gets it replayed. The agent's next
 event, or the turn ending, clears it. Nothing is cancelled: a long command looks the same.
 
-For opencode sessions the notice also quotes the newest error opencode recorded in that turn, by the
-session or one of its subagents (`code::opencode_state`, read-only from `opencode.db`; nothing when
-there is none or the schema isn't the one it knows). `session_v2.time_suspended` is not used: opencode
-stamps it whenever a background shell wakes a turn, so it says nothing about limits.
+For opencode sessions the notice also says what opencode's own database shows
+(`code::opencode_state`, read-only from `opencode.db`):
+
+- **Turns Patchbay can't see.** When a background shell or a subagent finishes after a turn ended,
+  opencode starts a new turn by itself. None of it reaches Patchbay over ACP: not its text, not its
+  tool calls, not its permission requests. Patchbay launches opencode with `"*": "ask"`, so any tool
+  call in such a turn waits for an answer nobody is asked for, and prompts Patchbay sends queue in
+  opencode's `session_inbox` behind it. The notice names such a turn, the call it is on, and how many
+  messages wait. Reproduced 2026-11-08 (pb-20261107-25): a self-woken reply of 600 lines never
+  appeared in Patchbay's transcript while the readout reported it and the one queued message.
+- **The newest error of the turn**, from the session or one of its subagents (a free-tier limit,
+  a 429), best-effort.
+
+opencode's schema is not a stable API. When the tables or columns the first part needs aren't
+there, the notice says Patchbay can't read opencode's state; it never reports "nothing waiting" from
+a read that failed. `session_v2.time_suspended` is not used: opencode stamps it whenever a background
+shell wakes a turn, so it says nothing about limits.
 
 ## Messaging between Code sessions
 
