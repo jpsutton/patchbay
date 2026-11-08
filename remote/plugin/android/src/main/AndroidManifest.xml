@@ -5,6 +5,11 @@
     <!-- Android 17: reaching a computer on the home network (Wi-Fi/Ethernet private addresses). -->
     <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
+    <!-- THROWAWAY: PB Phase 0 probe B (pb-20261106-08) — the line plan §2a says is missing.
+         Delete (together with the probe activity) before any merge. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
     <!-- Make installed speech engines visible on Android 11 and later. -->
     <queries>
         <intent>

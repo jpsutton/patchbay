@@ -26,6 +26,17 @@
             </intent-filter>
         </activity>
 
+        <!-- THROWAWAY: PB Phase 0 voice probe (pb-20261106-08). Delete before any merge. -->
+        <activity
+            android:name=".VoiceProbeActivity"
+            android:label="Voice Probe (PB phase 0)"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
         <provider
           android:name="androidx.core.content.FileProvider"
           android:authorities="${applicationId}.fileprovider"
