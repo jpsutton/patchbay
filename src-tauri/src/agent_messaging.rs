@@ -18,7 +18,6 @@ use tokio::signal::unix::{signal as unix_signal, SignalKind};
 #[cfg(unix)]
 use std::time::Duration;
 
-
 use crate::{AppState, api};
 
 const TOOL_SEND: &str = "send_agent_message";
