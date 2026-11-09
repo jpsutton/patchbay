@@ -109,7 +109,6 @@ pub fn account(dir: &Path) -> (String, Option<String>) {
         modified: Option<SystemTime>,
         current: Option<Profile>,
         verified: Option<Profile>,
-        backup_checked_tier: Option<String>,
     }
     fn parse_profile(path: &Path) -> Option<Profile> {
         let v = std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok())?;
@@ -124,24 +123,6 @@ pub fn account(dir: &Path) -> (String, Option<String>) {
             .collect::<Vec<_>>();
         Some(Profile { key, name, tiers })
     }
-    fn backup_profile_for_tier(file: &Path, tier: &str) -> Option<Profile> {
-        let parent = file.parent()?;
-        let mut backups: Vec<PathBuf> = std::fs::read_dir(parent)
-            .ok()?
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with(".claude.json.bak"))
-            })
-            .collect();
-        backups.sort_by(|a, b| b.cmp(a));
-        backups
-            .into_iter()
-            .filter_map(|p| parse_profile(&p))
-            .find(|p| p.tiers.iter().any(|x| x == tier))
-    }
     static SEEN: std::sync::Mutex<BTreeMap<PathBuf, Seen>> = std::sync::Mutex::new(BTreeMap::new());
     let fallback = || (dir.to_string_lossy().into_owned(), None);
     // `~/.claude` keeps it beside the directory; any other directory, inside it.
@@ -150,7 +131,7 @@ pub fn account(dir: &Path) -> (String, Option<String>) {
         _ => dir.join(".claude.json"),
     };
     let tier = login_plan_tier(dir);
-    let resolve = |seen: &mut Seen, file: &Path| -> (String, Option<String>) {
+    let resolve = |seen: &mut Seen| -> (String, Option<String>) {
         let Some(cur) = seen.current.clone() else {
             return fallback();
         };
@@ -166,39 +147,30 @@ pub fn account(dir: &Path) -> (String, Option<String>) {
             {
                 return (v.key.clone(), v.name.clone());
             }
-            if seen.backup_checked_tier.as_deref() != Some(t.as_str()) {
-                seen.backup_checked_tier = Some(t.clone());
-                if let Some(v) = backup_profile_for_tier(file, t) {
-                    let out = (v.key.clone(), v.name.clone());
-                    seen.verified = Some(v);
-                    return out;
-                }
-            }
             return fallback();
         }
         (cur.key, cur.name)
     };
     let Ok(modified) = std::fs::metadata(&file).and_then(|m| m.modified()) else {
         let mut guard = SEEN.lock().unwrap();
-        return guard.get_mut(&file).map_or_else(fallback, |s| resolve(s, &file));
+        return guard.get_mut(&file).map_or_else(fallback, resolve);
     };
     // The file can run to megabytes, so read it again only when it changes.
     if let Some(seen) = SEEN.lock().unwrap().get_mut(&file)
         && seen.modified == Some(modified)
     {
-        return resolve(seen, &file);
+        return resolve(seen);
     }
     let Some(profile) = parse_profile(&file) else {
         // Claude Code rewrites the file often: a read that lands mid-write keeps the last account seen.
         let mut guard = SEEN.lock().unwrap();
-        return guard.get_mut(&file).map_or_else(fallback, |s| resolve(s, &file));
+        return guard.get_mut(&file).map_or_else(fallback, resolve);
     };
     let mut guard = SEEN.lock().unwrap();
-    let seen = guard.entry(file.clone()).or_default();
+    let seen = guard.entry(file).or_default();
     seen.modified = Some(modified);
     seen.current = Some(profile);
-    seen.backup_checked_tier = None;
-    resolve(seen, &file)
+    resolve(seen)
 }
 
 /// The rate-limit tier the login stored for `dir` reports: from the credentials file when it
@@ -689,21 +661,7 @@ mod tests {
             ("u1:o-pro".to_owned(), Some("Personal".to_owned())),
             "contradicted overwrite must keep the verified account for this login tier"
         );
-
-        // Cold start when `.claude.json` was already overwritten before process launch, but
-        // `.claude.json.bak-*` beside it holds the profile matching `.credentials.json`.
-        let cold = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
-        std::fs::create_dir_all(&cold).unwrap();
-        std::fs::write(cold.join(".claude.json"), team_profile.to_string()).unwrap();
-        std::fs::write(cold.join(".claude.json.bak-20261004T142747Z"), pro_profile.to_string()).unwrap();
-        std::fs::write(cold.join(".credentials.json"), login.to_string()).unwrap();
-        assert_eq!(
-            account(&cold),
-            ("u1:o-pro".to_owned(), Some("Personal".to_owned())),
-            "cold start with contradicted .claude.json recovers verified profile from .claude.json.bak-*"
-        );
         let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&cold);
     }
 
     #[test]

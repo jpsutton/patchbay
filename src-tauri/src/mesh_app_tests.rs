@@ -1099,17 +1099,18 @@ fn load_folds_foreign_path_accounts_into_the_default() {
     assert_eq!(loaded[&me].latest.as_ref().unwrap().seven_day.unwrap().utilization, 0.9);
 }
 
-/// A `claude-code` session bound to its own `claude.config_dir.<id>` reports and is gated
-/// under that directory's account (not `default_plan_account`), and when that directory
-/// upgrades from a path fallback to a portable `u:o` key at runtime, `plan_accounts` and
-/// `adopt_plan_limits` fold the path-keyed history into the portable key without a restart.
+/// A `claude-code` session bound to its own `claude.config_dir.<id>` (even one ending in
+/// `/.claude`, like `<dir>/work/.claude`) reports and is gated under that directory's account
+/// (not `default_plan_account`), and when that directory upgrades from a path fallback to a
+/// portable `u:o` key at runtime, `adopt_plan_limits` folds the path-keyed history into the
+/// portable key on the next report without calling `plan_accounts` or restarting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_path_upgrade_and_session_config_dir_keep_accounts_apart() {
     use code::acp::CodeEvent;
     use code::plan_limits::{PlanLimits, Window, now};
     let n = node("live-fold-and-session-dir");
     let cwd = n.dir.to_string_lossy().into_owned();
-    let custom_dir = n.dir.join("claudetvg");
+    let custom_dir = n.dir.join("work").join(".claude");
     std::fs::create_dir_all(&custom_dir).unwrap();
     let custom_path = custom_dir.to_string_lossy().into_owned();
 
@@ -1120,7 +1121,7 @@ async fn live_path_upgrade_and_session_config_dir_keep_accounts_apart() {
         .unwrap();
 
     // First report arrives before `.claude.json` exists in `custom_dir`: stored under `custom_path`,
-    // never under `default_plan_account()`.
+    // never under `default_plan_account()` (even though `custom_path` ends with `/.claude`).
     let first = PlanLimits {
         five_hour: Some(Window { utilization: 0.15, resets_at: now() + 3600 }),
         seven_day: Some(Window { utilization: 0.60, resets_at: now() + 86400 }),
@@ -1134,36 +1135,132 @@ async fn live_path_upgrade_and_session_config_dir_keep_accounts_apart() {
     );
     assert!(
         !n.state.code.plan.accounts().contains_key(&crate::default_plan_account().0),
-        "default account must stay untouched"
+        "default account must stay untouched even when custom config dir ends in /.claude"
     );
 
-    // A foreign secondary directory path (`/.claudetvg`) over the mesh must not collapse into default either.
-    let foreign_secondary = json!({
-        "account": "/Users/peer/.claudetvg",
-        "limits": PlanLimits {
-            five_hour: Some(Window { utilization: 0.42, resets_at: now() + 3600 }),
-            observed_at: now() - 30,
-            ..Default::default()
-        }
-    });
-    mesh::RpcHandler::event(&MeshRpc { state: n.state.clone() }, MESH_PLAN_LIMITS_EVENT, &foreign_secondary);
-    assert!(!n.state.code.plan.accounts().contains_key(&crate::default_plan_account().0));
-
-    // Now Claude Code writes `.claude.json` in `custom_dir`: querying `plan_accounts` folds `custom_path`
-    // into `u-team:o-team` immediately without a restart.
+    // Now Claude Code writes `.claude.json` in `custom_dir`. Sending a report folds `custom_path`
+    // (and its 0.15 sample) into `u-team:o-team` directly inside `adopt_plan_limits`, WITHOUT
+    // calling `plan_accounts`.
     let profile = serde_json::json!({ "oauthAccount": {
         "accountUuid": "u-team", "organizationUuid": "o-team", "organizationName": "Vizius"
     }});
     std::fs::write(custom_dir.join(".claude.json"), profile.to_string()).unwrap();
+    let second = PlanLimits {
+        five_hour: Some(Window { utilization: 0.25, resets_at: now() + 3600 }),
+        seven_day: Some(Window { utilization: 0.61, resets_at: now() + 86400 }),
+        observed_at: now() - 30,
+        ..Default::default()
+    };
+    emit(&n, &s.id, CodeEvent::PlanLimits { limits: second });
+    assert!(
+        !n.state.code.plan.accounts().contains_key(&custom_path),
+        "adopt_plan_limits must fold the upgraded path key out of plan.accounts() without calling plan_accounts"
+    );
+    let team = n.state.code.plan.account("u-team:o-team");
+    assert_eq!(team.latest.unwrap().five_hour.unwrap().utilization, 0.25);
+    assert_eq!(
+        team.history.len(),
+        2,
+        "adopt_plan_limits must merge the pre-upgrade path-key history into u-team:o-team: {:?}",
+        team.history
+    );
+
     let chans: crate::api::ChanFactory = Arc::new(|_| None);
     let views = crate::api::call(&n.state, "plan_accounts", json!({}), &chans).await.unwrap();
     let arr = views.as_array().unwrap();
     assert!(arr.iter().any(|v| v["account"] == "u-team:o-team" && v["label"] == "Vizius"), "{arr:?}");
-    assert!(!arr.iter().any(|v| v["account"] == custom_path), "path key must fold into portable key: {arr:?}");
-    assert!(!n.state.code.plan.accounts().contains_key(&custom_path));
+    assert!(!arr.iter().any(|v| v["account"] == custom_path), "path key must not appear in plan_accounts: {arr:?}");
+}
+
+/// Path-keyed plan reports are machine-local: a sender never broadcasts a path key in
+/// `on_code_event` or `greeting()`, and a connected peer's `accounts()` and `plan_accounts`
+/// never contain the sender's path key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn path_keyed_plan_reports_never_broadcast_or_greet_peers() {
+    use code::acp::CodeEvent;
+    use code::plan_limits::{PlanLimits, Window, now};
+    let (a, b) = (node("alpha-no-path-bcast"), node("bravo-no-path-bcast"));
+    link(&a, &b).await;
+
+    let cwd = a.dir.to_string_lossy().into_owned();
+    let custom_dir = a.dir.join("work").join(".claude");
+    std::fs::create_dir_all(&custom_dir).unwrap();
+    let custom_path = custom_dir.to_string_lossy().into_owned();
+
+    let s_path = a.state.db.create_code_session(&cwd, None, "claude-code", "default").unwrap();
+    a.state
+        .db
+        .set_setting(&code::import_claude::config_dir_key(&s_path.id), &custom_path)
+        .unwrap();
+
+    // Also create a portable-keyed session on `a` so we can prove the mesh link carries portable
+    // reports while dropping `custom_path`.
+    let portable_dir = a.dir.join("portable-claude");
+    std::fs::create_dir_all(&portable_dir).unwrap();
+    std::fs::write(
+        portable_dir.join(".claude.json"),
+        serde_json::json!({ "oauthAccount": {
+            "accountUuid": "u-port", "organizationUuid": "o-port", "organizationName": "PortableOrg"
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let s_port = a.state.db.create_code_session(&cwd, None, "claude-code", "default").unwrap();
+    a.state
+        .db
+        .set_setting(
+            &code::import_claude::config_dir_key(&s_port.id),
+            &portable_dir.to_string_lossy(),
+        )
+        .unwrap();
+
+    let report = |five: f64, ago: i64| PlanLimits {
+        five_hour: Some(Window { utilization: five, resets_at: now() + 3600 }),
+        observed_at: now() - ago,
+        ..Default::default()
+    };
+
+    emit(&a, &s_path.id, CodeEvent::PlanLimits { limits: report(0.33, 40) });
+    assert!(
+        a.state.code.plan.accounts().contains_key(&custom_path),
+        "sender still adopts its own path-keyed report locally"
+    );
+
+    // `greeting()` on `a` must not carry any path-keyed plan report.
+    let greeting = mesh::RpcHandler::greeting(&MeshRpc { state: a.state.clone() });
+    assert!(
+        !greeting.iter().any(|(ev, p)| {
+            ev == MESH_PLAN_LIMITS_EVENT
+                && p["account"].as_str().is_some_and(claude_auth::is_path_account_key)
+        }),
+        "greeting() must never include a path account key: {greeting:?}"
+    );
+
+    // Emit a portable-keyed report after the path-keyed one and wait for `b` to receive it,
+    // proving the mesh channel delivered subsequent events.
+    emit(&a, &s_port.id, CodeEvent::PlanLimits { limits: report(0.77, 10) });
+    until("B receives A's portable report", 10, || {
+        b.state.code.plan.account("u-port:o-port").latest.is_some()
+    })
+    .await;
+
+    assert!(
+        !b.state.code.plan.accounts().contains_key(&custom_path),
+        "peer accounts() must never contain sender's path key: {:?}",
+        b.state.code.plan.accounts()
+    );
     assert_eq!(
-        n.state.code.plan.account("u-team:o-team").latest.unwrap().five_hour.unwrap().utilization,
-        0.15
+        b.state.code.plan.accounts().keys().collect::<Vec<_>>(),
+        vec!["u-port:o-port"],
+        "peer accounts() must contain only the portable account, never the path-keyed report: {:?}",
+        b.state.code.plan.accounts()
+    );
+    let chans: crate::api::ChanFactory = Arc::new(|_| None);
+    let views = crate::api::call(&b.state, "plan_accounts", json!({}), &chans).await.unwrap();
+    let arr = views.as_array().unwrap();
+    assert!(
+        !arr.iter().any(|v| v["account"] == custom_path),
+        "peer plan_accounts must never contain sender's path key: {arr:?}"
     );
 }
 
