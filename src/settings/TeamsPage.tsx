@@ -2,11 +2,32 @@ import { useEffect, useState } from "react";
 import { api, errorText, type Team, type TeamDetail, type TeamTemplate } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { input } from "./ProviderPage";
+import { RolesEditor, TemplatesEditor } from "./TeamEditors";
 
 const DOT: Record<string, string> = { running: "bg-accent", waiting: "bg-yellow-500", stalled: "bg-red-500", idle: "bg-muted", stopped: "bg-border" };
 
-/** Teams: Code sessions in named roles on one project (docs/design/teams.md, phase 1: read-only). */
+const changed = () => window.dispatchEvent(new Event("teams-changed"));
+
+/** Teams: Code sessions in named roles on one project (docs/design/teams.md), with the role and template editors. */
 export function TeamsPage() {
+  const [tab, setTab] = useState<"teams" | "roles" | "templates">("teams");
+  return (
+    <div className="max-w-3xl">
+      <div className="mb-3 flex gap-1 text-xs">
+        {(["teams", "roles", "templates"] as const).map((t) => (
+          <button key={t} className={`rounded-md px-2.5 py-1 capitalize ${tab === t ? "bg-panel-2 font-medium" : "text-muted hover:bg-panel-2/60"}`} onClick={() => setTab(t)}>
+            {t}
+          </button>
+        ))}
+      </div>
+      {tab === "teams" && <TeamsPanel />}
+      {tab === "roles" && <RolesEditor />}
+      {tab === "templates" && <TemplatesEditor />}
+    </div>
+  );
+}
+
+function TeamsPanel() {
   const setToast = useStore((s) => s.setToast);
   const sessions = useStore((s) => s.codeSessions);
   const [templates, setTemplates] = useState<TeamTemplate[]>([]);
@@ -47,7 +68,7 @@ export function TeamsPage() {
   const refresh = () => (sel && sel !== "new" ? api.teamDetail(sel).then(setDetail, fail) : undefined);
 
   return (
-    <div className="flex max-w-3xl gap-4 pb-4">
+    <div className="flex gap-4 pb-4">
       <div className="flex w-44 shrink-0 flex-col gap-0.5">
         {teams.map((t) => (
           <button key={t.id} className={`truncate rounded-md px-2 py-1.5 text-left text-xs ${sel === t.id ? "bg-panel-2" : "hover:bg-panel-2/60"}`} onClick={() => setSel(t.id)}>
@@ -106,7 +127,7 @@ export function TeamsPage() {
                       <span className={`h-2 w-2 rounded-full ${DOT[m.activity ?? ""] ?? "bg-border"}`} />
                       <span className="truncate">{m.title ?? "(session gone)"}</span>
                       <span className="text-muted">{m.agent}{m.model ? ` · ${m.model}` : ""} · {m.activity ?? "other computer"}</span>
-                      <button className="ml-auto text-muted hover:text-fg" onClick={() => api.teamDetach(detail.team.id, m.member.sessionId).then(refresh, fail)}>Remove</button>
+                      <button className="ml-auto text-muted hover:text-fg" onClick={() => api.teamDetach(detail.team.id, m.member.sessionId).then(() => { changed(); return refresh(); }, fail)}>Remove</button>
                     </div>
                   ))}
                   {here.length < seat.count && (
@@ -120,7 +141,7 @@ export function TeamsPage() {
                       <button
                         className="rounded-md border border-border px-2 text-xs disabled:opacity-40"
                         disabled={!pick[seat.seat]}
-                        onClick={() => api.teamAttach(detail.team.id, pick[seat.seat], seat.seat).then(() => { setPick({ ...pick, [seat.seat]: "" }); return refresh(); }, fail)}
+                        onClick={() => api.teamAttach(detail.team.id, pick[seat.seat], seat.seat).then(() => { setPick({ ...pick, [seat.seat]: "" }); changed(); return refresh(); }, fail)}
                       >
                         Add
                       </button>
@@ -132,7 +153,7 @@ export function TeamsPage() {
             <div className="text-muted">Role instructions reach a member when its agent starts (Claude Code, Codex, Antigravity, Grok) or on each message from a teammate (other agents). Restart a running session to apply a new role.</div>
             <button
               className="self-start text-muted hover:text-fg"
-              onClick={() => api.teamArchive(detail.team.id).then(() => { setSel(null); return reload(); }, fail)}
+              onClick={() => api.teamArchive(detail.team.id).then(() => { setSel(null); changed(); return reload(); }, fail)}
             >
               Archive team
             </button>

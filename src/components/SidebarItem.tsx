@@ -48,6 +48,7 @@ export function SidebarItem({
   status,
   icon,
   agent,
+  teamRole,
   ring,
   meta,
   host,
@@ -74,6 +75,8 @@ export function SidebarItem({
   icon: "conversation" | Activity;
   /** Coding agent harness that runs the session. */
   agent?: AgentId;
+  /** Code sessions: the role this session fills on a team. */
+  teamRole?: string;
   /** Chats: the model's cable ring replaces the icon (a `ModelRing`). */
   ring?: ReactNode;
   /** Right-aligned mono detail, e.g. a short time; hidden while the row's buttons show. */
@@ -163,6 +166,7 @@ export function SidebarItem({
       )}
       <div className="min-w-0 flex-1">
         <div className="truncate">
+          {teamRole && <span className="mr-1.5 rounded bg-panel-2 px-1 font-mono text-[10px] font-normal text-muted">{teamRole}</span>}
           {title}
           {agentLabel && <span className="sr-only"> ({agentLabel})</span>}
         </div>

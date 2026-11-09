@@ -446,9 +446,143 @@ impl TeamsDb {
         Ok(())
     }
 
+    /// Create or update a user role. Built-ins are copied, never edited in place.
+    pub fn save_role(&self, input: RoleInput) -> Result<Role> {
+        let name = input.name.trim();
+        if name.is_empty() {
+            bail!("a role needs a name");
+        }
+        if let Some(r) = &input.reports_to {
+            self.role(r)?;
+        }
+        let id = match input.id.filter(|i| !i.is_empty()) {
+            Some(id) => {
+                if self.role(&id)?.builtin {
+                    bail!("built-in roles can't be edited; copy it first");
+                }
+                id
+            }
+            None => new_id(),
+        };
+        self.0.execute(
+            "INSERT INTO roles(id, name, standing, instructions, caps_json, reports_to, builtin, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7) \
+             ON CONFLICT(id) DO UPDATE SET name = ?2, standing = ?3, instructions = ?4, caps_json = ?5, reports_to = ?6, updated_at = ?7",
+            params![id, name, input.standing, input.instructions, serde_json::to_string(&input.caps)?, input.reports_to, now_ms()],
+        )?;
+        self.role(&id)
+    }
+
+    pub fn delete_role(&self, id: &str) -> Result<()> {
+        if self.role(id)?.builtin {
+            bail!("built-in roles can't be deleted");
+        }
+        if let Some(t) = self.templates()?.into_iter().find(|t| t.seats.iter().any(|s| s.role_id == id)) {
+            bail!("the template \"{}\" uses this role", t.name);
+        }
+        let members: i64 = self.0.query_row("SELECT COUNT(*) FROM members WHERE role_id = ?1", [id], |r| r.get(0))?;
+        if members > 0 {
+            bail!("sessions are or were on teams in this role");
+        }
+        if let Some(r) = self.roles()?.into_iter().find(|r| r.reports_to.as_deref() == Some(id)) {
+            bail!("the role \"{}\" reports to this one", r.name);
+        }
+        self.0.execute("DELETE FROM roles WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// Create or update a user template. The built-in one is copied, never edited in place.
+    pub fn save_template(&self, input: TemplateInput) -> Result<Template> {
+        let name = input.name.trim();
+        if name.is_empty() {
+            bail!("a template needs a name");
+        }
+        if input.seats.is_empty() {
+            bail!("a template needs at least one seat");
+        }
+        let roles = self.roles()?;
+        let mut keys = std::collections::HashSet::new();
+        for s in &input.seats {
+            if s.seat.trim().is_empty() || !keys.insert(s.seat.as_str()) {
+                bail!("seat names must be filled in and different");
+            }
+            if !roles.iter().any(|r| r.id == s.role_id) {
+                bail!("seat {} names an unknown role", s.seat);
+            }
+            if AgentKind::parse(&s.agent).is_none() {
+                bail!("seat {} names an unknown agent {:?}", s.seat, s.agent);
+            }
+            if !crate::db::PERMISSION_MODES.contains(&s.permission_mode.as_str()) {
+                bail!("seat {} has an unknown permission mode {:?}", s.seat, s.permission_mode);
+            }
+            if s.count == 0 {
+                bail!("seat {} needs a count of at least 1", s.seat);
+            }
+        }
+        let id = match input.id.filter(|i| !i.is_empty()) {
+            Some(id) => {
+                if id.starts_with("builtin-") {
+                    bail!("the built-in template can't be edited; copy it first");
+                }
+                self.template(&id)?;
+                id
+            }
+            None => new_id(),
+        };
+        self.0.execute(
+            "INSERT INTO templates(id, name, seats_json, routing_json, updated_at) VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(id) DO UPDATE SET name = ?2, seats_json = ?3, routing_json = ?4, updated_at = ?5",
+            params![id, name, serde_json::to_string(&input.seats)?, serde_json::to_string(&input.routing)?, now_ms()],
+        )?;
+        self.template(&id)
+    }
+
+    pub fn delete_template(&self, id: &str) -> Result<()> {
+        if id.starts_with("builtin-") {
+            bail!("the built-in template can't be deleted");
+        }
+        self.template(id)?;
+        if let Some(t) = self.teams()?.into_iter().find(|t| t.template_id == id) {
+            bail!("the team \"{}\" uses this template", t.slug);
+        }
+        self.0.execute("DELETE FROM templates WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// Role name by session id, for the live members of teams that aren't archived.
+    pub fn session_roles(&self) -> Result<std::collections::HashMap<String, String>> {
+        let mut st = self.0.prepare(
+            "SELECT m.session_id, r.name FROM members m JOIN teams t ON t.id = m.team_id \
+             JOIN roles r ON r.id = m.role_id WHERE m.left_at IS NULL AND t.archived_at IS NULL",
+        )?;
+        Ok(st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?)
+    }
+
     fn role(&self, id: &str) -> Result<Role> {
         self.roles()?.into_iter().find(|r| r.id == id).ok_or_else(|| anyhow!("unknown role {id}"))
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleInput {
+    pub id: Option<String>,
+    pub name: String,
+    pub standing: bool,
+    pub instructions: String,
+    #[serde(default)]
+    pub caps: Caps,
+    pub reports_to: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateInput {
+    pub id: Option<String>,
+    pub name: String,
+    pub seats: Vec<Seat>,
+    #[serde(default)]
+    pub routing: Vec<Route>,
 }
 
 #[derive(Deserialize)]
@@ -586,6 +720,27 @@ fn open(state: &AppState) -> CmdResult<TeamsDb> {
 
 pub(crate) async fn list_roles(state: &AppState) -> CmdResult<Vec<Role>> {
     Ok(open(state)?.roles()?)
+}
+
+pub(crate) async fn save_role(state: &AppState, input: RoleInput) -> CmdResult<Role> {
+    Ok(open(state)?.save_role(input)?)
+}
+
+pub(crate) async fn delete_role(state: &AppState, id: String) -> CmdResult<()> {
+    Ok(open(state)?.delete_role(&id)?)
+}
+
+pub(crate) async fn save_template(state: &AppState, input: TemplateInput) -> CmdResult<Template> {
+    Ok(open(state)?.save_template(input)?)
+}
+
+pub(crate) async fn delete_template(state: &AppState, id: String) -> CmdResult<()> {
+    Ok(open(state)?.delete_template(&id)?)
+}
+
+/// Role name by session id, for the badge in the session list.
+pub(crate) async fn team_session_roles(state: &AppState) -> CmdResult<std::collections::HashMap<String, String>> {
+    Ok(open(state)?.session_roles()?)
 }
 
 pub(crate) async fn list_team_templates(state: &AppState) -> CmdResult<Vec<Template>> {
@@ -752,5 +907,46 @@ mod tests {
         for (id, hook) in [("grok", true), ("claude-code", true), ("antigravity", true), ("codex", true), ("opencode", false), ("cursor", false), ("kilo", false), ("patchbay", false)] {
             assert_eq!(has_prompt_hook(AgentKind::parse(id).unwrap()), hook, "{id}");
         }
+    }
+
+    fn worker_seat(role: &str, agent: &str) -> Seat {
+        Seat { seat: "workers".into(), role_id: role.into(), agent: agent.into(), model: None, permission_mode: "default".into(), count: 2, choices: vec![] }
+    }
+
+    #[test]
+    fn roles_and_templates_are_copied_not_edited_and_in_use_ones_stay() {
+        let d = dir();
+        let t = TeamsDb::open(&d).unwrap();
+        let role = |id: Option<&str>| RoleInput { id: id.map(Into::into), name: "Careful worker".into(), standing: false, instructions: "Be careful.".into(), caps: Caps::default(), reports_to: Some("builtin-desk".into()) };
+        assert!(t.save_role(role(Some("builtin-worker"))).unwrap_err().to_string().contains("copy it first"));
+        assert!(t.delete_role("builtin-worker").is_err());
+        let mine = t.save_role(role(None)).unwrap();
+        assert!(!mine.builtin);
+        let edited = t.save_role(RoleInput { instructions: "Be very careful.".into(), ..role(Some(&mine.id)) }).unwrap();
+        assert_eq!(edited.instructions, "Be very careful.");
+        assert!(t.save_role(RoleInput { name: " ".into(), ..role(None) }).is_err());
+
+        let tpl = |id: Option<&str>, agent: &str| TemplateInput { id: id.map(Into::into), name: "Mine".into(), seats: vec![worker_seat(&mine.id, agent)], routing: vec![] };
+        assert!(t.save_template(tpl(Some("builtin-triage-desk"), "cursor")).unwrap_err().to_string().contains("copy it first"));
+        assert!(t.save_template(tpl(None, "nope")).unwrap_err().to_string().contains("unknown agent"));
+        let mut bad = tpl(None, "cursor");
+        bad.seats[0].role_id = "missing".into();
+        assert!(t.save_template(bad).is_err());
+        let mine_tpl = t.save_template(tpl(None, "cursor")).unwrap();
+        assert_eq!(mine_tpl.seats[0].agent, "cursor");
+
+        // A role a template uses, and a template a team uses, can't go.
+        assert!(t.delete_role(&mine.id).unwrap_err().to_string().contains("uses this role"));
+        let mut input = new_team("mine", &d, &d.join("out"));
+        input.template_id = mine_tpl.id.clone();
+        let team = t.create_team(input).unwrap();
+        assert!(t.delete_template(&mine_tpl.id).unwrap_err().to_string().contains("uses this template"));
+        t.attach(&team.id, "s1", "workers").unwrap();
+        assert_eq!(t.session_roles().unwrap().get("s1").map(String::as_str), Some("Careful worker"));
+        t.archive(&team.id).unwrap();
+        assert!(t.session_roles().unwrap().is_empty());
+        // Archived teams still hold their template.
+        assert!(t.delete_template(&mine_tpl.id).is_err());
+        assert!(t.delete_template("builtin-triage-desk").is_err());
     }
 }

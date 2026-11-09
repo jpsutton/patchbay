@@ -358,8 +358,12 @@ export interface PermissionRule {
   createdAt: number;
 }
 
-export interface TeamRole { id: string; name: string; standing: boolean; instructions: string; builtin: boolean }
-export interface TeamSeat { seat: string; roleId: string; agent: string; model: string | null; count: number }
+export interface TeamCaps { writesItems: boolean; dispatches: boolean; decides: boolean; merges: boolean }
+export interface TeamRole { id: string; name: string; standing: boolean; instructions: string; caps: TeamCaps; reportsTo: string | null; builtin: boolean }
+export interface TeamSeat {
+  seat: string; roleId: string; agent: string; model: string | null; permissionMode: string; count: number;
+  choices?: { agent: string; model: string | null }[];
+}
 export interface TeamTemplate { id: string; name: string; seats: TeamSeat[]; routing: { class: string; goesTo: string; examples: string }[] }
 export interface Team {
   id: string; slug: string; templateId: string; cwd: string; idPrefix: string; prBase: string;
@@ -371,6 +375,8 @@ export interface TeamMemberRow {
   /** running / waiting / stalled / idle / stopped; null for a session on another computer. */
   activity: string | null;
 }
+export type TeamTemplateInput = { id?: string; name: string; seats: TeamSeat[]; routing: TeamTemplate["routing"] };
+export type TeamRoleInput = Omit<TeamRole, "id" | "builtin"> & { id?: string };
 export interface TeamDetail { team: Team; template: TeamTemplate; roles: TeamRole[]; members: TeamMemberRow[] }
 export interface NewTeam { templateId: string; slug: string; cwd: string; projectRules?: string; exportDir?: string }
 
@@ -1356,6 +1362,13 @@ export const api = {
   listSidebarLayout: () => invoke<SidebarEntry[]>("list_sidebar_layout"),
   applySidebarLayout: (put: SidebarEntry[], remove: string[]) => invoke<void>("apply_sidebar_layout", { put, remove }),
 
+  listRoles: () => invoke<TeamRole[]>("list_roles"),
+  saveRole: (input: TeamRoleInput) => invoke<TeamRole>("save_role", { input }),
+  deleteRole: (id: string) => invoke<void>("delete_role", { id }),
+  saveTemplate: (input: TeamTemplateInput) => invoke<TeamTemplate>("save_template", { input }),
+  deleteTemplate: (id: string) => invoke<void>("delete_template", { id }),
+  /** Role name by session id, for sessions on live teams. */
+  teamSessionRoles: () => invoke<Record<string, string>>("team_session_roles"),
   listTeamTemplates: () => invoke<TeamTemplate[]>("list_team_templates"),
   listTeams: () => invoke<Team[]>("list_teams"),
   createTeam: (input: NewTeam) => invoke<Team>("create_team", { input }),

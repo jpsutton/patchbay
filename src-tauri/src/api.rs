@@ -217,6 +217,11 @@ commands! {
     list_sidebar_layout();
     apply_sidebar_layout(put, remove);
     list_roles();
+    save_role(input);
+    delete_role(id);
+    save_template(input);
+    delete_template(id);
+    team_session_roles();
     list_team_templates();
     list_teams();
     create_team(input);

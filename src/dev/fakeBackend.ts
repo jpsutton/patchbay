@@ -1107,12 +1107,17 @@ const CLAUDE_SESSIONS = [
 const fakeTemplate = {
   id: "builtin-triage-desk", name: "Triage desk", routing: [],
   seats: [
-    { seat: "desk", roleId: "builtin-desk", agent: "opencode", model: null, count: 1 },
-    { seat: "advisor", roleId: "builtin-advisor", agent: "claude-code", model: "opus", count: 1 },
-    { seat: "lead", roleId: "builtin-lead", agent: "claude-code", model: "sonnet", count: 1 },
-    { seat: "workers", roleId: "builtin-worker", agent: "claude-code", model: "sonnet", count: 4 },
+    { seat: "desk", roleId: "builtin-desk", agent: "opencode", model: null, permissionMode: "default", count: 1 },
+    { seat: "advisor", roleId: "builtin-advisor", agent: "claude-code", model: "opus", permissionMode: "default", count: 1 },
+    { seat: "lead", roleId: "builtin-lead", agent: "claude-code", model: "sonnet", permissionMode: "default", count: 1 },
+    { seat: "workers", roleId: "builtin-worker", agent: "claude-code", model: "sonnet", permissionMode: "default", count: 4 },
   ],
 };
+const noCaps = { writesItems: false, dispatches: false, decides: false, merges: false };
+let fakeRoles: any[] = ["Desk", "Advisor", "Ship Lead", "Worker", "Verifier"].map((name, i) => ({
+  id: `builtin-${["desk", "advisor", "lead", "worker", "verifier"][i]}`, name, standing: i < 3, instructions: `You are the ${name.toLowerCase()}.`, caps: noCaps, reportsTo: null, builtin: true,
+}));
+let fakeTemplates: any[] = [fakeTemplate];
 let fakeTeams: any[] = [];
 let fakeMembers: any[] = [];
 
@@ -1784,7 +1789,23 @@ export function install() {
           db.sidebarLayout = applyChange(db.sidebarLayout, { put: a.put as SidebarEntry[], remove: a.remove as string[] });
           return null;
         }
-        case "list_team_templates": return [fakeTemplate];
+        case "list_roles": return fakeRoles;
+        case "save_role": {
+          const i = a.input as any;
+          const r = { ...i, id: i.id ?? id(), builtin: false };
+          fakeRoles = [...fakeRoles.filter((x) => x.id !== r.id), r];
+          return r;
+        }
+        case "delete_role": fakeRoles = fakeRoles.filter((r) => r.id !== a.id); return null;
+        case "save_template": {
+          const i = a.input as any;
+          const t = { ...i, id: i.id ?? id() };
+          fakeTemplates = [...fakeTemplates.filter((x) => x.id !== t.id), t];
+          return t;
+        }
+        case "delete_template": fakeTemplates = fakeTemplates.filter((t) => t.id !== a.id); return null;
+        case "team_session_roles": return Object.fromEntries(fakeMembers.map((m) => [m.sessionId, fakeRoles.find((r) => r.id === m.roleId)?.name]));
+        case "list_team_templates": return fakeTemplates;
         case "list_teams": return fakeTeams;
         case "create_team": {
           const i = a.input as { slug: string; cwd: string; templateId: string; projectRules?: string };
@@ -1796,7 +1817,7 @@ export function install() {
         case "team_detach": fakeMembers = fakeMembers.filter((m) => !(m.teamId === a.teamId && m.sessionId === a.sessionId)); return null;
         case "team_archive": fakeTeams = fakeTeams.filter((t) => t.id !== a.teamId); return null;
         case "team_detail": {
-          const roles = fakeTemplate.seats.map((s) => ({ id: s.roleId, name: s.seat, standing: true, instructions: "", builtin: true }));
+          const roles = fakeRoles;
           return {
             team: fakeTeams.find((t) => t.id === a.teamId),
             template: fakeTemplate,

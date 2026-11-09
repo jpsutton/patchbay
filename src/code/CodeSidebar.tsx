@@ -27,6 +27,7 @@ import {
 import { startSessionDrag } from "../lib/paneDrag";
 import { rowStatus } from "../lib/sessionLive";
 import { focusComposer } from "../lib/shortcuts";
+import { useTeamRoles } from "../lib/teamRoles";
 
 const COLLAPSED_KEY = "patchbay.codeSidebar.collapsed";
 /** The folder order from before the layout synced. It seeds the first layout. */
@@ -363,6 +364,8 @@ export function CodeSidebar() {
     return () => window.removeEventListener("keydown", onKey);
   }, [hasChosen]);
 
+  const teamRoles = useTeamRoles();
+
   // Show a drop mark only where the move changes something.
   const dropTarget = drag && planMove(layout ?? [], top, drag.key, drag.target) ? drag.target : null;
   let line: { key: string; edge: "top" | "bottom" } | null = null;
@@ -408,6 +411,7 @@ export function CodeSidebar() {
         key={s.id}
         icon={strongest(s.activity, live) ?? "chat"}
         agent={s.agent}
+        teamRole={teamRoles[s.id]}
         indent={!inPinned}
         title={s.title}
         subtitle={inPinned ? basename(s.cwd) : undefined}

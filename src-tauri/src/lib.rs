@@ -53,7 +53,7 @@ use crate::db::{
     PermissionRule, Prompt, Provider, SearchHit, SidebarEntry, new_id,
 };
 use crate::mesh::Mesh;
-use crate::teams::{create_team, list_roles, list_team_templates, list_teams, team_archive, team_attach, team_detach, team_detail};
+use crate::teams::{delete_role, delete_template, save_role, save_template, team_session_roles, create_team, list_roles, list_team_templates, list_teams, team_archive, team_attach, team_detach, team_detail};
 use crate::terminal::{TermEvent, TerminalManager};
 
 /// Everything commands share. Cheap to clone (all handles), so the mesh's request handler and
