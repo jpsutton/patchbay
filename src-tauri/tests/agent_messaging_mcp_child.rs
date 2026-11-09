@@ -73,7 +73,19 @@ fn real_child_sigterm_logs_signal_term_and_exits_by_signal() {
         let _ = kill(child.id() as i32, SIGTERM);
     }
 
-    let status = child.wait().expect("wait");
+    // Bounded wait (nit): avoids hanging suite if signal were ignored.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(s) = child.try_wait().expect("try_wait") {
+            break s;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("SIGTERM test timed out waiting for child exit (signal ignored?)");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
     let content = read_log(&log);
     use std::os::unix::process::ExitStatusExt;
     assert_eq!(

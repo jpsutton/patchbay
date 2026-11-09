@@ -66,6 +66,7 @@ fn mcp_log_path_is_safe_regular(path: &Path) -> bool {
 #[cfg(target_os = "macos")]
 fn o_nonblock_flag() -> i32 { 0x0004 }
 #[cfg(all(unix, not(target_os = "macos")))]
+// Hand-coded: libc is dev-dep only in this tree; O_NONBLOCK is 0o4000 on Linux.
 fn o_nonblock_flag() -> i32 { 0o4000 }
 #[cfg(not(unix))]
 fn o_nonblock_flag() -> i32 { 0 }
@@ -111,6 +112,14 @@ fn mcp_log_rotate_if_needed(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Single `write_all` of `line + "\n"` (c): deterministic invariant for (e) — a two-write
+/// mutant is caught by `mcp_log_write_line_single_write_all` regardless of scheduling.
+fn mcp_log_write_line<W: std::io::Write>(w: &mut W, line: &str) -> std::io::Result<()> {
+    let mut payload = line.as_bytes().to_vec();
+    payload.push(b'\n');
+    w.write_all(&payload)
+}
+
 /// Best-effort, size-capped append with rotate-to-.1. Never fails the caller; never logs secrets.
 /// `line` must already be safe (no token, no message bodies, no stderr content beyond error kind).
 /// Issues one `write_all` for the full line+newline (small O_APPEND writes reduce interleaving risk).
@@ -130,9 +139,7 @@ fn mcp_log_append(path: &Path, line: &str) {
             use std::os::unix::fs::PermissionsExt;
             let _ = f.set_permissions(fs::Permissions::from_mode(0o600));
         }
-        let mut payload = line.as_bytes().to_vec();
-        payload.push(b'\n');
-        f.write_all(&payload)?;
+        mcp_log_write_line(&mut f, line)?;
         Ok(())
     })();
 }
@@ -690,7 +697,6 @@ fn tools_list_for(can_steer: bool) -> Value {
     json!({ "tools": tools })
 }
 
-
 pub fn run_stdio() -> Result<()> {
     let log_path = mcp_log_path_from_env();
     // START line before doing work: pid/ppid/session/host_agent/timestamp. No secrets.
@@ -985,7 +991,6 @@ pub(crate) async fn call_tool(
     };
     Ok(json!({ "content": [{ "type": "text", "text": text }], "isError": false }))
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1323,19 +1328,24 @@ mod tests {
         assert!(fields.iter().any(|(k, _)| *k == "host_agent"), "{rendered}");
     }
 
-
     #[test]
     fn mcp_log_atomic_append_no_interleaving() {
-        // (e) N-writer stress: each append is one write_all(line+\n). A two-write mutant
-        // (e.g. writeln! split) can interleave/corrupt lines under concurrency.
+        // (e, a+b) N-writer stress with Barrier: each append must be one logical record.
+        // (a) exact full-pattern match + multiset equality of all (t,i) in {0..T}x{0..I}
+        // catches drops/dupes/merges/partial records. (b) Barrier for tighter contention.
+        // White-box deterministic proof is `mcp_log_write_line_single_write_all` (c).
+        use std::sync::{Arc, Barrier};
         let path = std::env::temp_dir().join(format!("pb-mcp-atomic-{}-{}.log", std::process::id(), now_ms()));
         let _ = std::fs::remove_file(&path);
         let n_threads = 20usize;
         let n_each = 25usize;
+        let barrier = Arc::new(Barrier::new(n_threads));
         let mut handles = Vec::new();
         for t in 0..n_threads {
             let p = path.clone();
+            let b = barrier.clone();
             handles.push(std::thread::spawn(move || {
+                b.wait();
                 for i in 0..n_each {
                     mcp_log_append(&p, &format!("ts=1 event=test t={t} i={i}"));
                 }
@@ -1345,10 +1355,67 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap_or_default();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), n_threads * n_each, "expected {} lines, got {} (interleaving/corruption?):\n{}", n_threads*n_each, lines.len(), content);
+        let mut seen = std::collections::BTreeSet::new();
         for (idx, line) in lines.iter().enumerate() {
-            assert!(line.starts_with("ts=1 event=test "), "malformed line {idx}: {line:?}");
-            assert_eq!(line.matches("ts=").count(), 1, "merged/interleaved line {idx}: {line:?}");
+            let mut parts = line.split_whitespace();
+            assert_eq!(parts.next(), Some("ts=1"), "malformed line {idx}: {line:?}");
+            assert_eq!(parts.next(), Some("event=test"), "malformed line {idx}: {line:?}");
+            let tpart = parts.next().unwrap_or("");
+            let ipart = parts.next().unwrap_or("");
+            assert_eq!(parts.next(), None, "extra content (partial/merged) line {idx}: {line:?}");
+            let tval: usize = tpart.strip_prefix("t=").unwrap_or_else(|| panic!("bad t in line {idx}: {line:?}")).parse().unwrap();
+            let ival: usize = ipart.strip_prefix("i=").unwrap_or_else(|| panic!("bad i in line {idx}: {line:?}")).parse().unwrap();
+            assert!(tval < n_threads && ival < n_each, "out of range line {idx}: {line:?}");
+            assert!(seen.insert((tval, ival)), "duplicate (t,i) line {idx}: {line:?}");
         }
+        assert_eq!(seen.len(), n_threads * n_each, "missing (t,i) pairs: got {}", seen.len());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mcp_log_write_line_single_write_all() {
+        // (e, c) Deterministic white-box: fixed path issues exactly one write_all of text+"\n".
+        // A two-write mutant (text, then "\n") fails regardless of scheduling.
+        struct CountWrites(Vec<u8>, usize);
+        impl std::io::Write for CountWrites {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.1 += 1;
+                self.0.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+                self.1 += 1;
+                self.0.extend_from_slice(buf);
+                Ok(())
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let mut w = CountWrites(Vec::new(), 0);
+        mcp_log_write_line(&mut w, "ts=1 event=test k=v").unwrap();
+        assert_eq!(w.1, 1, "must issue exactly one write_all (two-write mutant would call twice)");
+        assert_eq!(w.0, b"ts=1 event=test k=v\n", "payload must be line + newline");
+    }
+
+    #[test]
+    fn mcp_log_write_failure_does_not_panic() {
+        // (i, item 1) open-success / write-failure path: logging failure never kills the child.
+        // Uses testable mcp_log_write_line(&mut impl Write) with a failing writer (cross-platform).
+        // A write_all().unwrap() mutant panics (red, proven); correct path returns Err, no panic.
+        struct FailingWriter;
+        impl std::io::Write for FailingWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(std::io::ErrorKind::Other, "injected write failure"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let mut w = FailingWriter;
+        let r = mcp_log_write_line(&mut w, "ts=1 event=exit cause=stdin_eof");
+        assert!(r.is_err(), "write failure must surface as Err, not panic");
+        // mcp_log_append swallows errors (best-effort) — must not panic.
+        let bad = std::env::temp_dir().join(format!("pb-mcp-not-a-parent-file-{}", std::process::id()));
+        let _ = std::fs::write(&bad, b"x");
+        let impossible = bad.join("child").join("log.txt");
+        mcp_log_append(&impossible, "ts=1 event=start"); // must not panic
+        let _ = std::fs::remove_file(&bad);
     }
 }
