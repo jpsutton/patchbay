@@ -1502,7 +1502,7 @@ async fn remote_window_catches_up_and_saves_through_the_host() {
     ev(code::acp::CodeEvent::Update { update: json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "hello" } }) });
 
     // No transcript saved: the whole run, held whole by A's ring.
-    let attach = code_attach(&b.state, s.id.clone()).await.unwrap();
+    let attach = code_attach(&b.state, s.id.clone(), None).await.unwrap();
     assert_eq!(attach["partial"], false, "{attach}");
     let events = attach["events"].as_array().unwrap();
     assert!(events.iter().any(|e| e["update"]["content"]["text"] == "hello"), "{attach}");

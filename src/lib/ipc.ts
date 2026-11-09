@@ -1249,7 +1249,11 @@ export const api = {
     invoke<void>("code_permission_respond", { requestId, optionId, id: sessionId }),
   codeQuestionRespond: (requestId: string, answers: AgentQuestionAnswer[], sessionId?: string) =>
     invoke<void>("code_question_respond", { requestId, answers, id: sessionId }),
-  codeAttach: (id: string) => invoke<CodeAttach>("code_attach", { id }),
+  /**
+   * `catchUp`: also the events since the session's last finished turn, which the saved transcript
+   * does not hold yet. For a window opening a session that kept running without it.
+   */
+  codeAttach: (id: string, catchUp?: boolean) => invoke<CodeAttach>("code_attach", { id, catchUp }),
   /**
    * Catch up on events this window missed (see `code_resume` in lib.rs): from `point`, or a fresh
    * snapshot with the status of the tool calls in `running`.

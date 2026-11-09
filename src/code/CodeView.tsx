@@ -1032,8 +1032,17 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
       return;
     }
     api.codeIsRunning(activeId).then((running) => {
-      // A running agent without UI state (e.g. after a reload) is restarted so history replays.
-      if (!running || !cur) start(activeId);
+      if (!running) {
+        start(activeId);
+        return;
+      }
+      // A running agent this window has no real state for: a reload, or the app reopened on a
+      // patchbayd that kept the agent going. Live events may already have made a placeholder
+      // (status "idle", entries streaming in) that nothing would ever mark ready, leaving the
+      // composer disabled until the user restarted the agent. Attach rather than start: it
+      // replays `ready` and what the turn has done so far, and a start would end the turn.
+      const now = useStore.getState().code[activeId];
+      if (!now || now.status === "idle") attach(activeId);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, meshLoaded]);
