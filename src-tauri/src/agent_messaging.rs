@@ -13,6 +13,11 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
+#[cfg(unix)]
+use tokio::signal::unix::{signal as unix_signal, SignalKind};
+#[cfg(unix)]
+use std::time::Duration;
+
 
 use crate::{AppState, api};
 
@@ -631,7 +636,7 @@ pub fn run_stdio() -> Result<()> {
             .enable_all()
             .build();
         match runtime {
-            Ok(rt) => rt.block_on(run_stdio_async()),
+            Ok(rt) => rt.block_on(run_stdio_async(log_path.clone())),
             Err(e) => Err(anyhow::Error::new(e).context("tokio runtime init")),
         }
     }));
@@ -639,6 +644,7 @@ pub fn run_stdio() -> Result<()> {
     match result {
         Ok(Ok(cause)) => {
             // cause is a named normal-exit reason (e.g. stdin_eof). No error payload.
+            // Signal exits (unix) log and re-raise inside run_stdio_async, so they don't return here.
             let mut fields = mcp_process_fields();
             fields.push(("cause", cause));
             mcp_log_event(log_path.as_deref(), "exit", &fields);
@@ -664,9 +670,45 @@ pub fn run_stdio() -> Result<()> {
     }
 }
 
+#[cfg(unix)]
+const SIG_DFL: usize = 0;
+#[cfg(unix)]
+unsafe extern "C" {
+    #[link_name = "signal"]
+    fn sys_signal(sig: i32, handler: usize) -> usize;
+    #[link_name = "raise"]
+    fn sys_raise(sig: i32) -> i32;
+}
+#[cfg(unix)]
+const SIGTERM: i32 = 15;
+#[cfg(unix)]
+const SIGINT: i32 = 2;
+#[cfg(unix)]
+const SIGHUP: i32 = 1;
+
+#[cfg(unix)]
+async fn log_signal_exit_and_reraise(log_path: Option<PathBuf>, cause: &'static str, sig: i32) {
+    // Write-then-re-raise with a short bound. Failure to write must NEVER block exit.
+    let path = log_path.clone();
+    let fields = mcp_process_fields();
+    let write = tokio::task::spawn_blocking(move || {
+        let mut f = fields;
+        f.push(("cause", cause.to_owned()));
+        mcp_log_event(path.as_deref(), "exit", &f);
+    });
+    let _ = tokio::time::timeout(Duration::from_millis(200), write).await;
+    unsafe {
+        sys_signal(sig, SIG_DFL);
+        sys_raise(sig);
+    }
+    // Safety net if raise returns (should not for TERM/INT/HUP with DFL).
+    std::process::abort();
+}
+
 /// Returns Ok(named_cause) on normal end (stdin EOF), Err on failures.
 /// Error messages are mapped to safe kinds by callers; this keeps causes explicit.
-async fn run_stdio_async() -> Result<String> {
+/// On unix, SIGTERM/SIGINT/SIGHUP are logged as signal_* then re-raised (host sees signal termination).
+async fn run_stdio_async(log_path: Option<PathBuf>) -> Result<String> {
     let addr = std::env::var("PATCHBAY_MESSAGE_ADDR")
         .map_err(|_| anyhow!("setup_env_missing:PATCHBAY_MESSAGE_ADDR"))?;
     let token = std::env::var("PATCHBAY_MESSAGE_TOKEN")
@@ -676,56 +718,113 @@ async fn run_stdio_async() -> Result<String> {
 
     let mut input = BufReader::new(tokio::io::stdin()).lines();
     let mut output = tokio::io::stdout();
+
+    #[cfg(unix)]
+    let mut sigterm = unix_signal(SignalKind::terminate()).ok();
+    #[cfg(unix)]
+    let mut sigint = unix_signal(SignalKind::interrupt()).ok();
+    #[cfg(unix)]
+    let mut sighup = unix_signal(SignalKind::hangup()).ok();
+
     loop {
-        let line = match input.next_line().await {
-            Ok(Some(line)) => line,
-            Ok(None) => return Ok("stdin_eof".to_owned()),
-            Err(_) => return Err(anyhow!("stdin_read_error")),
-        };
-        let request: Value = match serde_json::from_str(&line) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        if request["method"]
-            .as_str()
-            .is_some_and(|m| m.starts_with("notifications/"))
+        #[cfg(unix)]
         {
-            continue;
+            let recv_term = async {
+                match sigterm.as_mut() {
+                    Some(s) => s.recv().await,
+                    None => std::future::pending::<Option<()>>().await,
+                }
+            };
+            let recv_int = async {
+                match sigint.as_mut() {
+                    Some(s) => s.recv().await,
+                    None => std::future::pending::<Option<()>>().await,
+                }
+            };
+            let recv_hup = async {
+                match sighup.as_mut() {
+                    Some(s) => s.recv().await,
+                    None => std::future::pending::<Option<()>>().await,
+                }
+            };
+            tokio::select! {
+                biased;
+                _ = recv_term => { log_signal_exit_and_reraise(log_path.clone(), "signal_term", SIGTERM).await; }
+                _ = recv_int => { log_signal_exit_and_reraise(log_path.clone(), "signal_int", SIGINT).await; }
+                _ = recv_hup => { log_signal_exit_and_reraise(log_path.clone(), "signal_hup", SIGHUP).await; }
+                line = input.next_line() => {
+                    let line = match line {
+                        Ok(Some(line)) => line,
+                        Ok(None) => return Ok("stdin_eof".to_owned()),
+                        Err(_) => return Err(anyhow!("stdin_read_error")),
+                    };
+                    handle_stdio_line(&addr, &token, &source_session_id, &mut output, line).await?;
+                }
+            }
         }
-        let id = request.get("id").cloned().unwrap_or(Value::Null);
-        let method = request["method"].as_str().unwrap_or_default();
-        let result = match method {
-            "initialize" => Ok(json!({
-                "protocolVersion": request["params"]["protocolVersion"].as_str().unwrap_or("2025-03-26"),
-                "capabilities": { "tools": {} },
-                "serverInfo": { "name": "patchbay-agent-messaging", "version": env!("CARGO_PKG_VERSION") }
-            })),
-            "ping" => Ok(json!({})),
-            "tools/list" => Ok(tools_list()),
-            "tools/call" => call_tool(&addr, &token, &source_session_id, &request["params"]).await,
-            _ => Err(anyhow!("unknown MCP method {method}")),
-        };
-        let response = match result {
-            Ok(value) => json!({ "jsonrpc": "2.0", "id": id, "result": value }),
-            Err(error) => json!({
-                "jsonrpc": "2.0", "id": id,
-                "result": ToolReply { content: vec![json!({ "type": "text", "text": format!("{error:#}") })], is_error: true }
-            }),
-        };
-        if output
-            .write_all(response.to_string().as_bytes())
-            .await
-            .is_err()
+        #[cfg(not(unix))]
         {
-            return Err(anyhow!("stdout_write_error"));
-        }
-        if output.write_all(b"\n").await.is_err() {
-            return Err(anyhow!("stdout_write_error"));
-        }
-        if output.flush().await.is_err() {
-            return Err(anyhow!("stdout_flush_error"));
+            let line = match input.next_line().await {
+                Ok(Some(line)) => line,
+                Ok(None) => return Ok("stdin_eof".to_owned()),
+                Err(_) => return Err(anyhow!("stdin_read_error")),
+            };
+            handle_stdio_line(&addr, &token, &source_session_id, &mut output, line).await?;
         }
     }
+}
+
+async fn handle_stdio_line(
+    addr: &str,
+    token: &str,
+    source_session_id: &str,
+    output: &mut tokio::io::Stdout,
+    line: String,
+) -> Result<()> {
+    let request: Value = match serde_json::from_str(&line) {
+        Ok(value) => value,
+        Err(_) => return Ok(()),
+    };
+    if request["method"]
+        .as_str()
+        .is_some_and(|m| m.starts_with("notifications/"))
+    {
+        return Ok(());
+    }
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let method = request["method"].as_str().unwrap_or_default();
+    let result = match method {
+        "initialize" => Ok(json!({
+            "protocolVersion": request["params"]["protocolVersion"].as_str().unwrap_or("2025-03-26"),
+            "capabilities": { "tools": {} },
+            "serverInfo": { "name": "patchbay-agent-messaging", "version": env!("CARGO_PKG_VERSION") }
+        })),
+        "ping" => Ok(json!({})),
+        "tools/list" => Ok(tools_list()),
+        "tools/call" => call_tool(addr, token, source_session_id, &request["params"]).await,
+        _ => Err(anyhow!("unknown MCP method {method}")),
+    };
+    let response = match result {
+        Ok(value) => json!({ "jsonrpc": "2.0", "id": id, "result": value }),
+        Err(error) => json!({
+            "jsonrpc": "2.0", "id": id,
+            "result": ToolReply { content: vec![json!({ "type": "text", "text": format!("{error:#}") })], is_error: true }
+        }),
+    };
+    if output
+        .write_all(response.to_string().as_bytes())
+        .await
+        .is_err()
+    {
+        return Err(anyhow!("stdout_write_error"));
+    }
+    if output.write_all(b"\n").await.is_err() {
+        return Err(anyhow!("stdout_write_error"));
+    }
+    if output.flush().await.is_err() {
+        return Err(anyhow!("stdout_flush_error"));
+    }
+    Ok(())
 }
 
 pub(crate) async fn call_tool(
