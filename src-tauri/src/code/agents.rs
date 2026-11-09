@@ -521,24 +521,47 @@ fn probe_opencode_deny_rules(
 
     // Kill process group (unix, leader set via process_group(0)) AND direct child on every
     // exit path so launchers/grandchildren do not leak and wait() cannot hang.
+    let mut kill_note = String::new();
     #[cfg(unix)]
     {
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &format!("-{}", child_pid)])
-            .status();
+        let pg = format!("-{}", child_pid);
+        let mut ok = false;
+        for prog in ["/bin/kill", "/usr/bin/kill", "kill"] {
+            for args in [vec!["-9", pg.as_str()], vec!["-s", "KILL", "--", pg.as_str()]] {
+                if let Ok(st) = std::process::Command::new(prog).args(&args).status() {
+                    if st.success() { ok = true; break; }
+                }
+            }
+            if ok { break; }
+        }
+        if !ok {
+            kill_note = format!("group_kill_failed(pgid={child_pid})");
+            tracing::warn!(cwd=%cwd.display(), pgid=child_pid, "opencode probe process-group kill reported failure");
+        }
     }
     let _ = child.kill();
     let wait_deadline = Instant::now() + Duration::from_secs(2);
+    let mut direct_reaped = false;
     loop {
         match child.try_wait() {
-            Ok(Some(_)) | Err(_) => break,
+            Ok(Some(_)) => { direct_reaped = true; break; }
+            Err(_) => break,
             Ok(None) if Instant::now() > wait_deadline => break,
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
         }
     }
+    if !direct_reaped {
+        let note = format!("direct_child_wait_timeout(pid={child_pid})");
+        tracing::warn!(cwd=%cwd.display(), pid=child_pid, "opencode probe child not reaped within bound");
+        if kill_note.is_empty() { kill_note = note; } else { kill_note = format!("{kill_note};{note}"); }
+    }
     // Reader threads are detached and never joined; killing the group/child closes pipe
     // write ends so they observe EOF. All blocking waits above are bounded.
-    result
+    if kill_note.is_empty() {
+        result
+    } else {
+        result.map_err(|e| format!("{e}; cleanup={kill_note}"))
+    }
 }
 
 #[derive(Debug)]
@@ -1929,18 +1952,28 @@ time.sleep(60)
         // give a moment for signals
         std::thread::sleep(std::time::Duration::from_millis(150));
         let gpid: i32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
-        let alive = std::process::Command::new("kill")
-            .args(["-0", &gpid.to_string()])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        // Zombie-aware: on Linux kill -0 succeeds for zombies; /proc/<pid>/stat state 'Z' means
+        // not a live leak (dead, awaiting reaping). Treat missing/zombie as gone.
+        let alive = {
+            let sig0 = std::process::Command::new("kill")
+                .args(["-0", &gpid.to_string()])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !sig0 { false } else {
+                match std::fs::read_to_string(format!("/proc/{gpid}/stat")) {
+                    Ok(stat) => !stat.split(')').nth(1).and_then(|r| r.trim_start().chars().next()).map(|c| c == 'Z').unwrap_or(false),
+                    Err(_) => sig0, // no /proc (e.g. macOS): fall back to kill -0
+                }
+            }
+        };
         if alive {
             let _ = std::process::Command::new("kill")
                 .args(["-9", &gpid.to_string()])
                 .status();
         }
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(!alive, "grandchild pid {gpid} leaked after probe returned ({err})");
+        assert!(!alive, "grandchild pid {gpid} leaked (live, not zombie) after probe returned ({err})");
         });
     }
 
