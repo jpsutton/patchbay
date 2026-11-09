@@ -202,9 +202,17 @@ const GROK_VERSION_FALLBACK: &str = "1.0.60";
 fn grok_version() -> &'static str {
     static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     VERSION.get_or_init(|| {
-        crate::code::agents::resolve(crate::code::agents::AgentKind::Grok, &Default::default())
+        let Ok(r) = crate::code::agents::resolve(crate::code::agents::AgentKind::Grok, &Default::default()) else {
+            return GROK_VERSION_FALLBACK.to_owned();
+        };
+        // A hung `grok` must not hold a request up: ask on a thread and give it a few seconds.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(std::process::Command::new(&r.program).arg("--version").output());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(3))
             .ok()
-            .and_then(|r| std::process::Command::new(&r.program).arg("--version").output().ok())
+            .and_then(|o| o.ok())
             .filter(|o| o.status.success())
             .and_then(|o| parse_grok_version(&String::from_utf8_lossy(&o.stdout)))
             .unwrap_or_else(|| GROK_VERSION_FALLBACK.to_owned())

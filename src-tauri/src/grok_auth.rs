@@ -281,8 +281,10 @@ struct TokenResponse {
 }
 
 /// The issuer's token endpoint, from its OIDC discovery document (cached per issuer).
-/// `PATCHBAY_GROK_TOKEN_URL` overrides it, for tests.
+/// In tests `PATCHBAY_GROK_TOKEN_URL` overrides it; a release build never sends a refresh token
+/// anywhere the login file's issuer didn't name.
 async fn token_endpoint(issuer: &str) -> Result<String> {
+    #[cfg(test)]
     if let Ok(u) = std::env::var("PATCHBAY_GROK_TOKEN_URL")
         && !u.is_empty()
     {
@@ -402,9 +404,14 @@ async fn token_from(home: &Path, lock_timeout: Duration) -> Result<Credentials> 
     // Keep the old refresh token when the provider didn't rotate it.
     let refresh = tokens.refresh_token.as_deref().unwrap_or(login.refresh_token.as_str());
     let root = apply_refresh(root, &login.scope, &tokens.access_token, refresh, expires_at_ms)?;
-    write_atomic(&path, &root)?;
     let creds = Credentials { token: tokens.access_token, user_id: login.user_id, team_id: login.team_id };
+    // The refresh token is spent: keep the new access token whatever happens to the file, so this
+    // process keeps working until it expires. A failed write is loud, because the file still holds
+    // the spent refresh token and the next refresh will be refused (`grok login` fixes it).
     cache_set(home, creds.clone(), expires_at_ms);
+    if let Err(e) = write_atomic(&path, &root) {
+        tracing::warn!("couldn't save the refreshed Grok login to {}: {e:#}", path.display());
+    }
     Ok(creds)
 }
 
