@@ -151,6 +151,18 @@ body,
   margin: 0;
 }
 
+/*
+ * The app fills the window and every pane scrolls inside itself. The page must never scroll:
+ * when a pane's own scroller reaches its end, the wheel chains to the page, and anything that
+ * overflows the window lets the whole UI slide off screen. A maximized window has no clipping
+ * #root (see rounded-window below), so nothing else stops it. Locking html and body stops the
+ * chain, and the programmatic scrolls (focus, scrollIntoView) that move the page without a wheel.
+ */
+html,
+body {
+  overflow: hidden;
+}
+
 body {
   background: var(--color-bg);
   color: var(--color-fg);
