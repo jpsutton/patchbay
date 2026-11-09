@@ -99,6 +99,11 @@ export interface TranscriptPart {
   toolCalls: Record<string, AcpToolCall>;
 }
 
+/** A page of this agent's older history, read back from its session file. `id` keeps its rows' keys. */
+export interface OlderPage extends TranscriptPart {
+  id: number;
+}
+
 export interface CodeState {
   status: "idle" | "starting" | "ready" | "exited";
   busy: boolean;
@@ -141,6 +146,20 @@ export interface CodeState {
   history: TranscriptPart | null;
   /** Turns run by agents the session had before its current one: shown, never replayed. */
   earlier: TranscriptPart | null;
+  /**
+   * Pages of this agent's history older than `entries`, read back from its session file when the
+   * user scrolled to the top (`loadOlderHistory`); oldest first.
+   */
+  older: OlderPage[];
+  /** Where the oldest page read so far starts in the session file. Above 0, earlier turns can still be read. */
+  pagedFrom: number;
+  /** User prompts before the first page this window read: a rewind or fork counts from there. */
+  promptBase: number;
+  /** `entries` is the newest part of the conversation only, so it must not be saved over the cached transcript. */
+  windowed: boolean;
+  olderLoading: boolean;
+  /** The last read of an older page failed: stop loading on scroll, offer a retry. */
+  olderError: boolean;
   /** `agentConfigRev` this agent was started with; older ones restart when idle. */
   configRev: number;
   /** `catalogRev` this agent was started with, for agents that run on Patchbay's models. */
@@ -199,6 +218,12 @@ const emptyCode = (): CodeState => ({
   autoApproved: {},
   history: null,
   earlier: null,
+  older: [],
+  pagedFrom: 0,
+  promptBase: 0,
+  windowed: false,
+  olderLoading: false,
+  olderError: false,
   configRev: 0,
   catalogRev: 0,
   lastForegroundAt: null,
@@ -262,7 +287,7 @@ function handBack(prev: ComposerRestore | null, dropped: QueuedPrompt[], me: str
 
 /** Persist what the transcript shows, so the session renders before the agent replays it. */
 function saveTranscript(id: string, s: CodeState) {
-  if (s.entries.length === 0 || s.partial) return;
+  if (s.entries.length === 0 || s.partial || s.windowed) return;
   const earlier = s.earlier ?? undefined;
   let json = JSON.stringify({ v: 1, earlier, entries: s.entries, toolCalls: s.toolCalls });
   if (json.length > 3_500_000) {
@@ -296,6 +321,18 @@ async function loadTranscript(id: string): Promise<{ history: TranscriptPart | n
     return { history: null, earlier: null };
   }
 }
+
+/**
+ * The cards a page of stored history shows: its updates run through the reducer live events use,
+ * on an empty state, so they come out as `session/load` would have built them.
+ */
+function partFromUpdates(id: string, updates: AcpUpdate[]): TranscriptPart {
+  let s = emptyCode();
+  for (const update of updates) s = stepCodeEvent(id, s, { type: "update", update });
+  return { entries: s.entries, toolCalls: s.toolCalls };
+}
+
+let olderPageSeq = 0;
 
 /** Hide the context note Patchbay put before a prompt (see `handoff.rs`) when the agent replays it. */
 function withoutNote(text: string): string {
@@ -505,6 +542,8 @@ interface Store {
   applyMeshChat: (p: MeshChatEvent) => void;
   /** Show a session that is already running (here, or on another node) without restarting it. */
   attachAgent: (id: string) => Promise<void>;
+  /** Read the next older page of a Patchbay-agent session's history into `older`. */
+  loadOlderHistory: (id: string) => Promise<void>;
   /** Apply a `code_resume` snapshot: the turn's state and the end of calls no longer running. */
   applyCodeResume: (id: string, r: Extract<CodeResume, { mode: "snapshot" }>) => void;
 }
@@ -1515,7 +1554,10 @@ export const useStore = create<Store>((set, get) => ({
     // A running session may have gone on without this window (patchbayd kept it going while the
     // app was closed), so ask for what happened since its last finished turn too. The phone app's
     // own backend does that on its own.
-    const attached = api.codeAttach(id, isRemoteApp() ? undefined : true);
+    // `history`: a Patchbay-agent session's turns come from its session file on the host, which
+    // holds turns that finished while no window was open, unlike the transcript a window saves.
+    // The phone app keeps to the saved transcript.
+    const attached = api.codeAttach(id, isRemoteApp() ? undefined : true, isRemoteApp() ? undefined : true);
     attached.catch(() => {});
     const { history, earlier } = await loadTranscript(id);
     let info;
@@ -1538,6 +1580,11 @@ export const useStore = create<Store>((set, get) => ({
     }
     const rev = get().agentConfigRev;
     const catalogRev = get().catalogRev;
+    // The host sent the newest turns itself: they are this agent's conversation, shown as live
+    // entries (not as a cached copy to be replayed over or moved to `earlier`), and what is above
+    // them is read on request.
+    const page = isRemoteApp() ? undefined : info.history;
+    const paged = page ? partFromUpdates(id, page.updates) : null;
     set((st) => ({
       code: {
         ...st.code,
@@ -1545,8 +1592,17 @@ export const useStore = create<Store>((set, get) => ({
           ...emptyCode(),
           configRev: rev,
           catalogRev,
-          history,
+          history: paged ? null : history,
           earlier,
+          ...(page && paged
+            ? {
+                entries: paged.entries,
+                toolCalls: paged.toolCalls,
+                pagedFrom: page.start,
+                promptBase: page.promptsBefore,
+                windowed: page.start > 0,
+              }
+            : {}),
           status: "ready",
           busy: info.busy,
           partial: !!info.partial,
@@ -1563,6 +1619,38 @@ export const useStore = create<Store>((set, get) => ({
       }));
     }
     finish(info.point);
+  },
+  loadOlderHistory: async (id) => {
+    const s = get().code[id];
+    if (!s || s.olderLoading || s.pagedFrom <= 0) return;
+    const from = s.pagedFrom;
+    const patch = (p: Partial<CodeState>) =>
+      set((st) => (st.code[id] && st.code[id].pagedFrom === from ? { code: { ...st.code, [id]: { ...st.code[id], ...p } } } : {}));
+    patch({ olderLoading: true, olderError: false });
+    try {
+      const page = await api.codeHistory(id, from);
+      if (!page) {
+        // Nothing to read (an older host, or no session file): what is shown is all there is.
+        patch({ olderLoading: false, pagedFrom: 0 });
+        get().setToast("Earlier messages aren't available here");
+        return;
+      }
+      const part = partFromUpdates(id, page.updates);
+      set((st) => {
+        const cur = st.code[id];
+        // The session restarted (or was reloaded) meanwhile: this page belongs to a view that is gone.
+        if (!cur || cur.pagedFrom !== from) return {};
+        return {
+          code: {
+            ...st.code,
+            [id]: { ...cur, older: [{ id: ++olderPageSeq, ...part }, ...cur.older], pagedFrom: page.start, olderLoading: false },
+          },
+        };
+      });
+    } catch (e) {
+      patch({ olderLoading: false, olderError: true });
+      get().setToast(errorText(e));
+    }
   },
 }));
 

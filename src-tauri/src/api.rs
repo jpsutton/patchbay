@@ -146,7 +146,8 @@ commands! {
     delete_code_session(id);
     code_auto_title(id);
     code_start(id);
-    code_attach(id, catch_up);
+    code_attach(id, catch_up, history);
+    code_history(id, before, prompts);
     code_resume(id, point, running);
     code_is_running(id);
     code_stop(id);
