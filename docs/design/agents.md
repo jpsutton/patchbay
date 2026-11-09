@@ -131,6 +131,12 @@ Agents report these three ways:
 
 Models are the one place where agent identity shows in the logic. Patchbay's agent and Grok run on Patchbay's models (`pb-<model id>`, with pricing, vision and context window from Settings). The other agents bring their own model ids. For those, the chosen model is saved in `agent_model` and reselected after `session/new` or `session/load` when the agent comes back on a different one. `AgentKind::uses_patchbay_models` gates this.
 
+### Grok Build on a Grok login
+
+Grok Build runs on Patchbay's models, and a provider can use a Grok login (`harness.md`). Grok attaches no session credential to a custom model's provider (checked on `grok` 1.0.60: a proxy-backed `[model_providers]` entry with no key answers 401 "no auth context"), so the login's access token goes to the child in the same way a stored key does: `PATCHBAY_KEY_<n>` in its environment, named by `env_key` in the generated `config.toml`. The token is read at launch, after `code_start_local` has refreshed it (`grok_auth::credentials`; the launch itself is not async), so it is good for what is left of its lifetime, about six hours. A session that outlives it gets 401s from the proxy until the agent restarts (open the session again or restart it). Providers on API keys are unaffected.
+
+The seat's weekly usage works for Grok Build sessions as it does for Patchbay's agent (`plan_account`): a report is requested after Grok's status updates and finished turns and while a turn runs, and "Stop at plan limit" applies.
+
 ## Switching agents mid-session
 
 The composer's agent picker works at any point in a session, on the desktop and on the phone. It lists the agents installed on the computer that runs the session: `list_agents` takes a `host`, and asks that computer through `code.new_options`. While the agent is mid-turn, the switch is refused.
