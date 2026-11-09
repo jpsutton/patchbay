@@ -2366,7 +2366,7 @@ time.sleep(60)
                 pr_base: None,
                 worktree_root: None,
                 project_rules: None,
-                export_dir: Some(dir.join("out").to_string_lossy().into_owned()),
+                export_dir: Some(format!("{}-out", dir.display())),
             })
             .unwrap();
         let mut launch = |agent: &str, seat: &str| {

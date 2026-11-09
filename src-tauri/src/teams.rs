@@ -386,7 +386,24 @@ impl TeamsDb {
             Some(d) => d,
             None => home_dir().context("HOME is not set")?.join(".hub/desks").join(&slug).to_string_lossy().into_owned(),
         };
-        check_export_dir(Path::new(&export_dir))?;
+        let id_prefix = input.id_prefix.filter(|p| !p.trim().is_empty()).unwrap_or_else(|| slug.clone());
+        if !id_prefix.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            bail!("the id prefix may use letters, digits, - and _ only");
+        }
+        let pr_base = input.pr_base.filter(|p| !p.trim().is_empty()).unwrap_or_else(|| "main".into());
+        check_pr_base(&pr_base)?;
+        let cwd = resolve(Path::new(&input.cwd));
+        let worktree_root = match input.worktree_root.filter(|w| !w.trim().is_empty()) {
+            Some(w) => {
+                let w = resolve(Path::new(&w));
+                if !w.starts_with(&cwd) {
+                    bail!("the worktree folder must be inside the team folder {}", cwd.display());
+                }
+                w.to_string_lossy().into_owned()
+            }
+            None => String::new(),
+        };
+        check_export_dir(Path::new(&export_dir), &cwd, Path::new(&worktree_root))?;
         let id = new_id();
         self.0.execute(
             "INSERT INTO teams(id, slug, template_id, cwd, id_prefix, pr_base, worktree_root, project_rules, export_dir, created_at) \
@@ -396,9 +413,9 @@ impl TeamsDb {
                 slug,
                 input.template_id,
                 input.cwd,
-                input.id_prefix.filter(|p| !p.trim().is_empty()).unwrap_or_else(|| slug.clone()),
-                input.pr_base.filter(|p| !p.trim().is_empty()).unwrap_or_else(|| "main".into()),
-                input.worktree_root.unwrap_or_default(),
+                id_prefix,
+                pr_base,
+                worktree_root,
                 input.project_rules.unwrap_or_default(),
                 export_dir,
                 now_ms()
@@ -674,8 +691,59 @@ pub fn preamble_for(data_dir: &Path, db: &Db, session_id: &str) -> Option<String
 
 // ---------------- markdown export ----------------
 
-/// Refuse a folder whose LEDGER.md or ROSTER.md was not written by us (say, a real Hub desk).
-fn check_export_dir(dir: &Path) -> Result<()> {
+/// `path` made absolute with symlinks resolved as far as it exists; the missing tail is kept as is.
+fn resolve(path: &Path) -> PathBuf {
+    let mut tail = Vec::new();
+    let mut cur = path.to_path_buf();
+    loop {
+        if let Ok(c) = cur.canonicalize() {
+            return tail.iter().rev().fold(c, |acc, t| acc.join(t));
+        }
+        match (cur.file_name().map(|n| n.to_owned()), cur.parent().map(Path::to_path_buf)) {
+            (Some(n), Some(p)) => {
+                tail.push(n);
+                cur = p;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+/// A branch name safe to hand to git later: no leading `-`, and git accepts it as a branch.
+fn check_pr_base(name: &str) -> Result<()> {
+    let ok = !name.starts_with('-')
+        && std::process::Command::new("git").args(["check-ref-format", "--branch", name]).output().is_ok_and(|o| o.status.success());
+    if !ok {
+        bail!("{name:?} is not a usable branch name");
+    }
+    Ok(())
+}
+
+/// Control characters (newlines included) become spaces, so event text can't forge lines.
+fn clean(t: &str) -> String {
+    t.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+}
+
+/// Refuse an export folder that is, or holds as one of our three files, a symlink; one whose
+/// LEDGER.md or ROSTER.md was not written by us (say, a real Hub desk); or one inside the team's
+/// folder or worktree root, where an agent could write into it.
+fn check_export_dir(dir: &Path, cwd: &Path, worktree_root: &Path) -> Result<()> {
+    let is_link = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink());
+    if is_link(dir) {
+        bail!("{} is a symlink; pick a real export folder", dir.display());
+    }
+    let real = resolve(dir);
+    for root in [cwd, worktree_root] {
+        if !root.as_os_str().is_empty() && real.starts_with(root) {
+            bail!("the export folder must be outside the team folder {}", root.display());
+        }
+    }
+    for name in ["LEDGER.md", "ROSTER.md", "CHANGELOG.md"] {
+        let p = dir.join(name);
+        if is_link(&p) {
+            bail!("{} is a symlink; pick another export folder", p.display());
+        }
+    }
     for name in ["LEDGER.md", "ROSTER.md"] {
         let p = dir.join(name);
         if let Ok(text) = std::fs::read_to_string(&p)
@@ -698,20 +766,20 @@ fn export(tdb: &TeamsDb, db: &Db, team_id: &str, event: &str) {
 fn write_export(tdb: &TeamsDb, db: &Db, team_id: &str, event: &str) -> Result<()> {
     let team = tdb.team(&team_id)?;
     let dir = PathBuf::from(&team.export_dir);
-    check_export_dir(&dir)?;
+    check_export_dir(&dir, &resolve(Path::new(&team.cwd)), Path::new(&team.worktree_root))?;
     std::fs::create_dir_all(&dir)?;
     let roles = tdb.roles()?;
     let mut roster = format!("{GENERATED}\n# Roster: {}\n\nFolder: {}\n\n| Role | Seat | Session | Agent |\n|---|---|---|---|\n", team.slug, team.cwd);
     for m in tdb.members(team_id)? {
         let role = roles.iter().find(|r| r.id == m.role_id).map_or("?", |r| r.name.as_str());
         let (title, agent) = db.get_code_session(&m.session_id)?.map_or((String::new(), String::new()), |s| (s.title, s.agent));
-        roster.push_str(&format!("| {role} | {} | {title} ({}) | {agent} |\n", m.seat, m.session_id));
+        roster.push_str(&format!("| {role} | {} | {} ({}) | {agent} |\n", m.seat, clean(&title).replace('|', "/"), m.session_id));
     }
     std::fs::write(dir.join("ROSTER.md"), roster)?;
     std::fs::write(dir.join("LEDGER.md"), ledger(tdb, &team)?)?;
     let log = dir.join("CHANGELOG.md");
     let mut text = std::fs::read_to_string(&log).unwrap_or_else(|_| format!("{GENERATED}\n# Changelog: {}\n\n", team.slug));
-    text.push_str(&format!("- {} {event}\n", chrono::Utc::now().format("%Y-%m-%d %H:%M:%SZ")));
+    text.push_str(&format!("- {} {}\n", chrono::Utc::now().format("%Y-%m-%d %H:%M:%SZ"), clean(event)));
     std::fs::write(log, text)?;
     Ok(())
 }
@@ -730,7 +798,7 @@ fn ledger(tdb: &TeamsDb, team: &Team) -> Result<String> {
         }
         out.push_str(&format!("## {status}\n\n| Id | Title | Type | Severity | Assignee | PR |\n|---|---|---|---|---|---|\n"));
         for i in here {
-            let cell = |t: &str| t.replace('|', "/").replace('\n', " ");
+            let cell = |t: &str| clean(&t.replace('|', "/"));
             out.push_str(&format!(
                 "| {} | {} | {} | {} | {} | {} |\n",
                 i.id, cell(&i.title), cell(&i.kind), cell(&i.severity), i.member_session.as_deref().unwrap_or(""), i.pr_url.as_deref().unwrap_or("")
@@ -742,7 +810,7 @@ fn ledger(tdb: &TeamsDb, team: &Team) -> Result<String> {
     if !open.is_empty() {
         out.push_str("## Decisions waiting\n\n");
         for d in open {
-            out.push_str(&format!("- {} ({}, {}): {}\n", d.id, d.class, d.status, d.question.replace('\n', " ")));
+            out.push_str(&format!("- {} ({}, {}): {}\n", d.id, d.class, d.status, clean(&d.question)));
         }
     }
     Ok(out)
@@ -854,6 +922,13 @@ mod tests {
         d
     }
 
+    /// A project folder inside `d`, apart from the export folders.
+    fn proj(d: &Path) -> PathBuf {
+        let p = d.join("proj");
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
     fn new_team(slug: &str, cwd: &Path, export: &Path) -> NewTeam {
         NewTeam {
             template_id: "builtin-triage-desk".into(),
@@ -887,7 +962,7 @@ mod tests {
     fn seats_fill_up_and_a_session_fills_one() {
         let d = dir();
         let t = TeamsDb::open(&d).unwrap();
-        let team = t.create_team(new_team("demo", &d, &d.join("out"))).unwrap();
+        let team = t.create_team(new_team("demo", &proj(&d), &d.join("out"))).unwrap();
         t.attach(&team.id, "s1", "desk").unwrap();
         assert!(t.attach(&team.id, "s2", "desk").unwrap_err().to_string().contains("full"));
         assert!(t.attach(&team.id, "s1", "advisor").unwrap_err().to_string().contains("already"));
@@ -905,11 +980,11 @@ mod tests {
         let foreign = d.join("desk");
         std::fs::create_dir_all(&foreign).unwrap();
         std::fs::write(foreign.join("LEDGER.md"), "# real ledger").unwrap();
-        assert!(t.create_team(new_team("x", &d, &foreign)).is_err());
+        assert!(t.create_team(new_team("x", &proj(&d), &foreign)).is_err());
         assert_eq!(std::fs::read_to_string(foreign.join("LEDGER.md")).unwrap(), "# real ledger");
 
         let out = d.join("out");
-        let team = t.create_team(new_team("demo", &d, &out)).unwrap();
+        let team = t.create_team(new_team("demo", &proj(&d), &out)).unwrap();
         let db = Db::open(&d.join("patchbay.sqlite")).unwrap();
         write_export(&t, &db, &team.id, "team created").unwrap();
         write_export(&t, &db, &team.id, "again").unwrap();
@@ -924,7 +999,7 @@ mod tests {
         let db = Db::open(&d.join("patchbay.sqlite")).unwrap();
         let s = db.create_code_session(&d.to_string_lossy(), None, "opencode", "default").unwrap();
         let t = TeamsDb::open(&d).unwrap();
-        let team = t.create_team(new_team("demo", &d, &d.join("out"))).unwrap();
+        let team = t.create_team(new_team("demo", &proj(&d), &d.join("out"))).unwrap();
         assert!(instructions_for(&d, &db, &s.id).is_none(), "not on a team yet");
         t.attach(&team.id, &s.id, "desk").unwrap();
         let text = instructions_for(&d, &db, &s.id).unwrap();
@@ -973,7 +1048,7 @@ mod tests {
 
         // A role a template uses, and a template a team uses, can't go.
         assert!(t.delete_role(&mine.id).unwrap_err().to_string().contains("uses this role"));
-        let mut input = new_team("mine", &d, &d.join("out"));
+        let mut input = new_team("mine", &proj(&d), &d.join("out"));
         input.template_id = mine_tpl.id.clone();
         let team = t.create_team(input).unwrap();
         assert!(t.delete_template(&mine_tpl.id).unwrap_err().to_string().contains("uses this template"));
@@ -984,5 +1059,56 @@ mod tests {
         // Archived teams still hold their template.
         assert!(t.delete_template(&mine_tpl.id).is_err());
         assert!(t.delete_template("builtin-triage-desk").is_err());
+    }
+
+    #[test]
+    fn export_refuses_symlinks_inside_folders_and_strips_control_characters() {
+        let d = dir();
+        let t = TeamsDb::open(&d).unwrap();
+        let p = proj(&d);
+        let db = Db::open(&d.join("patchbay.sqlite")).unwrap();
+        // Inside the team folder, or the folder itself a symlink (dangling too).
+        assert!(t.create_team(new_team("a", &p, &p.join("out"))).unwrap_err().to_string().contains("outside"));
+        let link = d.join("link");
+        std::os::unix::fs::symlink(d.join("nowhere"), &link).unwrap();
+        assert!(t.create_team(new_team("b", &p, &link)).unwrap_err().to_string().contains("symlink"));
+        // A dangling CHANGELOG.md symlink would be written through.
+        let out = d.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let victim = d.join("victim");
+        std::os::unix::fs::symlink(&victim, out.join("CHANGELOG.md")).unwrap();
+        assert!(t.create_team(new_team("c", &p, &out)).unwrap_err().to_string().contains("symlink"));
+        std::fs::remove_file(out.join("CHANGELOG.md")).unwrap();
+        assert!(!victim.exists());
+        // Event text can't start a line of its own.
+        let team = t.create_team(new_team("d", &p, &out)).unwrap();
+        write_export(&t, &db, &team.id, "evil\n- 2099 forged\r\u{1b}[31m").unwrap();
+        let log = std::fs::read_to_string(out.join("CHANGELOG.md")).unwrap();
+        assert!(log.lines().all(|l| !l.starts_with("- 2099")) && !log.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn team_inputs_are_validated() {
+        let d = dir();
+        let t = TeamsDb::open(&d).unwrap();
+        let p = proj(&d);
+        let with = |f: &dyn Fn(&mut NewTeam)| {
+            let mut n = new_team("v", &p, &d.join("out"));
+            f(&mut n);
+            t.create_team(n)
+        };
+        assert!(with(&|n| n.id_prefix = Some("a/b".into())).is_err());
+        assert!(with(&|n| n.pr_base = Some("-x".into())).is_err());
+        assert!(with(&|n| n.pr_base = Some("a..b".into())).is_err());
+        assert!(with(&|n| n.worktree_root = Some(d.to_string_lossy().into_owned())).is_err());
+        assert!(with(&|n| n.worktree_root = Some(format!("{}/../..", p.display()))).is_err());
+        let ok = with(&|n| {
+            n.id_prefix = Some("A_b-1".into());
+            n.pr_base = Some("release/1.0".into());
+            n.worktree_root = Some(p.join("trees").to_string_lossy().into_owned());
+        })
+        .unwrap();
+        assert_eq!(ok.pr_base, "release/1.0");
+        assert!(Path::new(&ok.worktree_root).starts_with(p.canonicalize().unwrap()));
     }
 }

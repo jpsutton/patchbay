@@ -145,6 +145,15 @@ After every change Patchbay rewrites `LEDGER.md` (index), `ROSTER.md` and append
 `CHANGELOG.md` in `export_dir`, so agents outside Patchbay can read the state. The files carry a
 header saying they are generated. Nothing reads them back.
 
+The export folder must be a real folder outside the team's folder and worktree root. Patchbay
+refuses it, or any of the three files, when it is a symlink, and strips control characters from
+event, title and question text before writing.
+
+Known limit: `decision_open` lets a `writes_items` role choose the class. Class `desk` resolves with
+no gate, so a role that can write items can pre-resolve its own question. That is acceptable while
+nothing acts on a decision; dispatch must not wait on a decision without a host-side check of who
+opened it and what class it took.
+
 ## Team tools
 
 Added to the messaging MCP (`agent_messaging.rs`, `tools_list_for`) only for sessions that are

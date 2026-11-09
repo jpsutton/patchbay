@@ -572,7 +572,10 @@ async fn tell(state: &AppState, from: Option<&str>, to: &str, text: &str) {
     let r = match from {
         Some(f) => {
             let node = state.mesh.node_id().to_owned();
-            crate::send_agent_message(state, &node, f, to, text).await.map(|_| ())
+            match crate::agent_messaging::check_send_limits(f, to) {
+                Ok(()) => crate::send_agent_message(state, &node, f, to, text).await.map(|_| ()),
+                Err(e) => Err(e),
+            }
         }
         None => async {
             if !state.code.is_running(to) {
@@ -669,13 +672,13 @@ mod tests {
 
     fn setup() -> (PathBuf, TeamsDb, Team) {
         let d = std::env::temp_dir().join(format!("pb-items-{}", new_id()));
-        std::fs::create_dir_all(&d).unwrap();
+        std::fs::create_dir_all(d.join("proj")).unwrap();
         let t = TeamsDb::open(&d).unwrap();
         let team = t
             .create_team(NewTeam {
                 template_id: "builtin-triage-desk".into(),
                 slug: "demo".into(),
-                cwd: d.to_string_lossy().into_owned(),
+                cwd: d.join("proj").to_string_lossy().into_owned(),
                 id_prefix: Some("DM".into()),
                 pr_base: None,
                 worktree_root: None,
