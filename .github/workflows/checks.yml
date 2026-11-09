@@ -261,10 +261,29 @@ jobs:
           exit 1
       - name: Build the Android bridge and debug APK
         working-directory: remote
-        run: ../node_modules/.bin/tauri android build --apk --debug --target aarch64 --ci --config '{"build":{"beforeBuildCommand":""}}'
+        run: |
+          set -euo pipefail
+          # Gradle/Kotlin artifact hosts (services.gradle.org, github.com) occasionally 504.
+          for attempt in 1 2 3 4 5; do
+            if ../node_modules/.bin/tauri android build --apk --debug --target aarch64 --ci --config '{"build":{"beforeBuildCommand":""}}'; then
+              exit 0
+            fi
+            echo "android build attempt ${attempt} failed; waiting"
+            sleep $((attempt * 30))
+          done
+          exit 1
       - name: Android speech controller tests and lint
         working-directory: remote/src-tauri/gen/android
-        run: ./gradlew :tauri-plugin-remote-platform:testDebugUnitTest :tauri-plugin-remote-platform:lintDebug --console=plain
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            if ./gradlew :tauri-plugin-remote-platform:testDebugUnitTest :tauri-plugin-remote-platform:lintDebug --console=plain; then
+              exit 0
+            fi
+            echo "android speech tests attempt ${attempt} failed; waiting"
+            sleep $((attempt * 20))
+          done
+          exit 1
       - name: Android speech reports
         if: always()
         uses: actions/upload-artifact@v4
