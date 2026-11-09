@@ -69,11 +69,14 @@ generated block (team name, its own role, the roster by role, the team tools).
 
 - Agents with a system-prompt hook get it there, through the existing `session_meta` /
   `CODEX_CONFIG` path in `code/agents.rs` (Grok, Claude Code, Antigravity, Codex).
-- Agents without one (OpenCode, Cursor, Kilo; see "Custom instructions" in `agents.md`) get the
-  same block as a fixed preamble on every prompt Patchbay sends them for team work: the first
-  brief, every peer message and every dispatch. Cost: the block's tokens on each such message. A
-  first-message-only preamble was rejected because members lose it on compaction, which happened
-  in the reference desk.
+- Agents without one (OpenCode, Cursor, Kilo, and Patchbay's own agent, whose instructions are a
+  host-wide setting rather than per session) get the same block as a fixed preamble on every
+  prompt with an `agent:` origin: the first brief, every peer message and every dispatch
+  (`dispatch_item` must send with that origin). Prompts the user types get no preamble. Cost: the
+  block's tokens on each such message. A first-message-only preamble was rejected because members
+  lose it on compaction, which happened in the reference desk.
+- Hook agents read instructions only when the agent starts. Attaching a running session, or
+  editing its role, takes effect on its next agent start; the UI says so.
 
 ## Templates and seats
 
@@ -101,7 +104,12 @@ apply to workers: the folder or inside it) and adds:
 
 - `slug`, `id_prefix` (items are `<prefix>-YYYYMMDD-NN`), `pr_base`, `worktree_root`;
 - `project_rules`: markdown, e.g. "set `CARGO_TARGET_DIR`", "the mock LLM port 8765 is taken".
-- `export_dir`: default `~/.hub/desks/<slug>/`.
+- `export_dir`: default `~/.hub/desks/<slug>/`. Creating a team, and every export, refuses a
+  folder whose `LEDGER.md` or `ROSTER.md` lacks the generated header, so a team never overwrites
+  a hand-run Hub desk with the same slug.
+
+A session fills at most one seat across all teams. Seat counts (standing `count`, worker `pool`)
+are enforced on every attach, by hand or by dispatch.
 
 ## Storage
 
@@ -162,8 +170,9 @@ Members report progress with `item_note`; the desk keeps sole ownership of statu
   Released members stop counting.
 - The approval-gap rule (a non-always-approve creator may not start Cursor, Claude Code, Codex)
   does not apply to seats the user configured in the template: choosing the agent in the template
-  is the approval. The worker still gets the seat's permission mode, never looser than the
-  team's.
+  is the approval (decided 2026-11-09). The worker still gets the seat's permission mode, never
+  looser than the team's. This loosens an existing safety check, so phase 4 gets a security
+  review before it is used.
 - Same-computer only, as today.
 
 ## UI
@@ -196,20 +205,28 @@ Routing: the three classes in the table above, with the reference desk's example
 - Run the branch as `patchbayd --data-dir ~/patchbay-teams-data` (empty folder). Mesh keychain
   entries are scoped by data folder (`mesh/keys.rs` `keyring_scope`), so it gets its own mesh
   identity. Test teams work in a throwaway clone, never the real checkout.
-- Container (Colima) isolation is deferred to the unattended-dispatch tests in phase 3.
+- Container (Colima) isolation is deferred to the unattended-dispatch tests in phase 4.
 
 ## Phases
 
-1. **Read-only.** `teams.db`, roles and templates with the built-ins, create a team and attach
-   existing sessions to seats by hand, the team panel, role preamble delivery, markdown export.
-   Done when: a team made from the template shows its roster and live activity, and each agent
-   kind receives its instructions (system prompt or preamble).
-2. **Items and decisions.** The item and decision tools with capability checks, the board, the
+1. **Read-only.** Done 2026-11-09 (`4a1824ea`, `41d53b74`). `teams.db`, built-in roles and the
+   triage template, create a team and attach sessions to seats by hand, instruction delivery
+   (hook or preamble), markdown export, and a read-only Teams page under Settings (not yet the
+   sidebar). Not verified: a real agent turn reading the instructions.
+2. **Editors and live check.** `save_role` / `save_template` / `delete_*` and their editors in
+   Settings (built-ins copyable, not editable in place), a role badge on member sessions in the
+   session list, and one real turn per delivery path. Done when: a user copies the Worker role,
+   edits its text, builds a template from it with a Cursor seat, and a real Claude Code member
+   and a real OpenCode member each answer "what is your role?" with their role's name.
+3. **Items and decisions.** The item and decision tools with capability checks, the board, the
    decision queue. Done when: a desk member can only change items through the tools, a worker's
    `item_set` is refused, and a decision goes desk → advisor → user with the verdict shown.
-3. **Dispatch.** `dispatch_item`, pool limits, worktree creation, `member_release`. Done when: a
+4. **Dispatch.** `dispatch_item`, pool limits, worktree creation, `member_release`. Done when: a
    desk fills a 2-worker pool from mixed agents, a third dispatch is refused until one is released,
    and the 5-per-creator cap no longer blocks it.
+
+The Teams sidebar page is deferred until after phase 4; it touches `CodeSidebar.tsx` and
+`App.tsx`, which change daily upstream.
 
 Each phase has its own tests in the existing style (`cargo test` for `teams.db` and capability
 checks; the fake ACP agent for preamble delivery).
