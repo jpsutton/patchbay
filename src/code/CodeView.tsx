@@ -35,6 +35,7 @@ import { EditMessage } from "../components/EditMessage";
 import { UsageBar, fmtTokens } from "../components/UsageBar";
 import { sessionModel, sessionModelRef } from "../components/SessionUsage";
 import { coldCacheExpiredAt, isCacheCommand } from "./coldCache";
+import { modelsByProvider } from "../lib/modelGroups";
 import { agentMessageBody, isAgentOrigin, parseAgentMessageLabel } from "../lib/agentMessage";
 import { MobilePlanUsage } from "../components/MobilePlanUsage";
 import { TerminalPane } from "../terminal/TerminalPane";
@@ -1441,6 +1442,10 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
           : "Starting agent…"
         : null;
   const acpModels = s?.models;
+  // Models by provider, so the model chip can list providers first. Null: keep one flat list.
+  const modelGroups = acpModels
+    ? modelsByProvider(usesPatchbayModels(session.agent), acpModels.availableModels, models, providers)
+    : null;
   // Which catalog model this session runs on: Patchbay's own agent and Grok Build follow the
   // catalog (`pb-<id>` model ids); the other agents bring a model the catalog doesn't price or size.
   const currentModelRef = sessionModelRef(session, acpModels?.currentModelId);
@@ -2219,6 +2224,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                   <ChipSelect
                     lead={<ModelRing id={currentModelRef} />}
                     mono
+                    twoLevel
                     className="max-w-60"
                     value={acpModels.currentModelId}
                     disabled={!ready || working}
@@ -2240,11 +2246,18 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                       }
                     }}
                   >
-                    {acpModels.availableModels.map((m) => (
-                      <option key={m.modelId} value={m.modelId}>
-                        {m.name}
-                      </option>
-                    ))}
+                    {(modelGroups ?? [{ provider: null, models: acpModels.availableModels }]).map((g) => {
+                      const options = g.models.map((m) => (
+                        <option key={m.modelId} value={m.modelId}>
+                          {m.name}
+                        </option>
+                      ));
+                      return g.provider === null ? options : (
+                        <optgroup key={g.provider} label={g.provider}>
+                          {options}
+                        </optgroup>
+                      );
+                    })}
                   </ChipSelect>
                 ) : (
                   model && (
