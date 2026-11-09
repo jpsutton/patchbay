@@ -2,9 +2,19 @@ import { useEffect, useState } from "react";
 import { api, errorText, type AuthMode, type DiscoveredModel, type Provider, type ProviderKind } from "../lib/ipc";
 import { useStore } from "../lib/store";
 
-const PRESETS: { label: string; kind: ProviderKind; baseUrl: string }[] = [
+/** Where Grok Build's own sign-in is served from; a Grok login provider points here. */
+const GROK_PROXY_URL = "https://cli-chat-proxy.grok.com/v1";
+
+/** The subscription login each API type can use, when it has one. */
+const LOGIN_MODE: Partial<Record<ProviderKind, AuthMode>> = {
+  anthropic: "claude_login",
+  openai_responses: "grok_login",
+};
+
+const PRESETS: { label: string; kind: ProviderKind; baseUrl: string; authMode?: AuthMode }[] = [
   { label: "OpenAI", kind: "openai_chat", baseUrl: "https://api.openai.com/v1" },
   { label: "Anthropic", kind: "anthropic", baseUrl: "https://api.anthropic.com/v1" },
+  { label: "Grok (subscription)", kind: "openai_responses", baseUrl: GROK_PROXY_URL, authMode: "grok_login" },
   { label: "Google Gemini", kind: "gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta" },
   { label: "OpenRouter", kind: "openai_chat", baseUrl: "https://openrouter.ai/api/v1" },
   { label: "Ollama (local)", kind: "openai_chat", baseUrl: "http://localhost:11434/v1" },
@@ -28,9 +38,12 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
   const [key, setKey] = useState("");
   const [authMode, setAuthMode] = useState<AuthMode>(provider?.authMode ?? "api_key");
   const [claudeDir, setClaudeDir] = useState(provider?.claudeConfigDir ?? "");
+  const [grokHome, setGrokHome] = useState(provider?.grokHome ?? "");
   const [busy, setBusy] = useState(false);
   const setToast = useStore((s) => s.setToast);
   const useClaudeLogin = kind === "anthropic" && authMode === "claude_login";
+  const useGrokLogin = kind === "openai_responses" && authMode === "grok_login";
+  const useLogin = useClaudeLogin || useGrokLogin;
 
   useEffect(() => {
     setName(provider?.name ?? "");
@@ -38,6 +51,7 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
     setBaseUrl(provider?.baseUrl ?? "");
     setAuthMode(provider?.authMode ?? "api_key");
     setClaudeDir(provider?.claudeConfigDir ?? "");
+    setGrokHome(provider?.grokHome ?? "");
     setKey("");
   }, [provider?.id]);
 
@@ -53,7 +67,7 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
                 setName(p.label);
                 setKind(p.kind);
                 setBaseUrl(p.baseUrl);
-                setAuthMode("api_key");
+                setAuthMode(p.authMode ?? "api_key");
               }}
             >
               {p.label}
@@ -73,7 +87,7 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
           onChange={(e) => {
             const next = e.target.value as ProviderKind;
             setKind(next);
-            if (next !== "anthropic") setAuthMode("api_key");
+            if (LOGIN_MODE[next] !== authMode) setAuthMode("api_key");
           }}
         >
           {(Object.keys(KIND_LABEL) as ProviderKind[]).map((k) => (
@@ -108,7 +122,46 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
           </span>
         </label>
       )}
-      {useClaudeLogin ? (
+      {kind === "openai_responses" && (
+        <label className="flex items-start gap-2 text-xs text-muted">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={useGrokLogin}
+            onChange={(e) => {
+              setAuthMode(e.target.checked ? "grok_login" : "api_key");
+              if (e.target.checked && !baseUrl.trim()) setBaseUrl(GROK_PROXY_URL);
+            }}
+          />
+          <span>
+            Use Grok login (subscription)
+            <span className="mt-0.5 block text-muted">
+              Reuses the login from grok on this machine. Uses your SuperGrok, X Premium or Grok Team usage, not
+              an API key. Use Grok's own base URL, {GROK_PROXY_URL}.
+            </span>
+          </span>
+        </label>
+      )}
+      {useGrokLogin && (
+        <>
+          <label className="flex flex-col gap-1 text-xs text-muted">
+            Grok home
+            <input
+              className={`${input} font-mono`}
+              value={grokHome}
+              onChange={(e) => setGrokHome(e.target.value)}
+              placeholder="$GROK_HOME, else ~/.grok (default)"
+            />
+            <span>
+              To use another Grok account, enter the GROK_HOME you signed in to it with, e.g. ~/.grok-team. Add one
+              provider per account. Sign in with <code>grok login</code> (<code>grok login --device-auth</code> on a
+              server).
+            </span>
+          </label>
+          <p className="text-xs text-ok">Signed in via grok on this machine — no API key stored.</p>
+        </>
+      )}
+      {useGrokLogin ? null : useClaudeLogin ? (
         <>
           <label className="flex flex-col gap-1 text-xs text-muted">
             Claude config directory
@@ -154,9 +207,10 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
                 name,
                 kind,
                 baseUrl,
-                authMode: kind === "anthropic" ? authMode : "api_key",
+                authMode: useLogin ? authMode : "api_key",
                 claudeConfigDir: useClaudeLogin ? claudeDir : undefined,
-                apiKey: useClaudeLogin ? "" : key ? key : undefined,
+                grokHome: useGrokLogin ? grokHome : undefined,
+                apiKey: useLogin ? "" : key ? key : undefined,
               });
               setKey("");
               onSaved(p);
@@ -169,7 +223,7 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
         >
           {provider ? "Save" : "Add provider"}
         </button>
-        {provider?.hasKey && !useClaudeLogin && (
+        {provider?.hasKey && !useLogin && (
           <button
             className="rounded-md px-3 py-1.5 text-xs text-muted hover:text-danger"
             onClick={async () => {
