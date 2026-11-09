@@ -1512,7 +1512,10 @@ export const useStore = create<Store>((set, get) => ({
       if (last) lastPoint.set(id, last);
     };
     // Both go to the gateway: ask at once rather than one round trip after the other.
-    const attached = api.codeAttach(id);
+    // A running session may have gone on without this window (patchbayd kept it going while the
+    // app was closed), so ask for what happened since its last finished turn too. The phone app's
+    // own backend does that on its own.
+    const attached = api.codeAttach(id, isRemoteApp() ? undefined : true);
     attached.catch(() => {});
     const { history, earlier } = await loadTranscript(id);
     let info;

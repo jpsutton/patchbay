@@ -1983,13 +1983,19 @@ fn code_attach_local(state: &AppState, id: &str) -> serde_json::Value {
     serde_json::json!({ "running": running, "busy": state.code.is_busy(id), "events": events })
 }
 
-async fn code_attach(state: &AppState, id: String) -> CmdResult<serde_json::Value> {
+/// `catch_up`: also bring what happened since the session's last finished turn. A window opening
+/// a session whose agent kept running without it (the app was closed, or reloaded, while patchbayd
+/// went on) needs that, as a window on another computer always gets it.
+async fn code_attach(state: &AppState, id: String, catch_up: Option<bool>) -> CmdResult<serde_json::Value> {
     if let Some(host) = remote_host(state, &id)? {
         if !state.mesh.connected(&host) {
             return Ok(serde_json::json!({ "running": false, "busy": false, "events": [], "offline": true }));
         }
         let p = serde_json::json!({ "id": id, "catchUp": true });
         return Ok(state.mesh.rpc(&host, "code.attach", p).await?);
+    }
+    if catch_up == Some(true) {
+        return Ok(code_attach_catch_up(state, &id));
     }
     Ok(code_attach_local(state, &id))
 }
