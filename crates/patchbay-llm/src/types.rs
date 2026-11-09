@@ -403,8 +403,13 @@ impl Error {
     }
 
     pub fn http(status: u16, message: impl Into<String>) -> Self {
+        let mut message: String = message.into();
+        // Grok's proxy answers a spent plan, or an account without one, with a bare 403.
+        if status == 403 && message.contains("active Grok subscription") {
+            message.push_str(" (the plan's usage is used up, or this account has no Grok subscription)");
+        }
         Error {
-            message: message.into(),
+            message,
             status: Some(status),
             retryable: matches!(status, 408 | 409 | 425 | 429) || status >= 500,
             cancelled: false,
@@ -417,6 +422,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_grok_403_says_what_it_means() {
+        let e = Error::http(403, "You have either run out of available resources or do not have an active Grok subscription.");
+        assert!(e.message.contains("usage is used up"), "{}", e.message);
+        assert!(!e.retryable);
+        assert_eq!(Error::http(403, "forbidden").message, "forbidden");
+    }
 
     #[test]
     fn plan_usage_comes_from_the_unified_headers() {

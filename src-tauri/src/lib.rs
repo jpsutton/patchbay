@@ -2,6 +2,7 @@ pub mod api;
 mod attachments;
 mod chat;
 mod claude_auth;
+mod grok_auth;
 mod code;
 mod db;
 #[cfg(feature = "desktop")]
@@ -213,6 +214,9 @@ struct ProviderInput {
     /// For Claude login: another Claude Code config directory (`CLAUDE_CONFIG_DIR`) to sign in with.
     #[serde(default)]
     claude_config_dir: Option<String>,
+    /// For Grok login: another Grok home directory (`GROK_HOME`) to sign in with.
+    #[serde(default)]
+    grok_home: Option<String>,
 }
 
 async fn list_providers(state: &AppState) -> CmdResult<Vec<Provider>> {
@@ -222,6 +226,8 @@ async fn list_providers(state: &AppState) -> CmdResult<Vec<Provider>> {
 async fn save_provider(state: &AppState, input: ProviderInput) -> CmdResult<Provider> {
     let auth_mode = match (&input.kind, input.auth_mode) {
         (db::ProviderKind::Anthropic, db::AuthMode::ClaudeLogin) => db::AuthMode::ClaudeLogin,
+        // Grok's proxy speaks the Responses API.
+        (db::ProviderKind::OpenaiResponses, db::AuthMode::GrokLogin) => db::AuthMode::GrokLogin,
         _ => db::AuthMode::ApiKey,
     };
     let p = Provider {
@@ -234,6 +240,10 @@ async fn save_provider(state: &AppState, input: ProviderInput) -> CmdResult<Prov
             .claude_config_dir
             .map(|d| d.trim().to_owned())
             .filter(|d| !d.is_empty() && auth_mode == db::AuthMode::ClaudeLogin),
+        grok_home: input
+            .grok_home
+            .map(|d| d.trim().to_owned())
+            .filter(|d| !d.is_empty() && auth_mode == db::AuthMode::GrokLogin),
         auth_mode,
     };
     if p.name.is_empty() || p.base_url.is_empty() {
@@ -244,8 +254,12 @@ async fn save_provider(state: &AppState, input: ProviderInput) -> CmdResult<Prov
             return Err(CmdError(format!("Claude config directory {d} does not exist")));
         }
     }
+    if p.auth_mode == db::AuthMode::GrokLogin {
+        // The error says where it looked and to run `grok login`.
+        grok_auth::check(p.grok_home.as_deref())?;
+    }
     state.db.upsert_provider(&p, None)?;
-    if p.auth_mode == db::AuthMode::ClaudeLogin {
+    if matches!(p.auth_mode, db::AuthMode::ClaudeLogin | db::AuthMode::GrokLogin) {
         providers::delete_key(&p.id);
         state.db.clear_inline_key(&p.id)?;
     } else {
@@ -283,13 +297,20 @@ async fn discover_models(
         .ok_or_else(|| CmdError("provider not found".into()))?;
     let auth = match p.auth_mode {
         db::AuthMode::ClaudeLogin => providers::Auth::ClaudeLogin,
+        db::AuthMode::GrokLogin => providers::Auth::GrokLogin,
         db::AuthMode::ApiKey => providers::Auth::Key,
     };
+    let mut grok_user = None;
     let key = match auth {
         providers::Auth::ClaudeLogin => Some(claude_auth::access_token(p.claude_config_dir.as_deref()).await?),
+        providers::Auth::GrokLogin => {
+            let c = grok_auth::credentials(p.grok_home.as_deref()).await?;
+            grok_user = Some(c.user_id);
+            Some(c.token)
+        }
         providers::Auth::Key => providers::load_key(&p.id, inline.as_deref()),
     };
-    Ok(providers::discover_models(&p.kind, &p.base_url, key.as_deref(), auth).await?)
+    Ok(providers::discover_models_for(&p.kind, &p.base_url, key.as_deref(), auth, grok_user.as_deref()).await?)
 }
 
 async fn list_models(state: &AppState) -> CmdResult<Vec<Model>> {

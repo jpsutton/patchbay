@@ -139,6 +139,7 @@ pub fn native_web_search(r: &Resolved) -> bool {
 pub enum Auth {
     Key,
     ClaudeLogin,
+    GrokLogin,
 }
 
 /// Resolved model + provider + key, ready to sample.
@@ -147,6 +148,9 @@ pub struct Resolved {
     pub model: Model,
     pub key: Option<String>,
     pub auth: Auth,
+    /// For `Auth::GrokLogin`: the signed-in user, whom Grok's proxy wants named on every request.
+    /// Filled by `ensure_token`.
+    pub grok_user: Option<String>,
 }
 
 pub fn resolve(db: &Db, model_ref: &str) -> Result<Resolved> {
@@ -158,10 +162,11 @@ pub fn resolve(db: &Db, model_ref: &str) -> Result<Resolved> {
         .ok_or_else(|| anyhow!("provider for model {} missing", model.display_name))?;
     let auth = match provider.auth_mode {
         AuthMode::ClaudeLogin => Auth::ClaudeLogin,
+        AuthMode::GrokLogin => Auth::GrokLogin,
         AuthMode::ApiKey => Auth::Key,
     };
     let key = match auth {
-        Auth::ClaudeLogin => None,
+        Auth::ClaudeLogin | Auth::GrokLogin => None,
         Auth::Key => load_key(&provider.id, inline.as_deref()),
     };
     Ok(Resolved {
@@ -169,16 +174,69 @@ pub fn resolve(db: &Db, model_ref: &str) -> Result<Resolved> {
         model,
         key,
         auth,
+        grok_user: None,
     })
 }
 
-/// Fill `resolved.key` for Claude login providers (no-op for API-key auth).
+/// Fill `resolved.key` for Claude and Grok login providers (no-op for API-key auth).
 pub async fn ensure_token(resolved: &mut Resolved) -> Result<()> {
-    if resolved.auth != Auth::ClaudeLogin {
-        return Ok(());
+    match resolved.auth {
+        Auth::ClaudeLogin => {
+            resolved.key = Some(crate::claude_auth::access_token(resolved.provider.claude_config_dir.as_deref()).await?);
+        }
+        Auth::GrokLogin => {
+            let c = crate::grok_auth::credentials(resolved.provider.grok_home.as_deref()).await?;
+            resolved.key = Some(c.token);
+            resolved.grok_user = Some(c.user_id);
+        }
+        Auth::Key => {}
     }
-    resolved.key = Some(crate::claude_auth::access_token(resolved.provider.claude_config_dir.as_deref()).await?);
     Ok(())
+}
+
+/// Grok Build's version as the proxy sees it (`x-grok-client-version`): what the installed
+/// `grok --version` reports, else the version this was written against. The proxy turns away
+/// clients below its minimum, so a current `grok` keeps Patchbay current too.
+const GROK_VERSION_FALLBACK: &str = "1.0.60";
+
+fn grok_version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| {
+        crate::code::agents::resolve(crate::code::agents::AgentKind::Grok, &Default::default())
+            .ok()
+            .and_then(|r| std::process::Command::new(&r.program).arg("--version").output().ok())
+            .filter(|o| o.status.success())
+            .and_then(|o| parse_grok_version(&String::from_utf8_lossy(&o.stdout)))
+            .unwrap_or_else(|| GROK_VERSION_FALLBACK.to_owned())
+    })
+}
+
+/// `grok 1.0.60 (01a8e1c591c0) [alpha]` -> `1.0.60`.
+fn parse_grok_version(out: &str) -> Option<String> {
+    let v = out.split_whitespace().nth(1)?;
+    (v.split('.').count() >= 2 && v.split('.').all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))).then(|| v.to_owned())
+}
+
+/// The headers Grok Build sends to its proxy (`cli-chat-proxy.grok.com`), so a request made
+/// with a Grok login looks like Grok's own. `user` is the signed-in user's id.
+fn grok_headers(user: Option<&str>) -> Vec<(String, String)> {
+    let version = grok_version();
+    let mut h = vec![
+        ("X-XAI-Token-Auth".to_owned(), "xai-grok-cli".to_owned()),
+        ("x-authenticateresponse".to_owned(), "authenticate-response".to_owned()),
+        ("x-grok-client-version".to_owned(), version.to_owned()),
+        ("x-grok-client-identifier".to_owned(), "grok-shell".to_owned()),
+        ("x-grok-client-mode".to_owned(), "headless".to_owned()),
+        (
+            "User-Agent".to_owned(),
+            format!("grok-shell/{version} ({}; {})", std::env::consts::OS, std::env::consts::ARCH),
+        ),
+    ];
+    if let Some(u) = user.filter(|u| !u.is_empty()) {
+        h.push(("x-userid".to_owned(), u.to_owned()));
+        h.push(("x-grok-user-id".to_owned(), u.to_owned()));
+    }
+    h
 }
 
 /// Subscription OAuth tokens only serve requests whose first system block is exactly this line.
@@ -225,7 +283,17 @@ pub fn llm_config(r: &Resolved) -> patchbay_llm::Config {
                 cfg.extra_headers.push(("anthropic-beta".into(), ANTHROPIC_OAUTH_BETA.into()));
             }
             Auth::Key => cfg.auth = AuthScheme::XApiKey,
+            // A Claude login on an Anthropic provider only; a Grok login never reaches here.
+            Auth::GrokLogin => {}
         }
+    }
+    if r.auth == Auth::GrokLogin {
+        cfg.auth = AuthScheme::Bearer;
+        cfg.extra_headers.extend(grok_headers(r.grok_user.as_deref()));
+        // Grok sends the model's id and groups a session's requests by header as well.
+        cfg.extra_headers.push(("x-grok-model-override".into(), r.model.model_id.clone()));
+        cfg.session_headers = vec!["x-grok-conv-id".into(), "x-grok-session-id".into()];
+        cfg.request_id_header = Some("x-grok-req-id".into());
     }
     let p = &r.model.params;
     cfg.max_output_tokens = p.max_output_tokens;
@@ -313,6 +381,17 @@ pub async fn discover_models(
     key: Option<&str>,
     auth: Auth,
 ) -> Result<Vec<DiscoveredModel>> {
+    discover_models_for(kind, base_url, key, auth, None).await
+}
+
+/// `discover_models`, naming the signed-in Grok user (`Auth::GrokLogin` only).
+pub async fn discover_models_for(
+    kind: &ProviderKind,
+    base_url: &str,
+    key: Option<&str>,
+    auth: Auth,
+    grok_user: Option<&str>,
+) -> Result<Vec<DiscoveredModel>> {
     let mut url = format!("{}/models", normalize_base_url(base_url));
     if *kind == ProviderKind::Gemini {
         url.push_str("?pageSize=1000");
@@ -339,6 +418,13 @@ pub async fn discover_models(
         (ProviderKind::Anthropic, Auth::Key, None) => {
             req = req.header("anthropic-version", ANTHROPIC_VERSION);
         }
+        (_, Auth::GrokLogin, Some(k)) => {
+            req = req.bearer_auth(k);
+            for (name, value) in grok_headers(grok_user) {
+                req = req.header(name, value);
+            }
+        }
+        (_, Auth::GrokLogin, None) => return Err(anyhow!("Grok login required to discover models")),
         (ProviderKind::Gemini, _, Some(k)) => req = req.header("x-goog-api-key", k),
         (_, _, Some(k)) => req = req.bearer_auth(k),
         (_, _, None) => {}
@@ -360,7 +446,11 @@ pub async fn discover_models(
         .data
         .into_iter()
         .map(|m| DiscoveredModel {
-            display_name: m.display_name.unwrap_or_else(|| m.id.clone()),
+            display_name: m
+                .display_name
+                // Grok's list names its models (`name: "Grok 4.7"`).
+                .or_else(|| (auth == Auth::GrokLogin).then(|| m.rest.get("name").and_then(|n| n.as_str()).map(str::to_owned)).flatten())
+                .unwrap_or_else(|| m.id.clone()),
             context_window: context_window_of(&m.rest),
             id: m.id,
         })
@@ -378,7 +468,64 @@ fn truncate(s: &str, n: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::context_window_of;
+    use super::{context_window_of, parse_grok_version};
+
+    #[test]
+    fn reads_grok_s_version_from_its_banner() {
+        assert_eq!(parse_grok_version("grok 1.0.60 (01a8e1c591c0) [alpha]\n").as_deref(), Some("1.0.60"));
+        assert_eq!(parse_grok_version("grok 2.1.0").as_deref(), Some("2.1.0"));
+        assert_eq!(parse_grok_version("grok (dev)"), None);
+        assert_eq!(parse_grok_version("command not found"), None);
+        assert_eq!(parse_grok_version(""), None);
+    }
+
+    #[test]
+    fn a_grok_login_sends_groks_headers_and_session_ids() {
+        use super::*;
+        let r = Resolved {
+            provider: Provider {
+                id: "p".into(),
+                name: "Grok".into(),
+                kind: ProviderKind::OpenaiResponses,
+                base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+                has_key: false,
+                auth_mode: AuthMode::GrokLogin,
+                claude_config_dir: None,
+                grok_home: None,
+            },
+            model: Model {
+                id: "m".into(),
+                provider_id: "p".into(),
+                model_id: "grok-4.7".into(),
+                display_name: "Grok 4.7".into(),
+                vision: false,
+                context_window: None,
+                params: Default::default(),
+            },
+            key: Some("tok".into()),
+            auth: Auth::GrokLogin,
+            grok_user: Some("user-1".into()),
+        };
+        let cfg = llm_config(&r);
+        let get = |k: &str| cfg.extra_headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.as_str());
+        assert_eq!(cfg.format, patchbay_llm::WireFormat::Responses);
+        assert!(matches!(cfg.auth, AuthScheme::Bearer));
+        assert_eq!(cfg.key.as_deref(), Some("tok"));
+        assert_eq!(get("X-XAI-Token-Auth"), Some("xai-grok-cli"));
+        assert_eq!(get("x-grok-client-identifier"), Some("grok-shell"));
+        assert_eq!(get("x-userid"), Some("user-1"));
+        assert_eq!(get("x-grok-user-id"), Some("user-1"));
+        assert_eq!(get("x-grok-model-override"), Some("grok-4.7"));
+        assert!(get("x-grok-client-version").is_some_and(|v| v.chars().next().is_some_and(|c| c.is_ascii_digit())));
+        assert!(get("user-agent").is_some_and(|v| v.starts_with("grok-shell/")));
+        assert_eq!(cfg.session_headers, ["x-grok-conv-id", "x-grok-session-id"]);
+        assert_eq!(cfg.request_id_header.as_deref(), Some("x-grok-req-id"));
+        // Nothing of Grok's goes to an API-key provider.
+        let mut plain = r;
+        plain.auth = Auth::Key;
+        let cfg = llm_config(&plain);
+        assert!(cfg.extra_headers.is_empty() && cfg.session_headers.is_empty() && cfg.request_id_header.is_none());
+    }
 
     #[test]
     fn reads_context_window_variants() {
@@ -415,7 +562,7 @@ mod tests {
                 base_url: "https://api.anthropic.com/v1".into(),
                 has_key: false,
                 auth_mode: AuthMode::ClaudeLogin,
-                claude_config_dir: None,
+                claude_config_dir: None, grok_home: None,
             },
             model: Model {
                 id: "m".into(),
@@ -428,6 +575,7 @@ mod tests {
             },
             key: None,
             auth,
+            grok_user: None,
         };
         let request = || patchbay_llm::Request {
             system: vec![SystemBlock::new("be terse")],
@@ -452,7 +600,7 @@ mod tests {
     fn only_vendor_endpoints_have_native_search() {
         use super::*;
         let on = |kind, url: &str, auth| Resolved {
-            provider: Provider { id: "p".into(), name: "n".into(), kind, base_url: url.into(), has_key: false, auth_mode: Default::default(), claude_config_dir: None },
+            provider: Provider { id: "p".into(), name: "n".into(), kind, base_url: url.into(), has_key: false, auth_mode: Default::default(), claude_config_dir: None, grok_home: None },
             model: Model {
                 id: "m".into(),
                 provider_id: "p".into(),
@@ -464,6 +612,7 @@ mod tests {
             },
             key: None,
             auth,
+            grok_user: None,
         };
         assert!(native_web_search(&on(ProviderKind::Anthropic, "https://api.anthropic.com/v1", Auth::Key)));
         assert!(native_web_search(&on(ProviderKind::Anthropic, "https://api.anthropic.com/v1", Auth::ClaudeLogin)));
