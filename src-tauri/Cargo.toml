@@ -116,8 +116,8 @@ tray-icon = { version = "0.25", default-features = false, features = ["ksni"], o
 # the dialog plugin already links).
 ashpd = { version = "0.11", default-features = false, features = ["tokio"], optional = true }
 
-# The tests raise the open-file limit (see `test_support`); the same libc tokio already links.
-[target.'cfg(unix)'.dev-dependencies]
+# libc: process-group kill (probe cleanup) in lib + open-file limit in tests.
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]

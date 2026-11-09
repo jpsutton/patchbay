@@ -7,6 +7,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use libc;
 
 use anyhow::{Result, anyhow};
 use patchbay_agent::proc::search_dirs;
@@ -524,19 +526,15 @@ fn probe_opencode_deny_rules(
     let mut kill_note = String::new();
     #[cfg(unix)]
     {
-        let pg = format!("-{}", child_pid);
-        let mut ok = false;
-        for prog in ["/bin/kill", "/usr/bin/kill", "kill"] {
-            for args in [vec!["-9", pg.as_str()], vec!["-s", "KILL", "--", pg.as_str()]] {
-                if let Ok(st) = std::process::Command::new(prog).args(&args).status() {
-                    if st.success() { ok = true; break; }
-                }
+        // Direct syscall (deterministic; no external kill binary / arg-form / PATH ambiguity).
+        // Negative pid targets the process group. ESRCH = already gone => success.
+        let rc = unsafe { libc::kill(-(child_pid as i32), libc::SIGKILL) };
+        if rc != 0 {
+            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
+            if errno != libc::ESRCH {
+                kill_note = format!("group_kill_failed(pgid={child_pid},errno={errno})");
+                tracing::warn!(cwd=%cwd.display(), pgid=child_pid, rc, errno, "opencode probe process-group kill failed");
             }
-            if ok { break; }
-        }
-        if !ok {
-            kill_note = format!("group_kill_failed(pgid={child_pid})");
-            tracing::warn!(cwd=%cwd.display(), pgid=child_pid, "opencode probe process-group kill reported failure");
         }
     }
     let _ = child.kill();
@@ -553,7 +551,7 @@ fn probe_opencode_deny_rules(
     if !direct_reaped {
         let note = format!("direct_child_wait_timeout(pid={child_pid})");
         tracing::warn!(cwd=%cwd.display(), pid=child_pid, "opencode probe child not reaped within bound");
-        if kill_note.is_empty() { kill_note = note; } else { kill_note = format!("{kill_note};{note}"); }
+        kill_note = if kill_note.is_empty() { note } else { format!("{kill_note};{note}") };
     }
     // Reader threads are detached and never joined; killing the group/child closes pipe
     // write ends so they observe EOF. All blocking waits above are bounded.
@@ -1776,9 +1774,20 @@ mod tests {
     #[cfg(unix)]
     fn with_test_timeout<T: Send + 'static>(secs: u64, name: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || { let _ = tx.send(f()); });
-        rx.recv_timeout(std::time::Duration::from_secs(secs))
-            .unwrap_or_else(|_| panic!("{name}: timed out after {secs}s (unbounded hang guard)"))
+        let handle = std::thread::spawn(move || { let _ = tx.send(f()); });
+        match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+            Ok(v) => v,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("{name}: timed out after {secs}s (unbounded hang guard)")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // Worker panicked/dropped sender — join to propagate the real panic (do not mask as timeout).
+                match handle.join() {
+                    Err(payload) => std::panic::resume_unwind(payload),
+                    Ok(_) => panic!("{name}: worker disconnected without result (not a timeout)"),
+                }
+            }
+        }
     }
     #[cfg(unix)]
     fn write_fake_opencode(dir: &Path, name: &str, script: &str) -> PathBuf {
@@ -1952,25 +1961,28 @@ time.sleep(60)
         // give a moment for signals
         std::thread::sleep(std::time::Duration::from_millis(150));
         let gpid: i32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
-        // Zombie-aware: on Linux kill -0 succeeds for zombies; /proc/<pid>/stat state 'Z' means
-        // not a live leak (dead, awaiting reaping). Treat missing/zombie as gone.
-        let alive = {
+        // Poll up to ~2s (SIGKILL async). Zombie-aware: kill -0 succeeds for zombies; on Linux
+        // /proc/<pid>/stat state 'Z' means not a live leak. Missing/zombie => gone.
+        let is_live = || {
             let sig0 = std::process::Command::new("kill")
                 .args(["-0", &gpid.to_string()])
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
-            if !sig0 { false } else {
-                match std::fs::read_to_string(format!("/proc/{gpid}/stat")) {
-                    Ok(stat) => !stat.split(')').nth(1).and_then(|r| r.trim_start().chars().next()).map(|c| c == 'Z').unwrap_or(false),
-                    Err(_) => sig0, // no /proc (e.g. macOS): fall back to kill -0
-                }
+            if !sig0 { return false; }
+            match std::fs::read_to_string(format!("/proc/{gpid}/stat")) {
+                Ok(stat) => !stat.split(')').nth(1).and_then(|r| r.trim_start().chars().next()).map(|c| c == 'Z').unwrap_or(false),
+                Err(_) => sig0, // no /proc (e.g. macOS): fall back to kill -0
             }
         };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
+        let mut alive = is_live();
+        while alive && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            alive = is_live();
+        }
         if alive {
-            let _ = std::process::Command::new("kill")
-                .args(["-9", &gpid.to_string()])
-                .status();
+            let _ = std::process::Command::new("kill").args(["-9", &gpid.to_string()]).status();
         }
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!alive, "grandchild pid {gpid} leaked (live, not zombie) after probe returned ({err})");
