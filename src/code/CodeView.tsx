@@ -187,14 +187,20 @@ function MoreOptions({
   useEffect(() => {
     if (!open) return;
     const close = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (ref.current?.contains(t)) return;
+      // A chip list is portaled to <body>, so a click in it is outside this panel. Don't treat
+      // that as a click-away: it would close the panel out from under the list.
+      if (t instanceof Element && t.closest("[data-chip-menu]")) return;
+      setOpen(false);
     };
     const esc = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        setOpen(false);
-      }
+      if (e.key !== "Escape") return;
+      // The open chip list takes Escape. Closing this panel too would unmount the chip first.
+      if (document.querySelector("[data-chip-menu]")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setOpen(false);
     };
     window.addEventListener("mousedown", close);
     window.addEventListener("keydown", esc, true);
