@@ -125,7 +125,7 @@ function UsageLimit({ agent }: { agent: string }) {
       <Row
         label="Stop at plan limit"
         hint={`Cancel running turns and hold new prompts when your Claude plan's 5-hour or weekly usage (or your Grok plan's weekly usage) reaches the limit, or extra usage starts. Lifts when the window resets.${
-          agent === "patchbay" ? " Applies to sessions on a model whose provider uses your Claude or Grok login. Shared with Claude Code." : ""
+          agent !== "claude-code" ? " Applies to sessions on a model whose provider uses your Claude or Grok login. Shared with Claude Code." : ""
         }`}
       >
         <Toggle
@@ -830,7 +830,7 @@ export function AgentPage({ id, list }: { id: AgentId; list: AgentList }) {
         </p>
       )}
       {a.takesProviders && <ProviderChoice agent={a.id} label={a.label} />}
-      {((a.id === "claude-code" && !prefs.agentProviders[a.id]) || (a.id === "patchbay" && onPlanLogin)) && (
+      {((a.id === "claude-code" && !prefs.agentProviders[a.id]) || ((a.id === "patchbay" || a.id === "grok") && onPlanLogin)) && (
         <UsageLimit agent={a.id} />
       )}
       {a.id === "cursor" && <CursorUsageLimit />}

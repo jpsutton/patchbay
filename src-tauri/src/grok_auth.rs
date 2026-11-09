@@ -367,6 +367,13 @@ fn cache_clear(home: &Path) {
     }
 }
 
+/// The token `credentials` last fetched for the login in `dir`, while it is still fresh. For launch
+/// code that can't wait on a refresh: call `credentials` first, then read this.
+pub fn cached_token(dir: Option<&str>) -> Option<String> {
+    let home = resolve_dir(dir).ok()?;
+    cache_get(&home).map(|c| c.token)
+}
+
 /// A usable access token, with who it belongs to, for the Grok login in `dir` (`None`: the
 /// default home), refreshed and written back when needed.
 pub async fn credentials(dir: Option<&str>) -> Result<Credentials> {
@@ -454,8 +461,9 @@ mod tests {
     /// Serialize tests that touch the process-wide cache or environment.
     static TEST_LOCK: StdMutex<()> = StdMutex::new(());
 
+    /// Forget the tokens of this module's temp homes (other modules' tests keep theirs).
     fn clear_cache() {
-        CACHE.write().unwrap().clear();
+        CACHE.write().unwrap().retain(|home, _| !home.to_string_lossy().contains("pb-grok-auth-"));
     }
 
     fn rfc3339_in(ms: i64) -> String {

@@ -968,7 +968,7 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     use code::acp::CodeEvent;
     // A session on a Grok login has no response headers to read its usage from: ask the billing
     // endpoint after each model call and each finished turn (at most once per gap per login).
-    if matches!(env.event, CodeEvent::ContextUsage { .. } | CodeEvent::PromptDone { .. })
+    if matches!(env.event, CodeEvent::ContextUsage { .. } | CodeEvent::SessionStatus { .. } | CodeEvent::PromptDone { .. })
         && let Some((home, base_url)) = grok_login_of_session(state, &env.code_session_id)
     {
         let s = state.clone();
@@ -1642,7 +1642,11 @@ async fn poll_cursor_plan(state: &AppState) {
 /// on a model whose provider uses a Grok login.
 fn grok_login_of_session(state: &AppState, id: &str) -> Option<(Option<String>, String)> {
     let session = state.db.get_code_session(id).ok().flatten()?;
-    if !matches!(code::agents::AgentKind::parse(&session.agent), Some(code::agents::AgentKind::Patchbay)) {
+    // Patchbay's agent and Grok Build both run on Patchbay's models, so both can be on a Grok seat.
+    if !matches!(
+        code::agents::AgentKind::parse(&session.agent),
+        Some(code::agents::AgentKind::Patchbay | code::agents::AgentKind::Grok)
+    ) {
         return None;
     }
     let model = state.db.get_model(&session.model_ref?).ok().flatten()?;
@@ -1727,8 +1731,8 @@ async fn wire_log_save(state: &AppState) -> CmdResult<String> {
 }
 
 /// The plan account the session runs on, if it runs on one with usage limits: Claude Code on its
-/// own sign-in (not on a Patchbay provider, which bills by the token), or Patchbay's agent on a
-/// model whose provider uses a Claude or a Grok login. Accounts are `claude_auth::account`s or
+/// own sign-in (not on a Patchbay provider, which bills by the token), or Patchbay's agent or Grok
+/// Build on a model whose provider uses a Claude or a Grok login. Accounts are `claude_auth::account`s or
 /// `grok_auth::account`s.
 fn plan_account(state: &AppState, prefs: &prefs::Preferences, id: &str) -> Option<(String, Option<String>)> {
     use code::agents::AgentKind;
@@ -1737,7 +1741,7 @@ fn plan_account(state: &AppState, prefs: &prefs::Preferences, id: &str) -> Optio
         Some(AgentKind::ClaudeCode) if !prefs.agent_providers.contains_key(AgentKind::ClaudeCode.id()) => {
             Some(default_plan_account())
         }
-        Some(AgentKind::Patchbay) => session
+        Some(AgentKind::Patchbay | AgentKind::Grok) => session
             .model_ref
             .and_then(|r| state.db.get_model(&r).ok().flatten())
             .and_then(|m| state.db.get_provider(&m.provider_id).ok().flatten())
@@ -2014,6 +2018,15 @@ async fn code_start_local(state: &AppState, id: String) -> anyhow::Result<()> {
     let sink = code_sink(state);
     let (code, db, dir) = (state.code.clone(), state.db.clone(), state.data_dir.clone());
     let message_bridge = state.agent_message_bridge.get().cloned();
+    // Grok Build gets a Grok login's token in its environment at launch, and the launch can't
+    // wait on a refresh: do it here, so the token it reads is fresh.
+    if state.db.get_code_session(&id)?.is_some_and(|s| s.agent == "grok") {
+        for (home, _) in grok_logins(&state.db) {
+            if let Err(e) = grok_auth::credentials(home.as_deref()).await {
+                tracing::debug!("grok login: {e:#}");
+            }
+        }
+    }
     // `start` may block briefly while a previous agent for this session shuts down.
     tokio::task::spawn_blocking(move || code.start(sink, db, &dir, &id, message_bridge)).await??;
     Ok(())
