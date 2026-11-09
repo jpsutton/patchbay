@@ -358,6 +358,22 @@ export interface PermissionRule {
   createdAt: number;
 }
 
+export interface TeamRole { id: string; name: string; standing: boolean; instructions: string; builtin: boolean }
+export interface TeamSeat { seat: string; roleId: string; agent: string; model: string | null; count: number }
+export interface TeamTemplate { id: string; name: string; seats: TeamSeat[]; routing: { class: string; goesTo: string; examples: string }[] }
+export interface Team {
+  id: string; slug: string; templateId: string; cwd: string; idPrefix: string; prBase: string;
+  worktreeRoot: string; projectRules: string; exportDir: string; createdAt: number; archivedAt: number | null;
+}
+export interface TeamMemberRow {
+  member: { teamId: string; sessionId: string; seat: string; roleId: string; status: string; itemId: string | null };
+  role: string | null; title: string | null; agent: string | null; model: string | null;
+  /** running / waiting / stalled / idle / stopped; null for a session on another computer. */
+  activity: string | null;
+}
+export interface TeamDetail { team: Team; template: TeamTemplate; roles: TeamRole[]; members: TeamMemberRow[] }
+export interface NewTeam { templateId: string; slug: string; cwd: string; projectRules?: string; exportDir?: string }
+
 export interface Prompt {
   id: string;
   name: string;
@@ -1339,6 +1355,14 @@ export const api = {
 
   listSidebarLayout: () => invoke<SidebarEntry[]>("list_sidebar_layout"),
   applySidebarLayout: (put: SidebarEntry[], remove: string[]) => invoke<void>("apply_sidebar_layout", { put, remove }),
+
+  listTeamTemplates: () => invoke<TeamTemplate[]>("list_team_templates"),
+  listTeams: () => invoke<Team[]>("list_teams"),
+  createTeam: (input: NewTeam) => invoke<Team>("create_team", { input }),
+  teamDetail: (teamId: string) => invoke<TeamDetail>("team_detail", { teamId }),
+  teamAttach: (teamId: string, sessionId: string, seat: string) => invoke<unknown>("team_attach", { teamId, sessionId, seat }),
+  teamDetach: (teamId: string, sessionId: string) => invoke<void>("team_detach", { teamId, sessionId }),
+  teamArchive: (teamId: string) => invoke<void>("team_archive", { teamId }),
 
   listPrompts: () => invoke<Prompt[]>("list_prompts"),
   savePrompt: (input: { id?: string; name: string; content: string }) => invoke<Prompt>("save_prompt", input),
