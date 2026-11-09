@@ -1099,6 +1099,74 @@ fn load_folds_foreign_path_accounts_into_the_default() {
     assert_eq!(loaded[&me].latest.as_ref().unwrap().seven_day.unwrap().utilization, 0.9);
 }
 
+/// A `claude-code` session bound to its own `claude.config_dir.<id>` reports and is gated
+/// under that directory's account (not `default_plan_account`), and when that directory
+/// upgrades from a path fallback to a portable `u:o` key at runtime, `plan_accounts` and
+/// `adopt_plan_limits` fold the path-keyed history into the portable key without a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_path_upgrade_and_session_config_dir_keep_accounts_apart() {
+    use code::acp::CodeEvent;
+    use code::plan_limits::{PlanLimits, Window, now};
+    let n = node("live-fold-and-session-dir");
+    let cwd = n.dir.to_string_lossy().into_owned();
+    let custom_dir = n.dir.join("claudetvg");
+    std::fs::create_dir_all(&custom_dir).unwrap();
+    let custom_path = custom_dir.to_string_lossy().into_owned();
+
+    let s = n.state.db.create_code_session(&cwd, None, "claude-code", "default").unwrap();
+    n.state
+        .db
+        .set_setting(&code::import_claude::config_dir_key(&s.id), &custom_path)
+        .unwrap();
+
+    // First report arrives before `.claude.json` exists in `custom_dir`: stored under `custom_path`,
+    // never under `default_plan_account()`.
+    let first = PlanLimits {
+        five_hour: Some(Window { utilization: 0.15, resets_at: now() + 3600 }),
+        seven_day: Some(Window { utilization: 0.60, resets_at: now() + 86400 }),
+        observed_at: now() - 60,
+        ..Default::default()
+    };
+    emit(&n, &s.id, CodeEvent::PlanLimits { limits: first });
+    assert!(
+        n.state.code.plan.accounts().contains_key(&custom_path),
+        "session with claude.config_dir.<id> must record under its own directory, not default"
+    );
+    assert!(
+        !n.state.code.plan.accounts().contains_key(&crate::default_plan_account().0),
+        "default account must stay untouched"
+    );
+
+    // A foreign secondary directory path (`/.claudetvg`) over the mesh must not collapse into default either.
+    let foreign_secondary = json!({
+        "account": "/Users/peer/.claudetvg",
+        "limits": PlanLimits {
+            five_hour: Some(Window { utilization: 0.42, resets_at: now() + 3600 }),
+            observed_at: now() - 30,
+            ..Default::default()
+        }
+    });
+    mesh::RpcHandler::event(&MeshRpc { state: n.state.clone() }, MESH_PLAN_LIMITS_EVENT, &foreign_secondary);
+    assert!(!n.state.code.plan.accounts().contains_key(&crate::default_plan_account().0));
+
+    // Now Claude Code writes `.claude.json` in `custom_dir`: querying `plan_accounts` folds `custom_path`
+    // into `u-team:o-team` immediately without a restart.
+    let profile = serde_json::json!({ "oauthAccount": {
+        "accountUuid": "u-team", "organizationUuid": "o-team", "organizationName": "Vizius"
+    }});
+    std::fs::write(custom_dir.join(".claude.json"), profile.to_string()).unwrap();
+    let chans: crate::api::ChanFactory = Arc::new(|_| None);
+    let views = crate::api::call(&n.state, "plan_accounts", json!({}), &chans).await.unwrap();
+    let arr = views.as_array().unwrap();
+    assert!(arr.iter().any(|v| v["account"] == "u-team:o-team" && v["label"] == "Vizius"), "{arr:?}");
+    assert!(!arr.iter().any(|v| v["account"] == custom_path), "path key must fold into portable key: {arr:?}");
+    assert!(!n.state.code.plan.accounts().contains_key(&custom_path));
+    assert_eq!(
+        n.state.code.plan.account("u-team:o-team").latest.unwrap().five_hour.unwrap().utilization,
+        0.15
+    );
+}
+
 /// Cursor plan usage one member fetched reaches the others; a different account is ignored.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cursor_plan_limits_reach_peers_on_the_same_account() {

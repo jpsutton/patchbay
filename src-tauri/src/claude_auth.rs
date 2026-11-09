@@ -98,51 +98,107 @@ pub fn is_path_account_key(key: &str) -> bool {
 /// profile catches up (the portable key returns, and `fold_plan_accounts` merges the history on
 /// the next load).
 pub fn account(dir: &Path) -> (String, Option<String>) {
-    static SEEN: std::sync::Mutex<BTreeMap<PathBuf, (SystemTime, String, Option<String>, Vec<String>)>> =
-        std::sync::Mutex::new(BTreeMap::new());
+    #[derive(Clone)]
+    struct Profile {
+        key: String,
+        name: Option<String>,
+        tiers: Vec<String>,
+    }
+    #[derive(Clone, Default)]
+    struct Seen {
+        modified: Option<SystemTime>,
+        current: Option<Profile>,
+        verified: Option<Profile>,
+        backup_checked_tier: Option<String>,
+    }
+    fn parse_profile(path: &Path) -> Option<Profile> {
+        let v = std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok())?;
+        let a = &v["oauthAccount"];
+        let (user, org) = (a["accountUuid"].as_str()?, a["organizationUuid"].as_str()?);
+        let key = format!("{user}:{org}");
+        let name = a["organizationName"].as_str().map(str::to_owned);
+        let tiers = [a["userRateLimitTier"].as_str(), a["organizationRateLimitTier"].as_str()]
+            .into_iter()
+            .flatten()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        Some(Profile { key, name, tiers })
+    }
+    fn backup_profile_for_tier(file: &Path, tier: &str) -> Option<Profile> {
+        let parent = file.parent()?;
+        let mut backups: Vec<PathBuf> = std::fs::read_dir(parent)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(".claude.json.bak"))
+            })
+            .collect();
+        backups.sort_by(|a, b| b.cmp(a));
+        backups
+            .into_iter()
+            .filter_map(|p| parse_profile(&p))
+            .find(|p| p.tiers.iter().any(|x| x == tier))
+    }
+    static SEEN: std::sync::Mutex<BTreeMap<PathBuf, Seen>> = std::sync::Mutex::new(BTreeMap::new());
     let fallback = || (dir.to_string_lossy().into_owned(), None);
     // `~/.claude` keeps it beside the directory; any other directory, inside it.
     let file = match home() {
         Ok(h) if dir == h.join(".claude") => h.join(".claude.json"),
         _ => dir.join(".claude.json"),
     };
-    // Claude Code rewrites the file often: a read that lands mid-write keeps the last account seen.
-    let last = || SEEN.lock().unwrap().get(&file).map(|(_, key, name, tiers)| (key.clone(), name.clone(), tiers.clone()));
-    // A profile identity, cross-checked against the login this directory actually stores: a
-    // login whose tier the profile doesn't carry names a different account, so the path is used.
-    let checked = |key: String, name: Option<String>, tiers: Vec<String>| -> (String, Option<String>) {
-        if let Some(tier) = login_plan_tier(dir)
-            && !tiers.is_empty()
-            && !tiers.iter().any(|t| t == &tier)
+    let tier = login_plan_tier(dir);
+    let resolve = |seen: &mut Seen, file: &Path| -> (String, Option<String>) {
+        let Some(cur) = seen.current.clone() else {
+            return fallback();
+        };
+        if let Some(ref t) = tier
+            && !cur.tiers.is_empty()
         {
+            if cur.tiers.iter().any(|x| x == t) {
+                seen.verified = Some(cur.clone());
+                return (cur.key, cur.name);
+            }
+            if let Some(ref v) = seen.verified
+                && v.tiers.iter().any(|x| x == t)
+            {
+                return (v.key.clone(), v.name.clone());
+            }
+            if seen.backup_checked_tier.as_deref() != Some(t.as_str()) {
+                seen.backup_checked_tier = Some(t.clone());
+                if let Some(v) = backup_profile_for_tier(file, t) {
+                    let out = (v.key.clone(), v.name.clone());
+                    seen.verified = Some(v);
+                    return out;
+                }
+            }
             return fallback();
         }
-        (key, name)
+        (cur.key, cur.name)
     };
     let Ok(modified) = std::fs::metadata(&file).and_then(|m| m.modified()) else {
-        return last().map_or_else(fallback, |(k, n, t)| checked(k, n, t));
+        let mut guard = SEEN.lock().unwrap();
+        return guard.get_mut(&file).map_or_else(fallback, |s| resolve(s, &file));
     };
     // The file can run to megabytes, so read it again only when it changes.
-    let (key, name, tiers) = if let Some((at, key, name, tiers)) = SEEN.lock().unwrap().get(&file)
-        && *at == modified
+    if let Some(seen) = SEEN.lock().unwrap().get_mut(&file)
+        && seen.modified == Some(modified)
     {
-        (key.clone(), name.clone(), tiers.clone())
-    } else {
-        let Some(v) = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else {
-            return last().map_or_else(fallback, |(k, n, t)| checked(k, n, t));
-        };
-        let a = &v["oauthAccount"];
-        let (Some(user), Some(org)) = (a["accountUuid"].as_str(), a["organizationUuid"].as_str()) else { return fallback() };
-        let (key, name) = (format!("{user}:{org}"), a["organizationName"].as_str().map(str::to_owned));
-        let tiers = [a["userRateLimitTier"].as_str(), a["organizationRateLimitTier"].as_str()]
-            .into_iter()
-            .flatten()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        SEEN.lock().unwrap().insert(file.clone(), (modified, key.clone(), name.clone(), tiers.clone()));
-        (key, name, tiers)
+        return resolve(seen, &file);
+    }
+    let Some(profile) = parse_profile(&file) else {
+        // Claude Code rewrites the file often: a read that lands mid-write keeps the last account seen.
+        let mut guard = SEEN.lock().unwrap();
+        return guard.get_mut(&file).map_or_else(fallback, |s| resolve(s, &file));
     };
-    checked(key, name, tiers)
+    let mut guard = SEEN.lock().unwrap();
+    let seen = guard.entry(file.clone()).or_default();
+    seen.modified = Some(modified);
+    seen.current = Some(profile);
+    seen.backup_checked_tier = None;
+    resolve(seen, &file)
 }
 
 /// The rate-limit tier the login stored for `dir` reports: from the credentials file when it
@@ -209,12 +265,21 @@ enum Store {
     Keychain { service: String, account: String },
 }
 
+/// Whether `file` holds a `claudeAiOauth` login (as opposed to being absent or MCP-only).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn has_file_login(file: &Path) -> bool {
+    std::fs::read_to_string(file)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .is_some_and(|v| v.get("claudeAiOauth").is_some())
+}
+
 impl Store {
-    /// The credentials file when there is one; on macOS, otherwise Claude Code's Keychain item.
+    /// The credentials file when it holds a Claude login; on macOS, otherwise Claude Code's Keychain item.
     fn locate(dir: &Path) -> Result<Store> {
         let file = dir.join(".credentials.json");
         #[cfg(target_os = "macos")]
-        if !file.exists() {
+        if !has_file_login(&file) {
             let account = std::env::var("USER").context("USER is not set")?;
             return Ok(Store::Keychain { service: keychain_service(dir, &home()?), account });
         }
@@ -583,6 +648,77 @@ mod tests {
         std::fs::write(dir.join(".credentials.json"), login("default_claude_max_5x")).unwrap();
         bump(later + std::time::Duration::from_secs(10));
         assert_eq!(account(&dir).0, "u1:o1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A long-running `claude` process on another account can flush its stale in-memory
+    /// `oauthAccount` into `.claude.json` even though this directory's credentials have not
+    /// changed. Once `account` has verified a profile against this directory's login tier, a
+    /// contradicted profile overwrite keeps the verified portable key instead of flipping
+    /// accounts or dropping to a path key.
+    #[test]
+    fn stale_profile_overwrite_keeps_verified_account() {
+        let dir = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pro_profile = serde_json::json!({ "oauthAccount": {
+            "accountUuid": "u1", "organizationUuid": "o-pro", "organizationName": "Personal",
+            "organizationRateLimitTier": "default_claude_ai"
+        }});
+        let team_profile = serde_json::json!({ "oauthAccount": {
+            "accountUuid": "u1", "organizationUuid": "o-team", "organizationName": "Vizius",
+            "userRateLimitTier": "default_claude_max_5x", "organizationRateLimitTier": "default_raven"
+        }});
+        let login = serde_json::json!({ "claudeAiOauth": {
+            "accessToken": "t", "refreshToken": "r", "expiresAt": 1, "rateLimitTier": "default_claude_ai"
+        }});
+        std::fs::write(dir.join(".claude.json"), pro_profile.to_string()).unwrap();
+        std::fs::write(dir.join(".credentials.json"), login.to_string()).unwrap();
+        assert_eq!(account(&dir), ("u1:o-pro".to_owned(), Some("Personal".to_owned())));
+
+        // Stale writer overwrites `.claude.json` with `o-team`, while `.credentials.json` stays on `default_claude_ai`.
+        std::fs::write(dir.join(".claude.json"), team_profile.to_string()).unwrap();
+        let later = SystemTime::now() + std::time::Duration::from_secs(10);
+        std::fs::File::options()
+            .write(true)
+            .open(dir.join(".claude.json"))
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert_eq!(
+            account(&dir),
+            ("u1:o-pro".to_owned(), Some("Personal".to_owned())),
+            "contradicted overwrite must keep the verified account for this login tier"
+        );
+
+        // Cold start when `.claude.json` was already overwritten before process launch, but
+        // `.claude.json.bak-*` beside it holds the profile matching `.credentials.json`.
+        let cold = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&cold).unwrap();
+        std::fs::write(cold.join(".claude.json"), team_profile.to_string()).unwrap();
+        std::fs::write(cold.join(".claude.json.bak-20261004T142747Z"), pro_profile.to_string()).unwrap();
+        std::fs::write(cold.join(".credentials.json"), login.to_string()).unwrap();
+        assert_eq!(
+            account(&cold),
+            ("u1:o-pro".to_owned(), Some("Personal".to_owned())),
+            "cold start with contradicted .claude.json recovers verified profile from .claude.json.bak-*"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&cold);
+    }
+
+    #[test]
+    fn mcp_only_credentials_file_is_not_a_claude_login() {
+        let dir = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(".credentials.json");
+        assert!(!has_file_login(&file));
+        std::fs::write(&file, r#"{"mcpOAuth":{"srv":{"accessToken":"x"}}}"#).unwrap();
+        assert!(!has_file_login(&file));
+        #[cfg(target_os = "macos")]
+        assert!(matches!(Store::locate(&dir).unwrap(), Store::Keychain { .. }));
+        std::fs::write(&file, r#"{"claudeAiOauth":{"accessToken":"t","refreshToken":"r","expiresAt":1}}"#).unwrap();
+        assert!(has_file_login(&file));
+        assert!(matches!(Store::locate(&dir).unwrap(), Store::File(_)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

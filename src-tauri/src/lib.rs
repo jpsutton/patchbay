@@ -1084,6 +1084,7 @@ const MESH_PLAN_LIMITS_EVENT: &str = "mesh://plan-limits";
 /// Take a plan report seen here, or one from another member that is newer than ours for its account.
 fn adopt_plan_limits(state: &AppState, account: &str, name: Option<String>, limits: code::plan_limits::PlanLimits, seen_here: bool) {
     let (account, name) = resolve_plan_account(&state.db, account, name);
+    let _ = fold_live_plan_accounts(state);
     if !seen_here && state.code.plan.account(&account).latest.is_some_and(|old| old.observed_at >= limits.observed_at) {
         return;
     }
@@ -1091,6 +1092,19 @@ fn adopt_plan_limits(state: &AppState, account: &str, name: Option<String>, limi
     let _ = state.db.set_setting(PLAN_ACCOUNTS_KEY, &serde_json::to_string(&state.code.plan.accounts()).unwrap_or_default());
     (state.emit)(PLAN_LIMITS_EVENT, serde_json::to_value(plan_views(state)).unwrap_or_default());
     enforce_plan_limit(state);
+}
+
+fn fold_live_plan_accounts(state: &AppState) -> std::collections::BTreeMap<String, code::plan_limits::Account> {
+    let raw = state.code.plan.accounts();
+    if !raw.keys().any(|k| claude_auth::is_path_account_key(k)) {
+        return raw;
+    }
+    let folded = fold_plan_accounts(&state.db, raw.clone());
+    if folded != raw {
+        state.code.plan.set_accounts(folded.clone());
+        let _ = state.db.set_setting(PLAN_ACCOUNTS_KEY, &serde_json::to_string(&folded).unwrap_or_default());
+    }
+    folded
 }
 
 /// Sessions the usage guard stopped that get prompted again when the limit lifts
@@ -1143,6 +1157,10 @@ fn local_claude_dir_paths(db: &Db) -> std::collections::HashSet<String> {
     dirs
 }
 
+fn is_default_claude_dir_path(account: &str) -> bool {
+    account == "~/.claude" || account.ends_with("/.claude") || account.ends_with("\\.claude")
+}
+
 /// Map a reported account key onto the id this computer should store it under.
 ///
 /// Path fallbacks are only meaningful on the machine that owns that directory. A path from
@@ -1160,7 +1178,7 @@ fn resolve_plan_account(db: &Db, account: &str, name: Option<String>) -> (String
         }
     }
     let local = local_claude_dir_paths(db);
-    if local.contains(account) {
+    if local.contains(account) || !is_default_claude_dir_path(account) {
         // Default dir still on a path key: prefer the portable default when known.
         if let Ok(def) = claude_auth::resolve_dir(None)
             && account == def.to_string_lossy()
@@ -1172,7 +1190,7 @@ fn resolve_plan_account(db: &Db, account: &str, name: Option<String>) -> (String
         }
         return (account.to_owned(), name);
     }
-    // Foreign path (another member's config dir): same as an untagged report.
+    // Foreign path (another member's default `~/.claude`): same as an untagged report.
     let (d, n) = default_plan_account();
     (d, name.or(n))
 }
@@ -1213,10 +1231,7 @@ struct PlanView {
 fn plan_views(state: &AppState) -> Vec<PlanView> {
     let (default, _) = default_plan_account();
     let providers = state.db.list_providers().unwrap_or_default();
-    state
-        .code
-        .plan
-        .accounts()
+    fold_live_plan_accounts(state)
         .into_iter()
         .map(|(account, usage)| {
             let names: Vec<_> = providers
@@ -1650,6 +1665,11 @@ fn plan_account(state: &AppState, prefs: &prefs::Preferences, id: &str) -> Optio
     let session = state.db.get_code_session(id).ok().flatten()?;
     match AgentKind::parse(&session.agent) {
         Some(AgentKind::ClaudeCode) if !prefs.agent_providers.contains_key(AgentKind::ClaudeCode.id()) => {
+            if let Some(dir) = state.db.get_setting(&code::import_claude::config_dir_key(id)).ok().flatten()
+                && let Ok(d) = claude_auth::resolve_dir(Some(&dir))
+            {
+                return Some(claude_auth::account(&d));
+            }
             Some(default_plan_account())
         }
         Some(AgentKind::Patchbay) => session
