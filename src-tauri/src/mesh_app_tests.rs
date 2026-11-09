@@ -1004,6 +1004,92 @@ async fn a_session_is_gated_only_by_its_own_accounts_report() {
     prompt(sc).await.expect("an account with no report is not blocked by another's");
 }
 
+/// A Grok seat is a plan account like a Claude one: a session on a Grok-login provider is gated by
+/// its own seat's weekly report, and by nothing else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_grok_seat_gates_its_own_sessions() {
+    use code::acp::{AgentCmd, Delivery};
+    use code::plan_limits::{PlanLimits, Window, now};
+    let a = node("alpha-grok-seat");
+    let cwd = a.dir.to_string_lossy().into_owned();
+    let resets = now() + 3600;
+    // A Grok home whose login names the seat; the seat is over the limit.
+    let home = a.dir.join("grok-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let login = serde_json::json!({ "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": {
+        "key": "tok", "auth_mode": "oidc", "refresh_token": "r", "user_id": "user-1", "team_id": "team-1",
+        "team_name": "Acme", "expires_at": "2099-01-01T00:00:00Z"
+    }});
+    std::fs::write(home.join("auth.json"), login.to_string()).unwrap();
+    let (seat, _) = crate::grok_auth::account(&home);
+    assert_eq!(seat, "grok:team-1:user-1");
+    a.state.code.plan.record(
+        &seat,
+        Some("Acme".into()),
+        PlanLimits { seven_day: Some(Window { utilization: 0.99, resets_at: resets }), observed_at: now() - 60, ..Default::default() },
+    );
+    let provider = |id: &str, name: &str, kind: db::ProviderKind, mode: db::AuthMode, grok_home: Option<String>| {
+        a.state
+            .db
+            .upsert_provider(
+                &db::Provider {
+                    id: id.into(),
+                    name: name.into(),
+                    kind,
+                    base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+                    has_key: false,
+                    auth_mode: mode,
+                    claude_config_dir: None,
+                    grok_home,
+                },
+                None,
+            )
+            .unwrap();
+        let model = db::Model {
+            id: format!("m-{id}"),
+            provider_id: id.into(),
+            model_id: "grok-4.7".into(),
+            display_name: name.into(),
+            vision: false,
+            context_window: None,
+            params: Default::default(),
+        };
+        a.state.db.upsert_model(&model).unwrap();
+        model.id
+    };
+    let on = |model: &str| {
+        let s = a.state.db.create_code_session(&cwd, Some(model), "patchbay", "default").unwrap();
+        let mut rx = a.state.code.attach_test_agent(&s.id);
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                if let AgentCmd::Prompt { reply, .. } = cmd
+                    && let Some(reply) = reply
+                {
+                    let _ = reply.send(Ok(Delivery::Sent));
+                }
+            }
+        });
+        s.id
+    };
+    let seat_model = provider("grok", "Grok Team", db::ProviderKind::OpenaiResponses, db::AuthMode::GrokLogin, Some(home.to_string_lossy().into_owned()));
+    let key_model = provider("plain", "Plain", db::ProviderKind::OpenaiResponses, db::AuthMode::ApiKey, None);
+    let (on_seat, on_key) = (on(&seat_model), on(&key_model));
+    let chans: crate::api::ChanFactory = Arc::new(|_| None);
+    let prompt = |id: String| crate::api::call(&a.state, "code_prompt", json!({ "id": id, "text": "more", "attachmentIds": [] }), &chans);
+
+    let err = prompt(on_seat).await.unwrap_err();
+    assert!(err.0.starts_with("Not sent. You have used 99% of Grok Team's weekly limit"), "{}", err.0);
+    // A provider that bills by the token has no plan to run out of.
+    prompt(on_key).await.expect("an API-key provider is not gated by a Grok seat");
+    // The panel names the seat by the provider that runs on it.
+    let views = crate::plan_views(&a.state);
+    assert_eq!(views.len(), 1);
+    let v = serde_json::to_value(&views[0]).unwrap();
+    assert_eq!(v["account"], "grok:team-1:user-1");
+    assert_eq!(v["label"], "Grok Team");
+    assert_eq!(v["latest"]["sevenDay"]["utilization"], 0.99);
+}
+
 /// Plan usage one member sees reaches the others, a member that was away catches up when it
 /// reconnects, and an older report never replaces a newer one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
