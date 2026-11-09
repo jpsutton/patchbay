@@ -1789,6 +1789,8 @@ export function install() {
           db.sidebarLayout = applyChange(db.sidebarLayout, { put: a.put as SidebarEntry[], remove: a.remove as string[] });
           return null;
         }
+        case "team_board": return { statuses: ["noticed", "triaged", "dispatched", "done"], items: [], decisions: [], events: [] };
+        case "team_decision_answer": return null;
         case "list_roles": return fakeRoles;
         case "save_role": {
           const i = a.input as any;

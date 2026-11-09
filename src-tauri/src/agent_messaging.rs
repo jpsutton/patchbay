@@ -485,6 +485,11 @@ async fn handle_bridge(
                 let info = state.shares.create(&canonical.to_string_lossy(), None, None)?;
                 Ok(serde_json::to_value(info)?)
             }
+            // Team tools (teams.rs): every call is checked against the caller's role there.
+            "team_member" => Ok(json!(crate::teams::is_member(&state, &request.source_session_id))),
+            name if crate::teams::is_tool(name) => {
+                crate::teams::call_tool(&state, &request.source_session_id, name, request.arguments.as_ref().unwrap_or(&Value::Null)).await
+            }
             "list_queued" => crate::list_queued_agent_messages(&state, &request.source_session_id).await,
             "accept_queued" => {
                 crate::accept_queued_agent_message(
@@ -701,6 +706,28 @@ fn steering_enabled() -> bool {
 
 fn tools_list() -> Value {
     tools_list_for(steering_enabled())
+}
+
+/// The tool list, plus the team tools when the host says this session is on a live team.
+async fn tools_list_with_team(addr: &str, token: &str, source_session_id: &str) -> Result<Value> {
+    let mut list = tools_list();
+    let member = bridge_call(addr, json!({ "token": token, "sourceSessionId": source_session_id, "action": "team_member" })).await;
+    if member.is_ok_and(|r| r["ok"] == true) {
+        list["tools"].as_array_mut().expect("tools array").extend(crate::teams::tool_defs());
+    }
+    Ok(list)
+}
+
+/// One request to the host's bridge, and its JSON reply.
+async fn bridge_call(addr: &str, request: Value) -> Result<Value> {
+    let stream = TcpStream::connect(addr).await.context("Patchbay is no longer available")?;
+    let (read, mut write) = stream.into_split();
+    write.write_all(request.to_string().as_bytes()).await?;
+    write.write_all(b"\n").await?;
+    write.shutdown().await?;
+    let mut line = String::new();
+    BufReader::new(read).take(MAX_LINE as u64).read_line(&mut line).await?;
+    Ok(serde_json::from_str(&line)?)
 }
 
 fn tools_list_for(can_steer: bool) -> Value {
@@ -962,7 +989,7 @@ async fn handle_stdio_line(
             "serverInfo": { "name": "patchbay-agent-messaging", "version": env!("CARGO_PKG_VERSION") }
         })),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(tools_list()),
+        "tools/list" => tools_list_with_team(addr, token, source_session_id).await,
         "tools/call" => call_tool(addr, token, source_session_id, &request["params"]).await,
         _ => Err(anyhow!("unknown MCP method {method}")),
     };
@@ -1017,6 +1044,7 @@ pub(crate) async fn call_tool(
             ),
             None,
         ),
+        t if crate::teams::is_tool(t) => (t, None, None, None),
         TOOL_CREATE => ("create", None, None, None),
         TOOL_SHARE => ("share", None, None, None),
         TOOL_LIST_SESSIONS => ("list", None, None, None),
@@ -1044,7 +1072,7 @@ pub(crate) async fn call_tool(
         "targetSessionId": target_session_id,
         "message": message,
         "messageId": message_id,
-        "arguments": matches!(name, TOOL_CREATE | TOOL_SHARE).then(|| params["arguments"].clone()),
+        "arguments": (matches!(name, TOOL_CREATE | TOOL_SHARE) || crate::teams::is_tool(name)).then(|| params["arguments"].clone()),
     });
     write.write_all(request.to_string().as_bytes()).await?;
     write.write_all(b"\n").await?;

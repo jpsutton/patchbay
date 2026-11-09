@@ -229,6 +229,8 @@ commands! {
     team_detach(team_id, session_id);
     team_archive(team_id);
     team_detail(team_id);
+    team_board(team_id);
+    team_decision_answer(team_id, decision_id, answer);
     list_prompts();
     save_prompt(id, name, content);
     delete_prompt(id);

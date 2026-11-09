@@ -377,6 +377,18 @@ export interface TeamMemberRow {
 }
 export type TeamTemplateInput = { id?: string; name: string; seats: TeamSeat[]; routing: TeamTemplate["routing"] };
 export type TeamRoleInput = Omit<TeamRole, "id" | "builtin"> & { id?: string };
+export interface TeamItem {
+  teamId: string; id: string; title: string; type: string; severity: string; status: string;
+  memberSession: string | null; plan: string; prUrl: string | null; createdAt: number; updatedAt: number;
+}
+export interface TeamEvent { id: number; itemId: string; at: number; actorSession: string | null; kind: string; text: string }
+export interface TeamDecision {
+  teamId: string; id: string; itemId: string | null; question: string; options: string[]; recommendation: string | null;
+  class: string; openedBy: string | null; advisorVerdict: string | null; advisorChoice: string | null; advisorText: string | null;
+  userAnswer: string | null; status: "awaiting_advisor" | "awaiting_user" | "cleared" | "resolved"; disagrees: boolean;
+  createdAt: number; resolvedAt: number | null;
+}
+export interface TeamBoard { statuses: string[]; items: TeamItem[]; decisions: TeamDecision[]; events: TeamEvent[] }
 export interface TeamDetail { team: Team; template: TeamTemplate; roles: TeamRole[]; members: TeamMemberRow[] }
 export interface NewTeam { templateId: string; slug: string; cwd: string; projectRules?: string; exportDir?: string }
 
@@ -1373,6 +1385,9 @@ export const api = {
   listTeams: () => invoke<Team[]>("list_teams"),
   createTeam: (input: NewTeam) => invoke<Team>("create_team", { input }),
   teamDetail: (teamId: string) => invoke<TeamDetail>("team_detail", { teamId }),
+  teamBoard: (teamId: string) => invoke<TeamBoard>("team_board", { teamId }),
+  teamDecisionAnswer: (teamId: string, decisionId: string, answer: string) =>
+    invoke<TeamDecision>("team_decision_answer", { teamId, decisionId, answer }),
   teamAttach: (teamId: string, sessionId: string, seat: string) => invoke<unknown>("team_attach", { teamId, sessionId, seat }),
   teamDetach: (teamId: string, sessionId: string) => invoke<void>("team_detach", { teamId, sessionId }),
   teamArchive: (teamId: string) => invoke<void>("team_archive", { teamId }),

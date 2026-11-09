@@ -3693,5 +3693,74 @@ async fn the_four_lines_make_a_delivered_but_failed_stall_readable_in_one_grep()
     assert_eq!(delivery_state(&text, &held_id), "delivered, no turn yet", "{text}");
     assert_eq!(delivery_state(&text, "never-sent"), "never delivered");
     let grep_bad: Vec<&str> = text.lines().filter(|l| l.contains(&format!("message_id={bad_id} "))).collect();
-    assert!(grep_bad.last().unwrap().contains("error_kind=usage_limit_exceeded"), "{grep_bad:?}");
+    assert!(grep_bad.last().unwrap().contains("error_kind=usage_limit_exceeded"), "{grep_bad:?}");}
+
+/// Team tools are checked on the host against the caller's role: a worker can't change items, a
+/// desk can and leaves events, and a decision goes desk -> advisor -> (HUMAN) user queue.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn team_tools_check_the_callers_role() {
+    let a = node("alpha-items");
+    let p = a.dir.join("proj");
+    repo(&p);
+    let cwd = p.to_string_lossy().into_owned();
+    let mk = |agent: &str| a.state.db.create_code_session(&cwd, None, agent, "default").unwrap();
+    let (desk, advisor, worker, outsider) = (mk("opencode"), mk("claude-code"), mk("cursor"), mk("grok"));
+    let team = teams::create_team(
+        &a.state,
+        serde_json::from_value(json!({ "templateId": "builtin-triage-desk", "slug": "t", "idPrefix": "T", "cwd": cwd, "exportDir": a.dir.join("out").to_string_lossy() })).unwrap(),
+    )
+    .await
+    .unwrap();
+    for (s, seat) in [(&desk, "desk"), (&advisor, "advisor"), (&worker, "workers")] {
+        teams::team_attach(&a.state, team.id.clone(), s.id.clone(), seat.into()).await.unwrap();
+    }
+    let mut rx_desk = a.state.code.attach_test_agent(&desk.id);
+    let mut rx_advisor = a.state.code.attach_test_agent(&advisor.id);
+    let _rx_worker = a.state.code.attach_test_agent(&worker.id);
+    let call = |s: &str, tool: &str, args: Value| {
+        let state = a.state.clone();
+        let (s, tool) = (s.to_owned(), tool.to_owned());
+        async move { teams::call_tool(&state, &s, &tool, &args).await }
+    };
+
+    // Membership decides who gets the tools at all.
+    assert!(teams::is_member(&a.state, &desk.id) && !teams::is_member(&a.state, &outsider.id));
+    assert!(call(&outsider.id, "item_list", json!({})).await.unwrap_err().to_string().contains("not on a live team"));
+
+    // The desk adds and changes an item; the worker is refused, and nothing changed.
+    let added = call(&desk.id, "item_add", json!({ "title": "Fix the thing", "type": "bug" })).await.unwrap();
+    let id = added["id"].as_str().unwrap().to_owned();
+    assert!(id.starts_with(&format!("T-{}-", chrono::Utc::now().format("%Y%m%d"))) && id.ends_with("-01"), "{id}");
+    let refused = call(&worker.id, "item_set", json!({ "itemId": id, "status": "done" })).await.unwrap_err().to_string();
+    assert!(refused.contains("refused") && refused.contains("writes_items") && refused.contains("Worker"), "{refused}");
+    assert!(call(&worker.id, "item_add", json!({ "title": "sneaky" })).await.is_err());
+    assert!(call(&worker.id, "decision_answer", json!({ "decisionId": "x", "verdict": "CLEAR" })).await.is_err());
+    call(&desk.id, "item_set", json!({ "itemId": id, "status": "triaged", "assignee": worker.id })).await.unwrap();
+    let got = call(&worker.id, "item_get", json!({ "itemId": id })).await.unwrap();
+    assert_eq!(got["item"]["status"], "triaged");
+    let kinds: Vec<&str> = got["events"].as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["created", "set", "set"]);
+    call(&worker.id, "item_list", json!({})).await.unwrap();
+    // The desk may not give the advisor's verdict either.
+    assert!(call(&desk.id, "decision_answer", json!({ "decisionId": "x", "verdict": "HUMAN" })).await.unwrap_err().to_string().contains("decides"));
+    let ledger = std::fs::read_to_string(a.dir.join("out/LEDGER.md")).unwrap();
+    assert!(ledger.contains(&id) && ledger.contains("## triaged"), "{ledger}");
+
+    // desk -> advisor: the advisor is messaged with the decision.
+    let (opened, msg) = tokio::join!(
+        call(&desk.id, "decision_open", json!({ "question": "Which?", "options": ["A", "B"], "recommendation": "A", "itemId": id })),
+        take_agent_message(&mut rx_advisor)
+    );
+    let did = opened.unwrap()["decision"]["id"].as_str().unwrap().to_owned();
+    assert!(msg.text.contains(&did) && msg.text.contains("Desk recommends: A"), "{}", msg.text);
+    // advisor says HUMAN: the desk is told, and it lands in the user's queue.
+    let (answered, told) = tokio::join!(call(&advisor.id, "decision_answer", json!({ "decisionId": did, "verdict": "HUMAN", "text": "your call" })), take_agent_message(&mut rx_desk));
+    assert_eq!(answered.unwrap()["status"], "awaiting_user");
+    assert!(told.text.contains("HUMAN") && told.text.contains("waiting for the user"), "{}", told.text);
+    let board = teams::team_board(&a.state, team.id.clone()).await.unwrap();
+    assert_eq!(board["decisions"][0]["status"], "awaiting_user");
+    // The user answers through the command, and the desk hears it.
+    let (d, told) = tokio::join!(teams::team_decision_answer(&a.state, team.id.clone(), did.clone(), "B".into()), take_agent_message(&mut rx_desk));
+    assert_eq!(d.unwrap().status, "resolved");
+    assert!(told.text.contains("the user answered: B"), "{}", told.text);
 }

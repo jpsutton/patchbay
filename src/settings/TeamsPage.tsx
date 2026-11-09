@@ -3,6 +3,7 @@ import { api, errorText, type Team, type TeamDetail, type TeamTemplate } from ".
 import { useStore } from "../lib/store";
 import { input } from "./ProviderPage";
 import { RolesEditor, TemplatesEditor } from "./TeamEditors";
+import { TeamBoard } from "./TeamBoard";
 
 const DOT: Record<string, string> = { running: "bg-accent", waiting: "bg-yellow-500", stalled: "bg-red-500", idle: "bg-muted", stopped: "bg-border" };
 
@@ -150,6 +151,7 @@ function TeamsPanel() {
                 </div>
               );
             })}
+            <TeamBoard teamId={detail.team.id} />
             <div className="text-muted">Role instructions reach a member when its agent starts (Claude Code, Codex, Antigravity, Grok) or on each message from a teammate (other agents). Restart a running session to apply a new role.</div>
             <button
               className="self-start text-muted hover:text-fg"
