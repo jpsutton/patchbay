@@ -6,7 +6,7 @@ import { isRemoteApp } from "./platform";
 import type { CodeLive } from "./sessionLive";
 
 export type ProviderKind = "openai_chat" | "openai_responses" | "anthropic" | "gemini";
-export type AuthMode = "api_key" | "claude_login";
+export type AuthMode = "api_key" | "claude_login" | "grok_login";
 
 export interface Provider {
   id: string;
@@ -17,6 +17,8 @@ export interface Provider {
   authMode: AuthMode;
   /** For Claude login: the Claude Code config directory whose login to use (null: ~/.claude). */
   claudeConfigDir?: string | null;
+  /** For Grok login: the Grok home directory whose login to use (null: $GROK_HOME, else ~/.grok). */
+  grokHome?: string | null;
 }
 
 /** USD per 1M tokens. */
@@ -1057,6 +1059,7 @@ export const api = {
     apiKey?: string;
     authMode?: AuthMode;
     claudeConfigDir?: string;
+    grokHome?: string;
   }) => invoke<Provider>("save_provider", { input }),
   deleteProvider: (id: string) => invoke<void>("delete_provider", { id }),
   discoverModels: (providerId: string) => invoke<DiscoveredModel[]>("discover_models", { providerId }),
