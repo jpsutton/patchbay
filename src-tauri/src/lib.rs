@@ -949,7 +949,7 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
         let (account, name) = plan_account(state, &prefs::load(&state.db), &env.code_session_id).unwrap_or_else(default_plan_account);
         // Upgrade a local path fallback to the portable account id when `.claude.json` has it.
         let (account, name) = resolve_plan_account(&state.db, &account, name);
-        if !claude_auth::is_path_account_key(&account) {
+        if !claude_auth::is_path_account_key(&account) || account == default_plan_account().0 {
             let tagged = serde_json::json!({ "account": account, "name": name, "limits": limits });
             state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, tagged);
         }
@@ -3368,6 +3368,7 @@ impl mesh::RpcHandler for MeshRpc {
     }
 
     fn greeting(&self) -> Vec<(String, serde_json::Value)> {
+        let default_account = default_plan_account().0;
         let mut out: Vec<(String, serde_json::Value)> = self
             .state
             .code
@@ -3375,7 +3376,7 @@ impl mesh::RpcHandler for MeshRpc {
             .accounts()
             .into_iter()
             .filter_map(|(account, a)| {
-                if claude_auth::is_path_account_key(&account) {
+                if claude_auth::is_path_account_key(&account) && account != default_account {
                     return None;
                 }
                 let payload = serde_json::json!({ "account": account, "name": a.name, "limits": a.latest? });
