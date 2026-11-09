@@ -3484,6 +3484,42 @@ async fn hidden_agent_modes_are_refused_through_ipc_and_mesh() {
         }
     });
     crate::api::call(&a.state, "code_set_mode", json!({ "id": s.id, "modeId": "build" }), &chans).await.unwrap();
+/// Team role instructions reach an agent without a prompt hook as a preamble block on a peer
+/// message, and an agent with a hook gets none (it already has them in its system prompt).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn team_preamble_goes_to_agents_without_a_prompt_hook() {
+    let a = node("alpha-team");
+    let an = a.state.mesh.node_id().to_owned();
+    let p = a.dir.join("proj");
+    repo(&p);
+    let cwd = p.to_string_lossy().into_owned();
+    let mk = |agent: &str| a.state.db.create_code_session(&cwd, None, agent, "default").unwrap();
+    let (sender, desk, advisor) = (mk("grok"), mk("opencode"), mk("claude-code"));
+    let team = teams::create_team(
+        &a.state,
+        serde_json::from_value(json!({
+            "templateId": "builtin-triage-desk", "slug": "t", "cwd": cwd, "exportDir": a.dir.join("out").to_string_lossy(),
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    teams::team_attach(&a.state, team.id.clone(), desk.id.clone(), "desk".into()).await.unwrap();
+    teams::team_attach(&a.state, team.id.clone(), advisor.id.clone(), "advisor".into()).await.unwrap();
+    let _rx_sender = a.state.code.attach_test_agent(&sender.id);
+    let mut rx_desk = a.state.code.attach_test_agent(&desk.id);
+    let mut rx_advisor = a.state.code.attach_test_agent(&advisor.id);
+
+    let (r, got) = tokio::join!(send_agent_message(&a.state, &an, &sender.id, &desk.id, "hello"), take_agent_message(&mut rx_desk));
+    r.unwrap();
+    let texts: Vec<&str> = got.blocks.iter().filter_map(|b| b["text"].as_str()).collect();
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    assert!(texts[0].starts_with("<team-instructions>") && texts[0].contains("You are the desk"), "{}", texts[0]);
+    assert!(texts[1].contains("hello"));
+
+    let (r, got) = tokio::join!(send_agent_message(&a.state, &an, &sender.id, &advisor.id, "hello"), take_agent_message(&mut rx_advisor));
+    r.unwrap();
+    assert_eq!(got.blocks.len(), 1, "claude-code has a prompt hook, so no preamble: {:?}", got.blocks);
 }
 
 

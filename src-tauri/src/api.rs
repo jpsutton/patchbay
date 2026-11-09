@@ -216,6 +216,14 @@ commands! {
     delete_permission_rule(id);
     list_sidebar_layout();
     apply_sidebar_layout(put, remove);
+    list_roles();
+    list_team_templates();
+    list_teams();
+    create_team(input);
+    team_attach(team_id, session_id, seat);
+    team_detach(team_id, session_id);
+    team_archive(team_id);
+    team_detail(team_id);
     list_prompts();
     save_prompt(id, name, content);
     delete_prompt(id);

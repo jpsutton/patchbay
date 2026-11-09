@@ -23,6 +23,7 @@ mod providers;
 pub mod shares;
 mod session_status;
 mod speech;
+mod teams;
 mod terminal;
 mod usage;
 pub mod web_token;
@@ -52,6 +53,7 @@ use crate::db::{
     PermissionRule, Prompt, Provider, SearchHit, SidebarEntry, new_id,
 };
 use crate::mesh::Mesh;
+use crate::teams::{create_team, list_roles, list_team_templates, list_teams, team_archive, team_attach, team_detach, team_detail};
 use crate::terminal::{TermEvent, TerminalManager};
 
 /// Everything commands share. Cheap to clone (all handles), so the mesh's request handler and
@@ -2633,6 +2635,12 @@ async fn code_prompt_local(
         let a = att.clone();
         blocks.extend(tokio::task::spawn_blocking(move || attachments::to_acp_blocks(&dir, &a)).await??);
         atts.push(att);
+    }
+    // An agent without a prompt hook gets its team role on each peer message (teams.rs).
+    if code::acp::is_agent_message_origin(&origin)
+        && let Some(preamble) = teams::preamble_for(&state.data_dir, &state.db, &id)
+    {
+        blocks.push(serde_json::json!({ "type": "text", "text": preamble }));
     }
     if !text.is_empty() {
         blocks.push(serde_json::json!({ "type": "text", "text": text }));

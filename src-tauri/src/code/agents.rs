@@ -1159,7 +1159,15 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
         return prepare_patchbay(db, data_dir, session);
     }
     let resolved = resolve(kind, &prefs.agent_paths)?;
-    let session_meta = session_meta(kind, &prefs.agent_instructions);
+    // Team role instructions ride with the custom instructions for agents that have a prompt hook;
+    // the others get them as a preamble on peer messages (`teams::preamble_for`).
+    let mut rules = prefs.agent_instructions.trim().to_owned();
+    if crate::teams::has_prompt_hook(kind)
+        && let Some(team) = crate::teams::instructions_for(data_dir, db, &session.id)
+    {
+        rules = if rules.is_empty() { team } else { format!("{rules}\n\n{team}") };
+    }
+    let session_meta = session_meta(kind, &rules);
     if kind == AgentKind::Grok {
         return prepare_grok(db, data_dir, session, resolved, session_meta);
     }
@@ -1208,7 +1216,6 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
                 ));
             }
             // Merged into every thread's config; `developer_instructions` joins Codex's prompt.
-            let rules = prefs.agent_instructions.trim();
             if !rules.is_empty() {
                 env.push((
                     "CODEX_CONFIG".to_owned(),
@@ -2333,6 +2340,57 @@ time.sleep(60)
         let claude = ApprovalSetup::for_session(AgentKind::ClaudeCode, "always-approve");
         assert_eq!(claude, ApprovalSetup::for_agent(AgentKind::ClaudeCode));
         assert!(!claude.follows_approval);
+    }
+
+    /// A team member's role instructions reach the prompt hook of each agent that has one, and
+    /// no launch for an agent without one (those get a preamble, see `teams::preamble_for`).
+    #[test]
+    fn team_instructions_ride_the_prompt_hooks() {
+        let dir = std::env::temp_dir().join(format!("pb-ag-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = std::sync::Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
+        let exe = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        let mut o = AgentPaths::new();
+        for id in ["claude-code", "antigravity", "codex", "opencode"] {
+            o.insert(id.into(), exe.clone());
+        }
+        let prefs = crate::prefs::Preferences { agent_paths: o, agent_instructions: "be terse".into(), ..Default::default() };
+        crate::prefs::save(&db, &prefs).unwrap();
+        let tdb = crate::teams::TeamsDb::open(&dir).unwrap();
+        let team = tdb
+            .create_team(crate::teams::NewTeam {
+                template_id: "builtin-triage-desk".into(),
+                slug: "t".into(),
+                cwd: dir.to_string_lossy().into_owned(),
+                id_prefix: None,
+                pr_base: None,
+                worktree_root: None,
+                project_rules: None,
+                export_dir: Some(dir.join("out").to_string_lossy().into_owned()),
+            })
+            .unwrap();
+        let mut launch = |agent: &str, seat: &str| {
+            let s = db.create_code_session(&dir.to_string_lossy(), None, agent, "default").unwrap();
+            tdb.attach(&team.id, &s.id, seat).unwrap();
+            prepare(&db, &dir, &s).unwrap()
+        };
+        let desk = "You are the desk";
+
+        let l = launch("claude-code", "desk");
+        let append = l.session_meta["systemPrompt"]["append"].as_str().unwrap().to_owned();
+        assert!(append.starts_with("be terse") && append.contains(desk), "{append}");
+        let l = launch("antigravity", "advisor");
+        let append = l.session_meta["antigravity"]["systemPrompt"]["append"].as_str().unwrap().to_owned();
+        assert!(append.starts_with("be terse") && append.contains("You are the advisor"), "{append}");
+        let l = launch("codex", "lead");
+        let cfg = l.env.iter().find(|(k, _)| k == "CODEX_CONFIG").unwrap().1.clone();
+        let cfg: Value = serde_json::from_str(&cfg).unwrap();
+        assert!(cfg["developer_instructions"].as_str().unwrap().contains("You are the ship lead"));
+
+        let l = launch("opencode", "workers");
+        assert_eq!(l.session_meta, json!({}));
+        assert!(l.env.iter().all(|(k, v)| !v.contains("You are a worker") && k != "CODEX_CONFIG"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
