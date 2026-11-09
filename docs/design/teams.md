@@ -58,9 +58,11 @@ A role has:
   - `merges`: may record a merge on an item. Default: lead.
 - `reports_to`: the role its members reply to by default.
 
-Built-in roles, editable and copyable: Desk, Advisor, Ship Lead, Worker, Verifier. Their default
-instructions come from the reference desk's protocol and DESK.md rules, without the
-patchbay-specific parts (those are project rules).
+Built-in roles, copyable but not editable in place: Desk, Advisor, Ship Lead, Worker, Verifier.
+Their default instructions come from the reference desk's protocol and DESK.md rules, without the
+patchbay-specific parts (those are project rules). A role cannot be deleted while a template uses
+it, another role reports to it, or any member (even a released one) has held it; a template
+cannot be deleted while a team, even an archived one, uses it.
 
 ### How instructions reach an agent
 
@@ -165,6 +167,10 @@ Members report progress with `item_note`; the desk keeps sole ownership of statu
 ## Starting sessions
 
 - Standing seats are started by the user from the team panel.
+- In the default permission mode, a member's call to `send_agent_message` (and later the team
+  tools) waits on a permission prompt. Unattended teams need those tools allowed for members
+  without asking; phase 4 decides how (a seat permission mode, or a standing allow rule for the
+  team tools only).
 - `dispatch_item` starts workers. It is exempt from `MAX_CREATED_SESSIONS` (5) and
   `MAX_CREATE_DEPTH` (2) in `lib.rs`; instead it refuses when the seat's `pool` is full.
   Released members stop counting.
@@ -213,11 +219,12 @@ Routing: the three classes in the table above, with the reference desk's example
    triage template, create a team and attach sessions to seats by hand, instruction delivery
    (hook or preamble), markdown export, and a read-only Teams page under Settings (not yet the
    sidebar). Not verified: a real agent turn reading the instructions.
-2. **Editors and live check.** `save_role` / `save_template` / `delete_*` and their editors in
-   Settings (built-ins copyable, not editable in place), a role badge on member sessions in the
-   session list, and one real turn per delivery path. Done when: a user copies the Worker role,
-   edits its text, builds a template from it with a Cursor seat, and a real Claude Code member
-   and a real OpenCode member each answer "what is your role?" with their role's name.
+2. **Editors and live check.** Done 2026-11-09 (`ad0e6ba8`). Role and template editors under
+   Settings > Teams (built-ins copyable only; routing has no editor yet), delete guards, and a
+   role badge in the session list. Live: a real OpenCode member (preamble path) and a real Claude
+   Code member (system-prompt path) each named their role and quoted the team's project rule.
+   Not verified: a member holding a copied role in a live turn (the delivery path doesn't
+   distinguish copies), and the editors and badge seen in a browser.
 3. **Items and decisions.** The item and decision tools with capability checks, the board, the
    decision queue. Done when: a desk member can only change items through the tools, a worker's
    `item_set` is refused, and a decision goes desk → advisor → user with the verdict shown.
