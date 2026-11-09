@@ -21,6 +21,8 @@ use crate::session::Session;
 const MAX_TIMEOUT_MS: u64 = 600_000;
 const MODEL_OUTPUT_CHARS: usize = 30_000;
 const BUFFER_CAP: usize = 2 * 1024 * 1024;
+/// The longest BashOutput waits for a background command to end.
+const MAX_WAIT_SECS: u64 = 120;
 
 /// A running command.
 pub struct Running {
@@ -241,7 +243,10 @@ working directory carries over between calls; other shell state does not. Use it
 and similar, not for reading, searching or editing files: the dedicated tools do that better. \
 Quote paths with spaces. Commands time out after 2 minutes unless you set `timeout` (milliseconds, \
 at most 600000). Set `run_in_background` for servers and slow jobs, then use BashOutput and KillShell. \
-Do not sleep in a loop to wait: read the output instead."
+Do not wait with `sleep`: a fixed sleep of more than 30 seconds is refused. Wait for a background \
+job with BashOutput and `wait_seconds`. To find a process, put square brackets around the last \
+character of the pattern (`pgrep -f '[f]oo'`, `ps aux | grep '[f]oo'`) so the search does not match \
+itself; a pattern that does is refused."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -271,14 +276,21 @@ Do not sleep in a loop to wait: read the output instead."
         }
     }
 
-    fn needs_permission(&self, _: &Value, _: &Session) -> bool {
-        true
+    fn needs_permission(&self, input: &Value, _: &Session) -> bool {
+        // A command the lint refuses never runs, so there is nothing to approve.
+        match str_arg(input, "command") {
+            Some(c) => shell_lint::check(c, bool_arg(input, "run_in_background")).is_none(),
+            None => true,
+        }
     }
 
     async fn run(&self, input: Value, ctx: &ToolCtx) -> ToolOutput {
         let Some(command) = str_arg(&input, "command").filter(|c| !c.trim().is_empty()) else {
             return ToolOutput::error("command is required");
         };
+        if let Some(problem) = shell_lint::check(command, bool_arg(&input, "run_in_background")) {
+            return ToolOutput::error(problem.message(ctx.session.prompts()));
+        }
         let session = &ctx.session;
         let dir = session.shells.cwd(&session.cwd);
         if bool_arg(&input, "run_in_background") {
@@ -410,13 +422,15 @@ impl Tool for BashOutput {
             name: "BashOutput".into(),
             description: "Read the output a background command (started with Bash `run_in_background`) \
 has produced since you last read it, and whether it still runs. Optional `filter` is a regular \
-expression: only matching lines come back."
+expression: only matching lines come back. Set `wait_seconds` (at most 120) to wait for the command \
+to end before reading, instead of sleeping."
                 .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "bash_id": {"type": "string", "description": "The id Bash returned"},
-                    "filter": {"type": "string", "description": "Regular expression for the lines to keep"}
+                    "filter": {"type": "string", "description": "Regular expression for the lines to keep"},
+                    "wait_seconds": {"type": "integer", "description": "Wait up to this many seconds (max 120) for the command to end before reading its output"}
                 },
                 "required": ["bash_id"]
             }),
@@ -440,6 +454,14 @@ expression: only matching lines come back."
         let Some(bg) = ctx.session.shells.shells.lock().unwrap().get(id).cloned() else {
             return ToolOutput::error(format!("No background command with ID {id}."));
         };
+        let wait = u64_arg(&input, "wait_seconds").unwrap_or(0).min(MAX_WAIT_SECS);
+        if wait > 0 && bg.run.done.borrow().is_none() {
+            tokio::select! {
+                _ = wait_done(bg.run.done.clone()) => {}
+                _ = tokio::time::sleep(Duration::from_secs(wait)) => {}
+                _ = ctx.cancel.cancelled() => {}
+            }
+        }
         let all = bg.run.output();
         let mut read = bg.read.lock().unwrap();
         let start = (*read).min(all.len());
