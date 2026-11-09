@@ -410,21 +410,28 @@ fn probe_opencode_deny_rules(
         .and_then(|l| l.local_addr())
         .map(|a| a.port())
         .map_err(|e| format!("probe port reserve failed: {e}"))?;
-    let mut child = Command::new(program)
-        .args([
-            "serve",
-            "--port",
-            &port.to_string(),
-            "--hostname",
-            "127.0.0.1",
-        ])
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env_remove("OPENCODE_CONFIG_CONTENT")
+    let mut cmd = Command::new(program);
+    cmd.args([
+        "serve",
+        "--port",
+        &port.to_string(),
+        "--hostname",
+        "127.0.0.1",
+    ])
+    .current_dir(cwd)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .env_remove("OPENCODE_CONFIG_CONTENT");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("probe start failed in {}: {e}", cwd.display()))?;
+    let child_pid = child.id();
 
     // Drain pipes concurrently (avoids 64KB pipe deadlock/truncation).
     let out_buf = Arc::new(Mutex::new(String::new()));
@@ -509,7 +516,18 @@ fn probe_opencode_deny_rules(
         Ok(extract_deny_rules_from_opencode_sources(&sources))
     })();
 
-    let _ = child.kill();
+    #[cfg(unix)]
+    {
+        // Kill the whole process group (child is leader via process_group(0)) so grandchild
+        // servers (e.g. npm-style launchers) do not leak on timeout/error paths.
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &format!("-{}", child_pid)])
+            .status();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
     let _ = child.wait();
     result
 }
@@ -669,8 +687,7 @@ fn is_executable(p: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        p.metadata()
-            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        p.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
     }
     #[cfg(not(unix))]
     {
@@ -876,10 +893,9 @@ pub fn antigravity_auth_status() -> Option<String> {
 pub fn clear_antigravity_auth() -> Result<()> {
     if let Some(path) = antigravity_acp_settings() {
         if path.is_file() {
-            if let Ok(mut val) = std::fs::read_to_string(&path).and_then(|s| {
-                serde_json::from_str::<serde_json::Value>(&s)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-            }) {
+            if let Ok(mut val) = std::fs::read_to_string(&path)
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)))
+            {
                 if let Some(obj) = val.as_object_mut() {
                     obj.remove("auth");
                 }
@@ -1027,14 +1043,7 @@ fn session_meta(kind: AgentKind, rules: &str) -> Value {
 
 /// True when this agent receives Settings → Code → custom instructions.
 pub fn supports_instructions(kind: AgentKind) -> bool {
-    matches!(
-        kind,
-        AgentKind::Patchbay
-            | AgentKind::Grok
-            | AgentKind::ClaudeCode
-            | AgentKind::Codex
-            | AgentKind::Antigravity
-    )
+    matches!(kind, AgentKind::Patchbay | AgentKind::Grok | AgentKind::ClaudeCode | AgentKind::Codex | AgentKind::Antigravity)
 }
 
 /// Build the launch for a session's agent: executable, arguments, environment and config.
@@ -1179,21 +1188,13 @@ fn cursor_preload(data_dir: &Path, user_opts: Option<String>) -> Vec<(String, St
             })
             .is_ok();
     if !written {
-        tracing::warn!(
-            "couldn't write {}; Cursor's AwaitShell calls won't show",
-            path.display()
-        );
+        tracing::warn!("couldn't write {}; Cursor's AwaitShell calls won't show", path.display());
         return Vec::new();
     }
     let user_opts = user_opts.unwrap_or_default();
     // NODE_OPTIONS takes a double-quoted value with backslash escapes (a path with spaces).
-    let quoted = path
-        .to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
-    let opts = format!("--require \"{quoted}\" {user_opts}")
-        .trim_end()
-        .to_owned();
+    let quoted = path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+    let opts = format!("--require \"{quoted}\" {user_opts}").trim_end().to_owned();
     vec![
         ("NODE_OPTIONS".to_owned(), opts),
         ("PATCHBAY_ORIG_NODE_OPTIONS".to_owned(), user_opts),
@@ -1201,11 +1202,7 @@ fn cursor_preload(data_dir: &Path, user_opts: Option<String>) -> Vec<(String, St
 }
 
 /// Patchbay's own agent: no process, and its models arrive through the host, not a config file.
-fn prepare_patchbay(
-    db: &std::sync::Arc<Db>,
-    data_dir: &Path,
-    session: &CodeSession,
-) -> Result<Launch> {
+fn prepare_patchbay(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) -> Result<Launch> {
     if db.list_models()?.is_empty() {
         return Err(anyhow!("add a provider and model in Settings first"));
     }
@@ -1276,18 +1273,7 @@ fn prepare_grok(
         args,
         env,
         env_remove: vec!["XAI_API_KEY".into(), "GROK_CODE_XAI_API_KEY".into()],
-        ext: Extensions {
-            status_line: true,
-            rewind: true,
-            fork: false,
-            patchbay_models: true,
-            interject: true,
-            steering: false,
-            force_send: false,
-            cancel_tool: false,
-            force_steers: false,
-            background_tools: false,
-        },
+        ext: Extensions { status_line: true, rewind: true, fork: false, patchbay_models: true, interject: true, steering: false, force_send: false, cancel_tool: false, force_steers: false, background_tools: false },
         session_meta,
         initial_model: None,
         login_hint: "",
@@ -1753,122 +1739,184 @@ mod tests {
         );
     }
 
-    /// pb-20261107-32 item 4: failing probe parse error carries NO config body or credential text.
-    #[test]
-    fn opencode_probe_parse_error_contains_no_config_body_or_credentials() {
-        // Mirrors the parse-failure error construction in probe_opencode_deny_rules.
-        let body = r#"{"permissions":[{"action":"shell","resource":"*","effect":"deny"}],"mcp":{"x":{"command":["cmd","SECRET_TOKEN_abc123"],"headers":{"Authorization":"Bearer TOPSECRET"}}}}"#;
-        let e = serde_json::from_str::<serde_json::Value>(&body[..10]).unwrap_err(); // force parse error
-        let msg = format!(
-            "probe config parse failed (body_len={}, parse_error={e})",
-            body.len()
-        );
-        assert!(
-            !msg.contains("SECRET_TOKEN"),
-            "error must not contain config body/credentials: {msg}"
-        );
-        assert!(
-            !msg.contains("TOPSECRET"),
-            "error must not contain credentials: {msg}"
-        );
-        assert!(
-            !msg.contains("permissions"),
-            "error must not contain config body: {msg}"
-        );
-        assert!(
-            msg.contains("body_len="),
-            "error should report length: {msg}"
-        );
-    }
 
-    /// pb-20261107-32 item 3: concurrent pipe drain handles >64KB output without deadlock/truncation.
-    #[test]
-    fn opencode_pipe_drain_handles_large_output() {
-        use std::io::Read;
-        use std::process::{Command, Stdio};
-        use std::sync::{Arc, Mutex};
-        let mut child = Command::new("python3")
-            .args([
-                "-c",
-                "import sys; sys.stdout.write('x' * 131072); sys.stdout.flush()",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("python3");
-        let out_buf = Arc::new(Mutex::new(String::new()));
-        let err_buf = Arc::new(Mutex::new(String::new()));
-        if let Some(mut pipe) = child.stdout.take() {
-            let buf = out_buf.clone();
-            std::thread::spawn(move || {
-                let mut b = [0u8; 8192];
-                loop {
-                    match pipe.read(&mut b) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            if let Ok(mut g) = buf.lock() {
-                                g.push_str(&String::from_utf8_lossy(&b[..n]));
-                            }
-                        }
-                    }
-                }
-            });
-        }
-        if let Some(mut pipe) = child.stderr.take() {
-            let buf = err_buf.clone();
-            std::thread::spawn(move || {
-                let mut b = [0u8; 8192];
-                loop {
-                    match pipe.read(&mut b) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            if let Ok(mut g) = buf.lock() {
-                                g.push_str(&String::from_utf8_lossy(&b[..n]));
-                            }
-                        }
-                    }
-                }
-            });
-        }
-        let status = child.wait().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert!(status.success());
-        let out = out_buf.lock().unwrap();
-        assert_eq!(out.len(), 131072, "must drain >64KB without truncation");
+    #[cfg(unix)]
+    fn write_fake_opencode(dir: &Path, name: &str, script: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join(name);
+        std::fs::write(&p, script).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
     }
-
-    /// pb-20261107-32 item 7: probe is pinned to a fresh `serve --port 0` child in session cwd
-    /// with OPENCODE_CONFIG_CONTENT unset (NOT `debug config` hitting shared service 49374).
-    /// Structural pin: the implementation spawns `serve --port 0 --hostname 127.0.0.1`,
-    /// removes OPENCODE_CONFIG_CONTENT, and never passes `--service` or `debug`.
+    /// pb-20261107-32 item 4 (real probe, fake program): parse/HTTP errors must not leak
+    /// config body or credentials. Fake serves 200 with bad JSON body containing
+    /// sk-FAKE-SECRET-123, and 404 containing the secret — Err must lack the secret.
+    #[cfg(unix)]
     #[test]
-    fn opencode_probe_pinned_to_fresh_session_env_serve_child() {
-        // Verify the constants/shape we rely on: probe function exists and the config builder
-        // gates probe by mode. The real probe path (when not overridden and in always-approve)
-        // is exercised by the #[ignore] live test; this pins the no-service/no-debug contract
-        // by asserting the probe does NOT attempt service port 49374 when given an isolated
-        // cwd/home environment (it starts its own server on port 0).
-        // We test with a missing binary to get a controlled error that proves the fresh-child
-        // path ran (not a service query): error must mention probe/start, not "port 49374".
+    fn opencode_probe_errors_contain_no_config_body_or_credentials_real_probe() {
         OPCODE_DENY_PROBE_OVERRIDE.with(|c| *c.borrow_mut() = None);
-        let dir = std::env::temp_dir().join(format!("pb-opc-pin7-{}", crate::db::new_id()));
+        let dir = std::env::temp_dir().join(format!("pb-opc-sec-{}", crate::db::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let err = probe_opencode_deny_rules(Path::new("/nonexistent/opencode-for-pb-pin7"), &dir)
-            .unwrap_err();
-        assert!(
-            err.contains("probe start failed"),
-            "must attempt fresh child spawn: {err}"
-        );
-        assert!(
-            !err.contains("49374"),
-            "must not reference shared service port: {err}"
-        );
-        assert!(
-            !err.contains("debug config"),
-            "must not use debug config path: {err}"
-        );
+        let cwd = dir.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let base = r#"#!/usr/bin/env python3
+import sys, socket, threading
+port = int(sys.argv[sys.argv.index('--port')+1])
+sys.stderr.write('server password testpw\n'); sys.stderr.flush()
+MODE = '__MODE__'
+def handle(c):
+    try:
+        c.recv(4096)
+        if MODE == 'notfound':
+            body = '{"error":"sk-FAKE-SECRET-123","Authorization":"Bearer TOPSECRET"}'
+            status = '404 Not Found'
+        else:
+            body = 'NOT_JSON sk-FAKE-SECRET-123 {"Authorization":"Bearer TOPSECRET"}'
+            status = '200 OK'
+        c.sendall(('HTTP/1.1 %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' % (status,len(body.encode()),body)).encode())
+    except Exception: pass
+    finally:
+        try: c.close()
+        except: pass
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('127.0.0.1',port)); s.listen(5)
+while True:
+    c,_=s.accept(); threading.Thread(target=handle,args=(c,),daemon=True).start()
+"#;
+        let p_bad = write_fake_opencode(&dir, "fake-badbody", &base.replace("__MODE__", "badbody"));
+        let err = probe_opencode_deny_rules(&p_bad, &cwd).unwrap_err();
+        assert!(!err.contains("sk-FAKE-SECRET"), "bad-body Err must not leak secret: {err}");
+        assert!(!err.contains("TOPSECRET"), "bad-body Err must not leak credential: {err}");
+        assert!(!err.contains("NOT_JSON"), "bad-body Err must not leak body: {err}");
+        assert!(err.contains("body_len=") || err.contains("parse"), "bad-body Err should indicate parse/length: {err}");
+        let p_nf = write_fake_opencode(&dir, "fake-notfound", &base.replace("__MODE__", "notfound"));
+        let err2 = probe_opencode_deny_rules(&p_nf, &cwd).unwrap_err();
+        assert!(!err2.contains("sk-FAKE-SECRET"), "404 Err must not leak secret: {err2}");
+        assert!(!err2.contains("TOPSECRET"), "404 Err must not leak credential: {err2}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// pb-20261107-32 item 3 (real probe, fake program): drain handles >64KB output before password.
+    /// Fake prints 70KB + "server password testpw" then serves 200/[] on the probe port.
+    /// Planted break-after-first-chunk in production drain must go RED (timeout / password not found).
+    #[cfg(unix)]
+    #[test]
+    fn opencode_probe_drains_large_output_real_probe() {
+        OPCODE_DENY_PROBE_OVERRIDE.with(|c| *c.borrow_mut() = None);
+        let dir = std::env::temp_dir().join(format!("pb-opc-drain-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = dir.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let script = r#"#!/usr/bin/env python3
+import sys, socket, threading
+port = int(sys.argv[sys.argv.index('--port')+1])
+# >64KB before password so a broken/single-chunk drain misses it
+sys.stdout.write('X' * 70000 + '\n')
+sys.stdout.write('server password testpw\n')
+sys.stdout.flush()
+body = '[]'
+def handle(c):
+    try:
+        c.recv(4096)
+        c.sendall(('HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' % (len(body),body)).encode())
+    except Exception: pass
+    finally:
+        try: c.close()
+        except: pass
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('127.0.0.1',port)); s.listen(5)
+while True:
+    c,_=s.accept(); threading.Thread(target=handle,args=(c,),daemon=True).start()
+"#;
+        let prog = write_fake_opencode(&dir, "fake-drain", script);
+        let denies = probe_opencode_deny_rules(&prog, &cwd).expect("probe must drain >64KB and find password");
+        assert!(denies.is_empty(), "expected empty denies from [] config: {denies:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// pb-20261107-32 item 7 (real probe, fake program): argv is `serve --port <n> --hostname 127.0.0.1`
+    /// with NO --service/debug; resolves under session cwd. Planted --service must go RED.
+    #[cfg(unix)]
+    #[test]
+    fn opencode_probe_argv_fresh_session_serve_no_service_real_probe() {
+        OPCODE_DENY_PROBE_OVERRIDE.with(|c| *c.borrow_mut() = None);
+        let dir = std::env::temp_dir().join(format!("pb-opc-argv-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = dir.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let argv_file = dir.join("argv.txt");
+        let script = format!(r#"#!/usr/bin/env python3
+import sys, socket, threading, json
+with open({argv:?}, 'w') as f: json.dump(sys.argv, f)
+port = int(sys.argv[sys.argv.index('--port')+1])
+sys.stderr.write('server password testpw\n'); sys.stderr.flush()
+body = '[]'
+def handle(c):
+    try:
+        c.recv(4096)
+        c.sendall(('HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' % (len(body),body)).encode())
+    except Exception: pass
+    finally:
+        try: c.close()
+        except: pass
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('127.0.0.1',port)); s.listen(5)
+while True:
+    c,_=s.accept(); threading.Thread(target=handle,args=(c,),daemon=True).start()
+"#, argv=argv_file.to_string_lossy());
+        let prog = write_fake_opencode(&dir, "fake-argv", &script);
+        let denies = probe_opencode_deny_rules(&prog, &cwd).expect("probe should succeed");
+        assert!(denies.is_empty());
+        let argv: Vec<String> = serde_json::from_str(&std::fs::read_to_string(&argv_file).unwrap()).unwrap();
+        assert!(argv.iter().any(|a| a == "serve"), "argv must contain 'serve': {argv:?}");
+        assert!(argv.iter().any(|a| a == "--port"), "argv must contain --port: {argv:?}");
+        assert!(argv.iter().any(|a| a == "--hostname"), "argv must contain --hostname: {argv:?}");
+        assert!(argv.iter().any(|a| a == "127.0.0.1"), "argv must contain 127.0.0.1: {argv:?}");
+        assert!(!argv.iter().any(|a| a == "--service"), "argv must NOT contain --service (shared service): {argv:?}");
+        assert!(!argv.iter().any(|a| a == "debug"), "argv must NOT contain debug (debug config path): {argv:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// pb-20261107-32 item 2 (process leak): fake launcher spawns `sleep 302 &` (grandchild)
+    /// and never serves HTTP (conn-refused). Probe must kill the whole process group so the
+    /// grandchild is gone on exit (npm-style launchers would otherwise leak one server per start).
+    #[cfg(unix)]
+    #[test]
+    fn opencode_probe_kills_process_group_no_grandchild_leak() {
+        OPCODE_DENY_PROBE_OVERRIDE.with(|c| *c.borrow_mut() = None);
+        let dir = std::env::temp_dir().join(format!("pb-opc-leak-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = dir.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let pid_file = dir.join("grandchild.pid");
+        let script = format!(r#"#!/usr/bin/env python3
+import sys, os, time
+# Grandchild inherits the launcher's process group (probe set process_group(0) on launcher).
+# Do NOT setsid: a plain backgrounded grandchild stays in the group and must be reaped by killpg.
+pid = os.fork()
+if pid == 0:
+    os.execvp('sleep', ['sleep', '302'])
+with open({pidf:?}, 'w') as f: f.write(str(pid))
+sys.stderr.write('server password testpw\n'); sys.stderr.flush()
+# never listen on --port => conn refused; stay alive so group-kill is what reaps us
+time.sleep(60)
+"#, pidf=pid_file.to_string_lossy());
+        let prog = write_fake_opencode(&dir, "fake-leak", &script);
+        let err = probe_opencode_deny_rules(&prog, &cwd).unwrap_err();
+        assert!(err.contains("probe") || err.contains("connect") || err.contains("read") || err.contains("HTTP") || err.contains("ready"),
+            "expected probe failure on conn-refused path, got: {err}");
+        // give a moment for signals
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let gpid: i32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &gpid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if alive {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &gpid.to_string()])
+                .status();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!alive, "grandchild pid {gpid} leaked after probe returned ({err})");
     }
 
     /// pb-20261107-32 item 5: #[ignore] live test calling the REAL probe (fresh serve child,
