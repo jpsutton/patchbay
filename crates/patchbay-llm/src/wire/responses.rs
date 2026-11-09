@@ -181,7 +181,12 @@ impl Parser for ResponsesParser {
                         cache_write: 0,
                         output: u64_at(u, &["output_tokens"]),
                         reasoning: u64_at(u, &["output_tokens_details", "reasoning_tokens"]),
-                        cost_usd: None,
+                        // xAI reports the price of the call in ten-billionths of a dollar.
+                        cost_usd: u
+                            .get("cost_in_usd_ticks")
+                            .and_then(Value::as_i64)
+                            .filter(|t| *t > 0)
+                            .map(|t| t as f64 / 1e10),
                     });
                 }
             }
@@ -306,6 +311,25 @@ mod tests {
         assert_eq!(b["input"][1]["encrypted_content"], "zz");
         assert_eq!(b["input"][2]["type"], "function_call");
         assert_eq!(b["input"][3], json!({"type": "function_call_output", "call_id": "c1", "output": "out"}));
+    }
+
+    #[test]
+    fn xai_reports_the_cost_of_a_call_in_ticks() {
+        let mut p: Box<dyn Parser> = Box::new(ResponsesParser::default());
+        let mut out = Vec::new();
+        p.event(
+            None,
+            r#"{"type":"response.completed","response":{"status":"completed","model":"grok-4.7","usage":{"input_tokens":448,"output_tokens":297,"input_tokens_details":{"cached_tokens":384},"output_tokens_details":{"reasoning_tokens":269},"cost_in_usd_ticks":21020000}}}"#,
+            &mut out,
+        )
+        .unwrap();
+        let usage = p.finish().unwrap().usage.unwrap();
+        assert_eq!(usage.cost_usd, Some(0.002102));
+        assert_eq!(usage.cached_read, 384);
+
+        let mut p: Box<dyn Parser> = Box::new(ResponsesParser::default());
+        p.event(None, r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}"#, &mut out).unwrap();
+        assert_eq!(p.finish().unwrap().usage.unwrap().cost_usd, None, "no ticks, no cost");
     }
 
     #[test]

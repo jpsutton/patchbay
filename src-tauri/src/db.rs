@@ -241,6 +241,10 @@ ALTER TABLE providers ADD COLUMN claude_config_dir TEXT;
 "#, r#"
 -- The Code session whose agent created this one (`create_agent_session`), NULL when a person did.
 ALTER TABLE code_sessions ADD COLUMN created_by TEXT;
+"#, r#"
+-- Which Grok login a grok_login provider uses: a Grok home directory (`$GROK_HOME`), NULL for the
+-- default. Not synced: a path on one node means nothing on another.
+ALTER TABLE providers ADD COLUMN grok_home TEXT;
 "#];
 
 pub fn now_ms() -> i64 {
@@ -288,6 +292,8 @@ pub enum AuthMode {
     ApiKey,
     /// Reuse Claude Code's subscription OAuth token from `~/.claude/.credentials.json`.
     ClaudeLogin,
+    /// Reuse Grok Build's subscription OAuth token from `~/.grok/auth.json`.
+    GrokLogin,
 }
 
 impl AuthMode {
@@ -295,12 +301,14 @@ impl AuthMode {
         match self {
             Self::ApiKey => "api_key",
             Self::ClaudeLogin => "claude_login",
+            Self::GrokLogin => "grok_login",
         }
     }
 
     fn parse(s: &str) -> Self {
         match s {
             "claude_login" => Self::ClaudeLogin,
+            "grok_login" => Self::GrokLogin,
             _ => Self::ApiKey,
         }
     }
@@ -321,6 +329,9 @@ pub struct Provider {
     /// For `ClaudeLogin`: the Claude Code config directory whose login to use (`None`: `~/.claude`).
     #[serde(default)]
     pub claude_config_dir: Option<String>,
+    /// For `GrokLogin`: the Grok home directory whose login to use (`None`: `$GROK_HOME`, else `~/.grok`).
+    #[serde(default)]
+    pub grok_home: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -624,7 +635,7 @@ impl Db {
     pub fn list_providers(&self) -> Result<Vec<(Provider, Option<String>)>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, name, kind, base_url, inline_key, auth_mode, claude_config_dir FROM providers ORDER BY created_at",
+            "SELECT id, name, kind, base_url, inline_key, auth_mode, claude_config_dir, grok_home FROM providers ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -636,6 +647,7 @@ impl Db {
                     has_key: false,
                     auth_mode: AuthMode::parse(&r.get::<_, String>(5)?),
                     claude_config_dir: r.get(6)?,
+                    grok_home: r.get(7)?,
                 },
                 r.get::<_, Option<String>>(4)?,
             ))
@@ -649,10 +661,10 @@ impl Db {
 
     pub fn upsert_provider(&self, p: &Provider, inline_key: Option<&str>) -> Result<()> {
         self.conn().execute(
-            "INSERT INTO providers (id, name, kind, base_url, inline_key, created_at, auth_mode, claude_config_dir)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO providers (id, name, kind, base_url, inline_key, created_at, auth_mode, claude_config_dir, grok_home)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET name = ?2, kind = ?3, base_url = ?4,
-               inline_key = COALESCE(?5, inline_key), auth_mode = ?7, claude_config_dir = ?8",
+               inline_key = COALESCE(?5, inline_key), auth_mode = ?7, claude_config_dir = ?8, grok_home = ?9",
             params![
                 p.id,
                 p.name,
@@ -661,7 +673,8 @@ impl Db {
                 inline_key,
                 now_ms(),
                 p.auth_mode.as_str(),
-                p.claude_config_dir
+                p.claude_config_dir,
+                p.grok_home
             ],
         )?;
         Ok(())
