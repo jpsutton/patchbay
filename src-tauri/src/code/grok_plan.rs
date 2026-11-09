@@ -113,7 +113,7 @@ pub async fn fetch(home: Option<&str>, base_url: &str) -> Result<GrokPlan> {
         .build()?
         .get(&url)
         .bearer_auth(&creds.token);
-    for (name, value) in crate::providers::grok_headers(Some(&creds.user_id)) {
+    for (name, value) in crate::providers::grok_headers(Some(creds.user_id.as_str())) {
         req = req.header(name, value);
     }
     let resp = req.send().await.with_context(|| format!("GET {url}"))?;
