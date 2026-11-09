@@ -40,6 +40,7 @@ import { setIconSize } from "./iconSize";
 import { notifyInBackground } from "./notify";
 import { activityOf, strongest, type Activity } from "./activity";
 import { isRemoteApp } from "./platform";
+import type { CodeLive } from "./sessionLive";
 import { loadStringList, saveStringList } from "./manualOrder";
 import * as paneLogic from "./panes";
 import { isForegroundUpdate } from "./codeWorking";
@@ -408,6 +409,13 @@ interface Store {
   conversations: Conversation[];
   activeConversationId: string | null;
   codeSessions: CodeSession[];
+  /**
+   * What the backend says each Code session is doing (`code_live`): the sidebar shows it for a
+   * session this window has no state of its own for, such as one still running in patchbayd
+   * from before the app was opened. Desktop and browser windows only.
+   */
+  codeLive: Record<string, CodeLive>;
+  refreshCodeLive: () => Promise<void>;
   activeCodeSessionId: string | null;
   /** Code sessions in split panes (left→right or top→bottom); empty when not split. `activeCodeSessionId` is the focused one. */
   panes: string[];
@@ -1011,6 +1019,30 @@ function loadSidebarCollapsed(): boolean {
 let catalogKey: string | null = null;
 /** Counts session-list loads, so only the latest one's answer is kept. */
 let codeSessionsSeq = 0;
+let codeLiveSeq = 0;
+let codeLiveTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Ask the backend again what each session is doing, once a burst of events has settled. */
+function scheduleCodeLive() {
+  if (isRemoteApp() || codeLiveTimer !== null) return;
+  codeLiveTimer = setTimeout(() => {
+    codeLiveTimer = null;
+    void useStore.getState().refreshCodeLive();
+  }, 400);
+}
+
+/** The events after which a session's row can read differently: its turn or agent started or ended, or it asks. */
+const LIVE_EVENTS = new Set([
+  "status",
+  "sessionReady",
+  "userPrompt",
+  "promptDone",
+  "permission",
+  "permissionResolved",
+  "question",
+  "questionResolved",
+  "stalled",
+]);
 /** Same for the sidebar layout. */
 let sidebarLayoutSeq = 0;
 
@@ -1156,6 +1188,7 @@ export const useStore = create<Store>((set, get) => ({
   conversations: [],
   activeConversationId: null,
   codeSessions: [],
+  codeLive: {},
   sidebarLayout: null,
   activeCodeSessionId: null,
   panes: [],
@@ -1309,6 +1342,25 @@ export const useStore = create<Store>((set, get) => ({
     set({ codeSessions: list });
     syncPanes(list);
     backfillActivity();
+    scheduleCodeLive();
+  },
+  refreshCodeLive: async () => {
+    if (isRemoteApp()) return;
+    const seq = ++codeLiveSeq;
+    try {
+      const live = await api.codeLive();
+      if (seq !== codeLiveSeq) return;
+      // Same answer apart from timestamps: keep the object, so nothing re-renders for it.
+      const same = (a: CodeLive, b?: CodeLive) =>
+        !!b && a.status === b.status && a.busy === b.busy && !!a.stalled === !!b.stalled &&
+        a.permissions.join() === b.permissions.join() && (a.questions ?? []).join() === (b.questions ?? []).join();
+      const cur = get().codeLive;
+      const ids = Object.keys(live);
+      if (ids.length === Object.keys(cur).length && ids.every((id) => same(live[id], cur[id]))) return;
+      set({ codeLive: live });
+    } catch {
+      /* an older backend without the command: rows keep to this window's own state */
+    }
   },
   refreshSidebarLayout: async () => {
     const seq = ++sidebarLayoutSeq;
@@ -1658,6 +1710,7 @@ export function codeEventArrived(env: CodeEnvelope) {
     const missed = last ? (last.s === pt.s ? pt.n > last.n + 1 : pt.n > 1) : false;
     if (missed) void resyncCode(id, last);
   }
+  if (LIVE_EVENTS.has(env.event.type)) scheduleCodeLive();
   const held = attaching.get(id);
   if (held) {
     held.push({ e: env.event, pt });
