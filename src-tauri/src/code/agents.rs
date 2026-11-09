@@ -354,9 +354,12 @@ fn extract_deny_rules_from_opencode_sources(sources: &Value) -> Vec<Value> {
 
 fn probe_http_get_config(port: u16, auth: &str) -> std::result::Result<String, String> {
     use std::io::{Read, Write};
-    use std::net::TcpStream;
+    use std::net::{SocketAddr, TcpStream};
     use std::time::Duration;
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+    let addr: SocketAddr = format!("127.0.0.1:{port}")
+        .parse()
+        .map_err(|e| format!("probe addr parse failed: {e}"))?;
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
         .map_err(|e| format!("probe connect failed: {e}"))?;
     stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
@@ -516,19 +519,25 @@ fn probe_opencode_deny_rules(
         Ok(extract_deny_rules_from_opencode_sources(&sources))
     })();
 
+    // Kill process group (unix, leader set via process_group(0)) AND direct child on every
+    // exit path so launchers/grandchildren do not leak and wait() cannot hang.
     #[cfg(unix)]
     {
-        // Kill the whole process group (child is leader via process_group(0)) so grandchild
-        // servers (e.g. npm-style launchers) do not leak on timeout/error paths.
         let _ = std::process::Command::new("kill")
             .args(["-9", &format!("-{}", child_pid)])
             .status();
     }
-    #[cfg(not(unix))]
-    {
-        let _ = child.kill();
+    let _ = child.kill();
+    let wait_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => break,
+            Ok(None) if Instant::now() > wait_deadline => break,
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+        }
     }
-    let _ = child.wait();
+    // Reader threads are detached and never joined; killing the group/child closes pipe
+    // write ends so they observe EOF. All blocking waits above are bounded.
     result
 }
 
@@ -1740,6 +1749,14 @@ mod tests {
     }
 
 
+
+    #[cfg(unix)]
+    fn with_test_timeout<T: Send + 'static>(secs: u64, name: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || { let _ = tx.send(f()); });
+        rx.recv_timeout(std::time::Duration::from_secs(secs))
+            .unwrap_or_else(|_| panic!("{name}: timed out after {secs}s (unbounded hang guard)"))
+    }
     #[cfg(unix)]
     fn write_fake_opencode(dir: &Path, name: &str, script: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
@@ -1754,6 +1771,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn opencode_probe_errors_contain_no_config_body_or_credentials_real_probe() {
+        with_test_timeout(30, "opencode_probe_errors_contain_no_config_body_or_credentials_real_probe", || {
         OPCODE_DENY_PROBE_OVERRIDE.with(|c| *c.borrow_mut() = None);
         let dir = std::env::temp_dir().join(format!("pb-opc-sec-{}", crate::db::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1793,6 +1811,7 @@ while True:
         assert!(!err2.contains("sk-FAKE-SECRET"), "404 Err must not leak secret: {err2}");
         assert!(!err2.contains("TOPSECRET"), "404 Err must not leak credential: {err2}");
         let _ = std::fs::remove_dir_all(&dir);
+        });
     }
 
     /// pb-20261107-32 item 3 (real probe, fake program): drain handles >64KB output before password.
@@ -1801,6 +1820,7 @@ while True:
     #[cfg(unix)]
     #[test]
     fn opencode_probe_drains_large_output_real_probe() {
+        with_test_timeout(30, "opencode_probe_drains_large_output_real_probe", || {
         OPCODE_DENY_PROBE_OVERRIDE.with(|c| *c.borrow_mut() = None);
         let dir = std::env::temp_dir().join(format!("pb-opc-drain-{}", crate::db::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1830,6 +1850,7 @@ while True:
         let denies = probe_opencode_deny_rules(&prog, &cwd).expect("probe must drain >64KB and find password");
         assert!(denies.is_empty(), "expected empty denies from [] config: {denies:?}");
         let _ = std::fs::remove_dir_all(&dir);
+        });
     }
 
     /// pb-20261107-32 item 7 (real probe, fake program): argv is `serve --port <n> --hostname 127.0.0.1`
@@ -1837,6 +1858,7 @@ while True:
     #[cfg(unix)]
     #[test]
     fn opencode_probe_argv_fresh_session_serve_no_service_real_probe() {
+        with_test_timeout(30, "opencode_probe_argv_fresh_session_serve_no_service_real_probe", || {
         OPCODE_DENY_PROBE_OVERRIDE.with(|c| *c.borrow_mut() = None);
         let dir = std::env::temp_dir().join(format!("pb-opc-argv-{}", crate::db::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1872,6 +1894,7 @@ while True:
         assert!(!argv.iter().any(|a| a == "--service"), "argv must NOT contain --service (shared service): {argv:?}");
         assert!(!argv.iter().any(|a| a == "debug"), "argv must NOT contain debug (debug config path): {argv:?}");
         let _ = std::fs::remove_dir_all(&dir);
+        });
     }
 
     /// pb-20261107-32 item 2 (process leak): fake launcher spawns `sleep 302 &` (grandchild)
@@ -1880,6 +1903,7 @@ while True:
     #[cfg(unix)]
     #[test]
     fn opencode_probe_kills_process_group_no_grandchild_leak() {
+        with_test_timeout(30, "opencode_probe_kills_process_group_no_grandchild_leak", || {
         OPCODE_DENY_PROBE_OVERRIDE.with(|c| *c.borrow_mut() = None);
         let dir = std::env::temp_dir().join(format!("pb-opc-leak-{}", crate::db::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1917,6 +1941,7 @@ time.sleep(60)
         }
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!alive, "grandchild pid {gpid} leaked after probe returned ({err})");
+        });
     }
 
     /// pb-20261107-32 item 5: #[ignore] live test calling the REAL probe (fresh serve child,
