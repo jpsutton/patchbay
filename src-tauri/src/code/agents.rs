@@ -318,43 +318,11 @@ fn extract_deny_rules_from_opencode_sources(sources: &Value) -> Vec<Value> {
     out
 }
 
-fn opencode_serve_auth_header(log: &str) -> Option<String> {
-    let pw = log.lines().find_map(|l| {
-        l.split("server password ").nth(1).map(str::trim)
-    }).filter(|s| !s.is_empty())?;
-    use base64::Engine;
-    Some(format!(
-        "Basic {}",
-        base64::engine::general_purpose::STANDARD.encode(format!("opencode:{pw}"))
-    ))
-}
-
-fn http_get_localhost(port: u16, path: &str, auth: &str) -> std::result::Result<String, String> {
-    use std::io::{Read, Write};
-    use std::net::TcpStream;
-    use std::time::Duration;
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
-        .map_err(|e| format!("connect 127.0.0.1:{port} failed: {e}"))?;
-    stream.set_read_timeout(Some(Duration::from_secs(8))).ok();
-    stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
-    let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: {auth}\r\nConnection: close\r\n\r\n"
-    );
-    stream.write_all(req.as_bytes()).map_err(|e| format!("probe request write failed: {e}"))?;
-    let mut resp = Vec::new();
-    stream.read_to_end(&mut resp).map_err(|e| format!("probe response read failed: {e}"))?;
-    let resp = String::from_utf8_lossy(&resp);
-    let mut parts = resp.splitn(2, "\r\n\r\n");
-    let status = parts.next().unwrap_or("");
-    let body = parts.next().unwrap_or("");
-    if !status.contains(" 200 ") {
-        return Err(format!("probe HTTP status not OK: {}", status.lines().next().unwrap_or(status)));
-    }
-    Ok(body.to_owned())
-}
-
 /// Probe opencode's resolved config sources for `cwd` (no injected content) and return deny
-/// rules from all sources. Fail-safe: any error => Err, caller must not inject allows.
+/// rules from all sources. Uses `opencode debug config` in the session cwd with
+/// OPENCODE_CONFIG_CONTENT unset (addendum B(i)): opencode resolves/normalizes sources
+/// including project/global/OPENCODE_CONFIG*/.opencode layers. Fail-safe: any error
+/// (non-zero exit, unparseable/missing output, missing binary) => Err, no allows.
 fn probe_opencode_deny_rules(program: &Path, cwd: &Path) -> std::result::Result<Vec<Value>, String> {
     #[cfg(test)]
     {
@@ -363,81 +331,52 @@ fn probe_opencode_deny_rules(program: &Path, cwd: &Path) -> std::result::Result<
             return r;
         }
     }
-    use std::io::Read;
-    use std::net::TcpListener;
     use std::process::{Command, Stdio};
-    use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
-    let port = TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .map(|a| a.port())
-        .map_err(|e| format!("failed to reserve probe port: {e}"))?;
     let mut child = Command::new(program)
-        .args(["serve", "--port", &port.to_string(), "--hostname", "127.0.0.1"])
+        .args(["debug", "config"])
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env_remove("OPENCODE_CONFIG_CONTENT")
         .spawn()
-        .map_err(|e| format!("failed to start opencode probe in {}: {e}", cwd.display()))?;
-    let log = Arc::new(Mutex::new(String::new()));
-    if let Some(mut pipe) = child.stdout.take() {
-        let log = log.clone();
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            loop {
-                match pipe.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if let Ok(mut g) = log.lock() {
-                            g.push_str(&String::from_utf8_lossy(&buf[..n]));
-                        }
-                    }
-                }
+        .map_err(|e| format!("failed to start opencode debug config in {}: {e}", cwd.display()))?;
+    // Simple timeout: wait with a deadline.
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(15);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if start.elapsed() > timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("opencode debug config timed out in {}", cwd.display()));
             }
-        });
-    }
-    if let Some(mut pipe) = child.stderr.take() {
-        let log = log.clone();
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            loop {
-                match pipe.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if let Ok(mut g) = log.lock() {
-                            g.push_str(&String::from_utf8_lossy(&buf[..n]));
-                        }
-                    }
-                }
-            }
-        });
-    }
-    let deadline = Instant::now() + Duration::from_secs(12);
-    let auth = loop {
-        if let Some(h) = log.lock().ok().and_then(|g| opencode_serve_auth_header(&g)) {
-            break Some(h);
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => return Err(format!("opencode debug config wait failed: {e}")),
         }
-        if Instant::now() > deadline {
-            break None;
-        }
-        std::thread::sleep(Duration::from_millis(75));
-    };
-    let result = (|| {
-        let auth = auth.ok_or_else(|| {
-            let tail = log.lock().ok().map(|g| g.chars().take(500).collect::<String>()).unwrap_or_default();
-            format!("opencode probe did not become ready for {}: {tail}", cwd.display())
-        })?;
-        let body = http_get_localhost(port, "/api/config", &auth)?;
-        let sources: Value = serde_json::from_str(&body)
-            .map_err(|e| format!("opencode probe config parse failed: {e}: {}", body.chars().take(200).collect::<String>()))?;
-        Ok(extract_deny_rules_from_opencode_sources(&sources))
-    })();
-    let _ = child.kill();
-    let _ = child.wait();
-    result
+    }
+    let output = child.wait_with_output().map_err(|e| format!("opencode debug config output failed: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "opencode debug config failed (status {}) in {}: {}",
+            output.status,
+            cwd.display(),
+            stderr.chars().take(500).collect::<String>()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let sources: Value = serde_json::from_str(stdout.trim())
+        .or_else(|_| {
+            // Some builds may prefix; try to find JSON array.
+            let start = stdout.find('[').ok_or_else(|| serde_json::from_str::<Value>("").unwrap_err())?;
+            serde_json::from_str(&stdout[start..])
+        })
+        .map_err(|e| format!("opencode debug config output unparseable in {}: {e}: {}", cwd.display(), stdout.chars().take(300).collect::<String>()))?;
+    Ok(extract_deny_rules_from_opencode_sources(&sources))
 }
 
 #[derive(Debug)]
@@ -1195,42 +1134,66 @@ mod tests {
         });
     }
 
-    /// pb-20261107-32 E/f: prepare() parses OPENCODE_CONFIG_CONTENT and asserts denies-last +
-    /// allows-only-in-always-approve across modes.
+    /// pb-20261107-32 spec(2)/E: prepare() output, real mode id `default` keeps current ask-everything.
     #[test]
-    fn opencode_prepare_output_allows_only_in_always_approve_and_denies_last() {
+    fn opencode_prepare_output_default_mode_no_allows() {
         let deny = vec![json!({"action":"shell","resource":"git push*","effect":"deny"})];
-        for mode in ["default", "auto"] {
-            with_probe_override(Ok(deny.clone()), || {
-                let dir = std::env::temp_dir().join(format!("pb-opc-m-{}", crate::db::new_id()));
-                std::fs::create_dir_all(&dir).unwrap();
-                let db = std::sync::Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
-                let mut o = AgentPaths::new();
-                o.insert("opencode".into(), std::env::current_exe().unwrap().to_string_lossy().into_owned());
-                let prefs = crate::prefs::Preferences { agent_paths: o, ..Default::default() };
-                crate::prefs::save(&db, &prefs).unwrap();
-                let session = db.create_code_session(&dir.to_string_lossy(), None, "opencode", mode).unwrap();
-                let launch = prepare(&db, &dir, &session).unwrap();
-                let cfg: Value = serde_json::from_str(&launch.env.iter().find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT").unwrap().1).unwrap();
-                assert_eq!(cfg.get("permission"), Some(&json!({"*":"ask"})), "mode {mode} must keep current ask-everything");
-                assert!(cfg.get("permissions").is_none(), "mode {mode} must not inject permissions array/allows");
-                let _ = std::fs::remove_dir_all(&dir);
-            });
-        }
         with_probe_override(Ok(deny), || {
-            let dir = std::env::temp_dir().join(format!("pb-opc-ma-{}", crate::db::new_id()));
+            let dir = std::env::temp_dir().join(format!("pb-opc-def-{}", crate::db::new_id()));
             std::fs::create_dir_all(&dir).unwrap();
             let db = std::sync::Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
             let mut o = AgentPaths::new();
             o.insert("opencode".into(), std::env::current_exe().unwrap().to_string_lossy().into_owned());
-            let prefs = crate::prefs::Preferences { agent_paths: o, ..Default::default() };
-            crate::prefs::save(&db, &prefs).unwrap();
+            crate::prefs::save(&db, &crate::prefs::Preferences { agent_paths: o, ..Default::default() }).unwrap();
+            let session = db.create_code_session(&dir.to_string_lossy(), None, "opencode", "default").unwrap();
+            let launch = prepare(&db, &dir, &session).unwrap();
+            let cfg: Value = serde_json::from_str(&launch.env.iter().find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT").unwrap().1).unwrap();
+            assert_eq!(cfg.get("permission"), Some(&json!({"*":"ask"})), "default must keep current ask-everything");
+            assert!(cfg.get("permissions").is_none(), "default must not inject permissions array/allows");
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// pb-20261107-32 spec(2)/E: prepare() output, real mode id `auto` keeps current ask-everything.
+    #[test]
+    fn opencode_prepare_output_auto_mode_no_allows() {
+        let deny = vec![json!({"action":"shell","resource":"git push*","effect":"deny"})];
+        with_probe_override(Ok(deny), || {
+            let dir = std::env::temp_dir().join(format!("pb-opc-auto-{}", crate::db::new_id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let db = std::sync::Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
+            let mut o = AgentPaths::new();
+            o.insert("opencode".into(), std::env::current_exe().unwrap().to_string_lossy().into_owned());
+            crate::prefs::save(&db, &crate::prefs::Preferences { agent_paths: o, ..Default::default() }).unwrap();
+            let session = db.create_code_session(&dir.to_string_lossy(), None, "opencode", "auto").unwrap();
+            let launch = prepare(&db, &dir, &session).unwrap();
+            let cfg: Value = serde_json::from_str(&launch.env.iter().find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT").unwrap().1).unwrap();
+            assert_eq!(cfg.get("permission"), Some(&json!({"*":"ask"})), "auto must keep current ask-everything");
+            assert!(cfg.get("permissions").is_none(), "auto must not inject permissions array/allows");
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// pb-20261107-32 spec(2)/E: prepare() output, real mode id `always-approve` injects allows and denies last.
+    #[test]
+    fn opencode_prepare_output_always_approve_mode_allows_and_denies_last() {
+        let deny = vec![json!({"action":"shell","resource":"git push*","effect":"deny"})];
+        with_probe_override(Ok(deny), || {
+            let dir = std::env::temp_dir().join(format!("pb-opc-aa-{}", crate::db::new_id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let db = std::sync::Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
+            let mut o = AgentPaths::new();
+            o.insert("opencode".into(), std::env::current_exe().unwrap().to_string_lossy().into_owned());
+            crate::prefs::save(&db, &crate::prefs::Preferences { agent_paths: o, ..Default::default() }).unwrap();
             let session = db.create_code_session(&dir.to_string_lossy(), None, "opencode", OPCODE_ALWAYS_APPROVE_MODE).unwrap();
             let launch = prepare(&db, &dir, &session).unwrap();
             let cfg: Value = serde_json::from_str(&launch.env.iter().find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT").unwrap().1).unwrap();
-            let perms = cfg["permissions"].as_array().unwrap();
-            assert!(perms.iter().any(|r| r["action"]=="shell" && r["effect"]=="allow"));
-            assert!(perms.iter().rposition(|r| r["effect"]=="deny").unwrap() > perms.iter().position(|r| r["action"]=="shell" && r["effect"]=="allow").unwrap());
+            let perms = cfg["permissions"].as_array().expect("always-approve must use permissions array");
+            assert!(perms.iter().any(|r| r["action"]=="shell" && r["effect"]=="allow" && r["resource"]=="*"));
+            assert!(perms.iter().any(|r| r["action"]=="external_directory" && r["effect"]=="allow" && r["resource"]=="*"));
+            let deny_i = perms.iter().rposition(|r| r["effect"]=="deny").unwrap();
+            let allow_i = perms.iter().position(|r| r["action"]=="shell" && r["effect"]=="allow").unwrap();
+            assert!(deny_i > allow_i, "deny must be after allows in prepare() output");
             let _ = std::fs::remove_dir_all(&dir);
         });
     }
