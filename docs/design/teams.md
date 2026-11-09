@@ -169,8 +169,10 @@ Members report progress with `item_note`; the desk keeps sole ownership of statu
 - Standing seats are started by the user from the team panel.
 - In the default permission mode, a member's call to `send_agent_message` (and later the team
   tools) waits on a permission prompt. Unattended teams need those tools allowed for members
-  without asking; phase 4 decides how (a seat permission mode, or a standing allow rule for the
-  team tools only).
+  without asking. Decided 2026-11-09: members get `send_agent_message` and the team tools
+  allowed without a prompt (a standing allow for those tools only, for live team members);
+  every other tool still asks according to the seat's permission mode. Phase 4's design gets a
+  security review before it is built.
 - `dispatch_item` starts workers. It is exempt from `MAX_CREATED_SESSIONS` (5) and
   `MAX_CREATE_DEPTH` (2) in `lib.rs`; instead it refuses when the seat's `pool` is full.
   Released members stop counting.
