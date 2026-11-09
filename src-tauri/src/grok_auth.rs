@@ -280,14 +280,21 @@ struct TokenResponse {
     expires_in: Option<i64>,
 }
 
+#[cfg(test)]
+fn endpoint_override() -> Option<String> {
+    std::env::var("PATCHBAY_GROK_TOKEN_URL").ok().filter(|u| !u.is_empty())
+}
+
+#[cfg(not(test))]
+fn endpoint_override() -> Option<String> {
+    None
+}
+
 /// The issuer's token endpoint, from its OIDC discovery document (cached per issuer).
 /// In tests `PATCHBAY_GROK_TOKEN_URL` overrides it; a release build never sends a refresh token
 /// anywhere the login file's issuer didn't name.
 async fn token_endpoint(issuer: &str) -> Result<String> {
-    #[cfg(test)]
-    if let Ok(u) = std::env::var("PATCHBAY_GROK_TOKEN_URL")
-        && !u.is_empty()
-    {
+    if let Some(u) = endpoint_override() {
         return Ok(u);
     }
     let issuer = issuer.trim_end_matches('/').to_owned();
