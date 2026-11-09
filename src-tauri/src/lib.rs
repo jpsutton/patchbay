@@ -8,6 +8,7 @@ mod db;
 mod daemon_link;
 #[cfg(feature = "desktop")]
 mod desktop;
+pub mod fd_limit;
 mod files;
 mod gateway;
 mod handoff;
