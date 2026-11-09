@@ -6,12 +6,13 @@
 //! The UI branches on [`Extensions`], never on the agent's identity.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 use patchbay_agent::proc::search_dirs;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::{agent_providers, grok_config};
 use crate::db::{CodeSession, Db};
@@ -250,10 +251,241 @@ impl ApprovalSetup {
 /// Codex mode that asks before edits; also its starting mode (`INITIAL_AGENT_MODE`).
 const CODEX_ASKING_MODE: &str = "read-only";
 
+const OPCODE_ALWAYS_APPROVE_MODE: &str = "always-approve";
+
 /// Config that makes OpenCode and Kilo ask over ACP for every tool. Both read inline config
-/// from an env var; deny rules in the user's own config still apply.
-fn ask_everything() -> serde_json::Map<String, Value> {
-    serde_json::Map::from_iter([("permission".to_owned(), json!({ "*": "ask" }))])
+/// from an env var; deny rules in the user's own config still apply when not overridden here.
+fn ask_everything() -> Map<String, Value> {
+    Map::from_iter([("permission".to_owned(), json!({ "*": "ask" }))])
+}
+
+fn opencode_config_paths() -> Vec<PathBuf> {
+    if let Some(p) = std::env::var_os("PATCHBAY_OPENCODE_CONFIG_PATH") {
+        let p = PathBuf::from(p);
+        if !p.as_os_str().is_empty() {
+            return vec![p];
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(base) = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
+        out.push(base.join("opencode").join("opencode.jsonc"));
+        out.push(base.join("opencode").join("opencode.json"));
+    }
+    if let Some(home) = home_dir() {
+        out.push(home.join(".config").join("opencode").join("opencode.jsonc"));
+        out.push(home.join(".config").join("opencode").join("opencode.json"));
+    }
+    out
+}
+
+fn strip_jsonc_comments(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_string {
+            out.push(c);
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == '/' && i + 1 < chars.len() {
+            if chars[i + 1] == '/' {
+                i += 2;
+                while i < chars.len() && chars[i] != '\n' && chars[i] != '\r' {
+                    i += 1;
+                }
+                continue;
+            }
+            if chars[i + 1] == '*' {
+                i += 2;
+                while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                    i += 1;
+                }
+                if i + 1 < chars.len() {
+                    i += 2;
+                }
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+fn parse_jsonc_value(input: &str) -> std::result::Result<Value, String> {
+    serde_json::from_str(input)
+        .or_else(|_| serde_json::from_str(&strip_jsonc_comments(input)))
+        .map_err(|e| e.to_string())
+}
+
+fn normalize_permission_action(key: &str) -> &str {
+    if key == "bash" { "shell" } else { key }
+}
+
+fn extract_deny_permission_rules(config: &Value) -> Vec<Value> {
+    let mut out = Vec::new();
+    if let Some(arr) = config.get("permissions").and_then(Value::as_array) {
+        for rule in arr {
+            if rule.get("effect").and_then(Value::as_str) == Some("deny") {
+                out.push(rule.clone());
+            }
+        }
+        return out;
+    }
+    let Some(obj) = config.get("permission").and_then(Value::as_object) else {
+        return out;
+    };
+    for (key, val) in obj {
+        let action = normalize_permission_action(key);
+        match val {
+            Value::String(effect) if effect == "deny" => {
+                out.push(json!({ "action": action, "resource": "*", "effect": "deny" }));
+            }
+            Value::Object(patterns) => {
+                for (resource, effect) in patterns {
+                    if effect.as_str() == Some("deny") {
+                        out.push(json!({ "action": action, "resource": resource, "effect": "deny" }));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone)]
+struct OpencodeUserConfig {
+    path: PathBuf,
+    deny_rules: Vec<Value>,
+}
+
+fn read_opencode_user_config_from_path(path: &Path) -> std::result::Result<OpencodeUserConfig, String> {
+    if !path.is_file() {
+        return Err(format!("{}: file not found", path.display()));
+    }
+    let raw = fs::read_to_string(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+    let val = parse_jsonc_value(&raw).map_err(|e| format!("{}: {}", path.display(), e))?;
+    Ok(OpencodeUserConfig {
+        deny_rules: extract_deny_permission_rules(&val),
+        path: path.to_path_buf(),
+    })
+}
+
+fn read_opencode_user_config() -> std::result::Result<OpencodeUserConfig, String> {
+    let candidates = opencode_config_paths();
+    let mut last_err = None;
+    let mut saw_existing = false;
+    for path in candidates {
+        match read_opencode_user_config_from_path(&path) {
+            Ok(cfg) => return Ok(cfg),
+            Err(e) if e.ends_with(": file not found") => continue,
+            Err(e) => {
+                saw_existing = true;
+                last_err = Some(e);
+            }
+        }
+    }
+    if saw_existing {
+        Err(last_err.unwrap_or_else(|| "opencode config parse failed".to_owned()))
+    } else {
+        Ok(OpencodeUserConfig { path: PathBuf::from("<no user opencode config>"), deny_rules: Vec::new() })
+    }
+}
+
+#[derive(Debug)]
+struct OpencodeConfigBuild {
+    config: Map<String, Value>,
+    warning: Option<String>,
+    allows_injected: bool,
+    deny_rules_reemitted: usize,
+    source_path: Option<PathBuf>,
+}
+
+fn build_opencode_config_from(
+    permission_mode: &str,
+    providers_config: Map<String, Value>,
+    user: std::result::Result<OpencodeUserConfig, String>,
+) -> OpencodeConfigBuild {
+    let mut base = ask_everything();
+    base.extend(providers_config.clone());
+    if permission_mode != OPCODE_ALWAYS_APPROVE_MODE {
+        return OpencodeConfigBuild {
+            config: base,
+            warning: None,
+            allows_injected: false,
+            deny_rules_reemitted: 0,
+            source_path: None,
+        };
+    }
+
+    match user {
+        Ok(user) => {
+            let mut permissions = vec![
+                json!({ "action": "*", "resource": "*", "effect": "ask" }),
+                json!({ "action": "shell", "resource": "*", "effect": "allow" }),
+                json!({ "action": "external_directory", "resource": "*", "effect": "allow" }),
+            ];
+            let deny_rules_reemitted = user.deny_rules.len();
+            permissions.extend(user.deny_rules);
+            let mut config = Map::new();
+            config.insert("permissions".to_owned(), Value::Array(permissions));
+            config.extend(providers_config);
+            OpencodeConfigBuild {
+                config,
+                warning: None,
+                allows_injected: true,
+                deny_rules_reemitted,
+                source_path: Some(user.path),
+            }
+        }
+        Err(err) => {
+            let warning = format!(
+                "PATCHBAY OPENCODE PERMISSION SAFETY: NOT injecting shell/external_directory allows for always-approve session because David's opencode config could not be read/parsed ({}). Falling back to ask-everything so deny rules cannot be silently outranked. Fix the config or path and retry.",
+                err
+            );
+            OpencodeConfigBuild {
+                config: base,
+                warning: Some(warning),
+                allows_injected: false,
+                deny_rules_reemitted: 0,
+                source_path: None,
+            }
+        }
+    }
+}
+
+fn build_opencode_config(
+    permission_mode: &str,
+    providers_config: Map<String, Value>,
+) -> OpencodeConfigBuild {
+    build_opencode_config_from(permission_mode, providers_config, read_opencode_user_config())
+}
+
+fn opencode_launch_config(permission_mode: &str, providers_config: Map<String, Value>) -> String {
+    let built = build_opencode_config(permission_mode, providers_config);
+    if let Some(warning) = &built.warning {
+        tracing::error!("{}", warning);
+        eprintln!("{}", warning);
+    }
+    Value::Object(built.config).to_string()
 }
 
 /// Where an agent's executable was found.
@@ -680,15 +912,16 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
         Some(model_ref) => agent_providers::setup(db, kind, model_ref)?,
         None => agent_providers::Setup::default(),
     };
-    let mut config = ask_everything();
-    config.extend(providers.config);
-    let config = Value::Object(config).to_string();
+    let mut base_config = ask_everything();
+    base_config.extend(providers.config.clone());
+    let base_config = Value::Object(base_config).to_string();
     match kind {
         AgentKind::Opencode => {
             env.push(("OPENCODE_DISABLE_AUTOUPDATE".to_owned(), "1".to_owned()));
+            let config = opencode_launch_config(&session.permission_mode, providers.config);
             env.push(("OPENCODE_CONFIG_CONTENT".to_owned(), config));
         }
-        AgentKind::Kilo => env.push(("KILO_CONFIG_CONTENT".to_owned(), config)),
+        AgentKind::Kilo => env.push(("KILO_CONFIG_CONTENT".to_owned(), base_config)),
         AgentKind::Codex => {
             env.push(("INITIAL_AGENT_MODE".to_owned(), CODEX_ASKING_MODE.to_owned()));
             // The adapter reads an API key from the environment only when told to sign in with
@@ -867,6 +1100,9 @@ fn prepare_grok(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static OPCODE_CFG_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn ids_round_trip() {
@@ -901,6 +1137,192 @@ mod tests {
 
     /// OpenCode set to use Patchbay's providers: they join its config next to the approval rule.
     /// `PB_PRINT_LAUNCH=1` prints the env, for trying it against a real `opencode acp`.
+
+    fn opencode_test_user(path: &Path, deny_rules: Vec<Value>) -> OpencodeUserConfig {
+        OpencodeUserConfig { path: path.to_path_buf(), deny_rules }
+    }
+
+    /// pb-20261107-32(a): deny present wins, then David edits the deny and the edit wins on next spawn.
+    #[test]
+    fn opencode_always_approve_reemits_denies_and_rereads_on_every_spawn() {
+        let dir = std::env::temp_dir().join(format!("pb-opc-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("opencode.jsonc");
+        std::fs::write(&cfg_path, r#"{"permission":{"bash":{"rm *":"deny"}}}"#).unwrap();
+        let b1 = build_opencode_config_from(
+            OPCODE_ALWAYS_APPROVE_MODE,
+            Map::new(),
+            read_opencode_user_config_from_path(&cfg_path),
+        );
+        assert!(b1.allows_injected);
+        assert_eq!(b1.deny_rules_reemitted, 1);
+        let perms = b1.config.get("permissions").unwrap().as_array().unwrap();
+        assert_eq!(perms[1], json!({"action":"shell","resource":"*","effect":"allow"}));
+        let deny = perms.last().unwrap();
+        assert_eq!(deny["action"], "shell");
+        assert_eq!(deny["resource"], "rm *");
+        assert_eq!(deny["effect"], "deny");
+
+        std::fs::write(&cfg_path, r#"{"permission":{"bash":{"git push*":"deny","rm *":"deny"}}}"#).unwrap();
+        let b2 = build_opencode_config_from(
+            OPCODE_ALWAYS_APPROVE_MODE,
+            Map::new(),
+            read_opencode_user_config_from_path(&cfg_path),
+        );
+        let perms2 = b2.config.get("permissions").unwrap().as_array().unwrap();
+        assert!(perms2.iter().any(|r| r["resource"] == "git push*" && r["effect"] == "deny"));
+        assert!(perms2.iter().any(|r| r["resource"] == "rm *" && r["effect"] == "deny"));
+        assert_eq!(b2.deny_rules_reemitted, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// pb-20261107-32(b): unreadable/unparseable config => no allows injected + visible warning.
+    #[test]
+    fn opencode_always_approve_falls_back_loudly_when_config_unreadable() {
+        let err = read_opencode_user_config_from_path(Path::new("/definitely/not/a/real/opencode.jsonc"));
+        let built = build_opencode_config_from(OPCODE_ALWAYS_APPROVE_MODE, Map::new(), err);
+        assert!(!built.allows_injected, "allows must not be injected when config is unreadable");
+        assert!(built.warning.as_deref().unwrap_or("").contains("NOT injecting"));
+        assert!(built.warning.as_deref().unwrap_or("").contains("PATCHBAY OPENCODE PERMISSION SAFETY"));
+        assert_eq!(built.config.get("permission"), Some(&json!({"*":"ask"})));
+        assert!(built.config.get("permissions").is_none());
+
+        let dir = std::env::temp_dir().join(format!("pb-opc-bad-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = dir.join("opencode.jsonc");
+        std::fs::write(&bad, "{ definitely not json").unwrap();
+        let err2 = read_opencode_user_config_from_path(&bad);
+        let built2 = build_opencode_config_from(OPCODE_ALWAYS_APPROVE_MODE, Map::new(), err2);
+        assert!(!built2.allows_injected);
+        assert!(built2.warning.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// pb-20261107-32(c): one test per approval mode pinning allows-only-in-always-approve.
+    #[test]
+    fn opencode_allows_only_in_always_approve_mode() {
+        let user = Ok(opencode_test_user(
+            Path::new("/tmp/test-opencode.jsonc"),
+            vec![json!({"action":"shell","resource":"rm *","effect":"deny"})],
+        ));
+        for mode in ["default", "auto", "plan", "read-only", "ask", ""] {
+            let built = build_opencode_config_from(mode, Map::new(), user.clone());
+            assert!(!built.allows_injected, "mode {mode} must not inject allows");
+            assert!(built.warning.is_none(), "mode {mode} should keep current behavior");
+            assert_eq!(built.config.get("permission"), Some(&json!({"*":"ask"})), "mode {mode}");
+            assert!(built.config.get("permissions").is_none(), "mode {mode}");
+        }
+        let always = build_opencode_config_from(OPCODE_ALWAYS_APPROVE_MODE, Map::new(), user);
+        assert!(always.allows_injected);
+        let perms = always.config.get("permissions").unwrap().as_array().unwrap();
+        assert_eq!(perms[1]["action"], "shell");
+        assert_eq!(perms[1]["effect"], "allow");
+        assert_eq!(perms[2]["action"], "external_directory");
+        assert_eq!(perms[2]["effect"], "allow");
+    }
+
+    /// pb-20261107-32(d): last-entry-wins ordering pinned (deny re-emitted after allows).
+    #[test]
+    fn opencode_deny_rules_are_appended_after_allows() {
+        let user = Ok(opencode_test_user(
+            Path::new("/tmp/test-opencode.jsonc"),
+            vec![
+                json!({"action":"shell","resource":"*","effect":"deny"}),
+                json!({"action":"external_directory","resource":"/secret","effect":"deny"}),
+            ],
+        ));
+        let built = build_opencode_config_from(OPCODE_ALWAYS_APPROVE_MODE, Map::new(), user);
+        let perms = built.config.get("permissions").unwrap().as_array().unwrap();
+        let allow_shell = perms.iter().position(|r| r["action"]=="shell" && r["effect"]=="allow" && r["resource"]=="*").unwrap();
+        let deny_shell = perms.iter().position(|r| r["action"]=="shell" && r["effect"]=="deny" && r["resource"]=="*").unwrap();
+        let allow_ext = perms.iter().position(|r| r["action"]=="external_directory" && r["effect"]=="allow" && r["resource"]=="*").unwrap();
+        let deny_ext = perms.iter().position(|r| r["action"]=="external_directory" && r["effect"]=="deny").unwrap();
+        assert!(deny_shell > allow_shell, "deny must come after allow for shell");
+        assert!(deny_ext > allow_ext, "deny must come after allow for external_directory");
+        assert_eq!(deny_shell, perms.len() - 2);
+        assert_eq!(deny_ext, perms.len() - 1);
+    }
+
+    /// pb-20261107-32(e): malformed content JSON fails loud (never silently emit bad JSON).
+    #[test]
+    fn opencode_launch_config_is_always_valid_json_and_never_silent_bad_config() {
+        for mode in ["default", "auto", "always-approve"] {
+            let user = if mode == OPCODE_ALWAYS_APPROVE_MODE {
+                Err("bad config".to_owned())
+            } else {
+                Ok(opencode_test_user(Path::new("/tmp/t.jsonc"), vec![]))
+            };
+            let built = build_opencode_config_from(mode, Map::new(), user);
+            let s = serde_json::to_string(&Value::Object(built.config.clone())).expect("config must serialize");
+            let parsed: Value = serde_json::from_str(&s).expect("config must be valid JSON - malformed content would be silently skipped by opencode");
+            assert!(parsed.is_object());
+            if mode == OPCODE_ALWAYS_APPROVE_MODE {
+                assert!(!built.allows_injected);
+                assert!(parsed.get("permissions").is_none());
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("pb-opc-jsonc-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = dir.join("opencode.jsonc");
+        std::fs::write(&bad, "{ broken").unwrap();
+        let out = build_opencode_config_from(
+            OPCODE_ALWAYS_APPROVE_MODE,
+            Map::new(),
+            read_opencode_user_config_from_path(&bad),
+        );
+        assert!(!out.allows_injected);
+        assert!(out.warning.is_some());
+        let parsed: Value = Value::Object(out.config);
+        let s = serde_json::to_string(&parsed).unwrap();
+        serde_json::from_str::<Value>(&s).expect("launch config must be valid JSON");
+        assert_eq!(parsed["permission"], json!({"*":"ask"}));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// pb-20261107-32(f): background service config unchanged (launch env is per-child only).
+    #[test]
+    fn opencode_launch_env_is_child_only_and_does_not_write_user_config() {
+        let _lock = OPCODE_CFG_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("pb-opc-f-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = std::sync::Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
+        let cfg_path = dir.join("opencode.jsonc");
+        let original = "{\n  \"permission\": {\"bash\": \"deny\"}\n}\n";
+        std::fs::write(&cfg_path, original).unwrap();
+        unsafe { std::env::set_var("PATCHBAY_OPENCODE_CONFIG_PATH", &cfg_path) };
+        let mut o = AgentPaths::new();
+        o.insert("opencode".into(), std::env::current_exe().unwrap().to_string_lossy().into_owned());
+        let prefs = crate::prefs::Preferences { agent_paths: o, ..Default::default() };
+        crate::prefs::save(&db, &prefs).unwrap();
+        for mode in ["default", "auto", "always-approve"] {
+            let session = db.create_code_session(&dir.to_string_lossy(), None, "opencode", mode).unwrap();
+            let launch = prepare(&db, &dir, &session).unwrap();
+            assert!(launch.env.iter().any(|(k, _)| k == "OPENCODE_CONFIG_CONTENT"), "missing config env in mode {mode}");
+            assert_eq!(std::fs::read_to_string(&cfg_path).unwrap(), original, "user config mutated in mode {mode}");
+            // Background service receives neither Launch.env nor any global export from prepare().
+        }
+        unsafe { std::env::remove_var("PATCHBAY_OPENCODE_CONFIG_PATH") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// JSONC parsing and deny extraction preserve David's deny rules across formats.
+    #[test]
+    fn opencode_deny_extraction_handles_jsonc_and_formats() {
+        let v = parse_jsonc_value(r#"{
+            // comment
+            "permission": { "bash": { "rm *": "deny", "*": "ask" }, "edit": "deny" }
+        }"#).unwrap();
+        let denies = extract_deny_permission_rules(&v);
+        assert!(denies.iter().any(|r| r["action"]=="shell" && r["resource"]=="rm *" && r["effect"]=="deny"));
+        assert!(denies.iter().any(|r| r["action"]=="edit" && r["resource"]=="*" && r["effect"]=="deny"));
+        assert!(!denies.iter().any(|r| r["effect"]!="deny"));
+
+        let v2 = parse_jsonc_value(r#"{"permissions":[{"action":"shell","resource":"x","effect":"allow"},{"action":"shell","resource":"x","effect":"deny"}]}"#).unwrap();
+        let denies2 = extract_deny_permission_rules(&v2);
+        assert_eq!(denies2.len(), 1);
+        assert_eq!(denies2[0]["resource"], "x");
+    }
+
     #[test]
     fn opencode_launch_carries_patchbay_providers_when_chosen() {
         let dir = std::env::temp_dir().join(format!("pb-ag-{}", crate::db::new_id()));
