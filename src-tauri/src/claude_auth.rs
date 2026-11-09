@@ -45,7 +45,32 @@ fn token_endpoint() -> String {
         .unwrap_or_else(|_| "https://api.anthropic.com/v1/oauth/token".into())
 }
 
+#[cfg(test)]
+pub(crate) static ENV_LOCK: Mutex<()> = Mutex::const_new(());
+#[cfg(test)]
+static TEST_HOME: RwLock<Option<PathBuf>> = RwLock::new(None);
+#[cfg(test)]
+static TEST_CONFIG_DIR: RwLock<Option<String>> = RwLock::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_test_env(home: Option<PathBuf>, config_dir: Option<String>) {
+    *TEST_HOME.write().unwrap() = home;
+    *TEST_CONFIG_DIR.write().unwrap() = config_dir;
+}
+
+fn raw_config_dir_env() -> Option<String> {
+    #[cfg(test)]
+    if let Some(dir) = TEST_CONFIG_DIR.read().unwrap().clone() {
+        return Some(dir);
+    }
+    std::env::var("CLAUDE_CONFIG_DIR").ok()
+}
+
 pub(crate) fn home() -> Result<PathBuf> {
+    #[cfg(test)]
+    if let Some(h) = TEST_HOME.read().unwrap().clone() {
+        return Ok(h);
+    }
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(PathBuf::from)
         .ok_or_else(|| anyhow!("cannot find home directory"))
@@ -53,25 +78,99 @@ pub(crate) fn home() -> Result<PathBuf> {
 
 /// Directory Claude Code stores config in (`$CLAUDE_CONFIG_DIR` or `~/.claude`).
 pub fn config_dir() -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
-        let p = PathBuf::from(dir);
-        if !p.as_os_str().is_empty() {
-            return Ok(p);
+    if let Some(dir) = raw_config_dir_env() {
+        let d = dir.trim();
+        if !d.is_empty() {
+            let p: PathBuf = if d == "~" {
+                home()?
+            } else if let Some(rest) = d.strip_prefix("~/") {
+                home()?.join(rest)
+            } else {
+                PathBuf::from(d)
+            }
+            .components()
+            .collect();
+            if !p.as_os_str().is_empty() {
+                return Ok(p);
+            }
         }
     }
-    Ok(home()?.join(".claude"))
+    Ok(home()?.join(".claude").components().collect())
 }
 
 /// A provider's Claude config directory (`~/` expanded), or the default when it names none.
 pub fn resolve_dir(dir: Option<&str>) -> Result<PathBuf> {
-    match dir.map(str::trim).filter(|d| !d.is_empty()) {
-        None => config_dir(),
-        Some("~") => home(),
+    let raw = match dir.map(str::trim).filter(|d| !d.is_empty()) {
+        None => return config_dir(),
+        Some("~") => home()?,
         Some(d) => match d.strip_prefix("~/") {
-            Some(rest) => Ok(home()?.join(rest)),
-            None => Ok(PathBuf::from(d)),
+            Some(rest) => home()?.join(rest),
+            None => PathBuf::from(d),
         },
+    };
+    Ok(raw.components().collect())
+}
+
+/// Normalize `path` for directory-identity comparisons: strip trailing slashes and `.`
+/// components, and resolve symlinks on the path (or its longest existing ancestor when the
+/// leaf directory has not been created yet).
+pub fn canonical_dir(path: &Path) -> PathBuf {
+    fn resolve(p: &Path, depth: u8) -> PathBuf {
+        let cleaned: PathBuf = p.components().collect();
+        if cleaned.as_os_str().is_empty() {
+            return PathBuf::new();
+        }
+        if let Ok(c) = std::fs::canonicalize(&cleaned) {
+            return c;
+        }
+        if depth < 8
+            && let Ok(target) = std::fs::read_link(&cleaned)
+        {
+            let next = if target.is_absolute() {
+                target
+            } else {
+                cleaned.parent().unwrap_or_else(|| Path::new("")).join(target)
+            };
+            return resolve(&next, depth + 1);
+        }
+        let mut cur = cleaned.as_path();
+        let mut tail = Vec::new();
+        while let Some(parent) = cur.parent() {
+            if let Some(name) = cur.file_name() {
+                tail.push(name.to_os_string());
+            }
+            if parent.as_os_str().is_empty() {
+                break;
+            }
+            if let Ok(mut base) = std::fs::canonicalize(parent) {
+                for part in tail.into_iter().rev() {
+                    base.push(part);
+                }
+                return base;
+            }
+            if depth < 8
+                && let Ok(target) = std::fs::read_link(parent)
+            {
+                let mut next = if target.is_absolute() {
+                    target
+                } else {
+                    parent.parent().unwrap_or_else(|| Path::new("")).join(target)
+                };
+                for part in tail.into_iter().rev() {
+                    next.push(part);
+                }
+                return resolve(&next, depth + 1);
+            }
+            cur = parent;
+        }
+        cleaned
     }
+    resolve(path, 0)
+}
+
+/// True when `a` and `b` refer to the same directory after resolving symlinks and trailing slashes.
+pub fn same_dir(a: &Path, b: &Path) -> bool {
+    canonical_dir(a) == canonical_dir(b)
 }
 
 /// True when `key` is a config-directory path fallback, not Claude Code's portable
@@ -127,8 +226,8 @@ pub fn account(dir: &Path) -> (String, Option<String>) {
     let fallback = || (dir.to_string_lossy().into_owned(), None);
     // `~/.claude` keeps it beside the directory; any other directory, inside it.
     let file = match home() {
-        Ok(h) if dir == h.join(".claude") => h.join(".claude.json"),
-        _ => dir.join(".claude.json"),
+        Ok(h) if same_dir(dir, &h.join(".claude")) => canonical_dir(&h).join(".claude.json"),
+        _ => canonical_dir(dir).join(".claude.json"),
     };
     let tier = login_plan_tier(dir);
     let resolve = |seen: &mut Seen| -> (String, Option<String>) {
@@ -290,7 +389,7 @@ impl Store {
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn keychain_service(dir: &Path, home: &Path) -> String {
     use sha2::{Digest, Sha256};
-    if dir == home.join(".claude") {
+    if same_dir(dir, &home.join(".claude")) {
         return "Claude Code-credentials".into();
     }
     let hash = hex::encode(Sha256::digest(dir.to_string_lossy().as_bytes()));
@@ -708,6 +807,7 @@ mod tests {
 
     #[test]
     fn resolve_dir_expands_home() {
+        let _env = ENV_LOCK.blocking_lock();
         let home = home().unwrap();
         assert_eq!(resolve_dir(Some(" ~/.claudetvg ")).unwrap(), home.join(".claudetvg"));
         assert_eq!(resolve_dir(Some("/x/y")).unwrap(), PathBuf::from("/x/y"));

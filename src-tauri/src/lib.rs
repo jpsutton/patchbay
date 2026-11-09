@@ -949,9 +949,14 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
         let (account, name) = plan_account(state, &prefs::load(&state.db), &env.code_session_id).unwrap_or_else(default_plan_account);
         // Upgrade a local path fallback to the portable account id when `.claude.json` has it.
         let (account, name) = resolve_plan_account(&state.db, &account, name);
-        if !claude_auth::is_path_account_key(&account) || account == default_plan_account().0 {
+        if !claude_auth::is_path_account_key(&account) {
+            if account == default_plan_account().0 {
+                note_default_plan_portable(state.mesh.node_id(), true);
+            }
             let tagged = serde_json::json!({ "account": account, "name": name, "limits": limits });
             state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, tagged);
+        } else if is_default_claude_dir_path(&account) {
+            note_default_plan_portable(state.mesh.node_id(), false);
         }
         adopt_plan_limits(state, &account, name, limits, true);
         return;
@@ -1082,6 +1087,30 @@ const PLAN_HISTORY_KEY: &str = "claude.planHistory";
 const PLAN_LIMITS_EVENT: &str = "code://plan-limits";
 /// A report one member saw, shared with the others, tagged with its account (`claude_auth::account`).
 const MESH_PLAN_LIMITS_EVENT: &str = "mesh://plan-limits";
+pub(crate) const UNIDENTIFIED_DEFAULT_PLAN_LOG: &str =
+    "plan usage not shared: default account has no portable identity";
+
+#[cfg(test)]
+pub(crate) static UNIDENTIFIED_DEFAULT_PLAN_LOGS: std::sync::Mutex<Vec<(String, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Log once per state transition per node when the sender's default Claude account lacks a
+/// portable identity, and clear that state once a portable default identity is observed.
+fn note_default_plan_portable(node_id: &str, portable: bool) {
+    static UNIDENTIFIED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let mut set = UNIDENTIFIED.lock().unwrap();
+    if portable {
+        set.remove(node_id);
+    } else if set.insert(node_id.to_owned()) {
+        tracing::info!("{UNIDENTIFIED_DEFAULT_PLAN_LOG}");
+        #[cfg(test)]
+        UNIDENTIFIED_DEFAULT_PLAN_LOGS
+            .lock()
+            .unwrap()
+            .push((node_id.to_owned(), UNIDENTIFIED_DEFAULT_PLAN_LOG.to_owned()));
+    }
+}
 
 /// Take a plan report seen here, or one from another member that is newer than ours for its account.
 fn adopt_plan_limits(state: &AppState, account: &str, name: Option<String>, limits: code::plan_limits::PlanLimits, seen_here: bool) {
@@ -1091,8 +1120,9 @@ fn adopt_plan_limits(state: &AppState, account: &str, name: Option<String>, limi
         return;
     }
     state.code.plan.record(&account, name, limits);
-    let _ = state.db.set_setting(PLAN_ACCOUNTS_KEY, &serde_json::to_string(&state.code.plan.accounts()).unwrap_or_default());
-    (state.emit)(PLAN_LIMITS_EVENT, serde_json::to_value(plan_views(state)).unwrap_or_default());
+    let accounts = state.code.plan.accounts();
+    let _ = state.db.set_setting(PLAN_ACCOUNTS_KEY, &serde_json::to_string(&accounts).unwrap_or_default());
+    (state.emit)(PLAN_LIMITS_EVENT, serde_json::to_value(plan_views_from(state, accounts)).unwrap_or_default());
     enforce_plan_limit(state);
 }
 
@@ -1144,26 +1174,48 @@ fn load_plan_accounts(db: &Db) -> std::collections::BTreeMap<String, code::plan_
 }
 
 /// Config-directory paths this computer uses for a Claude login (default + providers + sessions).
-fn local_claude_dir_paths(db: &Db) -> std::collections::HashSet<String> {
+fn local_claude_dir_paths(db: &Db) -> std::collections::HashSet<PathBuf> {
     let mut dirs = std::collections::HashSet::new();
     if let Ok(d) = claude_auth::resolve_dir(None) {
-        dirs.insert(d.to_string_lossy().into_owned());
+        dirs.insert(claude_auth::canonical_dir(&d));
+    }
+    if let Ok(h) = claude_auth::home() {
+        dirs.insert(claude_auth::canonical_dir(&h.join(".claude")));
     }
     for (p, _) in db.list_providers().unwrap_or_default() {
         if p.auth_mode == db::AuthMode::ClaudeLogin
             && let Ok(d) = claude_auth::resolve_dir(p.claude_config_dir.as_deref())
         {
-            dirs.insert(d.to_string_lossy().into_owned());
+            dirs.insert(claude_auth::canonical_dir(&d));
         }
     }
     for s in db.list_code_sessions().unwrap_or_default() {
         if let Some(dir) = db.get_setting(&code::import_claude::config_dir_key(&s.id)).ok().flatten()
             && let Ok(d) = claude_auth::resolve_dir(Some(&dir))
         {
-            dirs.insert(d.to_string_lossy().into_owned());
+            dirs.insert(claude_auth::canonical_dir(&d));
         }
     }
     dirs
+}
+
+/// True when `account` resolves to this machine's default Claude config directory (after
+/// resolving symlinks, trailing slashes, and `$CLAUDE_CONFIG_DIR`).
+pub(crate) fn is_default_claude_dir_path(account: &str) -> bool {
+    let Ok(dir) = claude_auth::resolve_dir(Some(account)) else {
+        return false;
+    };
+    if let Ok(def) = claude_auth::resolve_dir(None)
+        && claude_auth::same_dir(&dir, &def)
+    {
+        return true;
+    }
+    if let Ok(h) = claude_auth::home()
+        && claude_auth::same_dir(&dir, &h.join(".claude"))
+    {
+        return true;
+    }
+    false
 }
 
 /// Map a reported account key onto the id this computer should store it under.
@@ -1176,24 +1228,29 @@ fn resolve_plan_account(db: &Db, account: &str, name: Option<String>) -> (String
         return (account.to_owned(), name);
     }
     // Path → portable id when this directory's `.claude.json` now has oauthAccount.
-    if let Ok(dir) = claude_auth::resolve_dir(Some(account)) {
-        let (key, n) = claude_auth::account(&dir);
+    let resolved = claude_auth::resolve_dir(Some(account)).ok();
+    if let Some(ref dir) = resolved {
+        let (key, n) = claude_auth::account(dir);
         if !claude_auth::is_path_account_key(&key) {
             return (key, name.or(n));
         }
     }
     let local = local_claude_dir_paths(db);
-    if local.contains(account) {
-        // Default dir still on a path key: prefer the portable default when known.
-        if let Ok(def) = claude_auth::resolve_dir(None)
-            && account == def.to_string_lossy()
-        {
+    if resolved
+        .as_ref()
+        .is_some_and(|d| local.contains(&claude_auth::canonical_dir(d)))
+    {
+        // Default dir (including via symlink or trailing slash): normalize onto the default key.
+        if is_default_claude_dir_path(account) {
             let (d, n) = default_plan_account();
-            if !claude_auth::is_path_account_key(&d) {
-                return (d, name.or(n));
-            }
+            return (d, name.or(n));
         }
-        return (account.to_owned(), name);
+        return (
+            resolved
+                .map(|d| d.to_string_lossy().into_owned())
+                .unwrap_or_else(|| account.to_owned()),
+            name,
+        );
     }
     // Foreign path (another member's config dir): same as an untagged report.
     let (d, n) = default_plan_account();
@@ -1234,12 +1291,16 @@ struct PlanView {
 }
 
 fn plan_views(state: &AppState) -> Vec<PlanView> {
+    plan_views_from(state, fold_live_plan_accounts(state))
+}
+
+fn plan_views_from(
+    state: &AppState,
+    accounts: std::collections::BTreeMap<String, code::plan_limits::Account>,
+) -> Vec<PlanView> {
     let (default, _) = default_plan_account();
     let providers = state.db.list_providers().unwrap_or_default();
-    state
-        .code
-        .plan
-        .accounts()
+    accounts
         .into_iter()
         .map(|(account, usage)| {
             let names: Vec<_> = providers
@@ -1260,7 +1321,6 @@ fn plan_views(state: &AppState) -> Vec<PlanView> {
 }
 
 async fn plan_accounts(state: &AppState) -> CmdResult<Vec<PlanView>> {
-    let _ = fold_live_plan_accounts(state);
     Ok(plan_views(state))
 }
 
@@ -1357,7 +1417,8 @@ pub(crate) fn session_plan_usage_local(state: &AppState, id: &str) -> Option<Ses
         });
     }
     let prefs = prefs::load(&state.db);
-    let (account, _) = plan_account(state, &prefs, id)?;
+    let (account, name) = plan_account(state, &prefs, id)?;
+    let (account, _) = resolve_plan_account(&state.db, &account, name);
     let view = plan_views(state).into_iter().find(|v| v.account == account);
     let (label, latest) = match view {
         Some(v) => (v.label, v.usage.latest),
@@ -3368,7 +3429,6 @@ impl mesh::RpcHandler for MeshRpc {
     }
 
     fn greeting(&self) -> Vec<(String, serde_json::Value)> {
-        let default_account = default_plan_account().0;
         let mut out: Vec<(String, serde_json::Value)> = self
             .state
             .code
@@ -3376,8 +3436,14 @@ impl mesh::RpcHandler for MeshRpc {
             .accounts()
             .into_iter()
             .filter_map(|(account, a)| {
-                if claude_auth::is_path_account_key(&account) && account != default_account {
+                if claude_auth::is_path_account_key(&account) {
+                    if is_default_claude_dir_path(&account) {
+                        note_default_plan_portable(self.state.mesh.node_id(), false);
+                    }
                     return None;
+                }
+                if account == default_plan_account().0 {
+                    note_default_plan_portable(self.state.mesh.node_id(), true);
                 }
                 let payload = serde_json::json!({ "account": account, "name": a.name, "limits": a.latest? });
                 Some((MESH_PLAN_LIMITS_EVENT.to_owned(), payload))

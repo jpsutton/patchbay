@@ -784,12 +784,94 @@ async fn a_quiet_turn_is_reported_stalled_once_and_cleared_by_activity() {
     assert_eq!(stalls(), 1, "off");
 }
 
+static TRACING_LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+struct TestLogWriter;
+
+impl std::io::Write for TestLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let s = String::from_utf8_lossy(buf).into_owned();
+        eprint!("{s}");
+        TRACING_LINES.lock().unwrap().push(s);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn ensure_test_tracing() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(|| TestLogWriter)
+            .try_init();
+    });
+}
+
+fn unidentified_default_logs_for(node_id: &str) -> Vec<String> {
+    crate::UNIDENTIFIED_DEFAULT_PLAN_LOGS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(n, _)| n == node_id)
+        .map(|(_, msg)| msg.clone())
+        .collect()
+}
+
+struct TempClaudeEnv {
+    _guard: tokio::sync::MutexGuard<'static, ()>,
+    dir: PathBuf,
+}
+
+impl TempClaudeEnv {
+    async fn new(portable_default: Option<(&str, &str, &str)>, config_dir: Option<String>) -> Self {
+        ensure_test_tracing();
+        let guard = claude_auth::ENV_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!("pb-claude-home-{}", db::new_id()));
+        std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        if let Some((u, o, name)) = portable_default {
+            let profile = serde_json::json!({ "oauthAccount": {
+                "accountUuid": u, "organizationUuid": o, "organizationName": name
+            }});
+            std::fs::write(dir.join(".claude.json"), profile.to_string()).unwrap();
+        }
+        claude_auth::set_test_env(Some(dir.clone()), config_dir);
+        Self { _guard: guard, dir }
+    }
+
+    fn new_blocking(portable_default: Option<(&str, &str, &str)>, config_dir: Option<String>) -> Self {
+        ensure_test_tracing();
+        let guard = claude_auth::ENV_LOCK.blocking_lock();
+        let dir = std::env::temp_dir().join(format!("pb-claude-home-{}", db::new_id()));
+        std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        if let Some((u, o, name)) = portable_default {
+            let profile = serde_json::json!({ "oauthAccount": {
+                "accountUuid": u, "organizationUuid": o, "organizationName": name
+            }});
+            std::fs::write(dir.join(".claude.json"), profile.to_string()).unwrap();
+        }
+        claude_auth::set_test_env(Some(dir.clone()), config_dir);
+        Self { _guard: guard, dir }
+    }
+}
+
+impl Drop for TempClaudeEnv {
+    fn drop(&mut self) {
+        claude_auth::set_test_env(None, None);
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
 /// The usage guard: a Claude Code turn past the plan limit is cancelled once, with a notice, and
 /// new prompts are refused until the window resets. Sessions on other agents run on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn usage_limit_stops_claude_turns() {
     use code::acp::{AgentCmd, CodeEvent, Delivery};
     use code::plan_limits::PlanLimits;
+    let _env = TempClaudeEnv::new(Some(("u-limit", "o-limit", "LimitOrg")), None).await;
     let a = node("alpha-limit");
     let cwd = a.dir.to_string_lossy().into_owned();
     let claude = a.state.db.create_code_session(&cwd, None, "claude-code", "default").unwrap();
@@ -1008,6 +1090,7 @@ async fn a_session_is_gated_only_by_its_own_accounts_report() {
 async fn plan_limits_reach_every_member() {
     use code::acp::CodeEvent;
     use code::plan_limits::{PlanLimits, Window, now};
+    let _env = TempClaudeEnv::new(Some(("u-mesh-def", "o-mesh-def", "MeshDefault")), None).await;
     let (a, b) = (node("alpha-plan"), node("bravo-plan"));
     link(&a, &b).await;
     let bn = b.state.mesh.node_id().to_owned();
@@ -1016,8 +1099,9 @@ async fn plan_limits_reach_every_member() {
         observed_at: now() - ago,
         ..Default::default()
     };
-    // Sessions the nodes don't know count as the default login's, the same account on both here.
+    // Sessions the nodes don't know count as the default login's, pinned to the temp HOME fixture here.
     let (me, _) = crate::default_plan_account();
+    assert_eq!(me, "u-mesh-def:o-mesh-def");
     let five_of = |n: &Node, acct: &str| n.state.code.plan.account(acct).latest.and_then(|l| l.five_hour).map(|w| w.utilization);
     let five = |n: &Node| five_of(n, &me);
 
@@ -1056,12 +1140,20 @@ async fn plan_limits_reach_every_member() {
         !b.state.code.plan.accounts().contains_key("/home/molly/.claude"),
         "foreign path fallbacks must not appear as their own account"
     );
+    let foreign_work = json!({ "account": "/Users/other/work", "limits": report(0.55, 2) });
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &foreign_work);
+    assert_eq!(five(&b), Some(0.55));
+    assert!(
+        !b.state.code.plan.accounts().contains_key("/Users/other/work"),
+        "foreign non-default path must collapse onto default, not stay as a ghost account"
+    );
 }
 
 /// Saved path keys from another computer collapse into the default login on load.
 #[test]
 fn load_folds_foreign_path_accounts_into_the_default() {
     use code::plan_limits::{Account, PlanLimits, Window};
+    let _env = TempClaudeEnv::new_blocking(Some(("u-fold-def", "o-fold-def", "FoldDefault")), None);
     let n = node("fold-path-load");
     let (me, name) = crate::default_plan_account();
     let mut raw = std::collections::BTreeMap::new();
@@ -1091,34 +1183,63 @@ fn load_folds_foreign_path_accounts_into_the_default() {
             history: vec![],
         },
     );
+    raw.insert(
+        "/Users/other/work".into(),
+        Account {
+            name: None,
+            latest: Some(PlanLimits {
+                five_hour: Some(Window { utilization: 0.34, resets_at: code::plan_limits::now() + 3600 }),
+                seven_day: Some(Window { utilization: 0.64, resets_at: code::plan_limits::now() + 86400 }),
+                observed_at: code::plan_limits::now() - 86400,
+                ..Default::default()
+            }),
+            history: vec![],
+        },
+    );
     n.state.db.set_setting("claude.planByAccount", &serde_json::to_string(&raw).unwrap()).unwrap();
     let loaded = crate::load_plan_accounts(&n.state.db);
     assert_eq!(loaded.len(), 1, "{loaded:?}");
     assert!(loaded.contains_key(&me));
     assert!(!loaded.contains_key("/home/molly/.claude"));
+    assert!(!loaded.contains_key("/Users/other/work"));
     assert_eq!(loaded[&me].latest.as_ref().unwrap().seven_day.unwrap().utilization, 0.9);
 }
 
 /// A `claude-code` session bound to its own `claude.config_dir.<id>` (even one ending in
 /// `/.claude`, like `<dir>/work/.claude`) reports and is gated under that directory's account
 /// (not `default_plan_account`), and when that directory upgrades from a path fallback to a
-/// portable `u:o` key at runtime, `adopt_plan_limits` folds the path-keyed history into the
-/// portable key on the next report without calling `plan_accounts` or restarting.
+/// portable `u:o` key at runtime, both `adopt_plan_limits` and `plan_views` / `plan_accounts`
+/// fold the path-keyed history into the portable key without a restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_path_upgrade_and_session_config_dir_keep_accounts_apart() {
     use code::acp::CodeEvent;
     use code::plan_limits::{PlanLimits, Window, now};
+    let _env = TempClaudeEnv::new(Some(("u-def-live", "o-def-live", "DefaultLive")), None).await;
     let n = node("live-fold-and-session-dir");
     let cwd = n.dir.to_string_lossy().into_owned();
     let custom_dir = n.dir.join("work").join(".claude");
     std::fs::create_dir_all(&custom_dir).unwrap();
     let custom_path = custom_dir.to_string_lossy().into_owned();
 
+    // Mutant (i): a foreign non-default path must collapse onto default in `resolve_plan_account`.
+    assert_eq!(
+        crate::resolve_plan_account(&n.state.db, "/Users/other/work", None),
+        ("u-def-live:o-def-live".to_owned(), Some("DefaultLive".to_owned())),
+        "foreign path /Users/other/work must collapse onto default in resolve_plan_account"
+    );
+
     let s = n.state.db.create_code_session(&cwd, None, "claude-code", "default").unwrap();
     n.state
         .db
         .set_setting(&code::import_claude::config_dir_key(&s.id), &custom_path)
         .unwrap();
+
+    // Mutant (k): `work/.claude` is a local custom dir and must resolve to `custom_path`, not default.
+    assert_eq!(
+        crate::resolve_plan_account(&n.state.db, &custom_path, None),
+        (custom_path.clone(), None),
+        "custom dir ending in /.claude must resolve to the custom dir, not default"
+    );
 
     // First report arrives before `.claude.json` exists in `custom_dir`: stored under `custom_path`,
     // never under `default_plan_account()` (even though `custom_path` ends with `/.claude`).
@@ -1165,36 +1286,93 @@ async fn live_path_upgrade_and_session_config_dir_keep_accounts_apart() {
         team.history
     );
 
+    // Mutant (h) + Item 6: a second custom dir records a path-keyed report, upgrades via
+    // `.claude.json`, and is read through `session_plan_usage_local` and `plan_accounts` WITHOUT
+    // any subsequent `adopt_plan_limits` call — `plan_views` must fold it into `accounts()`.
+    let custom_dir2 = n.dir.join("work-two").join(".claude");
+    std::fs::create_dir_all(&custom_dir2).unwrap();
+    let custom_path2 = custom_dir2.to_string_lossy().into_owned();
+    let s2 = n.state.db.create_code_session(&cwd, None, "claude-code", "default").unwrap();
+    n.state
+        .db
+        .set_setting(&code::import_claude::config_dir_key(&s2.id), &custom_path2)
+        .unwrap();
+    emit(
+        &n,
+        &s2.id,
+        CodeEvent::PlanLimits {
+            limits: PlanLimits {
+                five_hour: Some(Window { utilization: 0.45, resets_at: now() + 3600 }),
+                seven_day: Some(Window { utilization: 0.70, resets_at: now() + 86400 }),
+                observed_at: now() - 20,
+                ..Default::default()
+            },
+        },
+    );
+    assert!(n.state.code.plan.accounts().contains_key(&custom_path2));
+    std::fs::write(
+        custom_dir2.join(".claude.json"),
+        serde_json::json!({ "oauthAccount": {
+            "accountUuid": "u-two", "organizationUuid": "o-two", "organizationName": "SecondOrg"
+        }})
+        .to_string(),
+    )
+    .unwrap();
+
+    let usage_view = serde_json::to_value(crate::session_plan_usage_local(&n.state, &s2.id)).unwrap();
+    assert_eq!(usage_view["account"], "u-two:o-two", "{usage_view:?}");
+    assert_eq!(usage_view["latest"]["fiveHour"]["utilization"], 0.45, "{usage_view:?}");
+
     let chans: crate::api::ChanFactory = Arc::new(|_| None);
     let views = crate::api::call(&n.state, "plan_accounts", json!({}), &chans).await.unwrap();
     let arr = views.as_array().unwrap();
     assert!(arr.iter().any(|v| v["account"] == "u-team:o-team" && v["label"] == "Vizius"), "{arr:?}");
-    assert!(!arr.iter().any(|v| v["account"] == custom_path), "path key must not appear in plan_accounts: {arr:?}");
+    assert!(arr.iter().any(|v| v["account"] == "u-two:o-two" && v["label"] == "SecondOrg"), "{arr:?}");
+    assert!(!arr.iter().any(|v| v["account"] == custom_path || v["account"] == custom_path2), "{arr:?}");
+    assert!(
+        !n.state.code.plan.accounts().contains_key(&custom_path2),
+        "plan_views / plan_accounts must fold upgraded path keys in plan.accounts() without a prior adopt_plan_limits call"
+    );
+    assert_eq!(
+        n.state.code.plan.account("u-two:o-two").latest.unwrap().five_hour.unwrap().utilization,
+        0.45
+    );
 }
 
-/// Path-keyed plan reports are machine-local: a sender never broadcasts a path key in
-/// `on_code_event` or `greeting()`, and a connected peer's `accounts()` and `plan_accounts`
-/// never contain the sender's path key.
+/// Final rule (`pb-20261109-05`):
+/// - Temp `HOME` WITHOUT portable default identity => default-dir report is NOT delivered,
+///   secondary path-key report is NOT delivered, `greeting()` carries neither, the sender logs
+///   `"plan usage not shared: default account has no portable identity"` once per state change,
+///   and a portable control message on the same mesh link IS delivered in the same run.
+/// - Temp `HOME` WITH portable default identity => default-dir report IS delivered tagged to peers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn path_keyed_plan_reports_never_broadcast_or_greet_peers() {
     use code::acp::CodeEvent;
     use code::plan_limits::{PlanLimits, Window, now};
+    let env = TempClaudeEnv::new(None, None).await;
     let (a, b) = (node("alpha-no-path-bcast"), node("bravo-no-path-bcast"));
     link(&a, &b).await;
+    let a_id = a.state.mesh.node_id().to_owned();
 
     let cwd = a.dir.to_string_lossy().into_owned();
+    let default_path = claude_auth::resolve_dir(None).unwrap().to_string_lossy().into_owned();
+    assert!(claude_auth::is_path_account_key(&default_path));
+
+    // 1. Default session on `a` (uses temp HOME's `~/.claude`, which has no `.claude.json`).
+    let s_def = a.state.db.create_code_session(&cwd, None, "claude-code", "default").unwrap();
+
+    // 2. Secondary session on `a` with its own `claude.config_dir.<id>` (`<a.dir>/work/.claude`, no `.claude.json`).
     let custom_dir = a.dir.join("work").join(".claude");
     std::fs::create_dir_all(&custom_dir).unwrap();
     let custom_path = custom_dir.to_string_lossy().into_owned();
-
     let s_path = a.state.db.create_code_session(&cwd, None, "claude-code", "default").unwrap();
     a.state
         .db
         .set_setting(&code::import_claude::config_dir_key(&s_path.id), &custom_path)
         .unwrap();
 
-    // Also create a portable-keyed session on `a` so we can prove the mesh link carries portable
-    // reports while dropping `custom_path`.
+    // 3. Control session on `a` with a portable `.claude.json` (`u-port:o-port`) to prove the mesh
+    //    channel delivers messages in the same run while path-keyed default/secondary reports are withheld.
     let portable_dir = a.dir.join("portable-claude");
     std::fs::create_dir_all(&portable_dir).unwrap();
     std::fs::write(
@@ -1220,47 +1398,293 @@ async fn path_keyed_plan_reports_never_broadcast_or_greet_peers() {
         ..Default::default()
     };
 
+    // Emit TWO unidentified default-dir reports and one unidentified secondary-dir report.
+    emit(&a, &s_def.id, CodeEvent::PlanLimits { limits: report(0.41, 50) });
+    emit(&a, &s_def.id, CodeEvent::PlanLimits { limits: report(0.42, 45) });
     emit(&a, &s_path.id, CodeEvent::PlanLimits { limits: report(0.33, 40) });
     assert!(
+        a.state.code.plan.accounts().contains_key(&default_path),
+        "sender still adopts its own unidentified default report locally"
+    );
+    assert!(
         a.state.code.plan.accounts().contains_key(&custom_path),
-        "sender still adopts its own path-keyed report locally"
+        "sender still adopts its own secondary path-keyed report locally"
     );
 
-    // `greeting()` on `a` must not carry any path-keyed plan report.
+    // `greeting()` on `a` must not carry any path-keyed plan report (default or secondary).
     let greeting = mesh::RpcHandler::greeting(&MeshRpc { state: a.state.clone() });
     assert!(
-        !greeting.iter().any(|(ev, p)| {
-            ev == MESH_PLAN_LIMITS_EVENT
-                && p["account"].as_str().is_some_and(claude_auth::is_path_account_key)
-        }),
-        "greeting() must never include a path account key: {greeting:?}"
+        !greeting.iter().any(|(ev, _)| ev == MESH_PLAN_LIMITS_EVENT),
+        "greeting() must send nothing when only path-keyed accounts exist: {greeting:?}"
     );
 
-    // Emit a portable-keyed report after the path-keyed one and wait for `b` to receive it,
-    // proving the mesh channel delivered subsequent events.
+    // Sender-side visibility log line emitted ONCE per state change (not per broadcast/greeting).
+    assert_eq!(
+        unidentified_default_logs_for(&a_id),
+        vec![crate::UNIDENTIFIED_DEFAULT_PLAN_LOG.to_owned()],
+        "unidentified default must log exactly once for the state transition"
+    );
+    assert!(
+        TRACING_LINES
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains(crate::UNIDENTIFIED_DEFAULT_PLAN_LOG)),
+        "tracing subscriber must observe the sender log line"
+    );
+
+    // Wait a bounded window first, then send the control message on the same mesh link and prove
+    // the control arrives while the unidentified default and secondary reports were never delivered.
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    assert!(
+        b.state.code.plan.accounts().is_empty(),
+        "peer must receive nothing after bounded wait when sender default is unidentified: {:?}",
+        b.state.code.plan.accounts()
+    );
+
     emit(&a, &s_port.id, CodeEvent::PlanLimits { limits: report(0.77, 10) });
-    until("B receives A's portable report", 10, || {
+    until("B receives A's portable control report", 10, || {
         b.state.code.plan.account("u-port:o-port").latest.is_some()
     })
     .await;
 
-    assert!(
-        !b.state.code.plan.accounts().contains_key(&custom_path),
-        "peer accounts() must never contain sender's path key: {:?}",
-        b.state.code.plan.accounts()
-    );
     assert_eq!(
         b.state.code.plan.accounts().keys().collect::<Vec<_>>(),
         vec!["u-port:o-port"],
-        "peer accounts() must contain only the portable account, never the path-keyed report: {:?}",
+        "peer accounts() must contain ONLY the control account, never the unidentified default or secondary path: {:?}",
         b.state.code.plan.accounts()
     );
     let chans: crate::api::ChanFactory = Arc::new(|_| None);
     let views = crate::api::call(&b.state, "plan_accounts", json!({}), &chans).await.unwrap();
     let arr = views.as_array().unwrap();
     assert!(
-        !arr.iter().any(|v| v["account"] == custom_path),
-        "peer plan_accounts must never contain sender's path key: {arr:?}"
+        !arr.iter().any(|v| v["account"] == custom_path || v["account"] == default_path),
+        "peer plan_accounts must never contain sender's path keys: {arr:?}"
+    );
+
+    // Now populate temp HOME's `.claude.json` with a portable default identity (`u-home:o-home`):
+    // subsequent default-dir reports MUST be delivered to `b`, and a later transition back to
+    // unidentified logs once again.
+    std::fs::write(
+        env.dir.join(".claude.json"),
+        serde_json::json!({ "oauthAccount": {
+            "accountUuid": "u-home", "organizationUuid": "o-home", "organizationName": "HomeOrg",
+            "organizationRateLimitTier": "default_claude_ai"
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    emit(&a, &s_def.id, CodeEvent::PlanLimits { limits: report(0.62, 5) });
+    until("B receives A's portable default report once identified", 10, || {
+        b.state.code.plan.account("u-home:o-home").latest.is_some()
+    })
+    .await;
+    assert_eq!(
+        b.state.code.plan.account("u-home:o-home").latest.unwrap().five_hour.unwrap().utilization,
+        0.62
+    );
+
+    // Transition back to unidentified (credentials tier mismatches profile) => logs a second time.
+    std::fs::write(
+        env.dir.join(".claude").join(".credentials.json"),
+        r#"{"claudeAiOauth":{"accessToken":"t","refreshToken":"r","expiresAt":1,"rateLimitTier":"other_tier"}}"#,
+    )
+    .unwrap();
+    emit(&a, &s_def.id, CodeEvent::PlanLimits { limits: report(0.65, 1) });
+    assert_eq!(
+        unidentified_default_logs_for(&a_id).len(),
+        2,
+        "transitioning from portable back to unidentified must log once for the new state change"
+    );
+}
+
+/// Canonical default check (test 1 — default-misread-as-secondary prevention):
+/// Symlinks to `~/.claude`, trailing slashes, and `CLAUDE_CONFIG_DIR` explicitly pointing at the
+/// default directory (with trailing slash or symlink) are recognized as the default directory,
+/// read `~/.claude.json` beside `.claude`, and never split into a secondary bucket.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn default_dir_via_symlink_trailing_slash_or_env_is_not_misread_as_secondary() {
+    use code::acp::CodeEvent;
+    use code::plan_limits::{PlanLimits, Window, now};
+    let mut env = TempClaudeEnv::new(None, None).await;
+    let real_default = env.dir.join(".claude");
+    let link_default = env.dir.join("symlink-to-default-claude");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real_default, &link_default).unwrap();
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(&link_default).unwrap();
+
+    let trailing = format!("{}/", real_default.to_string_lossy());
+    let link_trailing = format!("{}/", link_default.to_string_lossy());
+
+    // Explicitly set CLAUDE_CONFIG_DIR to the default location with a trailing slash.
+    claude_auth::set_test_env(Some(env.dir.clone()), Some(trailing.clone()));
+    assert!(crate::is_default_claude_dir_path(&real_default.to_string_lossy()));
+    assert!(crate::is_default_claude_dir_path(&trailing));
+    assert!(crate::is_default_claude_dir_path("~/.claude/"));
+    #[cfg(unix)]
+    assert!(crate::is_default_claude_dir_path(&link_trailing));
+
+    // Before `.claude.json` exists: a session pointing at the symlink or trailing-slash default
+    // normalizes onto the single default bucket (not a second secondary bucket) and logs once.
+    let (a, b) = (node("alpha-canon-def"), node("bravo-canon-def"));
+    link(&a, &b).await;
+    let cwd = a.dir.to_string_lossy().into_owned();
+    let s = a.state.db.create_code_session(&cwd, None, "claude-code", "default").unwrap();
+    #[cfg(unix)]
+    a.state
+        .db
+        .set_setting(&code::import_claude::config_dir_key(&s.id), &link_trailing)
+        .unwrap();
+
+    let report = |five: f64, ago: i64| PlanLimits {
+        five_hour: Some(Window { utilization: five, resets_at: now() + 3600 }),
+        observed_at: now() - ago,
+        ..Default::default()
+    };
+    emit(&a, &s.id, CodeEvent::PlanLimits { limits: report(0.28, 30) });
+    assert_eq!(
+        a.state.code.plan.accounts().len(),
+        1,
+        "symlink/trailing-slash default must not create a second bucket: {:?}",
+        a.state.code.plan.accounts()
+    );
+    assert_eq!(
+        unidentified_default_logs_for(a.state.mesh.node_id()).len(),
+        1,
+        "unidentified default accessed via symlink/trailing-slash must still emit the visibility log"
+    );
+
+    // Once `~/.claude.json` (beside `.claude`, NOT inside `.claude/`) is written, accessing the
+    // default dir via symlink or `CLAUDE_CONFIG_DIR` with trailing slash finds `u-canon:o-canon`
+    // and broadcasts to `b`.
+    std::fs::write(
+        env.dir.join(".claude.json"),
+        serde_json::json!({ "oauthAccount": {
+            "accountUuid": "u-canon", "organizationUuid": "o-canon", "organizationName": "CanonOrg"
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    assert_eq!(
+        claude_auth::account(&link_default),
+        ("u-canon:o-canon".to_owned(), Some("CanonOrg".to_owned()))
+    );
+    emit(&a, &s.id, CodeEvent::PlanLimits { limits: report(0.54, 5) });
+    until("B receives canonical default report", 10, || {
+        b.state.code.plan.account("u-canon:o-canon").latest.is_some()
+    })
+    .await;
+    assert_eq!(
+        b.state.code.plan.account("u-canon:o-canon").latest.unwrap().five_hour.unwrap().utilization,
+        0.54
+    );
+    let _ = &mut env;
+}
+
+/// Canonical default check (test 2 — secondary-misread-as-default prevention):
+/// A secondary config directory named `.claude` (e.g. `<dir>/work/.claude/` or a symlink to it)
+/// is NEVER misread as the default directory: its usage never reads `~/.claude.json` and never
+/// folds into local or peers' default usage bucket as wrong data.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn secondary_dir_named_dot_claude_is_never_misread_as_default_or_folded_into_peers_default() {
+    use code::acp::CodeEvent;
+    use code::plan_limits::{PlanLimits, Window, now};
+    let _env = TempClaudeEnv::new(Some(("u-main", "o-main", "MainOrg")), None).await;
+    let (a, b) = (node("alpha-sec-dot-claude"), node("bravo-sec-dot-claude"));
+    link(&a, &b).await;
+
+    let cwd = a.dir.to_string_lossy().into_owned();
+    let s_def = a.state.db.create_code_session(&cwd, None, "claude-code", "default").unwrap();
+
+    let sec_dir = a.dir.join("work").join(".claude");
+    std::fs::create_dir_all(&sec_dir).unwrap();
+    let sec_link = a.dir.join("work-claude-link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&sec_dir, &sec_link).unwrap();
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(&sec_link).unwrap();
+
+    let sec_with_slash = format!("{}/", sec_dir.to_string_lossy());
+    assert!(!crate::is_default_claude_dir_path(&sec_with_slash));
+    #[cfg(unix)]
+    assert!(!crate::is_default_claude_dir_path(&sec_link.to_string_lossy()));
+
+    let s_sec = a.state.db.create_code_session(&cwd, None, "claude-code", "default").unwrap();
+    a.state
+        .db
+        .set_setting(&code::import_claude::config_dir_key(&s_sec.id), &sec_with_slash)
+        .unwrap();
+
+    let report = |five: f64, ago: i64| PlanLimits {
+        five_hour: Some(Window { utilization: five, resets_at: now() + 3600 }),
+        observed_at: now() - ago,
+        ..Default::default()
+    };
+
+    // Seed the shared default account (`u-main:o-main`) at 0.10 on both peers.
+    emit(&a, &s_def.id, CodeEvent::PlanLimits { limits: report(0.10, 60) });
+    until("B has A's 0.10 default report", 10, || {
+        b.state.code.plan.account("u-main:o-main").latest.is_some()
+    })
+    .await;
+
+    // Emit 0.95 on the secondary `work/.claude/` session (which has no `.claude.json` yet), then
+    // follow with a 0.12 control report on `s_def` to prove delivery on the mesh link.
+    emit(&a, &s_sec.id, CodeEvent::PlanLimits { limits: report(0.95, 30) });
+    emit(&a, &s_def.id, CodeEvent::PlanLimits { limits: report(0.12, 20) });
+    until("B receives A's 0.12 default control update", 10, || {
+        b.state
+            .code
+            .plan
+            .account("u-main:o-main")
+            .latest
+            .and_then(|l| l.five_hour)
+            .map(|w| w.utilization)
+            == Some(0.12)
+    })
+    .await;
+
+    // Secondary `0.95` report must NEVER fold into `u-main:o-main` on `a` or `b`, and must not
+    // trigger the unidentified-default log line.
+    assert_eq!(
+        a.state.code.plan.account("u-main:o-main").latest.unwrap().five_hour.unwrap().utilization,
+        0.12
+    );
+    assert_eq!(
+        b.state.code.plan.account("u-main:o-main").latest.unwrap().five_hour.unwrap().utilization,
+        0.12,
+        "secondary work/.claude usage must never fold into peers' default bucket"
+    );
+    assert_eq!(
+        b.state.code.plan.accounts().keys().collect::<Vec<_>>(),
+        vec!["u-main:o-main"]
+    );
+    assert!(unidentified_default_logs_for(a.state.mesh.node_id()).is_empty());
+
+    // When `work/.claude/.claude.json` is written with `u-sec:o-sec`, it propagates under its own
+    // key and still leaves `u-main:o-main` untouched at 0.12.
+    std::fs::write(
+        sec_dir.join(".claude.json"),
+        serde_json::json!({ "oauthAccount": {
+            "accountUuid": "u-sec", "organizationUuid": "o-sec", "organizationName": "SecondOrg"
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    emit(&a, &s_sec.id, CodeEvent::PlanLimits { limits: report(0.88, 5) });
+    until("B receives secondary account under u-sec:o-sec", 10, || {
+        b.state.code.plan.account("u-sec:o-sec").latest.is_some()
+    })
+    .await;
+    assert_eq!(
+        b.state.code.plan.account("u-main:o-main").latest.unwrap().five_hour.unwrap().utilization,
+        0.12
+    );
+    assert_eq!(
+        b.state.code.plan.account("u-sec:o-sec").latest.unwrap().five_hour.unwrap().utilization,
+        0.88
     );
 }
 
