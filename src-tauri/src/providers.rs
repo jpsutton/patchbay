@@ -219,7 +219,7 @@ fn parse_grok_version(out: &str) -> Option<String> {
 
 /// The headers Grok Build sends to its proxy (`cli-chat-proxy.grok.com`), so a request made
 /// with a Grok login looks like Grok's own. `user` is the signed-in user's id.
-fn grok_headers(user: Option<&str>) -> Vec<(String, String)> {
+pub(crate) fn grok_headers(user: Option<&str>) -> Vec<(String, String)> {
     let version = grok_version();
     let mut h = vec![
         ("X-XAI-Token-Auth".to_owned(), "xai-grok-cli".to_owned()),

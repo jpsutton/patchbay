@@ -116,7 +116,7 @@ function ProviderChoice({ agent, label }: { agent: AgentId; label: string }) {
   );
 }
 
-/** Turns on a Claude plan: stop them before they run into extra usage. */
+/** Turns on a Claude or Grok plan: stop them before they run into extra usage. */
 function UsageLimit({ agent }: { agent: string }) {
   const limit = useStore((s) => s.prefs.usageLimit);
   const update = useStore((s) => s.updatePrefs);
@@ -124,8 +124,8 @@ function UsageLimit({ agent }: { agent: string }) {
     <>
       <Row
         label="Stop at plan limit"
-        hint={`Cancel running turns and hold new prompts when your Claude plan's 5-hour or weekly usage reaches the limit, or extra usage starts. Lifts when the window resets.${
-          agent === "patchbay" ? " Applies to sessions on a model whose provider uses your Claude login. Shared with Claude Code." : ""
+        hint={`Cancel running turns and hold new prompts when your Claude plan's 5-hour or weekly usage (or your Grok plan's weekly usage) reaches the limit, or extra usage starts. Lifts when the window resets.${
+          agent === "patchbay" ? " Applies to sessions on a model whose provider uses your Claude or Grok login. Shared with Claude Code." : ""
         }`}
       >
         <Toggle
@@ -721,7 +721,7 @@ export function AgentPage({ id, list }: { id: AgentId; list: AgentList }) {
   const [installError, setInstallError] = useState<string | null>(null);
   useEffect(list.want, []);
   const a = list.agents?.find((x) => x.id === id);
-  const onClaudeLogin = providers.some((p) => p.authMode === "claude_login");
+  const onPlanLogin = providers.some((p) => p.authMode === "claude_login" || p.authMode === "grok_login");
 
   const setPath = async (path: string) => {
     const agentPaths = { ...prefs.agentPaths };
@@ -830,7 +830,7 @@ export function AgentPage({ id, list }: { id: AgentId; list: AgentList }) {
         </p>
       )}
       {a.takesProviders && <ProviderChoice agent={a.id} label={a.label} />}
-      {((a.id === "claude-code" && !prefs.agentProviders[a.id]) || (a.id === "patchbay" && onClaudeLogin)) && (
+      {((a.id === "claude-code" && !prefs.agentProviders[a.id]) || (a.id === "patchbay" && onPlanLogin)) && (
         <UsageLimit agent={a.id} />
       )}
       {a.id === "cursor" && <CursorUsageLimit />}

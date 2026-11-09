@@ -1854,15 +1854,22 @@ export function install() {
             autoCompactPercent: 85,
           };
         case "plan_accounts": {
-          // `?plan=two` adds a second, lightly used account.
+          // `?plan=two` adds a second, lightly used account; `?plan=grok` adds a Grok seat (one weekly window).
           const latest = fakePlanLimits();
           if (!latest) return [];
-          const accounts = [{ account: "/home/demo/.claude", label: "Claude Code login", latest, history: fakePlanHistory() }];
+          const accounts: Record<string, unknown>[] = [{ account: "/home/demo/.claude", label: "Claude Code login", latest, history: fakePlanHistory() }];
           if (new URLSearchParams(location.search).get("plan") === "two")
             accounts.push({
               account: "/home/demo/.claude-team",
               label: "Claude (Teams)",
               latest: { ...latest, fiveHour: { ...latest.fiveHour, utilization: 0.18 }, sevenDay: { ...latest.sevenDay, utilization: 0.07 } },
+              history: [],
+            });
+          if (new URLSearchParams(location.search).get("plan") === "grok")
+            accounts.push({
+              account: "grok:team-demo:user-demo",
+              label: "Grok (Acme)",
+              latest: { fiveHour: null, sevenDay: { ...latest.sevenDay, utilization: 0.31 }, overageUntil: null, observedAt: latest.observedAt },
               history: [],
             });
           return accounts;

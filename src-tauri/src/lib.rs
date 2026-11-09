@@ -965,6 +965,14 @@ fn on_session_lost(state: &AppState, id: String, message: code::acp::UserMessage
 
 fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     use code::acp::CodeEvent;
+    // A session on a Grok login has no response headers to read its usage from: ask the billing
+    // endpoint after each model call and each finished turn (at most once per gap per login).
+    if matches!(env.event, CodeEvent::ContextUsage { .. } | CodeEvent::PromptDone { .. })
+        && let Some((home, base_url)) = grok_login_of_session(state, &env.code_session_id)
+    {
+        let s = state.clone();
+        api::spawn(async move { poll_grok_plan(&s, home, base_url, false).await });
+    }
     if let CodeEvent::PlanLimits { limits } = env.event {
         // Only sessions on a Claude plan report limits; one that can't be placed counts as the default login's.
         let (account, name) = plan_account(state, &prefs::load(&state.db), &env.code_session_id).unwrap_or_else(default_plan_account);
@@ -1242,7 +1250,7 @@ fn plan_views(state: &AppState) -> Vec<PlanView> {
         .map(|(account, usage)| {
             let names: Vec<_> = providers
                 .iter()
-                .filter(|(p, _)| p.auth_mode == db::AuthMode::ClaudeLogin && provider_plan_account(p).as_deref() == Some(account.as_str()))
+                .filter(|(p, _)| is_login_provider(p) && provider_plan_account(p).as_deref() == Some(account.as_str()))
                 .map(|(p, _)| p.name.as_str())
                 .collect();
             let label = if account == default {
@@ -1629,8 +1637,62 @@ async fn poll_cursor_plan(state: &AppState) {
     }
 }
 
+/// The Grok login a session's model runs on, as (Grok home, provider base URL): Patchbay's agent
+/// on a model whose provider uses a Grok login.
+fn grok_login_of_session(state: &AppState, id: &str) -> Option<(Option<String>, String)> {
+    let session = state.db.get_code_session(id).ok().flatten()?;
+    if !matches!(code::agents::AgentKind::parse(&session.agent), Some(code::agents::AgentKind::Patchbay)) {
+        return None;
+    }
+    let model = state.db.get_model(&session.model_ref?).ok().flatten()?;
+    let (p, _) = state.db.get_provider(&model.provider_id).ok().flatten()?;
+    (p.auth_mode == db::AuthMode::GrokLogin).then_some((p.grok_home, p.base_url))
+}
+
+/// Every Grok login a provider here uses, once each: (Grok home, provider base URL).
+fn grok_logins(db: &Db) -> Vec<(Option<String>, String)> {
+    let mut seen = std::collections::HashSet::new();
+    db.list_providers()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(p, _)| p.auth_mode == db::AuthMode::GrokLogin)
+        .filter(|(p, _)| seen.insert(grok_auth::resolve_dir(p.grok_home.as_deref()).map(|d| d.to_string_lossy().into_owned()).unwrap_or_default()))
+        .map(|(p, _)| (p.grok_home, p.base_url))
+        .collect()
+}
+
+/// A Grok seat's usage, seen here: tell the mesh, then count it like any plan report.
+fn report_grok_plan(state: &AppState, plan: code::grok_plan::GrokPlan) {
+    let tagged = serde_json::json!({ "account": plan.account, "name": plan.name, "limits": plan.limits });
+    state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, tagged);
+    adopt_plan_limits(state, &plan.account, plan.name, plan.limits, true);
+}
+
+/// Ask Grok's billing endpoint for one login's usage, unless that login was asked a moment ago
+/// (`force` ignores that).
+async fn poll_grok_plan(state: &AppState, home: Option<String>, base_url: String, force: bool) {
+    let key = grok_auth::resolve_dir(home.as_deref()).map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+    if !force && !code::grok_plan::may_poll(&key, code::plan_limits::now()) {
+        return;
+    }
+    match code::grok_plan::fetch(home.as_deref(), &base_url).await {
+        Ok(plan) => report_grok_plan(state, plan),
+        Err(e) => tracing::debug!("grok plan: {e:#}"),
+    }
+}
+
+/// The plan account a subscription-login provider runs on: a Claude or a Grok seat.
 fn provider_plan_account(p: &Provider) -> Option<String> {
-    claude_auth::resolve_dir(p.claude_config_dir.as_deref()).ok().map(|d| claude_auth::account(&d).0)
+    match p.auth_mode {
+        db::AuthMode::ClaudeLogin => claude_auth::resolve_dir(p.claude_config_dir.as_deref()).ok().map(|d| claude_auth::account(&d).0),
+        db::AuthMode::GrokLogin => grok_auth::resolve_dir(p.grok_home.as_deref()).ok().map(|d| grok_auth::account(&d).0),
+        db::AuthMode::ApiKey => None,
+    }
+}
+
+/// Providers whose usage counts against a subscription plan (Claude or Grok login).
+fn is_login_provider(p: &Provider) -> bool {
+    matches!(p.auth_mode, db::AuthMode::ClaudeLogin | db::AuthMode::GrokLogin)
 }
 
 // The ACP wire log (Settings > Diagnostics): this computer's agents only, kept in memory.
@@ -1663,9 +1725,10 @@ async fn wire_log_save(state: &AppState) -> CmdResult<String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// The Claude plan account the session runs on, if it runs on one with usage limits: Claude
-/// Code on its own sign-in (not on a Patchbay provider, which bills by the token), or Patchbay's
-/// agent on a model whose provider uses a Claude login. Accounts are `claude_auth::account`s.
+/// The plan account the session runs on, if it runs on one with usage limits: Claude Code on its
+/// own sign-in (not on a Patchbay provider, which bills by the token), or Patchbay's agent on a
+/// model whose provider uses a Claude or a Grok login. Accounts are `claude_auth::account`s or
+/// `grok_auth::account`s.
 fn plan_account(state: &AppState, prefs: &prefs::Preferences, id: &str) -> Option<(String, Option<String>)> {
     use code::agents::AgentKind;
     let session = state.db.get_code_session(id).ok().flatten()?;
@@ -1677,9 +1740,11 @@ fn plan_account(state: &AppState, prefs: &prefs::Preferences, id: &str) -> Optio
             .model_ref
             .and_then(|r| state.db.get_model(&r).ok().flatten())
             .and_then(|m| state.db.get_provider(&m.provider_id).ok().flatten())
-            .filter(|(p, _)| p.auth_mode == db::AuthMode::ClaudeLogin)
-            .and_then(|(p, _)| claude_auth::resolve_dir(p.claude_config_dir.as_deref()).ok())
-            .map(|d| claude_auth::account(&d)),
+            .and_then(|(p, _)| match p.auth_mode {
+                db::AuthMode::ClaudeLogin => claude_auth::resolve_dir(p.claude_config_dir.as_deref()).ok().map(|d| claude_auth::account(&d)),
+                db::AuthMode::GrokLogin => grok_auth::resolve_dir(p.grok_home.as_deref()).ok().map(|d| grok_auth::account(&d)),
+                db::AuthMode::ApiKey => None,
+            }),
         _ => None,
     }
 }
@@ -1692,7 +1757,7 @@ fn plan_account_label(state: &AppState, account: &str) -> String {
     let providers = state.db.list_providers().unwrap_or_default();
     let names: Vec<&str> = providers
         .iter()
-        .filter(|(p, _)| p.auth_mode == db::AuthMode::ClaudeLogin && provider_plan_account(p).as_deref() == Some(account))
+        .filter(|(p, _)| is_login_provider(p) && provider_plan_account(p).as_deref() == Some(account))
         .map(|(p, _)| p.name.as_str())
         .collect();
     if !names.is_empty() {
@@ -3913,6 +3978,22 @@ pub fn open_locked_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow:
         loop {
             tokio::time::sleep(code::cursor_plan::TICK).await;
             poll_cursor_plan(&cursor_poller).await;
+        }
+    });
+    let grok_poller = state.clone();
+    api::spawn(async move {
+        // Once at start, for the gauge before the first turn; then while a session runs on a Grok
+        // login, so a limit reached between its model calls still shows.
+        for (home, base_url) in grok_logins(&grok_poller.db) {
+            poll_grok_plan(&grok_poller, home, base_url, true).await;
+        }
+        loop {
+            tokio::time::sleep(code::grok_plan::TICK).await;
+            for id in grok_poller.code.busy_sessions() {
+                if let Some((home, base_url)) = grok_login_of_session(&grok_poller, &id) {
+                    poll_grok_plan(&grok_poller, home, base_url, false).await;
+                }
+            }
         }
     });
     let antigravity_poller = state.clone();

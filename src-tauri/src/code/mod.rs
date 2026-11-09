@@ -12,6 +12,7 @@ pub mod native;
 pub mod opencode_state;
 pub mod antigravity_plan;
 pub mod cursor_plan;
+pub mod grok_plan;
 pub mod permissions;
 pub mod plan_limits;
 pub mod questions;

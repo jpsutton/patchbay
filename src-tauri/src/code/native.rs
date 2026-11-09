@@ -65,8 +65,8 @@ impl Host for AppHost {
         providers::ensure_token(&mut resolved).await.map_err(|e| format!("{e:#}"))?;
         let prefs = crate::prefs::load(&self.db);
         let engine = prefs.agent_engine;
-        // The plan's usage limit only guards a turn while "Stop at plan limit" is on.
-        let plan_guarded = resolved.auth == providers::Auth::ClaudeLogin && prefs.usage_limit.enabled;
+        // The plan's usage limit (Claude or Grok) only guards a turn while "Stop at plan limit" is on.
+        let plan_guarded = matches!(resolved.auth, providers::Auth::ClaudeLogin | providers::Auth::GrokLogin) && prefs.usage_limit.enabled;
         let mut cfg = providers::llm_config(&resolved);
         cfg.cache_ttl = providers::agent_cache_ttl(&resolved);
         if let Some(n) = engine.request_retries {
