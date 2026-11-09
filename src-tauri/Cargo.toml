@@ -119,7 +119,8 @@ tray-icon = { version = "0.25", default-features = false, features = ["ksni"], o
 # the dialog plugin already links).
 ashpd = { version = "0.11", default-features = false, features = ["tokio"], optional = true }
 
-# libc: process-group kill (probe cleanup) in lib, open-file limit at startup (see `fd_limit`) and in tests.
+# libc: process-group kill (probe cleanup), open-file limit at startup (see `fd_limit`) and in tests,
+# and O_NOFOLLOW for team export; the tests raise the open-file limit (see `test_support`).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

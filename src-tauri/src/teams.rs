@@ -775,12 +775,25 @@ fn write_export(tdb: &TeamsDb, db: &Db, team_id: &str, event: &str) -> Result<()
         let (title, agent) = db.get_code_session(&m.session_id)?.map_or((String::new(), String::new()), |s| (s.title, s.agent));
         roster.push_str(&format!("| {role} | {} | {} ({}) | {agent} |\n", m.seat, clean(&title).replace('|', "/"), m.session_id));
     }
-    std::fs::write(dir.join("ROSTER.md"), roster)?;
-    std::fs::write(dir.join("LEDGER.md"), ledger(tdb, &team)?)?;
+    write_file(&dir.join("ROSTER.md"), &roster)?;
+    write_file(&dir.join("LEDGER.md"), &ledger(tdb, &team)?)?;
     let log = dir.join("CHANGELOG.md");
     let mut text = std::fs::read_to_string(&log).unwrap_or_else(|_| format!("{GENERATED}\n# Changelog: {}\n\n", team.slug));
     text.push_str(&format!("- {} {}\n", chrono::Utc::now().format("%Y-%m-%d %H:%M:%SZ"), clean(event)));
-    std::fs::write(log, text)?;
+    write_file(&log, &text)?;
+    Ok(())
+}
+
+/// Write `text` to `path`, refusing a symlink at the path itself (checked by the open, so a link
+/// swapped in after `check_export_dir` is still refused). Not on Windows: there the check above
+/// is all there is.
+fn write_file(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut o, libc::O_NOFOLLOW);
+    o.open(path).with_context(|| format!("can't write {}", path.display()))?.write_all(text.as_bytes())?;
     Ok(())
 }
 
@@ -1110,5 +1123,21 @@ mod tests {
         .unwrap();
         assert_eq!(ok.pr_base, "release/1.0");
         assert!(Path::new(&ok.worktree_root).starts_with(p.canonicalize().unwrap()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_write_itself_refuses_a_symlink() {
+        let d = dir();
+        let victim = d.join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        let link = d.join("LEDGER.md");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        assert!(write_file(&link, "x").is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        let plain = d.join("plain.md");
+        write_file(&plain, "a").unwrap();
+        write_file(&plain, "b").unwrap();
+        assert_eq!(std::fs::read_to_string(&plain).unwrap(), "b");
     }
 }
