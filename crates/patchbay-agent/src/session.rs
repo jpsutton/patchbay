@@ -353,6 +353,16 @@ impl Session {
         crate::store::subagents_dir(&self.host.data_dir(), &self.id).join("status.json")
     }
 
+    /// Whether reading `p` needs no approval: it is in the working directory, or it is this
+    /// session's own history (its transcript or its subagents'), which summaries point the model at.
+    pub fn may_read(&self, p: &std::path::Path) -> bool {
+        use crate::tools::inside;
+        let data = self.host.data_dir();
+        inside(&self.cwd, p)
+            || inside(&crate::store::sessions_dir(&data).join(format!("{}.jsonl", self.id)), p)
+            || inside(&crate::store::subagents_dir(&data, &self.id), p)
+    }
+
     /// Show the subagents' state: to the client, as a `subagents_update`, and in `status.json`.
     pub fn publish_agents(&self) {
         self.agents.write_status(&self.agents_status_path());
@@ -560,5 +570,69 @@ mod tests {
         assert_eq!(r.mode, Some(Mode::Plan));
         assert_eq!(r.minify, Some(true));
         assert_eq!(r.effort, Some(Effort::High));
+    }
+
+    /// The reads `may_read` lets through without approval: the working directory, the
+    /// session's own transcript, and its subagents' files. Everything else — including
+    /// a symlink in the working directory combined with `..`, which walks out of it —
+    /// still needs permission.
+    #[tokio::test]
+    async fn may_read_keeps_the_session_readable_and_the_symlink_escape_out() {
+        let base = std::env::temp_dir().join(format!("pb-mayread-{}", uuid::Uuid::new_v4()));
+        let cwd = base.join("work");
+        let data = base.join("data");
+        let id = "0b91d1a5-9d5e-4a2b-8c3f-1e2d3c4b5a69";
+        std::fs::create_dir_all(cwd.join("src")).unwrap();
+        let transcript = crate::store::sessions_dir(&data).join(format!("{id}.jsonl"));
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, "").unwrap();
+        let subagent = crate::store::subagents_dir(&data, id).join("a1b2c3d4.jsonl");
+        std::fs::create_dir_all(subagent.parent().unwrap()).unwrap();
+        std::fs::write(&subagent, "").unwrap();
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "s").unwrap();
+        std::fs::write(base.join("stolen.txt"), "s").unwrap();
+
+        let (a, b) = tokio::io::duplex(64);
+        let (peer, _incoming) = crate::rpc::connect(a, b);
+        let host = Arc::new(TestHost { data });
+        let s = Session::new(id.into(), cwd.clone(), host, peer, "pb-mock".into(), Mode::Default);
+
+        // Inside the working directory, and the session's own history.
+        assert!(s.may_read(&cwd.join("src/main.rs")));
+        assert!(s.may_read(&cwd.join("src/../src/main.rs")));
+        assert!(s.may_read(&transcript));
+        assert!(s.may_read(&subagent));
+        // Everything else asks first.
+        assert!(!s.may_read(&outside.join("secret.txt")));
+        #[cfg(unix)]
+        {
+            // The link sits in the working directory, but `link/..` leaves it: the path
+            // reads as `<work>/stolen.txt` and lands on `base/stolen.txt`, which exists.
+            std::os::unix::fs::symlink(&outside, cwd.join("link")).unwrap();
+            assert!(!s.may_read(&cwd.join("link/../stolen.txt")), "symlink + .. escaped the cwd");
+            assert!(!s.may_read(&cwd.join("link/secret.txt")));
+        }
+    }
+
+    /// The host a test session runs against: no model is called, only `data_dir`.
+    struct TestHost {
+        data: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl Host for TestHost {
+        fn models(&self) -> Vec<crate::host::ModelInfo> {
+            Vec::new()
+        }
+
+        async fn model_client(&self, _: &str) -> Result<ModelClient, String> {
+            Err("no model in tests".into())
+        }
+
+        fn data_dir(&self) -> PathBuf {
+            self.data.clone()
+        }
     }
 }

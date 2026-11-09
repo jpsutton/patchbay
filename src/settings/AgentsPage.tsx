@@ -221,7 +221,7 @@ function PatchbayModelSettings() {
         hint={
           search?.configured
             ? `A Brave Search API key is set (${search.source === "env" ? "from BRAVE_API_KEY" : search.source === "database" ? "stored in the database: no keychain" : "in the keychain"}). The agent can search the web, and so can Chat models without a search of their own (see Preferences → Chat).`
-            : "Paste a Brave Search API key to let the agent search the web. It is stored in the OS keychain."
+            : "Paste a Brave Search API key to let the agent search the web. It is stored in the OS keychain. Anthropic, OpenAI (Responses API) and Gemini models search with their provider's own search and need no key."
         }
       >
         <div className="flex flex-col items-end gap-1">
@@ -646,6 +646,22 @@ export function AgentsPage({ list, onOpen }: { list: AgentList; onOpen: (id: Age
             const t = v.trim();
             if (t && !/^\d+$/.test(t)) return Promise.resolve("Enter a whole number");
             return update({ autoArchiveDays: t ? Number(t) : null });
+          }}
+        />
+      </Row>
+      <Row
+        label="Flag quiet turns after (minutes)"
+        hint="When an agent sends nothing for this long in the middle of a turn, say so in the session and mark it in the sidebar. A usage limit or a lost connection can leave a turn hanging like this. Patchbay doesn't stop the turn; a long command looks the same. 0 = off."
+      >
+        <Deferred
+          value={String(prefs.stallNoticeMinutes)}
+          placeholder="10"
+          mono
+          width="w-24"
+          onCommit={(v) => {
+            const t = v.trim();
+            if (!/^\d+$/.test(t)) return Promise.resolve("Enter a whole number (0 = off)");
+            return update({ stallNoticeMinutes: Number(t) });
           }}
         />
       </Row>

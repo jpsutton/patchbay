@@ -32,6 +32,8 @@ pub struct Preferences {
     pub theme: String,
     /// small | default | large
     pub text_size: String,
+    /// small | medium | large: how big the line icons are drawn (medium = the original sizes).
+    pub icon_size: String,
     /// enter | mod-enter
     pub send_key: String,
     /// chat | code | last
@@ -93,6 +95,9 @@ pub struct Preferences {
     pub cursor_usage_limit: UsageLimit,
     /// Archive Code sessions this many days after their last prompt, unless pinned; `None` = never.
     pub auto_archive_days: Option<u32>,
+    /// Say so in the transcript, and mark the session stalled, when a turn has had nothing from
+    /// the agent for this many minutes (`code::stall`); 0 = off. Nothing is cancelled.
+    pub stall_notice_minutes: u32,
 
     // ---- Grok Build ----
     /// default | auto | always-approve
@@ -202,6 +207,7 @@ impl Default for Preferences {
         Self {
             theme: "system".into(),
             text_size: "default".into(),
+            icon_size: "medium".into(),
             send_key: "enter".into(),
             launch_tab: "last".into(),
             notifications: true,
@@ -227,6 +233,7 @@ impl Default for Preferences {
             usage_limit: UsageLimit::default(),
             cursor_usage_limit: UsageLimit::cursor_default(),
             auto_archive_days: None,
+            stall_notice_minutes: crate::code::stall::DEFAULT_MINUTES,
             permission_mode: "default".into(),
             agent_instructions: String::new(),
             web_fetch: false,
@@ -278,6 +285,7 @@ impl Preferences {
         self.validate_synced()?;
         one_of("theme", &self.theme, &["system", "light", "dark"])?;
         one_of("text size", &self.text_size, &["small", "default", "large"])?;
+        one_of("icon size", &self.icon_size, &["small", "medium", "large"])?;
         one_of("title bar", &self.title_bar, &["system", "app"])?;
         one_of("terminal local echo", &self.terminal_local_echo, &["auto", "on", "off"])?;
         one_of(
@@ -311,6 +319,9 @@ impl Preferences {
         }
         if !(8..=32).contains(&self.terminal_font_size) {
             return Err("terminal font size must be between 8 and 32".into());
+        }
+        if self.stall_notice_minutes > 1440 {
+            return Err("stalled-turn notice must be between 1 and 1440 minutes, or 0 for off".into());
         }
         let shell = self.terminal_shell.trim();
         if !shell.is_empty() && !std::path::Path::new(shell).is_file() {
@@ -400,6 +411,8 @@ mod tests {
         assert_eq!(p.theme, "dark");
         assert_eq!(p.terminal_font_size, 13);
         assert_eq!(p.auto_archive_days, None);
+        assert_eq!(p.stall_notice_minutes, 10, "stalled-turn notice is on by default");
+        assert_eq!(p.icon_size, "medium");
         assert_eq!(p.read_aloud_engine, "auto");
         assert!(!p.read_aloud_listen);
         assert!(p.background_summaries);
@@ -421,7 +434,11 @@ mod tests {
         };
         assert!(bad(|p| p.theme = "neon".into()));
         assert!(bad(|p| p.title_bar = "floating".into()));
+        assert!(bad(|p| p.icon_size = "huge".into()));
+        assert!(bad(|p| p.icon_size = "default".into()));
         assert!(bad(|p| p.permission_mode = "yolo".into()));
+        assert!(bad(|p| p.stall_notice_minutes = 1441));
+        assert!(!bad(|p| p.stall_notice_minutes = 0), "0 turns it off");
         assert!(bad(|p| p.auto_compact_percent = Some(100)));
         assert!(bad(|p| p.terminal_font_size = 4));
         assert!(bad(|p| p.auto_archive_days = Some(0)));

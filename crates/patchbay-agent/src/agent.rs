@@ -231,6 +231,7 @@ impl Agent {
                 Ok(json!({"rewind_points": points}))
             }
             "patchbay/rewind/execute" => self.rewind(&params).await,
+            "patchbay/fork" => self.fork(&params),
             // Stop one running tool call; the turn goes on and the model sees it was stopped.
             "patchbay/cancel_tool" => {
                 let s = self.need_session(&params)?;
@@ -305,6 +306,33 @@ impl Agent {
         } else {
             Err(RpcError::internal(format!("could not restore some files: {}", failed.join("; "))))
         }
+    }
+
+    /// `patchbay/fork`: copy this session into a new stored one and return its id, which
+    /// `session/load` then opens. With `targetPromptIndex` (a rewind point) the copy stops just
+    /// before that prompt, as a rewind there would; without it, it has the whole conversation. The
+    /// source is not changed. Files are not touched: the fork works in the folder as it is now.
+    fn fork(&self, params: &Value) -> Result<Value, RpcError> {
+        let s = self.need_session(params)?;
+        if s.busy.load(Ordering::SeqCst) {
+            return Err(RpcError::invalid_params("a turn is running; stop it first"));
+        }
+        let keep = match params["targetPromptIndex"].as_u64() {
+            None => None,
+            Some(t) => {
+                let prompts = s.prompts.lock().unwrap();
+                Some(prompts.get(t as usize).ok_or_else(|| RpcError::invalid_params("no fork point for that prompt"))?.msg_index)
+            }
+        };
+        let entries = crate::store::fork_entries(&s.store.load(), keep);
+        if !entries.iter().any(|e| matches!(e, crate::store::Entry::Meta { .. })) {
+            return Err(RpcError::internal("this session has nothing stored to fork yet"));
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        crate::store::Store::new(&self.host.data_dir(), &id)
+            .create_with(&entries)
+            .map_err(|e| RpcError::internal(format!("could not write the fork: {e}")))?;
+        Ok(json!({"sessionId": id}))
     }
 
     /// `session/steering`: a message for the running turn, read before its next model request.
@@ -403,6 +431,10 @@ impl Agent {
 
     async fn load_session(&self, params: &Value) -> Result<Value, RpcError> {
         let id = param_str(params, "sessionId")?.to_owned();
+        // The id becomes a file path below, so only one this agent minted may pass.
+        if !crate::store::valid_session_id(&id) {
+            return Err(RpcError::invalid_params(format!("invalid sessionId {id}")));
+        }
         if let Some(s) = self.session(&id) {
             return Ok(self.session_info(&s).await);
         }
@@ -471,5 +503,54 @@ impl Agent {
             })),
             Err(e) => Err(RpcError::internal(e)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The host a test agent runs against: no model is called, only `data_dir`.
+    struct TestHost(PathBuf);
+
+    #[async_trait::async_trait]
+    impl Host for TestHost {
+        fn models(&self) -> Vec<crate::host::ModelInfo> {
+            Vec::new()
+        }
+
+        async fn model_client(&self, _: &str) -> Result<crate::host::ModelClient, String> {
+            Err("no model in tests".into())
+        }
+
+        fn data_dir(&self) -> PathBuf {
+            self.0.clone()
+        }
+    }
+
+    /// An agent with nowhere to talk to: the peer's reader is held for the test's life.
+    fn test_agent(data: PathBuf) -> (Agent, tokio::task::JoinHandle<()>) {
+        let (a, b) = tokio::io::duplex(1 << 16);
+        let (peer, mut incoming) = rpc::connect(a, b);
+        let keep = tokio::spawn(async move { let _ = incoming.recv().await; });
+        (Agent { host: Arc::new(TestHost(data)), peer, sessions: Sessions::default(), subagents_cap: Default::default() }, keep)
+    }
+
+    /// `session/load` names a file with the id it is given, so only an id this agent
+    /// could have minted (a canonical UUID) is allowed to reach the store.
+    #[tokio::test]
+    async fn session_load_refuses_ids_that_could_name_another_file() {
+        let data = std::env::temp_dir().join(format!("pb-load-{}", uuid::Uuid::new_v4()));
+        let (agent, keep) = test_agent(data);
+        for bad in ["", "..", "../secrets", "../../etc/passwd", "a/b", "a\\b"] {
+            let err = agent.load_session(&json!({"sessionId": bad})).await.unwrap_err();
+            assert_eq!(err.code, -32602, "{bad:?}");
+            assert!(err.message.contains("invalid sessionId"), "{bad:?} reached the store: {err}");
+        }
+        // A well-formed id passes the format check and fails only because nothing is stored.
+        let id = "0b91d1a5-9d5e-4a2b-8c3f-1e2d3c4b5a69";
+        let err = agent.load_session(&json!({"sessionId": id})).await.unwrap_err();
+        assert!(err.message.contains("no stored session"), "{err}");
+        keep.abort();
     }
 }

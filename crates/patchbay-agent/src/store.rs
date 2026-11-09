@@ -85,9 +85,13 @@ pub enum ReqOutcome {
 }
 
 /// The entries that still count: a compaction and a rewind drop what they replace.
+///
+/// `Truncate { len }` keeps the first `len` messages of the history as the session holds it in
+/// memory, where a compaction leaves the summary as message 0. So the summary takes a position
+/// too: without it, a rewind after a compaction kept one message too many on reload.
 pub fn effective(entries: &[Entry]) -> Vec<Entry> {
     let mut out: Vec<Entry> = Vec::new();
-    // Where each message since the last compaction sits in `out`.
+    // Where each message since the last compaction (the summary included) sits in `out`.
     let mut positions: Vec<usize> = Vec::new();
     for e in entries {
         match e {
@@ -97,6 +101,7 @@ pub fn effective(entries: &[Entry]) -> Vec<Entry> {
             }
             Entry::Compacted { .. } => {
                 positions.clear();
+                positions.push(out.len());
                 out.push(e.clone());
             }
             Entry::Truncate { len } => {
@@ -111,6 +116,17 @@ pub fn effective(entries: &[Entry]) -> Vec<Entry> {
     out
 }
 
+/// A fork's entries: what still counts in `entries`, cut to the first `keep` messages of the
+/// in-memory history (as a rewind would cut it), or whole with `None`. Request records stay with
+/// the session that made the calls.
+pub fn fork_entries(entries: &[Entry], keep: Option<usize>) -> Vec<Entry> {
+    let mut v: Vec<Entry> = entries.iter().filter(|e| !matches!(e, Entry::Req(_))).cloned().collect();
+    if let Some(len) = keep {
+        v.push(Entry::Truncate { len });
+    }
+    effective(&v)
+}
+
 pub struct Store {
     path: PathBuf,
     file: Mutex<Option<std::fs::File>>,
@@ -120,6 +136,18 @@ pub struct Store {
 
 pub fn sessions_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("agent").join("sessions")
+}
+
+/// Whether `id` is shaped like a session id this agent mints: a canonical UUID, the
+/// only form `session/new` ever writes. `session/load` takes the id from the client
+/// and turns it straight into a file path, so anything else — a separator, `..`, an
+/// empty string — is refused before it reaches the filesystem.
+pub fn valid_session_id(id: &str) -> bool {
+    id.len() == 36
+        && id.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
 }
 
 /// Where a session's subagents keep their transcripts (`<agent id>.jsonl`) and `status.json`.
@@ -146,6 +174,11 @@ impl Store {
         self.path.is_file()
     }
 
+    /// The file, once something has been written to it: what a summary points the model at.
+    pub fn file_path(&self) -> Option<&Path> {
+        (!self.disabled && self.exists()).then_some(self.path.as_path())
+    }
+
     pub fn append(&self, entry: &Entry) {
         if self.disabled {
             return;
@@ -166,6 +199,22 @@ impl Store {
         if let Err(e) = f.write_all(line.as_bytes()) {
             tracing::warn!("cannot write {}: {e}", self.path.display());
         }
+    }
+
+    /// Write `entries` as a new file, failing if one is already there. Unlike `append`, it
+    /// reports a failed write: a fork written halfway would be a broken session.
+    pub fn create_with(&self, entries: &[Entry]) -> std::io::Result<()> {
+        let mut text = String::new();
+        for e in entries {
+            text.push_str(&serde_json::to_string(e).map_err(std::io::Error::other)?);
+            text.push('\n');
+        }
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&self.path)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()
     }
 
     /// Every entry in order; lines that no longer parse are skipped.
@@ -199,6 +248,63 @@ mod tests {
             .collect();
         assert_eq!(texts, ["one", "three"]);
         assert_eq!(kept.iter().filter(|e| matches!(e, Entry::Tool { .. })).count(), 1);
+    }
+
+    #[test]
+    fn a_rewind_after_a_compaction_counts_the_summary() {
+        // In memory the history is [summary, p1, a1, p2, a2]; rewinding to p2 keeps 3 messages.
+        let msg = |t: &str| Entry::Msg { m: Message::user(t) };
+        let entries = vec![
+            msg("old"),
+            Entry::Compacted { summary: Message::user("summary") },
+            msg("p1"),
+            msg("a1"),
+            msg("p2"),
+            msg("a2"),
+            Entry::Truncate { len: 3 },
+        ];
+        let restored = crate::session::restore(&entries);
+        assert_eq!(restored.messages.iter().map(|m| m.text()).collect::<Vec<_>>(), ["summary", "p1", "a1"]);
+    }
+
+    #[test]
+    fn a_fork_cuts_like_a_rewind_and_leaves_request_records_behind() {
+        let msg = |t: &str| Entry::Msg { m: Message::user(t) };
+        let entries = vec![
+            Entry::Meta { cwd: "/p".into(), model: "m".into(), mode: "default".into(), minify: None, effort: None },
+            msg("p1"),
+            Entry::Req(req("a")),
+            msg("a1"),
+            msg("p2"),
+            msg("a2"),
+        ];
+        let texts = |es: &[Entry]| crate::session::restore(es).messages.iter().map(|m| m.text()).collect::<Vec<_>>();
+        let whole = fork_entries(&entries, None);
+        assert_eq!(texts(&whole), ["p1", "a1", "p2", "a2"]);
+        assert!(!whole.iter().any(|e| matches!(e, Entry::Req(_) | Entry::Truncate { .. })));
+        assert!(matches!(whole[0], Entry::Meta { .. }));
+        assert_eq!(texts(&fork_entries(&entries, Some(2))), ["p1", "a1"]);
+    }
+
+    #[test]
+    fn session_ids_are_uuids_only() {
+        assert!(valid_session_id("0b91d1a5-9d5e-4a2b-8c3f-1e2d3c4b5a69"));
+        // Nothing that could name a different file, or climb out of the sessions dir.
+        for bad in [
+            "",
+            "..",
+            "../secrets",
+            "../../etc/passwd",
+            "a/b",
+            "a\\b",
+            "0b91d1a5-9d5e-4a2b-8c3f-1e2d3c4b5a69/../x",
+            "0b91d1a59d5e4a2b8c3f1e2d3c4b5a69.jsonl",
+            "0b91d1a59d5e-4a2b-8c3f-1e2d3c4b5a69",
+            "0b91d1a5-9d5e-4a2b-8c3f-1e2d3c4b5a6x",
+            "has spaces",
+        ] {
+            assert!(!valid_session_id(bad), "{bad:?} should not be a session id");
+        }
     }
 
     #[test]

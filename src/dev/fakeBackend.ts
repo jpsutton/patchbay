@@ -4,7 +4,7 @@ import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 import type { Channel } from "@tauri-apps/api/core";
 import { emptyParams, usesPatchbayModels } from "../lib/ipc";
-import { uuid } from "../lib/platform";
+import { isRemoteApp, uuid } from "../lib/platform";
 import { applyChange, type SidebarEntry } from "../lib/sidebarLayout";
 import type {
   MeshChatEvent,
@@ -196,6 +196,12 @@ const fakeLive = new Set<string>();
 const fakeLabel = (agent: string) => FAKE_AGENTS.find((x) => x.id === agent)?.label ?? agent;
 /** Agents that take a message mid-turn (the rest queue it behind the turn, as the backend does). */
 const FAKE_STEERING = new Set(["patchbay", "grok", "claude-code", "codex"]);
+/**
+ * Agents whose host keeps a forced send steered in instead of cancelling the turn (acp.rs
+ * `force_steers`: Claude Code and Patchbay's own agent), where `session/cancel` would kill a
+ * backgrounded shell. Only Send now's steered path is modelled here.
+ */
+const FAKE_FORCE_STEERS = new Set(["claude-code", "patchbay"]);
 /** Sessions mid-turn, and the prompts queued behind each turn. */
 const fakeTurns = new Set<string>();
 const fakeQueues: Record<string, { promptId: string; text: string; mentions: string[] }[]> = {};
@@ -385,22 +391,27 @@ function fakeReady(csid: string, loaded = false) {
       ? null
       : { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] },
     configOptions: fakeOptionsFor(csid),
-    extensions: { statusLine: agentId === "grok", rewind: grok, patchbayModels: grok, steering: FAKE_STEERING.has(agentId), forceSend: true, cancelTool: agentId === "patchbay" },
+    extensions: { statusLine: agentId === "grok", rewind: grok, fork: agentId === "patchbay", patchbayModels: grok, steering: FAKE_STEERING.has(agentId), forceSend: true, cancelTool: agentId === "patchbay" },
   });
-  codeEmit(csid, {
-    type: "update",
-    update: {
-      sessionUpdate: "available_commands_update",
-      availableCommands: [
-        { name: "compact", description: "Summarize the conversation to free up context" },
-        { name: "context", description: "Show context window usage" },
-        { name: "model", description: "Switch model", input: { hint: "<model>" } },
-        { name: "review", description: "Review the current changes", input: { hint: "[focus]" } },
-      ],
-    },
-  });
+  // A phone never gets this event (its host answers `list_session_commands` instead).
+  if (!isRemoteApp()) {
+    codeEmit(csid, {
+      type: "update",
+      update: {
+        sessionUpdate: "available_commands_update",
+        availableCommands: DEMO_COMMANDS,
+      },
+    });
+  }
   codeEmit(csid, { type: "status", state: "ready", message: null });
 }
+
+const DEMO_COMMANDS = [
+  { name: "compact", description: "Summarize the conversation to free up context" },
+  { name: "context", description: "Show context window usage" },
+  { name: "model", description: "Switch model", input: { hint: "<model>" } },
+  { name: "review", description: "Review the current changes", input: { hint: "[focus]" } },
+];
 
 const cancelled = new Set<string>();
 
@@ -1248,6 +1259,7 @@ export function install() {
             usageLimit?: { percent: number };
             cursorUsageLimit?: { percent: number };
             autoArchiveDays?: number | null;
+            stallNoticeMinutes?: number;
             readAloudEngine?: string;
             readAloudRate?: string;
             readAloudServerUrl?: string;
@@ -1256,6 +1268,7 @@ export function install() {
           if (p.autoCompactPercent != null && (p.autoCompactPercent < 10 || p.autoCompactPercent > 99)) throw "auto-compact threshold must be between 10 and 99%";
           if (p.usageLimit && (p.usageLimit.percent < 1 || p.usageLimit.percent > 100)) throw "usage limit must be between 1 and 100%";
           if (p.autoArchiveDays != null && (p.autoArchiveDays < 1 || p.autoArchiveDays > 3650)) throw "auto-archive age must be between 1 and 3650 days";
+          if (p.stallNoticeMinutes != null && (p.stallNoticeMinutes < 0 || p.stallNoticeMinutes > 1440)) throw "stalled-turn notice must be between 1 and 1440 minutes, or 0 for off";
           if (p.readAloudEngine && !["auto", "system", "builtin", "server"].includes(p.readAloudEngine)) throw "read aloud engine must be one of auto, system, builtin, server";
           if (p.readAloudRate && !["slower", "normal", "faster"].includes(p.readAloudRate)) throw "read aloud speed must be one of slower, normal, faster";
           const speechUrl = p.readAloudServerUrl?.trim() ?? "";
@@ -1380,6 +1393,37 @@ export function install() {
           console.info("fake backend: open path", a.path, "in", a.cwd);
           (window as unknown as Record<string, unknown>).__lastOpenedPath = { path: a.path, cwd: a.cwd };
           return null;
+        // Artifact shares (shares.rs). The share button is desktop-only, so these are only hit
+        // by dev tooling; return a plausible capability without pretending to serve bytes.
+        case "create_share": {
+          const token = id();
+          // Phase 2 shape: node id in the path so a gateway can route the fetch to the owner.
+          return {
+            token,
+            path: String(a.path),
+            name: String(a.path).split(/[\\/]/).pop() || "file",
+            mime: "text/html; charset=utf-8",
+            url: `http://127.0.0.1:4420/share/demo-node/${token}`,
+            createdAt: now(),
+            expiresAt: now() + 86_400_000,
+          };
+        }
+        case "list_shares":
+          return [];
+        case "revoke_share":
+          return null;
+        // Phone in-app viewer (dev stand-in): a canned HTML artifact with the sandboxed headers.
+        case "remote_share_fetch":
+          return {
+            status: 200,
+            headers: [
+              ["content-type", "text/html; charset=utf-8"],
+              ["content-disposition", 'inline; filename="demo.html"'],
+              ["content-security-policy", "sandbox"],
+              ["x-content-type-options", "nosniff"],
+            ],
+            bodyB64: btoa("<h1>Demo artifact</h1><p>Served through the gateway proxy.</p>"),
+          };
         // Set window.__fakeUpdate = { version, notes } before the first check to see the update button.
         case "update_check":
           return (window as unknown as Record<string, unknown>).__fakeUpdate ?? null;
@@ -1568,19 +1612,37 @@ export function install() {
           return null;
         }
         case "code_unqueue": {
-          const q = fakeQueues[a.id as string] ?? [];
-          const i = q.findIndex((x) => x.promptId === a.promptId);
+          const id = a.id as string;
+          const pid = a.promptId as string;
+          const q = fakeQueues[id] ?? [];
+          const i = q.findIndex((x) => x.promptId === pid);
           if (i >= 0) {
             q.splice(i, 1);
-            codeEmit(a.id as string, { type: "unqueued", promptIds: [a.promptId as string], restore: false });
+            codeEmit(id, { type: "unqueued", promptIds: [pid], restore: false });
+            return null;
+          }
+          // Like the host: a steered message waiting in the running turn comes out with it.
+          const st = fakeSteered[id] ?? [];
+          const j = st.findIndex((x) => x.promptId === pid);
+          if (j >= 0) {
+            st.splice(j, 1);
+            codeEmit(id, { type: "unqueued", promptIds: [pid], restore: false });
           }
           return null;
         }
         case "code_send_now": {
-          const q = (fakeQueues[a.id as string] ??= []);
+          const id = a.id as string;
+          const q = (fakeQueues[id] ??= []);
           const i = q.findIndex((x) => x.promptId === a.promptId);
-          const st = fakeSteered[a.id as string] ?? [];
+          const st = fakeSteered[id] ?? [];
           const j = st.findIndex((x) => x.promptId === a.promptId);
+          // Like the host: a message that is not waiting any more is an error the UI shows, and
+          // these agents steer instead of cancelling, so one already in the running turn cannot
+          // come out of it (acp.rs `force_steers`).
+          if (i < 0 && j < 0) throw "that message is no longer waiting to be sent";
+          if (j >= 0 && FAKE_FORCE_STEERS.has(db.code.find((x) => x.id === id)?.agent ?? "")) {
+            throw "that message is already in the running turn; wait for the agent to take it, or stop the turn";
+          }
           if (i >= 0 && fakeTurns.has(a.id as string)) {
             q.unshift(...q.splice(i, 1));
             fakeInterrupt(a.id as string);
@@ -1604,6 +1666,7 @@ export function install() {
         case "get_code_transcript": return db.transcripts[a.id as string] ?? null;
         case "save_code_transcript": db.transcripts[a.id as string] = a.json as string; return null;
         case "list_project_files": await sleep(80); return DEMO_FILES;
+        case "list_session_commands": await sleep(80); return DEMO_COMMANDS;
         case "code_session_image": return "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
         case "list_mcp_servers": return db.mcp.map((m) => ({ ...m, config: { ...m.config, env: m.config.env.map((kv) => (kv.secret ? { ...kv, value: "", stored: !!kv.value } : kv)) } }));
         case "save_mcp_server": {
@@ -1733,7 +1796,7 @@ export function install() {
           }
           return null;
         }
-        case "host_info": return { version: "0.11.0", os: "macos", arch: "aarch64" };
+        case "host_info": return { version: __PATCHBAY_VERSION__, os: "macos", arch: "aarch64" };
         case "code_set_agent": {
           const s = db.code.find((x) => x.id === a.id)!;
           const saved = db.transcripts[s.id];
@@ -1758,7 +1821,23 @@ export function install() {
           return null;
         }
         case "code_rewind": await sleep(150); return null;
-        case "code_usage": return { totals: { ...fakeUsage }, contextTokens: null, contextWindow: 128000, autoCompactPercent: 85 };
+        case "code_fork": {
+          // The copy's conversation isn't simulated: the fork opens empty, with its title and settings.
+          await sleep(150);
+          const src = db.code.find((x) => x.id === a.id)!;
+          const s: CodeSession = { ...src, id: id(), acpSessionId: null, title: `${src.title} (fork)`, pinned: false, createdAt: now(), updatedAt: now(), activity: null };
+          db.code.push(s);
+          return s;
+        }
+        // Stored totals, as if the session had already run: the sidebar's usage gauge and the
+        // composer's bar have something to show without a turn first.
+        case "code_usage":
+          return {
+            totals: { ...fakeUsage, input: 41_000, cachedRead: 30_000, output: 1_800 },
+            contextTokens: 24_000,
+            contextWindow: 128_000,
+            autoCompactPercent: 85,
+          };
         case "plan_accounts": {
           // `?plan=two` adds a second, lightly used account.
           const latest = fakePlanLimits();
@@ -1899,10 +1978,6 @@ export function install() {
           const s = db.code.find((x) => x.id === a.id)!;
           Object.assign(s, { hostNode: ME, cwd: a.cwd as string, epoch: s.epoch + 1 });
           return null;
-        }
-        case "code_checkpoints": {
-          const s = db.code.find((x) => x.hostNode === "n-old");
-          return s ? { [s.id]: now() - 3_600_000 } : {};
         }
         case "mesh_status": return mesh;
         case "mesh_create": meshMember(); mesh.name = (a.name as string) || mesh.name; mesh.members[0].name = mesh.name; mesh.members = mesh.members.slice(0, 1); meshStatusChanged(); return null;

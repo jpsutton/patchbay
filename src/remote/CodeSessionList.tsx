@@ -13,8 +13,15 @@ export interface Live {
   status: string;
   busy: boolean;
   permissions: string[];
+  /** Open agent questions; absent from older hosts. */
+  questions?: string[];
+  /** Mid-turn with nothing from the agent for the host's stall limit; absent from older hosts. */
+  stalled?: boolean;
   last: number;
 }
+
+/** Waiting on the user: an approval or an agent question. */
+export const liveNeedsYou = (l?: Live) => (l?.permissions.length ?? 0) > 0 || (l?.questions?.length ?? 0) > 0;
 
 const PROJECT_COLLAPSED_KEY = "patchbay.remote.codeProjectCollapsed";
 const HOST_COLLAPSED_KEY = "patchbay.remote.codeHostCollapsed";
@@ -261,23 +268,32 @@ export function CodeSessionList({
 
   return (
     <>
+      {/* The fixed ActionSheet overlay stays outside the clip wrapper, so it can't be clipped. */}
       {menu && <ActionSheet title={menu.title} actions={menu.actions} onClose={() => setMenu(null)} />}
-      {groupByProject && pinned.length > 0 && (
-        <section>
-          <div className="flex items-center gap-2 px-4 pb-1.5 pt-4 font-mono text-[11px] uppercase tracking-[0.06em] text-faint">
-            Pinned
+      {/*
+       * The list's scroller is a horizontal scroll container (overflow-y:auto coerces overflow-x to
+       * auto). Clip one level inside it so a child wider than the phone (a long title or mono path)
+       * can't extend scrollWidth and leave the list offset or show a horizontal scrollbar — the same
+       * phantom-scroll root cause as the desktop sidebar. `clip` creates no scroll container.
+       */}
+      <div className="min-w-0 overflow-x-clip">
+        {groupByProject && pinned.length > 0 && (
+          <section>
+            <div className="flex items-center gap-2 px-4 pb-1.5 pt-4 font-mono text-[11px] uppercase tracking-[0.06em] text-faint">
+              Pinned
+            </div>
+            {pinned.map((s) => row(s, false))}
+          </section>
+        )}
+        {hosts.map((host) => hostSection(host))}
+        {hosts.length === 0 && active.length === 0 && archived.length === 0 && (
+          <div className="px-4 py-8 text-center text-[14px] text-muted">
+            {onlineOnly ? "No sessions on online computers." : "No code sessions yet."}
           </div>
-          {pinned.map((s) => row(s, false))}
-        </section>
-      )}
-      {hosts.map((host) => hostSection(host))}
-      {hosts.length === 0 && active.length === 0 && archived.length === 0 && (
-        <div className="px-4 py-8 text-center text-[14px] text-muted">
-          {onlineOnly ? "No sessions on online computers." : "No code sessions yet."}
-        </div>
-      )}
-      <ArchivedRow count={archived.length} open={showArchived} onToggle={() => setShowArchived(!showArchived)} />
-      {showArchived && archived.map((s) => row(s, false))}
+        )}
+        <ArchivedRow count={archived.length} open={showArchived} onToggle={() => setShowArchived(!showArchived)} />
+        {showArchived && archived.map((s) => row(s, false))}
+      </div>
     </>
   );
 }
@@ -353,8 +369,15 @@ function ProjectBlock({
 
 function SessionState({ live, online }: { live?: Live; online: boolean }) {
   if (!online) return <span className="text-[12px] text-faint">Offline</span>;
-  if (live && live.permissions.length > 0)
+  if (liveNeedsYou(live))
     return <span className="rounded-full bg-accent px-2 py-0.5 text-[12px] font-semibold text-accent-fg">Needs you</span>;
+  if (live?.busy && live.stalled)
+    return (
+      <span className="flex items-center gap-1.5 text-[12px] text-warn">
+        <Dot size={6} className="text-warn" />
+        Gone quiet
+      </span>
+    );
   if (live?.busy)
     return (
       <span className="flex items-center gap-1.5 text-[12px] text-live">

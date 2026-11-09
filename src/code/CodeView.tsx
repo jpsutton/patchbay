@@ -26,13 +26,15 @@ import {
   type Entry,
 } from "../lib/store";
 import { HostBadge, MoveDialog, OfflineHostBanner } from "./HostControls";
-import { Composer } from "../components/Composer";
+import { Composer, seedDraft } from "../components/Composer";
 import { loadWidth, ResizeHandle, saveWidth } from "../components/ResizeHandle";
 import { MessageTime } from "../components/MessageTime";
 import { Markdown } from "../components/Markdown";
 import { FileLinkContext } from "../components/FileLink";
 import { EditMessage } from "../components/EditMessage";
-import { UsageBar } from "../components/UsageBar";
+import { UsageBar, fmtTokens } from "../components/UsageBar";
+import { sessionModel, sessionModelRef } from "../components/SessionUsage";
+import { coldCacheExpiredAt, isCacheCommand } from "./coldCache";
 import { MobilePlanUsage } from "../components/MobilePlanUsage";
 import { TerminalPane } from "../terminal/TerminalPane";
 import { QuestionCard } from "./QuestionCard";
@@ -43,6 +45,7 @@ import { WorkingIndicator } from "./WorkingIndicator";
 import { SubagentsPanel } from "./SubagentsPanel";
 import { TranscriptRows, type TranscriptRow } from "./TranscriptRows";
 import { DiffView, diffStats } from "./DiffView";
+import { FilesPanel } from "./FilesPanel";
 import { changesKey, collectChanges, normalizePath, type FileChange } from "./changes";
 import { todoPlanOf } from "../lib/todoPlan";
 import { CopyButton, copyText } from "../components/CopyButton";
@@ -55,21 +58,25 @@ import { PaneContext, useViewAction, ViewActive } from "../lib/shortcuts";
 import { usePaneSession } from "../lib/pane";
 import { useRememberedOpen } from "../lib/rowMemory";
 import { enqueueSpeech, speakingNow, stopSpeech } from "../lib/speech";
-import { liveCursorNow, takeLiveProse, type LiveCursor } from "../lib/spokenText";
+import { liveCursorNow, takeLiveProse, takeLiveQuestions, type LiveCursor, type LiveQuestionCursor } from "../lib/spokenText";
 import { HeaderButton } from "../components/HeaderButton";
 import { useDragRegion, WindowControls } from "../components/WindowControls";
 import { isRemoteApp, uuid } from "../lib/platform";
 import {
   ActivityIcon,
+  AgentBadgeIcon,
   CheckIcon,
   ChevronRightIcon,
   CopyIcon,
   FileDiffIcon,
+  FolderIcon,
+  hasAgentBadge,
   InfoIcon,
   MonitorUpIcon,
   MoreIcon,
   PaperclipIcon,
   PencilIcon,
+  ForkIcon,
   PlusIcon,
   RestartIcon,
   SlidersIcon,
@@ -421,6 +428,8 @@ function UserEntry({
   onEdit,
   onReuse,
   onSendNow,
+  onCancelPending,
+  onFork,
 }: {
   e: Extract<Entry, { kind: "user" }>;
   editing: boolean;
@@ -430,6 +439,10 @@ function UserEntry({
   onReuse?: () => void;
   /** Steered in and not read yet: stop the turn and send it as a prompt of its own. */
   onSendNow?: () => void;
+  /** Steered in and not read yet: take it back before the agent acts on it. */
+  onCancelPending?: () => void;
+  /** A new session with the conversation before this message, and this message in its composer. */
+  onFork?: () => void;
 }) {
   if (editing && onEdit) {
     return (
@@ -482,6 +495,16 @@ function UserEntry({
               Send now
             </button>
           )}
+          {onCancelPending && (
+            <button
+              className="flex h-6 w-6 items-center justify-center rounded-md text-muted hover:bg-panel-2 hover:text-fg"
+              onClick={onCancelPending}
+              title="Don't send"
+              aria-label="Cancel pending message"
+            >
+              <XIcon size={12} />
+            </button>
+          )}
         </div>
       )}
       <div className="action-row flex items-center gap-0.5 text-muted opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
@@ -494,6 +517,17 @@ function UserEntry({
           >
             <PencilIcon size={14} />
             {isRemoteApp() && "Edit"}
+          </button>
+        )}
+        {onFork && (
+          <button
+            className={`flex h-7 items-center justify-center rounded-md hover:bg-panel-2 hover:text-fg ${isRemoteApp() ? "gap-1 px-1.5 text-xs" : "w-7"}`}
+            onClick={onFork}
+            title="Fork from here: a new session with the conversation before this message"
+            aria-label="Fork from here"
+          >
+            <ForkIcon size={14} />
+            {isRemoteApp() && "Fork"}
           </button>
         )}
         {e.text && <CopyButton text={e.text} icon={<CopyIcon size={14} />} />}
@@ -557,6 +591,9 @@ const EntryView = memo(function EntryView({
   canReuse,
   onReuse,
   onSendNow,
+  onCancelPending,
+  canFork,
+  onFork,
   sessionId,
 }: {
   e: Entry;
@@ -579,6 +616,11 @@ const EntryView = memo(function EntryView({
   onReuse?: (i: number) => void;
   /** Send now for a steered message still waiting; given the prompt id. */
   onSendNow?: (promptId: string) => void;
+  /** Take back a steered message still waiting; given the prompt id. */
+  onCancelPending?: (promptId: string) => void;
+  /** The agent can fork the session here (`onFork` must be stable). */
+  canFork?: boolean;
+  onFork?: (i: number) => void;
   sessionId: string;
 }) {
   switch (e.kind) {
@@ -591,6 +633,8 @@ const EntryView = memo(function EntryView({
           onEdit={canEdit && onEdit ? (t, a) => onEdit(i, t, a) : undefined}
           onReuse={canReuse && onReuse ? () => onReuse(i) : undefined}
           onSendNow={e.pending && e.promptId && onSendNow ? () => onSendNow(e.promptId!) : undefined}
+          onCancelPending={e.pending && e.promptId && onCancelPending ? () => onCancelPending(e.promptId!) : undefined}
+          onFork={canFork && onFork && !e.pending ? () => onFork(i) : undefined}
         />
       );
     case "agent":
@@ -695,7 +739,7 @@ function backgroundLabel(tc: AcpToolCall): string {
   return ((toolDescription(tc) ?? tc.title) || "a command").split("\n")[0];
 }
 
-/** The right blade (Activity, Changes): its width is kept between runs. */
+/** The right blade (Activity, Changes, Files): its width is kept between runs. */
 const BLADE_WIDTH_KEY = "patchbay.bladeWidth";
 const BLADE_DEFAULT = 440;
 const BLADE_MIN = 320;
@@ -908,6 +952,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const sessions = useStore((s) => s.codeSessions);
   const state = useStore((s) => (activeId ? s.code[activeId] : undefined));
   const models = useStore((s) => s.models);
+  const providers = useStore((s) => s.providers);
   const pushCodeEntry = useStore((s) => s.pushCodeEntry);
   const setCodeBusy = useStore((s) => s.setCodeBusy);
   const clearCodeRestore = useStore((s) => s.clearCodeRestore);
@@ -915,15 +960,27 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const setToast = useStore((s) => s.setToast);
   const askConfirm = useStore((st) => st.askConfirm);
   const truncateCode = useStore((st) => st.truncateCode);
+  const composerInsert = useStore((s) => s.composerInsert);
+  // ChatView and every split pane stay mounted. Only the visible, focused pane consumes an insert,
+  // and PaneHost focuses a pane on pointer-down before the button's click fires.
+  const insertViewActive = useContext(ViewActive);
+  const insertPaneFocused = useContext(PaneContext)?.focused ?? true;
   const session = sessions.find((s) => s.id === activeId) ?? null;
 
   const [showTerm, setShowTerm] = useState(false);
-  const [blade, setBlade] = useState<"activity" | "changes" | null>(null);
+  const [blade, setBlade] = useState<"activity" | "changes" | "files" | null>(null);
   const [bladeWidth, setBladeWidth] = useState(() => loadWidth(BLADE_WIDTH_KEY, BLADE_DEFAULT, BLADE_MIN, BLADE_MAX));
   const [termMounted, setTermMounted] = useState<Record<string, boolean>>({});
   const [editingIdx, setEditingIdx] = useState<number | null>(null);
-  /** Fills the composer after Stop when this agent cannot rewind. */
-  const [composerSeed, setComposerSeed] = useState<{ id: number; text: string; replace?: boolean } | null>(null);
+  /** Fills the composer after Stop, or appends a share link from a transcript row. */
+  const [composerSeed, setComposerSeed] = useState<{ id: number; text: string; replace?: boolean; insert?: boolean; mentions?: string[] } | null>(null);
+  // A share-link action in a file row appends markdown to this pane's composer. Take it
+  // atomically so only one split pane inserts it (pb-20261105-18).
+  useEffect(() => {
+    if (!composerInsert || !insertViewActive || !insertPaneFocused) return;
+    const pending = useStore.getState().takeComposerInsert();
+    if (pending) setComposerSeed({ id: pending.id, text: pending.text, insert: true, mentions: pending.mentions });
+  }, [composerInsert, insertViewActive, insertPaneFocused]);
   const [moving, setMoving] = useState<"move" | "takeOver" | null>(null);
   /** The header's "more" menu in a narrow pane: where it opens, when it's open. */
   const [more, setMore] = useState<{ x: number; y: number } | null>(null);
@@ -1004,6 +1061,9 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     (i: number, text: string, atts: Attachment[]) => editRef.current?.(i, text, atts) ?? Promise.resolve(false),
     [],
   );
+  // Likewise for `forkSession`, at a message.
+  const forkRef = useRef<(i: number | null) => Promise<void>>(null);
+  const onFork = useCallback((i: number) => void forkRef.current?.(i), []);
   // Phone, agent without rewind: put an earlier prompt back in the composer to edit and resend.
   const onReuse = useCallback(
     (i: number) => {
@@ -1017,6 +1077,14 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const onSendNow = useCallback(
     (promptId: string) => {
       if (activeId) api.codeSendNow(activeId, promptId).catch((e) => setToast(errorText(e)));
+    },
+    [activeId],
+  );
+
+  // A steered message the agent hasn't read: take it back before it acts on it.
+  const onCancelPending = useCallback(
+    (promptId: string) => {
+      if (activeId) api.codeUnqueue(activeId, promptId).catch((e) => setToast(errorText(e)));
     },
     [activeId],
   );
@@ -1069,20 +1137,25 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const skipListen = useRef(false);
   useStopSpeechWhenHidden();
   // Live reading: each agent message is spoken as it finishes, in order, for the length of a
-  // turn. `live` is where reading has got to in the session on screen.
+  // turn. `live` is where reading has got to in the session on screen. Questions are not entries
+  // (they live in `state.questions`), so they have their own cursor with the same join/once rules.
   const live = useRef<{ id: string; cursor: LiveCursor } | null>(null);
+  const questionCursor = useRef<LiveQuestionCursor | null>(null);
   const listenEntries = state?.entries;
+  const listenQuestions = state?.questions;
   const listenWorking = state ? codeWorking(state) : false;
 
   useEffect(() => {
     if (!listenOn || !viewActive || !activeId || !listenEntries) {
       live.current = null;
+      questionCursor.current = null;
       return;
     }
     if (live.current?.id !== activeId) {
       // Join a turn already under way at the message being written; read nothing from history.
       if (!listenWorking) {
         live.current = null;
+        questionCursor.current = null;
         return;
       }
       live.current = { id: activeId, cursor: liveCursorNow(listenEntries) };
@@ -1090,7 +1163,12 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     const cur = live.current;
     const { texts, cursor } = takeLiveProse(listenEntries, cur.cursor, !listenWorking);
     cur.cursor = cursor;
-    // Stop was pressed: keep the cursor moving but say nothing more from this turn.
+    // A form already pending when listening starts is history; only a new arrival is read, once.
+    // Compute this before the Stop branch so a question arriving while stopped is still marked
+    // seen and never blurted out later when Stop clears.
+    const q = takeLiveQuestions(listenQuestions ?? [], questionCursor.current, activeId, cur !== null);
+    questionCursor.current = q.cursor;
+    // Stop was pressed: keep both cursors moving but say nothing more from this turn.
     if (skipListen.current) {
       if (!listenWorking) skipListen.current = false;
       return;
@@ -1100,7 +1178,12 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
         setToast(e instanceof Error ? e.message : "Could not read this aloud"),
       ),
     );
-  }, [activeId, listenEntries, listenWorking, viewActive, listenOn, setToast]);
+    q.forms.forEach(({ requestId, text }) =>
+      enqueueSpeech(text, `listen:${activeId}:question:${requestId}`).catch((e) =>
+        setToast(e instanceof Error ? e.message : "Could not read this aloud"),
+      ),
+    );
+  }, [activeId, listenEntries, listenQuestions, listenWorking, viewActive, listenOn, setToast]);
 
   const changes = useMemo(() => {
     if (!state || !session) return [];
@@ -1237,6 +1320,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
       <ActivityPanel plan={s?.plan ?? []} jobs={jobs} onClose={() => setBlade(null)} />
     ) : blade === "changes" ? (
       <ChangesPanel changes={changes} cwd={session.cwd} onClose={() => setBlade(null)} />
+    ) : blade === "files" ? (
+      <FilesPanel cwd={session.cwd} sessionId={session.id} changes={changes} onClose={() => setBlade(null)} />
     ) : null;
   const sideBySideBlade = viewWidth >= 600;
   const minBladeForView = Math.min(BLADE_MIN, Math.max(260, Math.round(viewWidth * 0.4)));
@@ -1256,12 +1341,10 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
           : "Starting agent…"
         : null;
   const acpModels = s?.models;
-  // Patchbay's own agent and Grok Build run on Patchbay's models (`pb-<id>`); other agents bring their own.
-  const patchbayModels = usesPatchbayModels(session.agent);
-  const currentModelRef = patchbayModels
-    ? (acpModels?.currentModelId?.replace(/^pb-/, "") ?? session.modelRef)
-    : (acpModels?.currentModelId ?? session.agentModel);
-  const model = patchbayModels ? models.find((m) => m.id === currentModelRef) : undefined;
+  // Which catalog model this session runs on: Patchbay's own agent and Grok Build follow the
+  // catalog (`pb-<id>` model ids); the other agents bring a model the catalog doesn't price or size.
+  const currentModelRef = sessionModelRef(session, acpModels?.currentModelId);
+  const model = sessionModel(session, acpModels?.currentModelId, models);
   const configOptions = (s?.configOptions ?? []).filter((o) => o.type === "select");
 
   const setConfigOption = async (o: AcpConfigOption, value: string) => {
@@ -1303,6 +1386,44 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     }
   };
 
+  /**
+   * Before a prompt leaves the composer: when the prompt cache has expired and the context is
+   * big, the whole context is re-cached at the cache-write price. Offer to compact first.
+   * Resolves false to keep the draft (the user cancelled); true to send.
+   */
+  const confirmColdCache = async (text: string): Promise<boolean> => {
+    if (!activeId) return true;
+    const st = useStore.getState().code[activeId];
+    // Mid-turn the message steers or queues, and the cache is in use.
+    if (!st || st.busy || isCacheCommand(text)) return true;
+    const expiredAt = coldCacheExpiredAt(st.usage?.cache, st.usage?.contextTokens, Date.now());
+    if (expiredAt == null) return true;
+    const when = new Date(expiredAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const { ok, alt } = await askConfirm({
+      title: "Prompt cache expired",
+      body:
+        `The cache expired at ${when}, so sending now re-caches about ${fmtTokens(st.usage?.contextTokens ?? 0)} tokens ` +
+        "at the cache-write price.\n\nCompacting first summarizes the conversation at the regular input price, " +
+        "so only the short summary is re-cached. Your message sends once it finishes.",
+      confirmLabel: "Compact first",
+      altLabel: "Send anyway",
+    });
+    if (alt) return true;
+    if (!ok) return false;
+    await send("/compact", []);
+    // The compaction is a turn of its own: wait it out so the message starts its own turn after it.
+    await new Promise<void>((resolve) => {
+      const idle = () => !useStore.getState().code[activeId]?.busy;
+      if (idle()) return resolve();
+      const unsubscribe = useStore.subscribe(() => {
+        if (!idle()) return;
+        unsubscribe();
+        resolve();
+      });
+    });
+    return true;
+  };
+
   const editAndResend = async (entryIndex: number, text: string, atts: Attachment[]): Promise<boolean> => {
     if (!activeId || !s) return false;
     const entry = s.entries[entryIndex];
@@ -1332,6 +1453,33 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   };
 
   editRef.current = editAndResend;
+
+  /**
+   * Fork into a new session: at a user message (the conversation before it, with the message in
+   * the new session's composer to edit and send) or, with null, the whole conversation. The source
+   * session is unchanged; both work in the same folder.
+   */
+  const forkSession = async (entryIndex: number | null) => {
+    if (!activeId || !s) return;
+    const entry = entryIndex == null ? null : s.entries[entryIndex];
+    if (entry && entry.kind !== "user") return;
+    const ordinal = entryIndex == null ? null : s.entries.slice(0, entryIndex).filter((x) => x.kind === "user").length;
+    try {
+      const made = await api.codeFork(activeId, ordinal, entry?.text ?? "");
+      if (entry) seedDraft(`code:${made.id}`, entry.text, entry.attachments ?? []);
+      await refreshCodeSessions();
+      // A phone's gateway can list sessions before the host's new row reaches it: show it anyway.
+      if (!useStore.getState().codeSessions.some((x) => x.id === made.id)) {
+        useStore.setState((cur) => ({ codeSessions: [made, ...cur.codeSessions] }));
+      }
+      useStore.getState().selectCodeSession(made.id);
+      setToast("Forked into a new session. Both sessions work in the same folder.");
+    } catch (e) {
+      setToast(`Could not fork: ${errorText(e)}`);
+    }
+  };
+
+  forkRef.current = forkSession;
 
   // The transcript as rows, mounted only near the viewport: earlier agents' part, the cached
   // history, the plan, then this agent's entries.
@@ -1380,6 +1528,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   }
   if (s && (ready || !s.history)) {
     const canEdit = ready && !working && !!s.extensions.rewind;
+    const canFork = ready && !working && !!s.extensions.fork;
     // Only the last prompt can be put back in the composer, and only when the agent can't rewind.
     const lastUser = s.entries.findLastIndex((x) => x.kind === "user");
     const canReuse = remote && ready && !working && !s.extensions.rewind;
@@ -1403,6 +1552,9 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             canReuse={canReuse && i === lastUser && e.kind === "user" && !!e.text}
             onReuse={onReuse}
             onSendNow={forceSend ? onSendNow : undefined}
+            onCancelPending={onCancelPending}
+            canFork={canFork && e.kind === "user"}
+            onFork={onFork}
             sessionId={session.id}
           />
         )),
@@ -1474,6 +1626,13 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
       {AGENT_LABELS[session.agent] ?? session.agent}
     </span>
   );
+  // Phone header badge: which agent runs this session, plus its provider when Patchbay routes it
+  // through a model. Other agents bring their own sign-in, where modelRef is only a default and
+  // must not be shown as the provider in use.
+  const agentName = AGENT_LABELS[session.agent] ?? session.agent;
+  const routedModel = usesPatchbayModels(session.agent) ? models.find((m) => m.id === session.modelRef) : undefined;
+  const providerName = routedModel ? providers.find((p) => p.id === routedModel.providerId)?.name : undefined;
+  const agentBadgeLabel = providerName ? `${agentName} · ${providerName}` : agentName;
   // A phone always gets a select: a segmented control doesn't fit beside the others.
   const modeControl =
     s?.modes && modes.length > 0 ? (
@@ -1575,11 +1734,14 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
       f,
       f === "markdown" ? codeToMarkdown(session, s.entries, s.toolCalls) : codeToJson(session, s.entries, s.toolCalls),
     );
+  // The whole conversation into a new session: a header button, or a "more" item in a narrow pane.
+  const canForkSession = !!s?.extensions.fork && ready && !working && s.entries.length > 0;
   const moreActions: ItemAction[] = [
     ...(level >= 3
       ? [
           { label: outstanding ? `Activity: plan and jobs (${outstanding})` : "Activity: plan and jobs", onSelect: () => setBlade(blade === "activity" ? null : "activity") },
           { label: changes.length ? `Changes (${changes.length})` : "Changes", onSelect: () => setBlade(blade === "changes" ? null : "changes") },
+          { label: "Files", onSelect: () => setBlade(blade === "files" ? null : "files") },
           ...(!remote && !hostOffline
             ? [
                 {
@@ -1600,6 +1762,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
         ]
       : []),
     ...(showMove && !working ? [{ label: "Move to another computer…", onSelect: () => setMoving("move") }] : []),
+    ...(canForkSession ? [{ label: "Fork session", onSelect: () => void forkSession(null) }] : []),
     { label: "Session info…", onSelect: () => useStore.getState().setSessionInfoId(session.id) },
     { label: "Restart the agent", onSelect: () => start(session.id) },
   ];
@@ -1610,6 +1773,17 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
       <header ref={headerRef} {...drag} className={`flex h-12 shrink-0 items-center gap-1 border-b border-line pr-3 ${leading ? "pl-1" : "pl-6"}`}>
         {leading}
         <Dot {...dot} title={dotLabel} role="img" aria-label={`Agent ${dotLabel}`} />
+        {/* The phone has no sidebar to name the agent, so show the same badge the desktop list does. */}
+        {remote && hasAgentBadge(session.agent) && (
+          <span
+            className="flex shrink-0 items-center justify-center rounded-full bg-panel p-[2px] text-muted"
+            role="img"
+            aria-label={agentBadgeLabel}
+            title={agentBadgeLabel}
+          >
+            <AgentBadgeIcon agent={session.agent} size={12} />
+          </span>
+        )}
         {/* The minimum is on this box, not the title: only then does a crowded header overflow (which is how
             `fitHeader` notices) instead of the title drawing over its neighbours. The last level lets it shrink. */}
         <div
@@ -1665,9 +1839,23 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
           <FileDiffIcon />
         </HeaderButton>
         )}
+        {level < 3 && (
+        <HeaderButton
+          label="Files"
+          active={blade === "files"}
+          onClick={() => setBlade(blade === "files" ? null : "files")}
+        >
+          <FolderIcon />
+        </HeaderButton>
+        )}
         {showMove && level < 2 && (
           <HeaderButton label="Move to another computer" disabled={working} onClick={() => setMoving("move")}>
             <MonitorUpIcon />
+          </HeaderButton>
+        )}
+        {canForkSession && level < 2 && (
+          <HeaderButton label="Fork session: a new session with this whole conversation" onClick={() => void forkSession(null)}>
+            <ForkIcon />
           </HeaderButton>
         )}
         {!remote && level < 3 && (
@@ -1861,6 +2049,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
               onRestored={() => clearCodeRestore(session.id)}
               disabled={!ready}
               commands={s?.commands}
+              // A phone never sees the agent's events, so `commands` stays empty there: ask the host.
+              slashCommands={isRemoteApp() ? () => api.listSessionCommands(session.id) : undefined}
               mentionFiles={() => api.listProjectFiles(session.cwd, session.id)}
               onEditLast={() => {
                 if (!ready || working || !s) return;
@@ -1871,6 +2061,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
               seed={composerSeed}
               onStop={stopTurn}
               onSend={send}
+              beforeSend={confirmColdCache}
               onForceSend={forceSend ? (t, a, m) => send(t, a, m, true) : undefined}
               placeholder={
                 reconnecting
@@ -2004,7 +2195,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             <aside
               role="dialog"
               aria-modal="true"
-              aria-label={blade === "activity" ? "Activity" : "Changes"}
+              aria-label={blade === "activity" ? "Activity" : blade === "files" ? "Files" : "Changes"}
               className="absolute right-0 top-0 bottom-0 z-40 flex w-[88%] max-w-[420px] flex-col border-l border-line bg-bg shadow-2xl"
             >
               {bladePanel}

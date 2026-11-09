@@ -92,6 +92,12 @@ impl Host for AppHost {
         providers::web_search_key(&self.db).map(|(k, _)| k)
     }
 
+    fn native_web_search(&self, model_id: &str) -> bool {
+        model_ref_from_key(model_id)
+            .and_then(|r| providers::resolve(&self.db, r).ok())
+            .is_some_and(|r| providers::native_web_search(&r))
+    }
+
     fn settings(&self) -> Settings {
         let prefs = crate::prefs::load(&self.db);
         let (e, d, c) = (prefs.agent_engine, Limits::default(), prefs.claude_config.clone());

@@ -1,6 +1,6 @@
 [package]
 name = "patchbay"
-version = "0.20.0"
+version = "0.21.0"
 # `tauri dev` runs `cargo run`, which can't choose between this and `patchbayd` on its own.
 default-run = "patchbay"
 edition = "2024"
@@ -42,8 +42,9 @@ desktop = [
 # Builds patchbayd. A marker so `tauri build` (which enables only `desktop`, see
 # tauri.conf.json) leaves the daemon out of the app's bundles.
 daemon = []
-# The daemon's browser UI.
-web = ["daemon", "dep:axum"]
+# The daemon's browser UI. axum is a normal dependency (below): the standalone desktop also
+# serves artifact shares over a small loopback axum server, so it must be available in every build.
+web = ["daemon"]
 # Tests of the window's IPC path on Tauri's mock runtime.
 ipc-test = ["desktop", "tauri/test"]
 
@@ -85,7 +86,7 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["compat", "rt"] }
+tokio-util = { version = "0.7", features = ["compat", "rt", "io"] }
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -99,7 +100,7 @@ hex = "0.4.3"
 rand = "0.8"
 tar = "0.4"
 urlencoding = "2"
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws", "query"], optional = true }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws", "query"] }
 zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
 
 # The app-drawn title bar on Wayland: KWin keeps its own title bar unless the window announces
@@ -118,6 +119,10 @@ ashpd = { version = "0.11", default-features = false, features = ["tokio"], opti
 # The tests raise the open-file limit (see `test_support`); the same libc tokio already links.
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+# Drive the artifact-share axum Router with in-process HTTP requests (`tower::ServiceExt::oneshot`).
+tower = { version = "0.5", features = ["util"] }
 
 [profile.dev.package."*"]
 opt-level = 1

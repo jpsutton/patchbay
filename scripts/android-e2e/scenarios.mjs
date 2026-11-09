@@ -5,8 +5,9 @@
 //   scenarios.mjs --seed FILE --src DIR [--only a,b]     (--list prints the names)
 //
 // A scenario that needs code the checked-out source does not have is SKIPPED, not failed, so the
-// same suite runs on every branch. Exit 1 when any scenario FAILED; skipped ones are not a failure.
-// `adb` picks the device from ANDROID_SERIAL. Needs Node 22 or newer.
+// same suite runs on every branch. Exit 1 when any scenario FAILED, or when --only names no
+// scenario at all; skipped ones are not a failure. `adb` picks the device from ANDROID_SERIAL.
+// Needs Node 22 or newer.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -124,6 +125,45 @@ const scenarios = [
     },
   },
   {
+    name: "fork",
+    needs: () => source("src/code/CodeView.tsx", "Fork from here"),
+    note: "Fork from here on the phone opens a new session with the earlier conversation and the message in its composer",
+    async run(ctx) {
+      const { page } = ctx;
+      const title = ctx.seed.session.title;
+      await openSession(ctx);
+      const forks = () => page.evalJs(`document.querySelectorAll('[aria-label="Fork from here"]').length`);
+      // Fork shows only while the agent is idle; the turns before this one may still be ending.
+      await until("two Fork from here buttons", 60_000, async () => (await forks()) >= 2);
+      const before = await forks();
+      const text = await page.evalJs(
+        `(() => { const b = [...document.querySelectorAll('[aria-label="Fork from here"]')].pop(); const t = b?.closest('.group')?.querySelector('.whitespace-pre-wrap')?.textContent ?? ''; b?.click(); return t; })()`,
+      );
+      if (!text) throw new Error("could not read and click the last user message's Fork from here");
+      await waitText(page, "the fork toast", /Forked into a new session/);
+      const esc = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      await waitText(page, "the fork's title", new RegExp(`${esc} \\(fork\\)`));
+      await until("the message in the fork's composer", 15_000, async () =>
+        (await page.evalJs(`document.querySelector('textarea')?.value ?? ''`)).includes(text.trim()),
+      );
+      // The fork holds the conversation before that message: one user message fewer.
+      await until(`${before - 1} user messages in the fork`, 60_000, async () => (await forks()) === before - 1);
+      await setComposer(page, "");
+      // Fork session, from the header: the whole conversation, so as many user messages as the source.
+      const forkTitle = new RegExp(`${esc} \\(fork\\)`);
+      await openSession(ctx);
+      await until("the source's Fork from here buttons again", 60_000, async () => (await forks()) === before);
+      if (forkTitle.test(await page.text())) throw new Error("the source session already shows a fork's title");
+      await until("the Fork session button", 10_000, () => click(page, '[aria-label^="Fork session"]'));
+      await waitText(page, "the whole-session fork's title", forkTitle);
+      await until(`${before} user messages in the whole-session fork`, 60_000, async () => (await forks()) === before);
+      const draft = await page.evalJs(`document.querySelector('textarea')?.value ?? ''`);
+      if (draft) throw new Error(`a whole-session fork should open with an empty composer, not "${draft}"`);
+      // The scenarios after this one look at the seeded session, not its forks.
+      await openSession(ctx);
+    },
+  },
+  {
     name: "session-info",
     needs: () => source("src/code/SessionInfoDialog.tsx"),
     note: "the info dialog shows both session ids; with host info, the host's version and OS",
@@ -186,6 +226,11 @@ async function run() {
   if (!args.seed) throw new Error("--seed is required");
   const seed = JSON.parse(readFileSync(args.seed, "utf8"));
   const only = args.only ? new Set(args.only.split(",")) : null;
+  // A --only that matches nothing would run zero scenarios and exit 0; fail before touching
+  // the phone, naming what was asked for.
+  if (only && !scenarios.some((s) => only.has(s.name))) {
+    throw new Error(`--only matched no scenario; asked for: ${[...only].join(", ")} (scenarios.mjs --list prints the names)`);
+  }
   let page = await main(await attach());
   const ctx = {
     seed,

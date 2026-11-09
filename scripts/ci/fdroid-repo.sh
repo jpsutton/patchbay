@@ -25,9 +25,24 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 pages="$work/pages"
 mkdir -p "$pages"
-# Start from what is published, so the older versions stay listed.
+# Start from what is published, so the older versions stay listed. A failed fetch must not
+# be read as a first publish: that would rebuild the index from only the new APK and
+# force-push a tree wiping every published APK and the apt tree on this branch.
 if git -C "$src" fetch --depth 1 "$remote" gh-pages 2>/dev/null; then
     git -C "$src" archive FETCH_HEAD | tar -x -C "$pages"
+    if [ -z "$(ls -A "$pages")" ]; then
+        echo "fdroid-repo.sh: the fetched gh-pages tree is empty; refusing to force-push over what is published" >&2
+        exit 1
+    fi
+elif refs=$(git -C "$src" ls-remote --heads "$remote" gh-pages 2>&1); then
+    if [ -n "$refs" ]; then
+        echo "fdroid-repo.sh: git fetch of gh-pages failed although the branch exists; refusing to force-push a rebuilt tree: $refs" >&2
+        exit 1
+    fi
+    # The branch is genuinely absent: a first publish, where an empty $pages is correct.
+else
+    echo "fdroid-repo.sh: fetch failed and gh-pages existence cannot be checked; refusing to force-push: $refs" >&2
+    exit 1
 fi
 mkdir -p "$pages/fdroid/repo/icons" "$pages/fdroid/archive/icons" "$pages/fdroid/metadata"
 cp "$src/remote/fdroid/metadata/"*.yml "$pages/fdroid/metadata/"

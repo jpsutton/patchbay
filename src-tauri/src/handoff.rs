@@ -4,13 +4,13 @@
 //! The source packages a snapshot into an outbox directory; the target fetches its files over
 //! the mesh and unpacks them into its own checkout. Uncommitted work travels as a commit made
 //! with a private index (`refs/patchbay/<kind>/<session>`), so the user's branch and index stay
-//! untouched on the source. Checkpoints use the same package, but a receiver keeps them in a
-//! bare mirror repository until a "take over" needs them.
+//! untouched on the source. This only happens when the user moves a session and the source is
+//! online: the working folder is never replicated to other computers on its own.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::code::agent_state;
@@ -68,11 +68,7 @@ fn git_env(dir: &Path, env: &[(&str, &std::ffi::OsStr)], args: &[&str]) -> Resul
     for (k, v) in env {
         cmd.env(k, v);
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
+    patchbay_agent::proc::NoWindow::no_window(&mut cmd);
     let out = cmd.output().context("running git")?;
     if !out.status.success() {
         bail!("git {}: {}", args.first().unwrap_or(&""), String::from_utf8_lossy(&out.stderr).trim());
@@ -86,14 +82,6 @@ pub fn outbox(data_dir: &Path) -> PathBuf {
 
 pub fn inbox(data_dir: &Path) -> PathBuf {
     data_dir.join("mesh").join("inbox")
-}
-
-fn checkpoint_dir(data_dir: &Path, session_id: &str) -> PathBuf {
-    data_dir.join("mesh").join("checkpoints").join(session_id)
-}
-
-fn mirror_dir(data_dir: &Path, session_id: &str) -> PathBuf {
-    data_dir.join("mesh").join("mirrors").join(format!("{session_id}.git"))
 }
 
 /// Commit the working tree as it is (tracked changes and untracked, non-ignored files) on top
@@ -242,7 +230,7 @@ fn repo_root(target_cwd: &Path, subpath: &str) -> PathBuf {
     target_cwd.ancestors().nth(depth).unwrap_or(target_cwd).to_path_buf()
 }
 
-/// Bring `target_cwd` to the snapshot: fetch it from `source` (a bundle file or a mirror repo),
+/// Bring `target_cwd` to the snapshot: fetch it from `source` (a bundle file),
 /// put the branch at the source's HEAD and lay the uncommitted work on top, unstaged.
 /// Returns a note for the user when the branch had to be renamed.
 pub fn apply_git(source: &Path, g: &GitMeta, target_cwd: &Path, from_name: &str) -> Result<Option<String>> {
@@ -328,62 +316,6 @@ fn restore_agent(dir: &Path, meta: &Meta, agent_home: &Path, target_cwd: &Path) 
         }
         _ => Ok(false),
     }
-}
-
-/// Keep a received checkpoint: git objects into this session's mirror, the rest beside it.
-pub fn store_checkpoint(data_dir: &Path, dir: &Path, meta: &Meta) -> Result<()> {
-    let keep = checkpoint_dir(data_dir, &meta.session_id);
-    std::fs::create_dir_all(&keep)?;
-    if let Some(g) = &meta.git
-        && g.bundle
-    {
-        let mirror = mirror_dir(data_dir, &meta.session_id);
-        if !mirror.exists() {
-            std::fs::create_dir_all(&mirror)?;
-            git(&mirror, &["init", "-q", "--bare"])?;
-        }
-        let src = dir.join("workspace.bundle");
-        git(&mirror, &["fetch", "-q", &src.to_string_lossy(), &format!("+{r}:{r}", r = g.reference)])?;
-    }
-    for f in ["agent.tar", "workspace.tar"] {
-        let p = dir.join(f);
-        let dest = keep.join(f);
-        if p.exists() {
-            std::fs::copy(&p, &dest)?;
-        } else if meta.files.iter().all(|x| x != f) {
-            let _ = std::fs::remove_file(&dest);
-        }
-    }
-    std::fs::write(keep.join("meta.json"), serde_json::to_vec_pretty(meta)?)?;
-    Ok(())
-}
-
-/// The latest checkpoint this node holds for a session.
-pub fn checkpoint(data_dir: &Path, session_id: &str) -> Option<Meta> {
-    let raw = std::fs::read(checkpoint_dir(data_dir, session_id).join("meta.json")).ok()?;
-    serde_json::from_slice(&raw).ok()
-}
-
-/// Commits this node already holds for a session's checkpoints (sent as `have`).
-pub fn checkpoint_have(data_dir: &Path, session_id: &str) -> Vec<String> {
-    let Some(meta) = checkpoint(data_dir, session_id) else { return Vec::new() };
-    let Some(g) = meta.git else { return Vec::new() };
-    let mirror = mirror_dir(data_dir, session_id);
-    git(&mirror, &["rev-parse", "-q", "--verify", &g.reference]).map(|c| vec![c]).unwrap_or_default()
-}
-
-/// Restore a session from the local checkpoint. Returns (agent state restored, note).
-pub fn restore_checkpoint(data_dir: &Path, agent_home: &Path, session_id: &str, target_cwd: &Path, from_name: &str) -> Result<(bool, Option<String>)> {
-    let meta = checkpoint(data_dir, session_id).ok_or_else(|| anyhow!("no checkpoint of this session on this computer"))?;
-    let keep = checkpoint_dir(data_dir, session_id);
-    let mut note = None;
-    if let Some(g) = &meta.git {
-        note = apply_git(&mirror_dir(data_dir, session_id), g, target_cwd, from_name)?;
-    } else if meta.tarball {
-        apply_tarball(&keep.join("workspace.tar"), target_cwd)?;
-    }
-    let restored = restore_agent(&keep, &meta, agent_home, target_cwd)?;
-    Ok((restored, note))
 }
 
 /// Save work a session did here after it moved elsewhere (we were offline when it was taken
@@ -571,17 +503,6 @@ mod tests {
         // Changes arrive uncommitted and unstaged.
         assert_eq!(git(&dst, &["diff", "--cached", "--name-only"]).unwrap(), "");
         assert!(git(&dst, &["status", "--porcelain"]).unwrap().contains("M a.txt"));
-
-        // A checkpoint stored in a mirror can restore it too, and later ones are incremental.
-        store_checkpoint(&data, &dir, &meta).unwrap();
-        let have = checkpoint_have(&data, "sess1");
-        assert_eq!(have.len(), 1);
-        std::fs::write(src.join("a.txt"), "second edit").unwrap();
-        let (dir2, meta2) = package(&data, &data, &session(&src), "handoff", &have).unwrap();
-        store_checkpoint(&data, &dir2, &meta2).unwrap();
-        let dst2 = base.join("dst2");
-        restore_checkpoint(&data, &data.join("home3"), "sess1", &dst2, "alpha").unwrap();
-        assert_eq!(std::fs::read_to_string(dst2.join("a.txt")).unwrap(), "second edit");
     }
 
     #[test]

@@ -9,11 +9,13 @@ pub mod grok_config;
 pub mod import_claude;
 pub mod mcp;
 pub mod native;
+pub mod opencode_state;
 pub mod antigravity_plan;
 pub mod cursor_plan;
 pub mod permissions;
 pub mod plan_limits;
 pub mod questions;
+pub mod stall;
 pub mod titles;
 pub mod wire;
 
@@ -49,6 +51,8 @@ pub struct CodeManager {
     pub plan: plan_limits::PlanGuard,
     pub cursor_plan: cursor_plan::CursorPlanGuard,
     pub antigravity_plan: antigravity_plan::AntigravityPlanGuard,
+    /// Turns the agent has gone quiet in (`stall`).
+    pub stall: stall::StallWatch,
     /// Tests: `start` attaches a stand-in agent and hands its commands out here instead of spawning one.
     #[cfg(test)]
     pub test_started: Mutex<Option<mpsc::UnboundedSender<(String, mpsc::UnboundedReceiver<AgentCmd>)>>>,
@@ -304,6 +308,21 @@ impl CodeManager {
         rx.await.map_err(|_| anyhow!("agent stopped"))?
     }
 
+    /// "Send now": a queued prompt goes next (the running turn is cancelled), or one steered
+    /// into the running turn is taken out of it. Says what it did, or why it could not, so the
+    /// button never does nothing.
+    pub async fn send_now(&self, code_session_id: &str, prompt_id: &str) -> Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.send(
+            code_session_id,
+            AgentCmd::SendNow {
+                prompt_id: prompt_id.to_owned(),
+                reply: Some(reply),
+            },
+        )?;
+        rx.await.map_err(|_| anyhow!("agent stopped"))?
+    }
+
     pub async fn set_model(&self, code_session_id: &str, model_id: String) -> Result<()> {
         let (reply, rx) = oneshot::channel();
         self.send(code_session_id, AgentCmd::SetModel { model_id, reply })?;
@@ -344,6 +363,13 @@ impl CodeManager {
                 reply,
             },
         )?;
+        rx.await.map_err(|_| anyhow!("agent stopped"))?
+    }
+
+    /// Copy the session into a new agent session (see `AgentCmd::Fork`); returns its id.
+    pub async fn fork(&self, code_session_id: &str, ordinal: Option<usize>, preview: String) -> Result<String> {
+        let (reply, rx) = oneshot::channel();
+        self.send(code_session_id, AgentCmd::Fork { ordinal, preview, reply })?;
         rx.await.map_err(|_| anyhow!("agent stopped"))?
     }
 

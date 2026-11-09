@@ -256,6 +256,34 @@ export interface Attachment {
   path: string;
 }
 
+/**
+ * An explicit, revocable, time-limited HTTP share of one file on a host (src-tauri/shares.rs).
+ * `url` is rooted at the per-node `artifacts.baseUrl` setting; clicking it opens the artifact in
+ * the system browser from an isolated, sandboxed origin.
+ */
+export interface ShareInfo {
+  token: string;
+  /** Canonicalized absolute path of the shared file. */
+  path: string;
+  name: string;
+  mime: string;
+  url: string;
+  /** Unix milliseconds. */
+  createdAt: number;
+  /** Unix milliseconds; after this the server refuses the token. */
+  expiresAt: number;
+}
+
+/** Result of fetching a share through the gateway (phone's `remote_share_fetch` command). */
+export interface ShareFetch {
+  /** 200 = ok, 404 = expired/revoked/unknown/owner offline (no bytes). */
+  status: number;
+  /** Exact response headers from the owning node, as [name, value] pairs. */
+  headers: [string, string][];
+  /** Base64 artifact bytes (empty when status != 200). */
+  bodyB64: string;
+}
+
 export interface Message {
   id: string;
   conversationId: string;
@@ -515,6 +543,8 @@ export type PromptDelivery = "sent" | "steered" | "queued";
 export interface AgentExtensions {
   statusLine: boolean;
   rewind: boolean;
+  /** The session can be forked into a new one, at a message or at the end. */
+  fork?: boolean;
   /** Runs on Patchbay's providers and models: a change to them needs a restart to apply. */
   patchbayModels?: boolean;
   /** A message sent mid-turn joins the running turn; otherwise it waits for the turn to end. */
@@ -579,6 +609,8 @@ export type CodeEvent =
   | { type: "config"; models: AcpModels | null; modes: AcpModes | null; configOptions: AcpConfigOption[] | null }
   | { type: "autoApproved"; toolCallId: string; description: string }
   | { type: "notice"; message: string }
+  /** Patchbay's own: the turn has had nothing from the agent for the stall limit. Nothing was cancelled. */
+  | { type: "stalled"; message: string; quietSecs: number }
   | { type: "update"; update: AcpUpdate }
   | { type: "permission"; requestId: string; request: AcpPermissionRequest }
   | { type: "permissionResolved"; requestId: string }
@@ -846,6 +878,7 @@ export interface AgentEngine {
 export interface Preferences {
   theme: "system" | "light" | "dark";
   textSize: "small" | "default" | "large";
+  iconSize: "small" | "medium" | "large";
   sendKey: "enter" | "mod-enter";
   launchTab: "chat" | "code" | "last";
   notifications: boolean;
@@ -870,6 +903,8 @@ export interface Preferences {
   cursorUsageLimit: { enabled: boolean; percent: number; autoResume: boolean };
   /** Archive Code sessions this many days after their last prompt, unless pinned; null = never. */
   autoArchiveDays: number | null;
+  /** Say so, and mark the session, when a turn has had nothing from its agent this many minutes; 0 = off. */
+  stallNoticeMinutes: number;
   permissionMode: "default" | "auto" | "always-approve";
   agentInstructions: string;
   webFetch: boolean;
@@ -902,6 +937,7 @@ export interface Preferences {
 export const defaultPreferences: Preferences = {
   theme: "system",
   textSize: "default",
+  iconSize: "medium",
   sendKey: "enter",
   launchTab: "last",
   notifications: true,
@@ -918,6 +954,7 @@ export const defaultPreferences: Preferences = {
   usageLimit: { enabled: true, percent: 95, autoResume: false },
   cursorUsageLimit: { enabled: false, percent: 95, autoResume: false },
   autoArchiveDays: null,
+  stallNoticeMinutes: 10,
   permissionMode: "default",
   agentInstructions: "",
   webFetch: false,
@@ -1093,6 +1130,14 @@ export const api = {
   attachmentThumbnail: (id: string) => invoke<string>("attachment_thumbnail", { id }),
   attachmentImage: (id: string) => invoke<string>("attachment_image", { id }),
 
+  /** Explicitly share one generated file. `cwd` resolves relative paths (the session's folder). */
+  createShare: (path: string, cwd: string | null) => invoke<ShareInfo>("create_share", { path, cwd }),
+  listShares: () => invoke<ShareInfo[]>("list_shares"),
+  revokeShare: (token: string) => invoke<void>("revoke_share", { token }),
+  /** Phone only: fetch a share through the gateway / owning node for the in-app viewer. */
+  shareFetch: (nodeId: string, token: string) =>
+    invoke<ShareFetch>("remote_share_fetch", { nodeId, token }),
+
   listCodeSessions: () => invoke<CodeSession[]>("list_code_sessions"),
   /** With `host`, the session runs on that computer, in its folder `cwd`. */
   createCodeSession: (cwd: string, modelRef: string | null, agent?: AgentId, host?: string | null) =>
@@ -1133,6 +1178,8 @@ export const api = {
   saveCodeTranscript: (id: string, json: string) => invoke<void>("save_code_transcript", { id, json }),
   /** With `sessionId`, lists files on the node hosting that session. */
   listProjectFiles: (cwd: string, sessionId?: string) => invoke<string[]>("list_project_files", { cwd, sessionId }),
+  /** The slash commands a session's agent advertises, asked of its host (the phone has no events to learn them from). */
+  listSessionCommands: (sessionId: string) => invoke<AcpCommand[]>("list_session_commands", { sessionId }),
   /** A picture the reply linked, read on the computer that holds the session. A data URL. */
   codeSessionImage: (id: string, path: string) => invoke<string>("code_session_image", { id, path }),
 
@@ -1173,6 +1220,9 @@ export const api = {
     invoke<void>("code_authenticate", { id, methodId, apiKey: apiKey ?? null }),
   codeRewind: (id: string, ordinal: number, preview: string, revertFiles: boolean) =>
     invoke<void>("code_rewind", { id, ordinal, preview, revertFiles }),
+  /** A new session with this one's conversation before the `ordinal`-th prompt, or all of it with null. */
+  codeFork: (id: string, ordinal: number | null, preview: string) =>
+    invoke<CodeSession>("code_fork", { id, ordinal, preview }),
   codeUsage: (id: string) => invoke<UsageView>("code_usage", { id }),
   planAccounts: () => invoke<PlanAccount[]>("plan_accounts"),
   cursorPlanLimits: () => invoke<CursorPlanLimits | null>("cursor_plan_limits"),
@@ -1206,8 +1256,6 @@ export const api = {
   /** Move a session to `target` into folder `cwd` there; resolves to a note for the user, if any. */
   codeMove: (id: string, target: string, cwd: string) => invoke<string | null>("code_move", { id, target, cwd }),
   codeTakeOver: (id: string, cwd: string) => invoke<string | null>("code_take_over", { id, cwd }),
-  /** Session id -> when the checkpoint this node holds was taken. */
-  codeCheckpoints: () => invoke<Record<string, number>>("code_checkpoints"),
 
   meshStatus: () => invoke<MeshStatus>("mesh_status"),
   meshCreate: (passphrase: string, name: string) => invoke<void>("mesh_create", { passphrase, name }),

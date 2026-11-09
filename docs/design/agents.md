@@ -36,10 +36,41 @@ All eight speak ACP (over stdio, or in memory for Patchbay's own), so one client
 - DB: `code_sessions.agent` (default `grok` for rows made before the built-in agent; new sessions use the `defaultAgent` preference, `patchbay` by default) and `code_sessions.agent_model`. ACP session ids only mean something to the agent that made them, so switching agents starts a new ACP session (next section).
 - Preferences: `defaultAgent` and `agentPaths` (id -> executable). Changing `agentPaths` restarts idle sessions, like the other agent settings.
 
+## Quiet turns
+
+An agent can hold `session/prompt` open with nothing more to say; opencode did when its free-tier
+model hit a usage limit mid-turn, and the turn then looked busy for hours. The host counts every event a
+session's agent sends as activity (`code::stall`). Every 30 s it checks busy sessions that aren't
+waiting on a person (permission, question, sign-in); one quiet for `stallNoticeMinutes` (default
+10, 0 = off; per computer, since the host runs the check) gets one `stalled` event: an info line in
+the transcript, a warn light in the sidebar and "Gone quiet" in the phone's list, and `stalled` from
+`list_agent_sessions`. A window that opens the session meanwhile gets it replayed. The agent's next
+event, or the turn ending, clears it. Nothing is cancelled: a long command looks the same.
+
+For opencode sessions the notice also says what opencode's own database shows
+(`code::opencode_state`, read-only from `opencode.db`):
+
+- **Turns Patchbay can't see.** When a background shell or a subagent finishes after a turn ended,
+  opencode starts a new turn by itself. None of it reaches Patchbay over ACP: not its text, not its
+  tool calls, not its permission requests. Patchbay launches opencode with `"*": "ask"`, so any tool
+  call in such a turn waits for an answer nobody is asked for, and prompts Patchbay sends queue in
+  opencode's `session_inbox` behind it. The notice names such a turn, the call it is on, and how many
+  messages wait. Reproduced 2026-11-08 (pb-20261107-25): a self-woken reply of 600 lines never
+  appeared in Patchbay's transcript while the readout reported it and the one queued message.
+- **The newest error of the turn**, from the session or one of its subagents (a free-tier limit,
+  a 429), best-effort.
+
+opencode's schema is not a stable API. When the tables or columns the first part needs aren't
+there, the notice says Patchbay can't read opencode's state; it never reports "nothing waiting" from
+a read that failed. `session_v2.time_suspended` is not used: opencode stamps it whenever a background
+shell wakes a turn, so it says nothing about limits.
+
 ## Messaging between Code sessions
 
 Each running session receives a Patchbay-owned MCP server through ACP's `mcpServers` field. Its
-`list_agent_sessions` tool discovers unarchived sessions by title and host; `send_agent_message`
+`list_agent_sessions` tool discovers unarchived sessions by title and host, with `activity`
+(`running`, `waiting`, `stalled`, `idle`, `stopped`) and `lastActivityAt` for sessions on the
+caller's own computer (null for other hosts); `send_agent_message`
 addresses one session by id. The MCP child uses a short-lived request to a loopback listener owned
 by the Patchbay process. A per-session random token and the source session id accompany that
 request; Patchbay checks that the source session is hosted on the sending member.
@@ -205,9 +236,9 @@ Every prompt carries a `promptId`, which the UI generates and the backend fills 
 - `steered`: emitted before the agent answers, so the message shows ahead of the reply.
 - `queued`: the UI moves it from the transcript to the queue list above the composer. When its turn starts, it comes again as `sent`.
 
-`unqueued` removes messages from the queue: the user clicked ✕ (`code_unqueue`), or the turn was stopped or failed (`restore: true`). The store keys all of this by prompt id, so the sending window, other windows and a catch-up replay all agree. A `userPrompt` without a `promptId` comes from an older host and keeps the old origin check.
+`unqueued` removes messages from the queue: the user clicked ✕ (`code_unqueue`), or the turn was stopped or failed (`restore: true`). The store keys all of this by prompt id, so the sending window, other windows and a catch-up replay all agree. ✕ on a message still waiting under its bubble retracts it the same way: `code_unqueue` takes a steered message out of the running turn as well, the store drops the pending bubble for it, and the agent's late answer to the steer is dropped instead of queued — the steer itself has already gone to the agent. A `userPrompt` without a `promptId` comes from an older host and keeps the old origin check.
 
-**Force send** cancels the running turn instead of waiting for it: `code_prompt` with `force: true` (Ctrl+Enter mid-turn, or Ctrl+Shift+Enter when Ctrl+Enter is the send key; with Enter to send, Ctrl+Enter sends when idle and Shift+Enter is the only newline key), or `code_send_now` for a queued message ("Send now" on its chip) or a steered one the agent may not have read yet ("Send now" under its bubble). The agent thread puts the message at the front of the queue (a `queued` event for a new one), answers any open permission request as cancelled, and sends `session/cancel`. When that `session/prompt` returns, the front of the queue goes out even though the turn was cancelled; the rest of the queue follows as usual. A forced message is never steered. If the cancelled turn hasn't ended after 30 seconds, a notice says so; the message still goes when it does, and Stop drops it. The cancelled turn's output stays in the transcript. Stop after a force drops the queue as usual. The UI offers it only on hosts that report `extensions.forceSend`. **Steered messages** show as pending (`pending` on the user entry, "Waiting for the agent's next step") until a tool call after them has finished and the agent speaks or starts another tool, or the turn ends. ACP reports no read receipt, so this is a guess from the transcript. The agent thread keeps the messages steered into the running turn; `code_send_now` on one moves it to the front of the queue (a `queued` event), ignores the agent's late reply to the steer and cancels the turn. If the agent had already read the steer, it may act on the message twice. Test: `send_now_takes_a_steered_message_out_of_the_turn`. Exception: Claude Code and Patchbay's agent (host-only `Extensions.force_steers`, plus `background_tools` for Patchbay's agent). A steer moves a running foreground shell command to the background, as the Claude Code CLI does, where `session/cancel` kills it, so a forced send and "Send now" steer the message in and cancel nothing. Patchbay's agent first gets `patchbay/background_tools` (see harness.md). Stop still cancels. The cost: a forced send during a model reply, or a tool other than Bash, waits for it to end.
+**Force send** cancels the running turn instead of waiting for it: `code_prompt` with `force: true` (Ctrl+Enter mid-turn, or Ctrl+Shift+Enter when Ctrl+Enter is the send key; with Enter to send, Ctrl+Enter sends when idle and Shift+Enter is the only newline key), or `code_send_now` for a queued message ("Send now" on its chip) or a steered one the agent may not have read yet ("Send now" under its bubble). The agent thread puts the message at the front of the queue (a `queued` event for a new one), answers any open permission request as cancelled, and sends `session/cancel`. When that `session/prompt` returns, the front of the queue goes out even though the turn was cancelled; the rest of the queue follows as usual. A forced message is never steered. If the cancelled turn hasn't ended after 30 seconds, a notice says so; the message still goes when it does, and Stop drops it. The cancelled turn's output stays in the transcript. Stop after a force drops the queue as usual. The UI offers it only on hosts that report `extensions.forceSend`. **Steered messages** show as pending (`pending` on the user entry, "Waiting for the agent's next step") until a tool call after them has finished and the agent speaks or starts another tool, or the turn ends. ACP reports no read receipt, so this is a guess from the transcript. The agent thread keeps the messages steered into the running turn; `code_send_now` on one moves it to the front of the queue (a `queued` event), ignores the agent's late reply to the steer and cancels the turn. If the agent had already read the steer, it may act on the message twice. `code_send_now` answers what it did, so "Send now" never does nothing: a message no longer waiting, or one already in the running turn of a host that steers instead of cancelling, comes back as an error the UI shows as a toast. Test: `send_now_takes_a_steered_message_out_of_the_turn`. Exception: Claude Code and Patchbay's agent (host-only `Extensions.force_steers`, plus `background_tools` for Patchbay's agent). A steer moves a running foreground shell command to the background, as the Claude Code CLI does, where `session/cancel` kills it, so a forced send and "Send now" steer the message in and cancel nothing. Patchbay's agent first gets `patchbay/background_tools` (see harness.md). Stop still cancels. The cost: a forced send during a model reply, or a tool other than Bash, waits for it to end.
 
 Tests: `steering_joins_the_running_turn`, `a_refused_steer_waits_for_the_next_turn`, `prompts_mid_turn_wait_without_steering`, `stopping_hands_back_the_queue`, `grok_interjects_text_and_queues_files`, `force_send_cancels_the_turn_instead_of_steering` and `send_now_jumps_the_queue` drive the fake agent in `acp.rs`. `fakeBackend.ts` steers for Grok, Claude Code and Codex, and queues for the other agents.
 
@@ -244,6 +275,6 @@ Probed from Patchbay's own launch path (`cargo test --lib agents_live -- --ignor
 - **Patchbay providers for OpenCode, Kilo and Claude Code.** I tried injecting a Patchbay provider into OpenCode 2.0.29 through `OPENCODE_CONFIG_CONTENT`, with and without `enabled_providers`. `opencode acp` ignored it: the model list and default stayed those from `~/.config/opencode/opencode.jsonc`. The next things to try are a private config dir (`OPENCODE_CONFIG_DIR`, or `XDG_CONFIG_HOME` pointed at a Patchbay-owned directory) or OpenCode's `serve` API. A private dir would also hide the user's own OpenCode setup, so it should be opt-in. Claude Code could run on an Anthropic-kind provider through `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`. That is also opt-in and untested.
 - **OpenCode retries.** When its provider is unreachable, OpenCode retries for minutes and reports each attempt only in `session_info_update._meta["opencode/retry"]`. Patchbay shows "Working…" the whole time. A generic "agent is retrying" hint would need either that meta key or a timeout.
 - **Mesh.** `CodeSession` gained `agent` and `agent_model`. Mesh sync and session migration need to carry them. Migrating a session to a node without that agent installed should fail cleanly. The mesh branch adds DB migrations too, so whichever branch merges second renumbers its migration.
-- **Rewind for other agents.** Only Patchbay's agent (`patchbay/rewind/*`) and Grok (`x.ai/rewind/*`) have it. Claude's adapter and OpenCode advertise `sessionCapabilities.fork`, which could support "edit and resend" by forking at a message. Today the UI hides edit-and-resend unless `extensions.rewind` is set.
+- **Rewind for other agents.** Only Patchbay's agent (`patchbay/rewind/*`) and Grok (`x.ai/rewind/*`) have it. Claude's adapter and OpenCode advertise `sessionCapabilities.fork`, but ACP's `session/fork` takes no message position: it copies the whole session, so it gives "fork at the end", not "edit and resend" at a message. See `session-fork.md`. Today the UI hides edit-and-resend unless `extensions.rewind` is set.
 - **Other ACP agents** in the registry (Goose, Qwen Code, GitHub Copilot CLI and others) need only a new `AgentKind` arm.
 - **The npx pin** (`CLAUDE_ACP_PACKAGE`) needs a bump now and then. A global install of `claude-agent-acp` overrides it.

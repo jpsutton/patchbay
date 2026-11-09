@@ -1,5 +1,6 @@
 import type { ReactNode, SVGProps } from "react";
 import type { AgentId } from "../lib/ipc";
+import { iconPx, useIconSize } from "../lib/iconSize";
 
 /**
  * Line icons drawn on Lucide's 24-unit grid (ISC license).
@@ -12,11 +13,18 @@ import type { AgentId } from "../lib/ipc";
  * Toolbar icons use the standard 18px size, which would scale those lines off the pixel grid.
  * They pass a second drawing, redrawn by hand on an 18-unit grid with 2-unit strokes on whole
  * coordinates, and render it 1:1 at 18px. Any other size scales the 24-grid drawing.
+ *
+ * The icon-size preference scales every icon here (lib/iconSize.ts). Medium draws the size asked
+ * for, as before. `fixed` opts an icon out, for ones that mimic something of a set size (window
+ * controls). The 9px agent badge and the status dots aren't drawn by this factory, so they never
+ * scale.
  */
-type IconProps = SVGProps<SVGSVGElement> & { size?: number | string };
+type IconProps = SVGProps<SVGSVGElement> & { size?: number | string; fixed?: boolean };
 
 function icon(paths: ReactNode, grid18?: ReactNode) {
-  return function Icon({ size = 18, strokeWidth = 2, ...rest }: IconProps) {
+  return function Icon({ size: asked = 18, strokeWidth = 2, fixed, ...rest }: IconProps) {
+    const level = useIconSize();
+    const size = fixed ? asked : iconPx(asked, level);
     const snapped = grid18 !== undefined && Number(size) === 18;
     return (
       <svg
@@ -150,6 +158,17 @@ export const FolderPlusIcon = icon(
     <path d="M12 10v6" />
     <path d="M9 13h6" />
     <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+  </>,
+);
+
+export const FolderIcon = icon(
+  <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />,
+);
+
+export const FileIcon = icon(
+  <>
+    <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+    <path d="M14 2v4a2 2 0 0 0 2 2h4" />
   </>,
 );
 
@@ -415,6 +434,17 @@ export const PencilIcon = icon(
   </>,
 );
 
+/** Lucide `git-fork`: a session forked into a new one. */
+export const ForkIcon = icon(
+  <>
+    <circle cx="12" cy="18" r="3" />
+    <circle cx="6" cy="6" r="3" />
+    <circle cx="18" cy="6" r="3" />
+    <path d="M18 9v2c0 .6-.4 1-1 1H7c-.6 0-1-.4-1-1V9" />
+    <path d="M12 12v3" />
+  </>,
+);
+
 export const SlidersIcon = icon(
   <>
     <path d="M14 17H5" />
@@ -509,6 +539,18 @@ export const SpeakerIcon = icon(
   <>
     <path d="M11 5 6 9H2v6h4l5 4V5z" />
     <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+    <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+  </>,
+);
+
+/** Sound radiating from a live source: the active "stream each reply aloud" state. A distinct
+ * glyph from the idle SpeakerIcon, so "on" reads at a glance even without the accent tint. */
+export const BroadcastIcon = icon(
+  <>
+    <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
+    <path d="M7.76 7.76a6 6 0 0 0 0 8.48" />
+    <path d="M16.24 7.76a6 6 0 0 1 0 8.48" />
+    <path d="M4.93 4.93a10 10 0 0 0 0 14.14" />
     <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
   </>,
 );

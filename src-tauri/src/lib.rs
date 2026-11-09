@@ -17,6 +17,7 @@ mod mesh;
 mod portal_shortcuts;
 mod prefs;
 mod providers;
+pub mod shares;
 mod speech;
 mod terminal;
 mod usage;
@@ -62,8 +63,6 @@ pub struct AppState {
     agent_message_bridge: Arc<std::sync::OnceLock<agent_messaging::AgentMessagingBridge>>,
     /// Sends an event to this node's window.
     emit: mesh::node::UiSink,
-    /// Sessions whose checkpoint is being fetched right now.
-    pulling: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Per running session: the events a newly attached viewer needs to catch up.
     live: Arc<std::sync::Mutex<std::collections::HashMap<String, LiveAgent>>>,
     /// Terminals of sessions on other nodes, shown here: terminal id -> output channel and
@@ -71,6 +70,8 @@ pub struct AppState {
     remote_terms: Arc<std::sync::Mutex<std::collections::HashMap<String, RemoteTerm>>>,
     /// The native window's extras (quick-entry shortcut, title bar); `None` in the daemon.
     desktop: Arc<std::sync::OnceLock<Arc<dyn DesktopHooks>>>,
+    /// Explicit, revocable, expiring HTTP shares of files on this host (see `shares.rs`).
+    shares: Arc<shares::ShareRegistry>,
 }
 
 /// What only the desktop app can do. Preferences for these save everywhere, but apply only
@@ -88,6 +89,15 @@ impl AppState {
         mesh: Mesh,
         emit: mesh::node::UiSink,
     ) -> Self {
+        // The public base URL for share links is a per-node setting (default loopback). Phase 2
+        // can point it at the gateway proxy without changing the share mechanism.
+        let base_url = db
+            .get_setting(shares::BASE_URL_SETTING)
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| shares::DEFAULT_BASE_URL.to_owned());
+        let shares = Arc::new(shares::ShareRegistry::load(&data_dir, base_url, mesh.node_id().to_owned()));
         let state = AppState {
             db,
             data_dir,
@@ -97,11 +107,13 @@ impl AppState {
             mesh: mesh.clone(),
             agent_message_bridge: Arc::default(),
             emit: emit.clone(),
-            pulling: Arc::default(),
             live: Arc::default(),
             remote_terms: Arc::default(),
             desktop: Arc::default(),
+            shares,
         };
+        // Nothing is in flight yet, so whatever a crashed or failed transfer left in the inbox is garbage.
+        let _ = std::fs::remove_dir_all(handoff::inbox(&state.data_dir));
         state.code.plan.set_accounts(load_plan_accounts(&state.db));
         if let Some(r) = state.db.get_setting(PLAN_RESUME_KEY).ok().flatten().and_then(|j| serde_json::from_str(&j).ok()) {
             state.code.plan.set_resumes(r);
@@ -157,9 +169,14 @@ struct LiveAgent {
     /// was written has no other way to get it: the saved transcript doesn't hold it, and the
     /// event ring only reaches back to the last finished turn.
     plan: Option<serde_json::Value>,
+    /// The slash commands the agent last advertised (`available_commands_update`). A phone has no
+    /// event history to learn them from, so it asks for them (`code.commands`).
+    commands: Option<serde_json::Value>,
     /// Each tool call's latest status in this run of the agent. A window that missed events
     /// (see `code_resume`) learns from it which of the calls it still shows running have ended.
     tools: std::collections::HashMap<String, String>,
+    /// The `stalled` event while the turn stays quiet, so a window opening it then sees why.
+    stalled: Option<serde_json::Value>,
 }
 
 /// Errors cross the IPC boundary as plain strings.
@@ -608,6 +625,31 @@ async fn attachment_image(state: &AppState, id: String) -> CmdResult<String> {
     Ok(tokio::task::spawn_blocking(move || attachments::image_data_url(&dir, &att)).await??)
 }
 
+// ---------------- artifact shares ----------------
+//
+// An explicit share of one file on this host. `create_share` canonicalizes the path and returns a
+// URL rooted at the per-node `artifacts.baseUrl` setting; the same `AppState.shares` registry is
+// read by the HTTP route (`web.rs` / the standalone loopback server) to serve the bytes. Read-only,
+// time-limited, revocable: see `shares.rs` for the security model.
+
+async fn create_share(
+    state: &AppState,
+    path: String,
+    cwd: Option<String>,
+    ttl_secs: Option<i64>,
+) -> CmdResult<shares::ShareInfo> {
+    Ok(state.shares.create(&path, cwd.as_deref(), ttl_secs)?)
+}
+
+async fn list_shares(state: &AppState) -> CmdResult<Vec<shares::ShareInfo>> {
+    Ok(state.shares.list())
+}
+
+async fn revoke_share(state: &AppState, token: String) -> CmdResult<()> {
+    state.shares.revoke(&token);
+    Ok(())
+}
+
 // ---------------- code ----------------
 //
 // A Code session runs on one node, its host. Commands for a session hosted elsewhere in the mesh
@@ -631,15 +673,19 @@ async fn create_code_session(
     let p = serde_json::json!({ "host": host, "cwd": cwd, "modelRef": model_ref, "agent": agent });
     let created = gateway::on_host(state, &p, "code.create").await?;
     let id = created["id"].as_str().ok_or_else(|| CmdError("the host returned no session".into()))?;
-    // The host's new row reaches this computer through mesh sync; wait for it, so the caller
-    // can open the session from its list.
+    wait_for_session_row(state, id, &host).await
+}
+
+/// A session row another computer just made, once mesh sync has brought it here, so the caller
+/// can open the session from its list.
+async fn wait_for_session_row(state: &AppState, id: &str, host: &str) -> CmdResult<CodeSession> {
     for _ in 0..100 {
         if let Some(s) = state.db.get_code_session(id)? {
             return Ok(s);
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    Err(CmdError(format!("the session started on {}, but hasn't reached this computer yet", state.mesh.member_name(&host))))
+    Err(CmdError(format!("the session started on {}, but hasn't reached this computer yet", state.mesh.member_name(host))))
 }
 
 /// Claude Code's sessions on this computer, from every account it is signed in with (the default
@@ -850,8 +896,7 @@ fn ensure_local_host(state: &AppState, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Agent events go to this window and, live, to every other node. A finished turn also tells
-/// the other nodes to fetch a checkpoint, so the session survives this node going away.
+/// Agent events go to this window and, live, to every other node.
 fn code_sink(state: &AppState) -> code::acp::Sink {
     let state = state.clone();
     Arc::new(move |env| on_code_event(&state, env))
@@ -937,7 +982,15 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
             let mut live = state.live.lock().unwrap();
             let id = env.code_session_id.clone();
             let ev = serde_json::to_value(&env.event).unwrap_or_default();
+            // Anything but our own stall report is a sign of life (`code::stall`).
+            if !matches!(env.event, CodeEvent::Stalled { .. })
+                && state.code.stall.touch(&id)
+                && let Some(l) = live.get_mut(&id)
+            {
+                l.stalled = None;
+            }
             match &env.event {
+                CodeEvent::Stalled { .. } => live.entry(id).or_default().stalled = Some(ev),
                 CodeEvent::SessionReady { .. } => {
                     let l = live.entry(id).or_default();
                     l.ready = Some(ev);
@@ -965,6 +1018,11 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
                 CodeEvent::Usage { .. } => live.entry(id).or_default().usage = Some(ev),
                 CodeEvent::Update { update } if update["sessionUpdate"] == "plan" => {
                     live.entry(id).or_default().plan = Some(ev)
+                }
+                CodeEvent::Update { update } if update["sessionUpdate"] == "available_commands_update" => {
+                    if update["availableCommands"].is_array() {
+                        live.entry(id).or_default().commands = Some(update["availableCommands"].clone());
+                    }
                 }
                 CodeEvent::Update { update }
                     if matches!(update["sessionUpdate"].as_str(), Some("tool_call" | "tool_call_update")) =>
@@ -1000,15 +1058,12 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
                         l.questions.retain(|(r, _)| r != request_id);
                     }
                 }
-                CodeEvent::Status { state, .. } if state == "exited" => {
+                CodeEvent::Status { state: s, .. } if s == "exited" => {
                     live.remove(&id);
+                    state.code.stall.forget(&id);
                 }
                 _ => {}
             }
-        }
-        if matches!(env.event, CodeEvent::PromptDone { .. }) {
-            let p = serde_json::json!({ "id": env.code_session_id, "host": mesh.node_id() });
-            mesh.broadcast_event("mesh://checkpoint", p);
         }
         // Stamped with its point, so phones and windows can resume from it.
         let v = mesh.broadcast_event(code::acp::EVENT, serde_json::to_value(&env).unwrap_or_default());
@@ -1412,7 +1467,17 @@ async fn poll_antigravity_plan(state: &AppState) {
         code::antigravity_plan::AntigravityAuthKind::Oauth => {}
     }
     let Some(auth) = code::antigravity_plan::load_auth(&state.code.antigravity_plan).await else {
-        tracing::debug!("antigravity plan: no local Google OAuth login");
+        tracing::debug!("antigravity plan: no readable local Google OAuth login");
+        // No usable login (disk sources missing/invalid and the keychain fallback denied or
+        // deferred): record the `unavailable` report instead of retrying — and therefore
+        // re-prompting — every TICK. Fresh for FRESH_SECS, so the loop itself backs off too.
+        let limits = code::antigravity_plan::AntigravityPlanLimits::unavailable(
+            "unreadable".into(),
+            None,
+            "Could not read or refresh the Antigravity Google login from disk or the keychain. Sign in again in Antigravity to see plan usage.".into(),
+            now,
+        );
+        adopt_antigravity_plan(state, limits, true);
         return;
     };
     if state
@@ -1598,13 +1663,39 @@ fn plan_account(state: &AppState, prefs: &prefs::Preferences, id: &str) -> Optio
     }
 }
 
+/// What a usage-limit message calls an account: the Claude login providers that run on it,
+/// else the account's own name (an organization), else this computer's default sign-in,
+/// else the key itself. The panel's labels can differ (it leads with "Claude Code login" for
+/// the default); a stop message has to say which login ran out, so the provider comes first.
+fn plan_account_label(state: &AppState, account: &str) -> String {
+    let providers = state.db.list_providers().unwrap_or_default();
+    let names: Vec<&str> = providers
+        .iter()
+        .filter(|(p, _)| p.auth_mode == db::AuthMode::ClaudeLogin && provider_plan_account(p).as_deref() == Some(account))
+        .map(|(p, _)| p.name.as_str())
+        .collect();
+    if !names.is_empty() {
+        return names.join(", ");
+    }
+    if let Some(name) = state.code.plan.account(account).name {
+        return name;
+    }
+    if account == default_plan_account().0 {
+        return "Claude Code login".to_owned();
+    }
+    account.to_owned()
+}
+
 /// Cancel every running turn on a Claude plan account past its usage limit. The agent stops
 /// cleanly, its session stays resumable, and queued prompts go back to their composers.
 fn enforce_plan_limit(state: &AppState) {
     let prefs = prefs::load(&state.db);
     let now = code::plan_limits::now();
     for id in state.code.busy_sessions() {
-        let Some(hit) = plan_account(state, &prefs, &id).and_then(|(a, _)| state.code.plan.hit(&a, &prefs.usage_limit, now)) else {
+        let Some((account, _)) = plan_account(state, &prefs, &id) else {
+            continue;
+        };
+        let Some(hit) = state.code.plan.hit(&account, &prefs.usage_limit, now) else {
             continue;
         };
         if !state.code.plan.start_stopping(&id) {
@@ -1615,7 +1706,8 @@ fn enforce_plan_limit(state: &AppState) {
             state.code.plan.turn_ended(&id);
             continue;
         }
-        let mut message = format!("Stopped. {}", hit.message(prefs.usage_limit.percent, now));
+        let label = plan_account_label(state, &account);
+        let mut message = format!("Stopped. {}", hit.message(prefs.usage_limit.percent, now, &label));
         if prefs.usage_limit.auto_resume {
             state.code.plan.schedule_resume(&id, hit.resets_at);
             save_resumes(state);
@@ -1626,6 +1718,74 @@ fn enforce_plan_limit(state: &AppState) {
             code::acp::Envelope { code_session_id: id, event: code::acp::CodeEvent::Notice { message } },
         );
     }
+}
+
+/// Whether the session's turn is held up by a person: an open permission request or question,
+/// or a sign-in.
+fn waiting_on_person(state: &AppState, id: &str) -> bool {
+    state.live.lock().unwrap().get(id).is_some_and(|l| !l.permissions.is_empty() || !l.questions.is_empty() || l.auth.is_some())
+}
+
+/// What a session hosted here is doing, for `list_agent_sessions`.
+fn session_activity(state: &AppState, id: &str) -> code::stall::Activity {
+    code::stall::activity(
+        state.code.is_running(id),
+        state.code.is_busy(id),
+        waiting_on_person(state, id),
+        state.code.stall.is_stalled(id),
+    )
+}
+
+/// Report turns that have gone quiet past `stall_notice_minutes` (0 = off), once each, in their
+/// transcript. Nothing is cancelled (`code::stall`).
+fn check_stalls(state: &AppState) {
+    let minutes = prefs::load(&state.db).stall_notice_minutes;
+    if minutes == 0 {
+        return;
+    }
+    let busy: Vec<(String, bool)> = state
+        .code
+        .busy_sessions()
+        .into_iter()
+        .filter(|id| state.code.is_running(id))
+        .map(|id| {
+            let waiting = waiting_on_person(state, &id) || state.code.pending.lock().unwrap().values().any(|(s, _)| *s == id);
+            (id, waiting)
+        })
+        .collect();
+    let limit = std::time::Duration::from_secs(u64::from(minutes) * 60);
+    for (id, quiet) in state.code.stall.due(&busy, std::time::Instant::now(), limit) {
+        tracing::info!("stalled turn: {id} quiet for {}s", quiet.as_secs());
+        let mut message = code::stall::notice(quiet);
+        if let Some(why) = stall_cause(state, &id) {
+            message = format!("{message}\n\n{why}");
+        }
+        on_code_event(
+            state,
+            code::acp::Envelope {
+                code_session_id: id,
+                event: code::acp::CodeEvent::Stalled { message, quiet_secs: quiet.as_secs() },
+            },
+        );
+    }
+}
+
+/// What the agent's own records say about a stalled turn, for agents that keep them where
+/// Patchbay can read them: opencode (pb-20261107-18, pb-20261107-25). `None` for other agents.
+/// For opencode it always says something: when its state can't be read, that is said too, so a
+/// failed read never passes for "nothing found".
+fn stall_cause(state: &AppState, id: &str) -> Option<String> {
+    use code::opencode_state::{Readout, db_path, describe, read};
+    let session = state.db.get_code_session(id).ok()??;
+    if session.agent != code::agents::AgentKind::Opencode.id() {
+        return None;
+    }
+    let readout = match (session.acp_session_id, db_path()) {
+        (Some(acp), Some(path)) => read(&path, &acp),
+        (None, _) => Readout::Unreadable("Patchbay has no opencode session id for it".into()),
+        (_, None) => Readout::Unreadable("there is no home directory to find opencode's database in".into()),
+    };
+    Some(describe(&readout))
 }
 
 /// How often sessions waiting on the usage limit are checked for resuming.
@@ -1781,6 +1941,27 @@ async fn code_start(state: &AppState, id: String) -> CmdResult<()> {
     Ok(code_start_local(state, id).await?)
 }
 
+/// The slash commands a running session's agent advertises, cut down to what a menu shows (name,
+/// description, input hint) so a phone learns nothing else about the session. Empty while the agent
+/// hasn't advertised any yet, or isn't running.
+fn session_commands(state: &AppState, id: &str) -> serde_json::Value {
+    let live = state.live.lock().unwrap();
+    let commands = if state.code.is_running(id) { live.get(id).and_then(|l| l.commands.as_ref()) } else { None };
+    menu_commands(commands)
+}
+
+fn menu_commands(commands: Option<&serde_json::Value>) -> serde_json::Value {
+    let list = commands.and_then(|c| c.as_array()).into_iter().flatten().filter_map(|c| {
+        let name = c["name"].as_str().filter(|n| !n.is_empty())?;
+        let mut out = serde_json::json!({ "name": name, "description": c["description"].as_str().unwrap_or_default() });
+        if let Some(hint) = c["input"]["hint"].as_str() {
+            out["input"] = serde_json::json!({ "hint": hint });
+        }
+        Some(out)
+    });
+    serde_json::Value::Array(list.collect())
+}
+
 /// Catch-up for a window opening a running session: whether it runs and is mid-turn, plus the
 /// events that set up its controls (session ready, open permission requests, usage) and the
 /// agent's plan.
@@ -1795,6 +1976,9 @@ fn code_attach_local(state: &AppState, id: &str) -> serde_json::Value {
         events.extend(l.questions.iter().map(|(_, e)| e.clone()));
         events.extend(l.usage.clone());
         events.extend(l.plan.clone());
+        if state.code.is_busy(id) {
+            events.extend(l.stalled.clone());
+        }
     }
     serde_json::json!({ "running": running, "busy": state.code.is_busy(id), "events": events })
 }
@@ -1935,10 +2119,16 @@ async fn code_prompt_local(
 ) -> anyhow::Result<code::acp::Delivery> {
     ensure_local_host(state, &id)?;
     let prefs = prefs::load(&state.db);
-    if let Some(hit) =
-        plan_account(state, &prefs, &id).and_then(|(a, _)| state.code.plan.hit(&a, &prefs.usage_limit, code::plan_limits::now()))
+    // The session's own account, and no other: a report recorded under a different account's
+    // key can never stop this prompt (PlanGuard::hit answers only for the key asked for).
+    if let Some((account, _)) = plan_account(state, &prefs, &id)
+        && let Some(hit) = state.code.plan.hit(&account, &prefs.usage_limit, code::plan_limits::now())
     {
-        anyhow::bail!("Not sent. {}", hit.message(prefs.usage_limit.percent, code::plan_limits::now()));
+        let label = plan_account_label(state, &account);
+        anyhow::bail!(
+            "Not sent. {}",
+            hit.message(prefs.usage_limit.percent, code::plan_limits::now(), &label)
+        );
     }
     if on_cursor_session(state, &id)
         && let Some(hit) = state.code.cursor_plan.hit(&prefs.cursor_usage_limit, code::cursor_plan::now())
@@ -2018,13 +2208,22 @@ pub(crate) fn list_agent_sessions(state: &AppState, source_session_id: &str) -> 
         .filter(|session| session.archived_at.is_none())
         .map(|session| {
             let host = session.host_node.unwrap_or_default();
+            // Only this node knows what its own agents are doing; another host's are unknown (null).
+            let here = host == state.mesh.node_id();
+            let (activity, last_activity_at) = if here {
+                (serde_json::json!(session_activity(state, &session.id).as_str()), serde_json::json!(state.code.stall.last_activity_ms(&session.id)))
+            } else {
+                (serde_json::Value::Null, serde_json::Value::Null)
+            };
             serde_json::json!({
                 "sessionId": session.id,
                 "title": session.title,
                 "agent": session.agent,
                 "hostNode": host,
                 "hostName": state.mesh.member_name(&host),
-                "online": host == state.mesh.node_id() || state.mesh.connected(&host),
+                "online": here || state.mesh.connected(&host),
+                "activity": activity,
+                "lastActivityAt": last_activity_at,
             })
         })
         .collect();
@@ -2332,14 +2531,17 @@ async fn ensure_remote_force_send(state: &AppState, host: &str, id: &str) -> any
     Ok(())
 }
 
-/// Send a queued prompt now: the running turn is cancelled and the prompt goes next.
+/// Send a queued prompt now: the running turn is cancelled and the prompt goes next. A message
+/// steered into the running turn comes out of it; one that is not waiting any more is an error
+/// the UI shows, so the button never does nothing.
 async fn code_send_now(state: &AppState, id: String, prompt_id: String) -> CmdResult<()> {
     if let Some(host) = remote_host(state, &id)? {
         ensure_remote_force_send(state, &host, &id).await?;
         state.mesh.rpc(&host, "code.send_now", serde_json::json!({ "id": id, "promptId": prompt_id })).await?;
         return Ok(());
     }
-    Ok(state.code.send(&id, AgentCmd::SendNow { prompt_id })?)
+    state.code.send_now(&id, &prompt_id).await?;
+    Ok(())
 }
 
 async fn code_prompt(
@@ -2531,6 +2733,32 @@ async fn code_rewind(
     Ok(state.code.rewind(&id, ordinal, preview, revert_files).await?)
 }
 
+/// Fork a Code session into a new one on the same computer, agent, model and folder: the
+/// conversation up to (not including) the user prompt at transcript position `ordinal`, or all of
+/// it. The new session loads the copy when it starts. See docs/design/session-fork.md.
+async fn code_fork(state: &AppState, id: String, ordinal: Option<usize>, preview: String) -> CmdResult<CodeSession> {
+    if let Some(host) = remote_host(state, &id)? {
+        let params = serde_json::json!({ "id": id, "ordinal": ordinal, "preview": preview });
+        let made = state.mesh.rpc(&host, "code.fork", params).await?;
+        let new_id = made["id"].as_str().ok_or_else(|| CmdError("the host returned no session".into()))?;
+        return wait_for_session_row(state, new_id, &host).await;
+    }
+    Ok(code_fork_local(state, &id, ordinal, preview).await?)
+}
+
+async fn code_fork_local(state: &AppState, id: &str, ordinal: Option<usize>, preview: String) -> anyhow::Result<CodeSession> {
+    ensure_local_host(state, id)?;
+    let src = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("no session {id}"))?;
+    let agent_session = state.code.fork(id, ordinal, preview).await?;
+    let s = state.db.create_code_session(&src.cwd, src.model_ref.as_deref(), &src.agent, &src.permission_mode)?;
+    state.db.update_code_session(&s.id, Some(&agent_session), None, None)?;
+    if let Some(m) = &src.agent_model {
+        state.db.set_code_session_agent_model(&s.id, m)?;
+    }
+    state.db.set_code_session_title(&s.id, &format!("{} (fork)", src.title), true)?;
+    Ok(state.db.get_code_session(&s.id)?.unwrap_or(s))
+}
+
 async fn code_usage(state: &AppState, id: String) -> CmdResult<usage::UsageView> {
     Ok(state.db.code_usage(&id)?.view())
 }
@@ -2581,8 +2809,10 @@ fn agent_home(state: &AppState) -> PathBuf {
 
 /// Commits the target already has at `cwd`, so the bundle can leave them out.
 fn local_commits(cwd: &str) -> Vec<String> {
+    use patchbay_agent::proc::NoWindow;
     let out = std::process::Command::new("git")
         .args(["-C", cwd, "for-each-ref", "--count=100", "--format=%(objectname)", "refs/heads", "refs/remotes"])
+        .no_window()
         .output();
     match out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).lines().map(str::to_owned).collect(),
@@ -2590,19 +2820,21 @@ fn local_commits(cwd: &str) -> Vec<String> {
     }
 }
 
-/// Host side: package a session for another node (`kind` = handoff | checkpoint).
+/// Host side: package a session for another node (`kind` = handoff).
 async fn package_local(state: &AppState, id: &str, kind: &str, have: Vec<String>) -> anyhow::Result<serde_json::Value> {
     ensure_local_host(state, id)?;
-    if kind == "handoff" {
-        if state.code.is_busy(id) {
-            anyhow::bail!("the agent is in the middle of a turn; move the session once it finishes");
-        }
-        state.code.set_moving(id, true);
-        // Let the agent flush its session files before they're copied.
-        let code = state.code.clone();
-        let sid = id.to_owned();
-        tokio::task::spawn_blocking(move || code.stop_and_wait(&sid, std::time::Duration::from_secs(5))).await?;
+    // Older computers asked for `checkpoint` packages after every turn; the workspace is only copied on a move.
+    if kind != "handoff" {
+        anyhow::bail!("only a move copies the working folder");
     }
+    if state.code.is_busy(id) {
+        anyhow::bail!("the agent is in the middle of a turn; move the session once it finishes");
+    }
+    state.code.set_moving(id, true);
+    // Let the agent flush its session files before they're copied.
+    let code = state.code.clone();
+    let sid = id.to_owned();
+    tokio::task::spawn_blocking(move || code.stop_and_wait(&sid, std::time::Duration::from_secs(5))).await?;
     let s = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("no such session"))?;
     let (dir, home, kind2) = (state.data_dir.clone(), agent_home(state), kind.to_owned());
     let res = tokio::task::spawn_blocking(move || handoff::package(&dir, &home, &s, &kind2, &have)).await?;
@@ -2618,11 +2850,19 @@ async fn package_local(state: &AppState, id: &str, kind: &str, have: Vec<String>
     }
 }
 
-/// Copy a package's files from `host` into a local inbox directory.
+/// Copy a package's files from `host` into a local inbox directory. A failed copy leaves nothing behind.
 async fn fetch_package(state: &AppState, host: &str, token: &str, meta: &handoff::Meta) -> anyhow::Result<PathBuf> {
-    use base64::Engine;
     let dir = handoff::inbox(&state.data_dir).join(token);
-    tokio::fs::create_dir_all(&dir).await?;
+    let res = fetch_package_files(state, host, token, meta, &dir).await;
+    if res.is_err() {
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+    res.map(|_| dir)
+}
+
+async fn fetch_package_files(state: &AppState, host: &str, token: &str, meta: &handoff::Meta, dir: &std::path::Path) -> anyhow::Result<()> {
+    use base64::Engine;
+    tokio::fs::create_dir_all(dir).await?;
     for name in &meta.files {
         let mut f = tokio::fs::File::create(dir.join(name)).await?;
         let mut offset = 0u64;
@@ -2639,7 +2879,7 @@ async fn fetch_package(state: &AppState, host: &str, token: &str, meta: &handoff
             }
         }
     }
-    Ok(dir)
+    Ok(())
 }
 
 /// Target side: pull session `id` from its host into `cwd` here and take over the lease.
@@ -2649,7 +2889,7 @@ async fn import_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Result<O
     let host = s.host_node.clone().filter(|h| h != &me).ok_or_else(|| anyhow::anyhow!("this session already runs here"))?;
     let host_name = state.mesh.member_name(&host);
     if !state.mesh.connected(&host) {
-        anyhow::bail!("{host_name} is offline; use Take over to continue from its last checkpoint");
+        anyhow::bail!("{host_name} is offline; use Take over to continue the conversation here");
     }
     let r = state
         .mesh
@@ -2662,8 +2902,9 @@ async fn import_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Result<O
         let (home, target, from) = (agent_home(state), PathBuf::from(cwd), host_name.clone());
         let m = meta.clone();
         let d = dir.clone();
-        let (restored, note) = tokio::task::spawn_blocking(move || handoff::unpack(&d, &m, &home, &target, &from)).await??;
+        let unpacked = tokio::task::spawn_blocking(move || handoff::unpack(&d, &m, &home, &target, &from)).await;
         let _ = tokio::fs::remove_dir_all(&dir).await;
+        let (restored, note) = unpacked??;
         finish_takeover(state, &s, cwd, restored, &host_name)?;
         Ok(note)
     }
@@ -2697,7 +2938,9 @@ async fn code_move(state: &AppState, id: String, target: String, cwd: String) ->
     Ok(r.as_str().map(str::to_owned))
 }
 
-/// Continue a session here from the last checkpoint this node holds, when its host is gone.
+/// Continue a session here when its host is gone. Only the conversation (already synced here)
+/// comes along: the host's working folder can't be copied while it is offline, so the session
+/// carries on in a folder that already exists on this computer.
 async fn take_over_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Result<Option<String>> {
     let s = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("no such session"))?;
     let me = state.mesh.node_id().to_owned();
@@ -2706,69 +2949,18 @@ async fn take_over_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Resul
     if state.mesh.connected(&host) {
         anyhow::bail!("{host_name} is online; move the session instead");
     }
-    let (dir, home, target) = (state.data_dir.clone(), agent_home(state), PathBuf::from(cwd));
-    let (sid, from) = (id.to_owned(), host_name.clone());
-    let (restored, note) = if handoff::checkpoint(&state.data_dir, id).is_some() {
-        tokio::task::spawn_blocking(move || handoff::restore_checkpoint(&dir, &home, &sid, &target, &from)).await??
-    } else if target.is_dir() {
-        (false, Some(format!("No checkpoint from {host_name} reached this computer, so only the conversation came along.")))
-    } else {
-        anyhow::bail!("no checkpoint from {host_name} is here and {} doesn't exist", target.display());
-    };
-    finish_takeover(state, &s, cwd, restored, &host_name)?;
-    Ok(note)
+    let target = std::path::Path::new(cwd);
+    if !target.is_dir() {
+        anyhow::bail!("{} doesn't exist; choose a folder that already exists on this computer", target.display());
+    }
+    finish_takeover(state, &s, cwd, false, &host_name)?;
+    Ok(Some(format!(
+        "{host_name} is offline, so only the conversation came along. The files in {cwd} are whatever is on this computer."
+    )))
 }
 
 async fn code_take_over(state: &AppState, id: String, cwd: String) -> CmdResult<Option<String>> {
     Ok(take_over_local(state, &id, cwd.trim()).await?)
-}
-
-/// Checkpoints of other nodes' sessions this node holds: session id -> taken at (ms).
-async fn code_checkpoints(state: &AppState) -> CmdResult<std::collections::HashMap<String, i64>> {
-    let mut out = std::collections::HashMap::new();
-    for s in state.db.list_code_sessions()? {
-        if let Some(m) = handoff::checkpoint(&state.data_dir, &s.id) {
-            out.insert(s.id, m.created_at);
-        }
-    }
-    Ok(out)
-}
-
-/// Fetch the latest checkpoint of a session hosted on `host`.
-async fn pull_checkpoint(state: AppState, id: String, host: String) {
-    if !state.pulling.lock().unwrap().insert(id.clone()) {
-        return;
-    }
-    let mut have = handoff::checkpoint_have(&state.data_dir, &id);
-    let mut result = Err(anyhow::anyhow!("not attempted"));
-    for _ in 0..2 {
-        result = async {
-            let r = state
-                .mesh
-                .rpc_long(&host, "code.package", serde_json::json!({ "id": id, "kind": "checkpoint", "have": have }))
-                .await?;
-            let token = r["token"].as_str().unwrap_or_default().to_owned();
-            let meta: handoff::Meta = serde_json::from_value(r["meta"].clone())?;
-            let dir = fetch_package(&state, &host, &token, &meta).await;
-            let _ = state.mesh.rpc(&host, "code.package_done", serde_json::json!({ "id": id, "token": token, "moved": false })).await;
-            let dir = dir?;
-            let data = state.data_dir.clone();
-            let d = dir.clone();
-            tokio::task::spawn_blocking(move || handoff::store_checkpoint(&data, &d, &meta)).await??;
-            let _ = tokio::fs::remove_dir_all(&dir).await;
-            anyhow::Ok(())
-        }
-        .await;
-        // The host may have pruned what we had: retry once with a full copy.
-        if result.is_ok() || have.is_empty() {
-            break;
-        }
-        have.clear();
-    }
-    if let Err(e) = result {
-        tracing::warn!("mesh: checkpoint of {id}: {e:#}");
-    }
-    state.pulling.lock().unwrap().remove(&id);
 }
 
 // ---------------- mesh ----------------
@@ -2856,7 +3048,7 @@ impl mesh::RpcHandler for MeshRpc {
             "code.send_now" => {
                 ensure_local_host(state, &id()?)?;
                 let prompt_id = param(&p, "promptId")?.to_owned();
-                state.code.send(&id()?, AgentCmd::SendNow { prompt_id }).map(|_| Value::Null)
+                state.code.send_now(&id()?, &prompt_id).await.map(|_| Value::Null)
             }
             "code.set_model" => code_set_model_local(state, &id()?, param(&p, "modelId")?.to_owned()).await.map(|_| Value::Null),
             "code.set_config_option" => {
@@ -2888,6 +3080,11 @@ impl mesh::RpcHandler for MeshRpc {
                 let revert = p["revertFiles"].as_bool().unwrap_or(false);
                 state.code.rewind(&id()?, ordinal, preview, revert).await.map(|_| Value::Null)
             }
+            "code.fork" => {
+                let ordinal = p["ordinal"].as_u64().map(|o| o as usize);
+                let preview = p["preview"].as_str().unwrap_or_default().to_owned();
+                code_fork_local(state, &id()?, ordinal, preview).await.map(|s| json!(s))
+            }
             "code.permission" => {
                 let opt = p["optionId"].as_str().map(str::to_owned);
                 state.code.respond_permission(param(&p, "requestId")?, opt);
@@ -2903,6 +3100,7 @@ impl mesh::RpcHandler for MeshRpc {
                 let files = tokio::task::spawn_blocking(move || files::list(std::path::Path::new(&s.cwd))).await??;
                 Ok(json!(files))
             }
+            "code.commands" => Ok(session_commands(state, &id()?)),
             "code.image" => {
                 let id = id()?;
                 ensure_local_host(state, &id)?;
@@ -2989,6 +3187,9 @@ impl mesh::RpcHandler for MeshRpc {
             "host.info" => Ok(gateway::host_info_local()),
             "code.create" => gateway::create_local(state, &p).map(|s| json!(s)),
             "fs.dirs" => gateway::list_dirs_local(p["path"].as_str()),
+            // Phase 2: a gateway relays a share fetch HERE (the owning node). Only the opaque
+            // token is accepted; expiry/revocation are enforced on this node, never the gateway.
+            "share.get" => Ok(json!(shares::fetch_local(&state.shares, param(&p, "token")?).await)),
             m if m.starts_with("remote.") => gateway::call(state, &from, m, &p).await,
             other => anyhow::bail!("unknown request {other}"),
         }
@@ -3045,13 +3246,7 @@ impl mesh::RpcHandler for MeshRpc {
                 l.account_id = id.to_owned();
             }
             adopt_antigravity_plan(&self.state, l, false);
-            return;
         }
-        if name != "mesh://checkpoint" {
-            return;
-        }
-        let (Some(id), Some(host)) = (payload["id"].as_str(), payload["host"].as_str()) else { return };
-        tokio::spawn(pull_checkpoint(self.state.clone(), id.to_owned(), host.to_owned()));
     }
 
     fn greeting(&self) -> Vec<(String, serde_json::Value)> {
@@ -3300,6 +3495,27 @@ fn force_send_needs_a_host_that_advertises_it() {
     assert!(!attach_has_force_send(&serde_json::json!({ "running": true, "events": [] })));
 }
 
+#[cfg(test)]
+#[test]
+fn menu_commands_keeps_only_what_a_menu_shows() {
+    let cmds = serde_json::json!([
+        { "name": "review", "description": "Review changes", "input": { "hint": "path", "extra": 1 }, "secret": "x" },
+        { "name": "compact", "description": "Compact" },
+        { "name": "", "description": "no name" },
+        { "description": "no name at all" },
+    ]);
+    assert_eq!(
+        menu_commands(Some(&cmds)),
+        serde_json::json!([
+            { "name": "review", "description": "Review changes", "input": { "hint": "path" } },
+            { "name": "compact", "description": "Compact" },
+        ])
+    );
+    // Nothing advertised yet, or not an array: an empty list, so the phone shows no menu.
+    assert_eq!(menu_commands(None), serde_json::json!([]));
+    assert_eq!(menu_commands(Some(&serde_json::json!("x"))), serde_json::json!([]));
+}
+
 /// Queue input for a remote terminal; false when `id` is local.
 fn remote_term(state: &AppState, id: &str, method: &str, params: serde_json::Value) -> bool {
     match state.remote_terms.lock().unwrap().get(id) {
@@ -3545,6 +3761,11 @@ pub fn open_locked_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow:
     let keys = Arc::new(mesh::keys::OsKeyStore::new(&data_dir));
     let mesh = Mesh::new(db.clone(), data_dir.clone(), keys)?;
     let state = AppState::new(db, data_dir, mesh.clone(), emit);
+    // A desktop app (or a daemon built without `web`) owns the data folder itself, so it must
+    // serve artifact shares from its own loopback HTTP server. A `web`-enabled daemon serves
+    // them from its main axum server instead (web.rs), and tests must not bind any port.
+    #[cfg(all(not(feature = "web"), not(test)))]
+    shares::spawn(&state);
     let (agent_messaging, message_listener) = agent_messaging::AgentMessagingBridge::bind()?;
     let _ = state.agent_message_bridge.set(agent_messaging.clone());
     agent_messaging.serve(message_listener, state.clone());
@@ -3569,6 +3790,13 @@ pub fn open_locked_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow:
         }
     });
     let cursor_poller = state.clone();
+    let stall_watch = state.clone();
+    api::spawn(async move {
+        loop {
+            tokio::time::sleep(code::stall::TICK).await;
+            check_stalls(&stall_watch);
+        }
+    });
     api::spawn(async move {
         loop {
             tokio::time::sleep(code::cursor_plan::TICK).await;

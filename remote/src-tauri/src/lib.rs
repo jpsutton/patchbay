@@ -66,6 +66,8 @@ struct Remote {
     foreground: AtomicBool,
     /// Join requests (by node id) already announced with a notification.
     join_notified: Mutex<HashSet<String>>,
+    /// Open agent questions (`session\0request`) already announced with a notification.
+    question_notified: Mutex<HashSet<String>>,
     /// What the user chose on a join request's notification, until the window picks it up:
     /// `{ action: "open" | "approve" | "reject", nodeId }`.
     join_action: Mutex<Option<Value>>,
@@ -116,6 +118,23 @@ impl Remote {
         if let Err(e) = self.app.notification().builder().title(title).body(body).show() {
             tracing::debug!("notification: {e}");
         }
+    }
+
+    /// Announce an agent's question, once however many events or index refreshes repeat it.
+    fn notify_question(&self, session: &str, request: &str) {
+        if !self.question_notified.lock().unwrap().insert(format!("{session}\0{request}")) {
+            return;
+        }
+        self.notify("Agent has a question for you", &self.title_of("codeSessions", session));
+    }
+
+    /// Forget announced questions of `session` that are no longer open, so the set stays small.
+    fn retain_questions(&self, session: &str, open: &[&str]) {
+        let prefix = format!("{session}\0");
+        self.question_notified
+            .lock()
+            .unwrap()
+            .retain(|k| k.strip_prefix(&prefix).is_none_or(|r| open.contains(&r)));
     }
 
     /// Tell the user a node waits to join, with Approve and Decline in the notification shade and
@@ -208,6 +227,11 @@ impl Remote {
                 let id = payload["codeSessionId"].as_str().unwrap_or_default();
                 match payload["event"]["type"].as_str() {
                     Some("permission") => self.notify("Agent needs your approval", &self.title_of("codeSessions", id)),
+                    Some("question") => {
+                        if let Some(rid) = payload["event"]["requestId"].as_str() {
+                            self.notify_question(id, rid);
+                        }
+                    }
                     Some("promptDone") if payload["event"]["stopReason"] != "cancelled" => {
                         self.notify("Agent finished", &self.title_of("codeSessions", id))
                     }
@@ -221,6 +245,13 @@ impl Remote {
                 let followed = self.client.topics().contains(&rmt::session_topic(id));
                 if !followed && payload["live"]["permissions"].as_array().is_some_and(|p| !p.is_empty()) {
                     self.notify("Agent needs your approval", &self.title_of("codeSessions", id));
+                }
+                let open: Vec<&str> = payload["live"]["questions"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                self.retain_questions(id, &open);
+                if !followed {
+                    for rid in &open {
+                        self.notify_question(id, rid);
+                    }
                 }
                 self.emit("remote://live", payload);
             }
@@ -751,11 +782,6 @@ async fn get_code_transcript(r: Shared<'_>, id: String) -> CmdResult<Value> {
 #[tauri::command]
 fn save_code_transcript() {}
 
-#[tauri::command]
-fn code_checkpoints() -> Value {
-    json!({})
-}
-
 /// Follow the session and catch up: the host's replay plus what happened since its last turn.
 #[tauri::command]
 async fn code_attach(r: Shared<'_>, id: String) -> CmdResult<Value> {
@@ -874,6 +900,14 @@ async fn code_rewind(r: Shared<'_>, id: String, ordinal: u64, preview: String, r
     Ok(())
 }
 
+/// Fork a session into a new one on its host; returns the new session's row, which the gateway's
+/// list may not have yet.
+#[tauri::command]
+async fn code_fork(r: Shared<'_>, id: String, ordinal: Option<u64>, preview: String) -> CmdResult<Value> {
+    r.forget_index();
+    r.code("code.fork", json!({ "id": id, "ordinal": ordinal, "preview": preview })).await
+}
+
 #[tauri::command]
 async fn code_permission_respond(
     r: Shared<'_>,
@@ -921,6 +955,31 @@ async fn list_project_files(r: Shared<'_>, session_id: Option<String>) -> CmdRes
     }
 }
 
+/// The slash commands the session's agent advertises, for the composer's `/` menu. Like the file
+/// list, the host answers (names, descriptions, hints only); empty before the agent has any.
+#[tauri::command]
+async fn list_session_commands(r: Shared<'_>, session_id: Option<String>) -> CmdResult<Value> {
+    match session_id {
+        Some(id) => r.code("code.commands", json!({ "id": id })).await,
+        None => Ok(json!([])),
+    }
+}
+
+/// Fetch one artifact share for the in-app viewer (Phase 2). The phone has no HTTP route to the
+/// gateway, so this goes over the mesh connection it already holds: `remote.share_get` asks the
+/// gateway, which relays ONLY the opaque token to the owning node (where expiry/revocation are
+/// enforced). The result is normalized to camelCase for the frontend. An RPC failure (host offline)
+/// rejects, and the viewer shows an error state with an "open in browser" fallback.
+#[tauri::command]
+async fn remote_share_fetch(r: Shared<'_>, node_id: String, token: String) -> CmdResult<Value> {
+    let v = r.client.rpc("remote.share_get", json!({ "nodeId": node_id, "token": token })).await?;
+    Ok(json!({
+        "status": v["status"].as_u64().unwrap_or(404),
+        "headers": v["headers"].clone(),
+        "bodyB64": v["body_b64"].as_str().unwrap_or(""),
+    }))
+}
+
 /// Tell the client when any network interface's address changes (Wi-Fi to cellular, a VPN
 /// coming up), so it checks its connection at once instead of waiting for pings to fail.
 fn watch_network(client: RemoteClient) {
@@ -952,6 +1011,7 @@ pub fn run() {
     #[cfg_attr(not(mobile), allow(unused_mut))]
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_remote_platform::init());
     #[cfg(mobile)]
     {
@@ -990,6 +1050,7 @@ pub fn run() {
                 local: Mutex::new(local),
                 foreground: AtomicBool::new(true),
                 join_notified: Mutex::default(),
+                question_notified: Mutex::default(),
                 join_action: Mutex::default(),
             }));
             // Join requests come with Approve and Decline buttons; tapping any of them reports back.
@@ -1064,7 +1125,6 @@ pub fn run() {
             host_info,
             get_code_transcript,
             save_code_transcript,
-            code_checkpoints,
             code_attach,
             code_start,
             code_is_running,
@@ -1078,12 +1138,15 @@ pub fn run() {
             code_set_permission_mode,
             code_set_config_option,
             code_rewind,
+            code_fork,
             code_permission_respond,
             code_question_respond,
             code_usage,
             session_plan_usage,
             list_project_files,
+            list_session_commands,
             code_session_image,
+            remote_share_fetch,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Patchbay Remote");

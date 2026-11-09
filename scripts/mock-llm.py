@@ -109,7 +109,8 @@ def calls_of(plan):
 def _decide(user_text, images, after_tool, tools):
     """Return ("text", str) or ("tool", name, args_dict)."""
     if after_tool:
-        snippet = user_text.strip().replace("\n", " ")[:300]
+        # Long enough for two subagent reports, each ending with its transcript path.
+        snippet = user_text.strip().replace("\n", " ")[:900]
         return ("text", f"Tool finished. I saw this output: `{snippet}`")
     if "!tools" in user_text:
         names = sorted((t.get("function", t) or {}).get("name", "?") for t in tools or [])
@@ -130,7 +131,10 @@ def _decide(user_text, images, after_tool, tools):
         return ("tools", [(task, job("A")), (task, job("B"))])
     if task and "!bg" in user_text:
         return ("tool", task, {"description": "slow job", "prompt": "Report BG-DONE", "subagent_type": "explore", "run_in_background": True, "name": "scout"})
-    if task and "!fork" in user_text:
+    # A fork is offered the main agent's tools (Task included, for the shared cache) and inherits
+    # the "!fork" prompt; like a real model it heeds the fork note and does not fork again.
+    is_fork = any(n in user_text for n in ("You are a fork of the main agent", "You are fork of main agent"))
+    if task and "!fork" in user_text and not is_fork:
         return ("tool", task, {"description": "branch off", "prompt": "Report FORK-OK", "subagent_type": "fork"})
     if task and "!named" in user_text:
         return ("tool", task, {"description": "named job", "prompt": "Report NAMED-OK", "subagent_type": "general-purpose", "name": "worker"})

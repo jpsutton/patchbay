@@ -7,12 +7,13 @@ import { codeEventArrived, useStore } from "../lib/store";
 import { ChatView } from "../chat/ChatView";
 import { PaneHost } from "../code/PaneHost";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { ShareViewer } from "../components/ShareViewer";
 import { SessionInfoDialog } from "../code/SessionInfoDialog";
 import { ActionSheet, useHold, type ItemAction } from "../components/ItemMenu";
 import { chatActions, promptRename } from "../lib/itemActions";
 import { NewSessionSheet } from "./NewSession";
 import { ChatNodePicker } from "./ChatNodePicker";
-import { ArchivedRow, CodeSessionList, type Live } from "./CodeSessionList";
+import { ArchivedRow, CodeSessionList, liveNeedsYou, type Live } from "./CodeSessionList";
 import { fmtShort } from "../lib/format";
 import { Dot } from "../components/Dot";
 import { ReadAloudSettings } from "../settings/ReadAloudSettings";
@@ -361,8 +362,8 @@ function Main({
         hiddenAt.current = Date.now();
         const st = useStore.getState();
         const running =
-          Object.values(st.code).some((c) => c.busy || c.permissions.length > 0) ||
-          Object.values(liveRef.current).some((l) => l.busy || l.permissions.length > 0) ||
+          Object.values(st.code).some((c) => c.busy || c.permissions.length > 0 || c.questions.length > 0) ||
+          Object.values(liveRef.current).some((l) => l.busy || liveNeedsYou(l)) ||
           Object.values(st.chatStreams).some((c) => c.running);
         if (running && flag(STAY_KEY, true)) remote.keepAlive(true).catch(() => {});
         return;
@@ -563,6 +564,8 @@ function Main({
       )}
       <ConfirmDialog />
       <SessionInfoDialog />
+      {/* Phase 2: tapping a share link in chat opens the artifact in-app. */}
+      <ShareViewer />
       {toast && (
         <div className="pointer-events-none fixed inset-x-4 bottom-[calc(env(safe-area-inset-bottom)+16px)] z-50 flex justify-center">
           <div className="pointer-events-auto max-w-md rounded-xl border border-border bg-raised px-4 py-2.5 text-[14px] shadow-float">
@@ -628,7 +631,7 @@ function Home({
   const conversations = useStore((s) => s.conversations);
   const sessions = useStore((s) => s.codeSessions);
   const streams = useStore((s) => s.chatStreams);
-  const needsYou = sessions.filter((s) => (live[s.id]?.permissions.length ?? 0) > 0).length;
+  const needsYou = sessions.filter((s) => liveNeedsYou(live[s.id])).length;
 
   const [sheet, setSheet] = useState<{ title: string; actions: ItemAction[] } | null>(null);
   const [showArchived, setShowArchived] = useState(false);
@@ -811,6 +814,39 @@ function Toggle({ label, sub, on, onChange }: { label: string; sub: string; on: 
   );
 }
 
+/** The icon-size preference, kept on this phone like the rest of its preferences. */
+function IconSizeRow() {
+  const size = useStore((s) => s.prefs.iconSize);
+  const update = useStore((s) => s.updatePrefs);
+  const setToast = useStore((s) => s.setToast);
+  const options = [
+    { value: "small", label: "Small" },
+    { value: "medium", label: "Medium" },
+    { value: "large", label: "Large" },
+  ] as const;
+  return (
+    <div className="flex items-center gap-3 py-2">
+      <span className="min-w-0 flex-1 text-[15px]">Icon size</span>
+      <div role="radiogroup" aria-label="Icon size" className="flex rounded-lg border border-line p-0.5">
+        {options.map((o) => (
+          <button
+            key={o.value}
+            role="radio"
+            aria-checked={size === o.value}
+            className={`h-8 rounded-md px-3 text-[13px] ${size === o.value ? "bg-panel-2 text-fg" : "text-muted active:bg-panel-2"}`}
+            onClick={async () => {
+              const err = await update({ iconSize: o.value });
+              if (err) setToast(err);
+            }}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function JoinRequests({ pending }: { pending: RemoteStatus["pending"] }) {
   const setToast = useStore((s) => s.setToast);
   const [busy, setBusy] = useState<string | null>(null);
@@ -926,6 +962,7 @@ function SettingsSheet({
             on={onlineHostsOnly}
             onChange={onOnlineHostsOnly}
           />
+          <IconSizeRow />
         </div>
         <div className="mt-6 font-mono text-[11px] uppercase tracking-[0.06em] text-faint">Reading</div>
         <div className="mt-2 rounded-xl border border-line bg-panel px-4">

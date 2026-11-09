@@ -80,8 +80,14 @@ pub async fn compact(
     if summary.trim().is_empty() {
         return Err("the model returned an empty summary".into());
     }
+    // The summary is lossy; the file still holds every message before it, so say where.
+    let transcript = session
+        .store
+        .file_path()
+        .map(|path| format!("\n\n{}", p.msg("compact_transcript", &[("path", &path.display().to_string())])))
+        .unwrap_or_default();
     let message = Message::user(format!(
-        "{SUMMARY_MARK}\n{}\n</conversation-summary>\n\n{}",
+        "{SUMMARY_MARK}\n{}\n</conversation-summary>{transcript}\n\n{}",
         summary.trim(),
         p.msg("compact_continue", &[])
     ));

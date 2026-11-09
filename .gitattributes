@@ -1,0 +1,5 @@
+# THIRD_PARTY_NOTICES.md is generated as LF. Without an eol rule,
+# core.autocrlf=true (the Windows default) checks it out as CRLF while
+# regeneration writes LF, so the notices gate's byte comparison sees a
+# line-ending difference as staleness (pb-20261106-13).
+THIRD_PARTY_NOTICES.md text eol=lf

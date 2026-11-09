@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
+use patchbay_agent::proc::search_dirs;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -162,6 +163,9 @@ pub struct Extensions {
     pub status_line: bool,
     /// Grok Build's `x.ai/rewind/*` methods, behind "edit and resend".
     pub rewind: bool,
+    /// Copy the session into a new one, whole or up to a prompt (`patchbay/fork`). Patchbay's own
+    /// agent only: ACP's `session/fork` takes no message position (docs/design/session-fork.md).
+    pub fork: bool,
     /// Runs on Patchbay's providers and models, so a change to them needs a restart to apply.
     pub patchbay_models: bool,
     /// Grok Build's `x.ai/interject`, which steers a message into the running turn.
@@ -293,37 +297,11 @@ pub struct Launch {
 /// User overrides from Settings: agent id -> executable path.
 pub type AgentPaths = BTreeMap<String, String>;
 
-/// PATH plus the user-level bin directories a desktop launch may leave out of it.
-fn search_dirs() -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    if let Some(home) = home_dir() {
-        for d in [".local/bin", "bin", ".npm-global/bin", ".bun/bin", ".opencode/bin", ".cursor/bin", ".volta/bin"] {
-            dirs.push(home.join(d));
-        }
-    }
-    if cfg!(unix) {
-        dirs.push("/usr/local/bin".into());
-        dirs.push("/opt/homebrew/bin".into());
-    }
-    dirs
-}
-
 /// PATH for an agent process: the program's own directory first (an npm shim's `node` usually
 /// sits beside it), then [`search_dirs`]. Without this, a shim found in `~/.npm-global/bin`
 /// fails with "env: node: No such file" when Patchbay was started from a desktop entry.
 fn child_path(program: &Path) -> Option<String> {
-    let mut dirs = Vec::new();
-    if let Some(dir) = program.parent().filter(|d| !d.as_os_str().is_empty()) {
-        dirs.push(dir.to_path_buf());
-    }
-    for d in search_dirs() {
-        if !dirs.contains(&d) {
-            dirs.push(d);
-        }
-    }
-    std::env::join_paths(dirs).ok().map(|p| p.to_string_lossy().into_owned())
+    patchbay_agent::proc::child_path(program.parent())
 }
 
 /// Locate an executable on [`search_dirs`].
@@ -618,11 +596,13 @@ fn detect(kind: AgentKind, overrides: &AgentPaths) -> AgentInfo {
 }
 
 fn version_of(program: &Path) -> Option<String> {
+    use patchbay_agent::proc::NoWindow;
     let mut child = std::process::Command::new(program)
         .arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
+        .no_window()
         .spawn()
         .ok()?;
     let t0 = std::time::Instant::now();
@@ -821,6 +801,7 @@ fn prepare_patchbay(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSess
         ext: Extensions {
             patchbay_models: true,
             rewind: true,
+            fork: true,
             cancel_tool: true,
             force_steers: true,
             background_tools: true,
@@ -874,7 +855,7 @@ fn prepare_grok(
         args,
         env,
         env_remove: vec!["XAI_API_KEY".into(), "GROK_CODE_XAI_API_KEY".into()],
-        ext: Extensions { status_line: true, rewind: true, patchbay_models: true, interject: true, steering: false, force_send: false, cancel_tool: false, force_steers: false, background_tools: false },
+        ext: Extensions { status_line: true, rewind: true, fork: false, patchbay_models: true, interject: true, steering: false, force_send: false, cancel_tool: false, force_steers: false, background_tools: false },
         session_meta,
         initial_model: None,
         login_hint: "",
@@ -1065,6 +1046,8 @@ mod tests {
 
     #[test]
     fn antigravity_auth_status_parses_settings_and_clears() {
+        // Holds GEMINI_HOME for the whole test: another test swaps the same variable.
+        let _env = crate::test_support::gemini_home_lock();
         let dir = std::env::temp_dir().join(format!("gemini-test-{}", crate::db::new_id()));
         let settings = dir.join("antigravity-acp").join("settings.json");
         std::fs::create_dir_all(settings.parent().unwrap()).unwrap();

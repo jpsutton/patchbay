@@ -1,5 +1,5 @@
 //! Two app instances in one process, linked by a real mesh on localhost: moving a Code session,
-//! checkpoints, taking over from an offline host, and remote terminals.
+//! taking over from an offline host, and remote terminals.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -69,7 +69,7 @@ fn host_of(n: &Node, id: &str) -> Option<String> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn move_checkpoint_take_over_and_orphaned_work() {
+async fn move_take_over_and_orphaned_work() {
     let (a, b) = (node("alpha"), node("bravo"));
     link(&a, &b).await;
     let (an, bn) = (a.state.mesh.node_id().to_owned(), b.state.mesh.node_id().to_owned());
@@ -97,20 +97,26 @@ async fn move_checkpoint_take_over_and_orphaned_work() {
     // A's checkout is untouched.
     assert_eq!(std::fs::read_to_string(proj_a.join("app.txt")).unwrap(), "v2, not committed\n");
 
-    // A turn on B ends: A fetches a checkpoint.
+    // A turn on B ends. Nothing is copied to A: the working folder only moves when asked.
     std::fs::write(proj_b.join("app.txt"), "v3 from bravo\n").unwrap();
     code_sink(&b.state)(code::acp::Envelope {
         code_session_id: s.id.clone(),
         event: code::acp::CodeEvent::PromptDone { stop_reason: json!("end_turn") },
     });
-    until("checkpoint on A", 20, || handoff::checkpoint(&a.dir, &s.id).is_some()).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(!a.dir.join("mesh").join("mirrors").exists());
+    assert!(!a.dir.join("mesh").join("checkpoints").exists());
 
-    // B vanishes; A takes over from the checkpoint into a fresh folder.
+    // B vanishes; A takes over with the conversation only, in a folder it already has.
     b.state.mesh.stop();
     until("A notices B is gone", 40, || !a.state.mesh.connected(&bn)).await;
     let proj_a2 = a.dir.join("proj2");
-    take_over_local(&a.state, &s.id, &proj_a2.to_string_lossy()).await.unwrap();
-    assert_eq!(std::fs::read_to_string(proj_a2.join("app.txt")).unwrap(), "v3 from bravo\n");
+    assert!(take_over_local(&a.state, &s.id, &proj_a2.to_string_lossy()).await.is_err(), "the folder must exist");
+    std::fs::create_dir_all(&proj_a2).unwrap();
+    let note = take_over_local(&a.state, &s.id, &proj_a2.to_string_lossy()).await.unwrap();
+    assert!(note.is_some());
+    assert!(!proj_a2.join("app.txt").exists());
+    assert!(a.state.db.get_setting(&format!("mesh.handoff.{}", s.id)).unwrap().is_some());
     assert_eq!(host_of(&a, &s.id).as_deref(), Some(an.as_str()));
     let epoch = a.state.db.get_code_session(&s.id).unwrap().unwrap().epoch;
     assert_eq!(epoch, 2);
@@ -717,6 +723,67 @@ async fn attach_replays_latest_plan() {
     assert_eq!(got[0]["update"]["entries"][0]["content"], "decode the archive");
 }
 
+/// pb-20261107-17: a turn with nothing from its agent past the limit is reported once (a
+/// `stalled` event in its transcript, replayed to a window that opens it, and `stalled` in
+/// `list_agent_sessions`), never cancelled, and cleared by the agent's next word.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quiet_turn_is_reported_stalled_once_and_cleared_by_activity() {
+    use code::acp::CodeEvent;
+    let a = node("alpha-stall");
+    let s = a.state.db.create_code_session(&a.dir.to_string_lossy(), None, "opencode", "default").unwrap();
+    let mut rx = a.state.code.attach_test_agent(&s.id);
+    let stalls = || {
+        a.events.lock().unwrap().iter().filter(|(n, p)| n == code::acp::EVENT && p["event"]["type"] == "stalled").count()
+    };
+    let activity = || {
+        let listed = list_agent_sessions(&a.state, &s.id).unwrap();
+        let me = listed.as_array().unwrap().iter().find(|x| x["sessionId"] == s.id.as_str()).cloned().unwrap();
+        (me["activity"].as_str().unwrap_or_default().to_owned(), me["lastActivityAt"].clone())
+    };
+    let replayed = || {
+        code_attach_local(&a.state, &s.id)["events"].as_array().unwrap().iter().any(|e| e["type"] == "stalled")
+    };
+    assert_eq!(activity().0, "idle");
+
+    // Mid-turn, and the agent's last word was eleven minutes ago.
+    a.state.code.set_busy(&s.id, true);
+    emit(&a, &s.id, chunk("merging now"));
+    assert_eq!(activity().0, "running");
+    assert!(activity().1.is_i64(), "last activity is reported");
+    let ago = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(11 * 60)).unwrap();
+    a.state.code.stall.touch_at(&s.id, ago, 1);
+    check_stalls(&a.state);
+    assert_eq!(stalls(), 1);
+    assert_eq!(activity().0, "stalled");
+    assert!(replayed(), "a window opening it now sees why");
+    check_stalls(&a.state);
+    assert_eq!(stalls(), 1, "reported once");
+    assert!(rx.try_recv().is_err(), "nothing was sent to the agent: no cancel");
+    assert!(a.state.code.is_busy(&s.id), "the turn is left running");
+
+    // The agent speaks again: no longer stalled, and nothing to replay.
+    emit(&a, &s.id, chunk("done"));
+    assert_eq!(activity().0, "running");
+    assert!(!replayed());
+
+    // Waiting on a person is never a stall.
+    a.state.code.stall.touch_at(&s.id, ago, 1);
+    emit(&a, &s.id, CodeEvent::Question { request_id: "q1".into(), form: json!({}) });
+    a.state.code.stall.touch_at(&s.id, ago, 1);
+    check_stalls(&a.state);
+    assert_eq!(stalls(), 1);
+    assert_eq!(activity().0, "waiting");
+
+    // Off at 0.
+    emit(&a, &s.id, CodeEvent::QuestionResolved { request_id: "q1".into() });
+    let mut p = prefs::load(&a.state.db);
+    p.stall_notice_minutes = 0;
+    prefs::save(&a.state.db, &p).unwrap();
+    a.state.code.stall.touch_at(&s.id, ago, 1);
+    check_stalls(&a.state);
+    assert_eq!(stalls(), 1, "off");
+}
+
 /// The usage guard: a Claude Code turn past the plan limit is cancelled once, with a notice, and
 /// new prompts are refused until the window resets. Sessions on other agents run on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -765,7 +832,8 @@ async fn usage_limit_stops_claude_turns() {
     assert_eq!(notices(), 1);
     let ev = a.events.lock().unwrap().iter().rev().find(|(_, p)| p["event"]["type"] == "notice").cloned().unwrap();
     let text = ev.1["event"]["message"].as_str().unwrap().to_owned();
-    assert!(text.starts_with("Stopped. You have used 96% of your Claude plan's 5-hour limit"), "{text}");
+    let label = crate::plan_account_label(&a.state, &crate::default_plan_account().0);
+    assert!(text.starts_with(&format!("Stopped. You have used 96% of {label}'s 5-hour limit")), "{text}");
 
     // A session on another Claude account runs on: that account's usage is its own.
     let teams = db::Provider {
@@ -840,6 +908,98 @@ async fn usage_limit_stops_claude_turns() {
     let latest = |acct: &str| again.code.plan.account(acct).latest.and_then(|l| l.five_hour).map(|w| w.utilization);
     assert_eq!(latest(&crate::default_plan_account().0), Some(0.97));
     assert_eq!(latest("/tmp/pb-other-claude"), Some(0.2));
+}
+
+/// Two accounts in one guard, constructed directly: a session is stopped only by its own
+/// account's report — never by another account's 99%, and never at all when its own account
+/// has no report. This is the contract `PlanGuard` states ("Accounts never count against
+/// each other"), pinned at the prompt gate where a violation would actually block a send.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_is_gated_only_by_its_own_accounts_report() {
+    use code::acp::{AgentCmd, Delivery};
+    use code::plan_limits::{PlanLimits, Window, now};
+    let a = node("alpha-own-account");
+    let cwd = a.dir.to_string_lossy().into_owned();
+    let resets = now() + 3600;
+    let observed = now() - 60;
+    // Account A over the limit, account B well under it — recorded straight into the guard.
+    a.state.code.plan.record(
+        "acct-a:org-a",
+        Some("Alpha".into()),
+        PlanLimits { five_hour: Some(Window { utilization: 0.99, resets_at: resets }), observed_at: observed, ..Default::default() },
+    );
+    a.state.code.plan.record(
+        "acct-b:org-b",
+        Some("Beta".into()),
+        PlanLimits { five_hour: Some(Window { utilization: 0.05, resets_at: resets }), observed_at: observed, ..Default::default() },
+    );
+    // One provider per account: each config directory's `.claude.json` names its account, so
+    // sessions bound to a provider resolve to exactly that key (and account C has no report).
+    let provider = |id: &str, name: &str, account: (&str, &str)| {
+        let dir = a.dir.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let profile = serde_json::json!({ "oauthAccount": {
+            "accountUuid": account.0, "organizationUuid": account.1, "organizationName": name
+        }});
+        std::fs::write(dir.join(".claude.json"), profile.to_string()).unwrap();
+        a.state
+            .db
+            .upsert_provider(
+                &db::Provider {
+                    id: id.into(),
+                    name: name.into(),
+                    kind: db::ProviderKind::Anthropic,
+                    base_url: "https://api.anthropic.com/v1".into(),
+                    has_key: false,
+                    auth_mode: db::AuthMode::ClaudeLogin,
+                    claude_config_dir: Some(dir.to_string_lossy().into_owned()),
+                },
+                None,
+            )
+            .unwrap();
+        let model = db::Model {
+            id: format!("m-{id}"),
+            provider_id: id.into(),
+            model_id: "claude-x".into(),
+            display_name: name.into(),
+            vision: false,
+            context_window: None,
+            params: Default::default(),
+        };
+        a.state.db.upsert_model(&model).unwrap();
+        model.id
+    };
+    // A session on a provider, with a test agent that answers its prompts.
+    let on = |model: &str| {
+        let s = a.state.db.create_code_session(&cwd, Some(model), "patchbay", "default").unwrap();
+        let mut rx = a.state.code.attach_test_agent(&s.id);
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                if let AgentCmd::Prompt { reply, .. } = cmd
+                    && let Some(reply) = reply
+                {
+                    let _ = reply.send(Ok(Delivery::Sent));
+                }
+            }
+        });
+        s.id
+    };
+    let model_a = provider("prov-a", "Claude Alpha", ("acct-a", "org-a"));
+    let model_b = provider("prov-b", "Claude Beta", ("acct-b", "org-b"));
+    let model_c = provider("prov-c", "Claude Gamma", ("acct-c", "org-c"));
+    let sa = on(&model_a);
+    let sb = on(&model_b);
+    let sc = on(&model_c);
+    let chans: crate::api::ChanFactory = Arc::new(|_| None);
+    let prompt = |id: String| crate::api::call(&a.state, "code_prompt", json!({ "id": id, "text": "more", "attachmentIds": [] }), &chans);
+
+    // A reads A's own 99% — and the message names A's account, not a generic "your Claude plan".
+    let err = prompt(sa).await.unwrap_err();
+    assert!(err.0.starts_with("Not sent. You have used 99% of Claude Alpha's 5-hour limit"), "{}", err.0);
+    // B reads B's 5%: another account's 99% never stops this session.
+    prompt(sb).await.expect("B is not gated by A's numbers");
+    // C has no report of its own: no report, no block — never another account's numbers.
+    prompt(sc).await.expect("an account with no report is not blocked by another's");
 }
 
 /// Plan usage one member sees reaches the others, a member that was away catches up when it
@@ -1004,6 +1164,7 @@ async fn phone_decides_join_requests_waiting_on_any_computer() {
     .await;
     a.state.mesh.approve(&pid).await.unwrap();
     until("phone online", 10, || p.client.status()["phase"] == "online").await;
+    until("B knows the phone", 10, || members::get(&b.state.db, &pid).unwrap().is_some()).await;
 
     // C asks B; the phone, whichever of them it is connected through, is told and approves.
     until("B listens", 5, || b.state.mesh.bound_port().is_some()).await;

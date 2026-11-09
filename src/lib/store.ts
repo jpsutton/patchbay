@@ -36,6 +36,7 @@ import {
   defaultPreferences,
 } from "./ipc";
 
+import { setIconSize } from "./iconSize";
 import { notifyInBackground } from "./notify";
 import { activityOf, strongest, type Activity } from "./activity";
 import { isRemoteApp } from "./platform";
@@ -43,7 +44,9 @@ import { loadStringList, saveStringList } from "./manualOrder";
 import * as paneLogic from "./panes";
 import { isForegroundUpdate } from "./codeWorking";
 import { chunkChars, phaseOf, type Phase } from "./workingStatus";
+import { trackStall } from "./stall";
 import { adoptEarlier } from "./earlierHistory";
+import { appendText } from "./streamText";
 import { appendUserChunk } from "./harness";
 import { planUpdateOf } from "./todoPlan";
 import { applyChange, type LayoutChange, type SidebarEntry } from "./sidebarLayout";
@@ -56,8 +59,9 @@ export type Mode = "chat" | "code";
 
 export type Entry =
   /** `promptId`: names the prompt in its `userPrompt` events, so each shows once. `pending`: steered
-   *  into the running turn, and the agent has not taken a step since (see `readSteers`). */
-  | { kind: "user"; text: string; attachments?: Attachment[]; promptId?: string; at?: number; pending?: boolean }
+   *  into the running turn, and the agent has not taken a step since (see `readSteers`). `waitFor`:
+   *  the tool calls that were running when it came in; the agent reads it once they are done. */
+  | { kind: "user"; text: string; attachments?: Attachment[]; promptId?: string; at?: number; pending?: boolean; waitFor?: string[] }
   | { kind: "agent"; text: string; at?: number }
   /** An image the agent sent in its reply (an ACP image block). */
   | { kind: "image"; data: string; mimeType: string; from?: "user" }
@@ -125,6 +129,8 @@ export interface CodeState {
   approvalGaps: string[];
   /** The agent waits for a sign-in: before it starts a session, or mid-session. */
   auth: { message: string; methods: AuthChoice[] } | null;
+  /** The host reported this turn quiet that many seconds ago (`lib/stall.ts`); null otherwise. */
+  stalled: number | null;
   /** Prompts waiting for the running turn to end. */
   queued: QueuedPrompt[];
   /** Queued prompts this window sent that a stop dropped, for its composer to take back. */
@@ -187,6 +193,7 @@ const emptyCode = (): CodeState => ({
   extensions: { statusLine: false, rewind: false },
   approvalGaps: [],
   auth: null,
+  stalled: null,
   queued: [],
   restore: null,
   autoApproved: {},
@@ -329,6 +336,8 @@ export interface ConfirmRequest {
   title: string;
   body: string;
   confirmLabel?: string;
+  /** A second way to go on, between Cancel and the confirm button; it comes back as `alt` with `ok` false. */
+  altLabel?: string;
   danger?: boolean;
   checkbox?: { label: string; checked: boolean };
   /** A text field, e.g. for renaming; its value comes back in `text`. */
@@ -338,6 +347,8 @@ export interface ConfirmRequest {
 export interface ConfirmResult {
   ok: boolean;
   checked: boolean;
+  /** The `altLabel` button was pressed. */
+  alt?: boolean;
   text?: string;
 }
 
@@ -381,6 +392,14 @@ interface Store {
   importClaudeOpen: boolean;
   /** The Code session whose details dialog is open (see `code/SessionInfoDialog.tsx`). */
   sessionInfoId: string | null;
+  /** Phase 2: the artifact share URL open in the phone's embedded viewer (see ShareViewer.tsx). */
+  shareUrl: string | null;
+  /**
+   * A one-shot request to append text to the active composer's draft (pb-20261105-18). A component
+   * anywhere in the transcript sets it; the mounted composer takes it atomically so split panes
+   * can't both insert the same text. See `Composer`'s `seed` insert mode.
+   */
+  composerInsert: { id: number; text: string; mentions?: string[] } | null;
   /** Sidebar title filter. */
   sidebarQuery: string;
   providers: Provider[];
@@ -407,6 +426,11 @@ interface Store {
   /** Last Antigravity plan report from the Cloud Code quota poll or a mesh peer. */
   antigravityPlanLimits: AntigravityPlanLimits | null;
   antigravityPlanOpen: boolean;
+  /**
+   * The sidebar's usage pane for the open Code session when its agent has no plan window (Grok,
+   * Patchbay's own agent, an ACP agent); see components/SessionUsage.
+   */
+  sessionUsageOpen: boolean;
   prefs: Preferences;
   loadPrefs: () => Promise<void>;
   /** Preferences someone saved on this backend (another window or browser tab): show them here. */
@@ -424,6 +448,11 @@ interface Store {
   setNewSessionOpen: (o: boolean) => void;
   setImportClaudeOpen: (o: boolean) => void;
   setSessionInfoId: (id: string | null) => void;
+  setShareUrl: (url: string | null) => void;
+  /** Ask the active composer to append `text` to its draft. `mentions` registers @-mentioned files alongside the text. */
+  insertIntoComposer: (text: string, mentions?: string[]) => void;
+  /** Take (and clear) the pending insert. Only the first composer to call gets it. */
+  takeComposerInsert: () => { id: number; text: string; mentions?: string[] } | null;
   setSidebarQuery: (q: string) => void;
   setToast: (t: string | null) => void;
   setAlert: (a: Alert | null) => void;
@@ -434,6 +463,7 @@ interface Store {
   setCursorPlanOpen: (o: boolean) => void;
   setAntigravityPlanLimits: (l: AntigravityPlanLimits | null) => void;
   setAntigravityPlanOpen: (o: boolean) => void;
+  setSessionUsageOpen: (o: boolean) => void;
   refreshCatalog: () => Promise<void>;
   setDefaultModel: (ref: string) => Promise<void>;
   refreshConversations: () => Promise<void>;
@@ -517,16 +547,6 @@ export function rawText(raw: unknown): string {
   return json.length > MAX_RAW ? `${json.slice(0, MAX_RAW)}\n…[${json.length - MAX_RAW} more characters]` : json;
 }
 
-function appendText(entries: Entry[], kind: "agent" | "thought" | "user", text: string, at?: number): Entry[] {
-  if (!text) return entries;
-  const last = entries[entries.length - 1];
-  if (last && last.kind === kind) {
-    return [...entries.slice(0, -1), { ...last, text: last.text + text }];
-  }
-  if ((kind === "agent" || kind === "user") && at) return [...entries, { kind, text, at }];
-  return [...entries, { kind, text } as Entry];
-}
-
 type TerminalMeta = {
   terminal_info?: { terminal_id?: string };
   terminal_output?: { data?: string };
@@ -586,17 +606,24 @@ function endRunning(calls: Record<string, AcpToolCall>, status: "completed" | "f
 /** `entries` with no steered message waiting on the agent: its turn is over. */
 function noPending(entries: Entry[]): Entry[] {
   return entries.some((x) => x.kind === "user" && x.pending)
-    ? entries.map((x) => (x.kind === "user" && x.pending ? { ...x, pending: false } : x))
+    ? entries.map((x) => (x.kind === "user" && x.pending ? { ...x, pending: false, waitFor: undefined } : x))
     : entries;
 }
 
 /**
  * Steered messages the agent has probably read: it takes one in before its next model request, so
  * once a tool call after the message has finished and the agent goes on, it is no longer waiting.
- * ACP says nothing when a steer is read, so this is a guess from the transcript.
+ * A message that came in while tool calls ran is read as soon as those finish and the agent goes
+ * on: those calls sit above it in the transcript, so the rule above would only fire a whole step
+ * later, long after the model has seen it. ACP says nothing when a steer is read, so this is a
+ * guess from the transcript.
  */
 function readSteers(s: CodeState): CodeState {
   if (!s.entries.some((x) => x.kind === "user" && x.pending)) return s;
+  const done = (id: string) => {
+    const status = s.toolCalls[id]?.status;
+    return status === undefined || status === "completed" || status === "failed";
+  };
   let stepped = false;
   let entries = s.entries;
   for (let i = entries.length - 1; i >= 0; i--) {
@@ -604,9 +631,9 @@ function readSteers(s: CodeState): CodeState {
     if (x.kind === "tool") {
       const status = s.toolCalls[x.id]?.status;
       if (status === "completed" || status === "failed") stepped = true;
-    } else if (x.kind === "user" && x.pending && stepped) {
+    } else if (x.kind === "user" && x.pending && (stepped || (x.waitFor?.length && x.waitFor.every(done)))) {
       if (entries === s.entries) entries = [...entries];
-      entries[i] = { ...x, pending: false };
+      entries[i] = { ...x, pending: false, waitFor: undefined };
     }
   }
   return entries === s.entries ? s : { ...s, entries };
@@ -794,6 +821,14 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
     case "notice":
       next = { ...s, entries: [...s.entries, { kind: "info", text: e.message }] };
       break;
+    case "stalled":
+      // A replay of the same report (a window catching up) doesn't add a second line.
+      next =
+        s.stalled != null
+          ? { ...s, stalled: e.quietSecs }
+          : { ...s, stalled: e.quietSecs, entries: [...s.entries, { kind: "info", text: e.message }] };
+      if (s.stalled == null) notifyCode(id, "has gone quiet");
+      break;
     case "unrecognized": {
       // Repeats of the same kind in a turn (an unknown chunk type, say) show as one line, with
       // the latest payload, even with other entries between them.
@@ -930,7 +965,14 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
                   attachments,
                   promptId: pid,
                   ...(e.replay || s.status !== "ready" ? {} : { at: Date.now() }),
-                  ...(e.delivery === "steered" && !e.replay ? { pending: true } : {}),
+                  ...(e.delivery === "steered" && !e.replay
+                    ? {
+                        pending: true,
+                        waitFor: Object.values(s.toolCalls)
+                          .filter(isRunning)
+                          .map((tc) => tc.toolCallId),
+                      }
+                    : {}),
                 },
               ],
           queued,
@@ -940,8 +982,12 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
     }
     case "unqueued": {
       const dropped = s.queued.filter((q) => e.promptIds.includes(q.promptId));
+      // A steered message waiting under its bubble goes with its retraction; one the agent has
+      // already read (no longer pending) stays in the transcript.
+      const retracted = (x: Entry) => x.kind === "user" && x.pending && !!x.promptId && e.promptIds.includes(x.promptId);
       next = {
         ...s,
+        entries: s.entries.some(retracted) ? s.entries.filter((x) => !retracted(x)) : s.entries,
         queued: s.queued.filter((q) => !e.promptIds.includes(q.promptId)),
         restore: e.restore ? handBack(s.restore, dropped, useStore.getState().mesh?.nodeId) : s.restore,
       };
@@ -1026,6 +1072,9 @@ function syncPanes(list: CodeSession[]) {
   if (next !== cur) applyPanes(next);
 }
 
+/** Monotonic id so two inserts in the same millisecond still look like different requests. */
+let nextComposerInsertId = 0;
+
 export const useStore = create<Store>((set, get) => ({
   mode: "chat",
   paletteOpen: false,
@@ -1098,6 +1147,8 @@ export const useStore = create<Store>((set, get) => ({
   newSessionOpen: false,
   importClaudeOpen: false,
   sessionInfoId: null,
+  shareUrl: null,
+  composerInsert: null,
   sidebarQuery: "",
   providers: [],
   models: [],
@@ -1119,6 +1170,7 @@ export const useStore = create<Store>((set, get) => ({
   cursorPlanOpen: false,
   antigravityPlanLimits: null,
   antigravityPlanOpen: false,
+  sessionUsageOpen: false,
   confirm: null,
   prefs: defaultPreferences,
   loadPrefs: async () => {
@@ -1173,35 +1225,55 @@ export const useStore = create<Store>((set, get) => ({
   setNewSessionOpen: (newSessionOpen) => set({ newSessionOpen }),
   setImportClaudeOpen: (importClaudeOpen) => set({ importClaudeOpen }),
   setSessionInfoId: (sessionInfoId) => set({ sessionInfoId }),
+  setShareUrl: (shareUrl) => set({ shareUrl }),
+  insertIntoComposer: (text, mentions) =>
+    set({ composerInsert: { id: ++nextComposerInsertId, text, mentions } }),
+  takeComposerInsert: () => {
+    const pending = get().composerInsert;
+    if (pending) set({ composerInsert: null });
+    return pending;
+  },
   setSidebarQuery: (sidebarQuery) => set({ sidebarQuery }),
   setToast: (toast) => set({ toast }),
   setAlert: (alert) => set({ alert }),
   setMeshPopoverOpen: (meshPopoverOpen) =>
     set(
       meshPopoverOpen
-        ? { meshPopoverOpen, planOpen: false, cursorPlanOpen: false, antigravityPlanOpen: false }
+        ? { meshPopoverOpen, planOpen: false, cursorPlanOpen: false, antigravityPlanOpen: false, sessionUsageOpen: false }
         : { meshPopoverOpen },
     ),
   setPlanAccounts: (planAccounts) => set({ planAccounts }),
   setPlanOpen: (planOpen) =>
     set(
       planOpen
-        ? { planOpen, meshPopoverOpen: false, cursorPlanOpen: false, antigravityPlanOpen: false }
+        ? { planOpen, meshPopoverOpen: false, cursorPlanOpen: false, antigravityPlanOpen: false, sessionUsageOpen: false }
         : { planOpen },
     ),
   setCursorPlanLimits: (cursorPlanLimits) => set({ cursorPlanLimits }),
   setCursorPlanOpen: (cursorPlanOpen) =>
     set(
       cursorPlanOpen
-        ? { cursorPlanOpen, meshPopoverOpen: false, planOpen: false, antigravityPlanOpen: false }
+        ? { cursorPlanOpen, meshPopoverOpen: false, planOpen: false, antigravityPlanOpen: false, sessionUsageOpen: false }
         : { cursorPlanOpen },
     ),
   setAntigravityPlanLimits: (antigravityPlanLimits) => set({ antigravityPlanLimits }),
   setAntigravityPlanOpen: (antigravityPlanOpen) =>
     set(
       antigravityPlanOpen
-        ? { antigravityPlanOpen, meshPopoverOpen: false, planOpen: false, cursorPlanOpen: false }
+        ? { antigravityPlanOpen, meshPopoverOpen: false, planOpen: false, cursorPlanOpen: false, sessionUsageOpen: false }
         : { antigravityPlanOpen },
+    ),
+  setSessionUsageOpen: (sessionUsageOpen) =>
+    set(
+      sessionUsageOpen
+        ? {
+            sessionUsageOpen,
+            meshPopoverOpen: false,
+            planOpen: false,
+            cursorPlanOpen: false,
+            antigravityPlanOpen: false,
+          }
+        : { sessionUsageOpen },
     ),
 
   refreshCatalog: async () => {
@@ -1309,7 +1381,7 @@ export const useStore = create<Store>((set, get) => ({
     let restart = false;
     for (const e of events) {
       if (e.type === "title") title = e.title;
-      else s = trackTurn(s, stepCodeEvent(id, s, e));
+      else s = trackStall(e.type, trackTurn(s, stepCodeEvent(id, s, e)));
       if (e.type === "promptDone" || e.type === "permissionResolved") restart = true;
     }
     // One store update for the whole batch: each one re-renders the open transcript.
@@ -1629,6 +1701,7 @@ export function applyUiPrefs(p: Preferences) {
   if (p.theme === "system") delete root.dataset.theme;
   else root.dataset.theme = p.theme;
   root.style.fontSize = TEXT_SIZE_PX[p.textSize] ?? TEXT_SIZE_PX.default;
+  setIconSize(p.iconSize);
 }
 
 /** True when this keydown should send, per the "send with" preference. */

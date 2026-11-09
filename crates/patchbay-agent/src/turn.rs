@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use patchbay_llm::{Event, Message, Part, Request, Role, StopReason, ToolCall, ToolResult};
+use patchbay_llm::{Event, Message, Part, Request, Role, StopReason, SystemBlock, ToolCall, ToolResult};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
@@ -133,6 +133,69 @@ async fn reminders(session: &Session, model_name: &str) -> Option<Part> {
     (!notes.is_empty()).then(|| Part::Text(prompt::reminder(&notes.join("\n\n"))))
 }
 
+/// From this size on, every step's results tell the model how big its context is. Below it the
+/// number would only add noise; above it, every further read costs on every later step, and the
+/// model should weigh a targeted search, a fresh session or `/compact` against reading more.
+const CONTEXT_NOTE_TOKENS: u64 = 100_000;
+
+/// The context-size note for a step's results, once the context is big enough to matter.
+fn context_note(context: u64, window: Option<u64>, compact_percent: u8, p: crate::prompts::Prompts) -> Option<String> {
+    if context < CONTEXT_NOTE_TOKENS {
+        return None;
+    }
+    let k = |n: u64| format!("{}k", n / 1000);
+    Some(match window.filter(|w| *w > 0) {
+        Some(w) => p.msg(
+            "context_size_window",
+            &[
+                ("context", &k(context)),
+                ("window", &k(w)),
+                ("percent", &(context * 100 / w).to_string()),
+                ("compact", &compact_percent.to_string()),
+            ],
+        ),
+        None => p.msg("context_size", &[("context", &k(context))]),
+    })
+}
+
+/// The main agent's tools, in the order it offers them. A fork offers the same list, so its
+/// requests share the main agent's cached prefix.
+pub(crate) async fn registry_for(session: &Arc<Session>) -> Registry {
+    let settings = session.host.settings();
+    let setup = session.claude();
+    let mcp = session.mcp.lock().await.clone();
+    let model_id = session.state.lock().await.model_id.clone();
+    let search = session.host.web_search_key().is_some() || session.host.native_web_search(&model_id);
+    let mut registry = Registry::builtin(settings.web_fetch, search);
+    for t in mcp.tools() {
+        registry.push(t);
+    }
+    if !setup.skills.is_empty() {
+        registry.push(Arc::new(crate::tools::skill::Skill));
+    }
+    if !setup.agents.is_empty() {
+        let custom = setup.agents.iter().map(|a| (a.name.clone(), a.description.clone())).collect();
+        registry.retain(|n| n != "Task");
+        registry.push(Arc::new(crate::tools::task::Task { custom }));
+    }
+    registry
+}
+
+/// Tells the model it can search the web when its provider does the searching.
+const NATIVE_SEARCH_HINT: &str = "You can search the web for current information. After answering from search \
+results, end with a \"Sources:\" list of Markdown links to the pages you used.";
+
+/// Where the model's provider has its own web search and `registry` offers `WebSearch`, offer the
+/// provider's search in place of that tool: the provider runs it inside the same reply, with no
+/// Brave key. A registry without `WebSearch` (a subagent kept off the web) gets no search.
+pub(crate) fn use_native_search(host: &dyn crate::host::Host, model_id: &str, registry: &Registry, request: &mut Request) {
+    if registry.offers("WebSearch") && host.native_web_search(model_id) {
+        request.tools.retain(|t| t.name != "WebSearch");
+        request.system.push(SystemBlock::new(NATIVE_SEARCH_HINT));
+        request.web_search = true;
+    }
+}
+
 /// The tools and the request for the next model call over `messages`. The prompt cache keys on
 /// this exactly, so everything that builds a request for the session's history goes through here:
 /// a refresh of the cache is only a refresh when it matches the real request.
@@ -145,30 +208,19 @@ pub(crate) async fn build_request(
 ) -> (Registry, Request) {
     let settings = session.host.settings();
     let setup = session.claude();
-    let mcp = session.mcp.lock().await.clone();
-    let mut registry = Registry::builtin(settings.web_fetch, session.host.web_search_key().is_some());
-    for t in mcp.tools() {
-        registry.push(t);
-    }
-    if !setup.skills.is_empty() {
-        registry.push(Arc::new(crate::tools::skill::Skill));
-    }
-    if !setup.agents.is_empty() {
-        let custom = setup.agents.iter().map(|a| (a.name.clone(), a.description.clone())).collect();
-        registry.retain(|n| n != "Task");
-        registry.push(Arc::new(crate::tools::task::Task { custom }));
-    }
+    let registry = registry_for(session).await;
     let mut system = mc.system_prefix.clone();
     let model_name = session.host.models().into_iter().find(|m| m.id == model_id).map(|m| m.name).unwrap_or(model_id.to_owned());
     let extras = prompt::Extras { claude: settings.claude.clone(), skills: &setup.skills };
     system.extend(prompt::system_blocks(&session.cwd, &model_name, &settings.instructions, mode, session.prompts(), &extras));
-    let request = Request {
+    let mut request = Request {
         system,
         messages,
         tools: registry.specs(mode == Mode::Plan, session.prompts()),
         cache_key: Some(session.id.clone()),
         ..Default::default()
     };
+    use_native_search(session.host.as_ref(), model_id, &registry, &mut request);
     (registry, request)
 }
 
@@ -377,7 +429,8 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
                     Event::Retrying { attempt, max, reason } => {
                         session.text_chunk("agent_thought_chunk", &format!("Retrying ({attempt}/{max}): {reason}\n"))
                     }
-                    Event::ToolCall(_) | Event::Search(_) => {}
+                    Event::Search(q) => session.text_chunk("agent_thought_chunk", &format!("Searching the web: {q}\n")),
+                    Event::ToolCall(_) => {}
                 }
             })
             .await;
@@ -503,6 +556,10 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
         let mut parts: Vec<Part> = results.into_iter().map(Part::ToolResult).collect();
         if let Some(r) = reminders(&session, &model_name).await {
             parts.push(r);
+        }
+        let context = session.state.lock().await.context_tokens;
+        if let Some(n) = context_note(context, mc.context_window, percent, session.prompts()) {
+            parts.push(Part::Text(prompt::reminder(&n)));
         }
         parts.extend(notes_part(&session.agents.drain_notes(), session.prompts()));
         parts.extend(session.agents.stalled_note(session.prompts()));
@@ -772,6 +829,90 @@ async fn run_call(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A host whose provider has a web search of its own.
+    struct NativeSearchHost;
+
+    #[async_trait::async_trait]
+    impl crate::host::Host for NativeSearchHost {
+        fn models(&self) -> Vec<crate::host::ModelInfo> {
+            Vec::new()
+        }
+        async fn model_client(&self, _model_id: &str) -> Result<crate::host::ModelClient, String> {
+            Err("not used".into())
+        }
+        fn data_dir(&self) -> std::path::PathBuf {
+            std::env::temp_dir()
+        }
+        fn native_web_search(&self, _model_id: &str) -> bool {
+            true
+        }
+    }
+
+    /// The provider's own search replaces the WebSearch tool, and only where the tool was on
+    /// offer in the first place.
+    #[test]
+    fn native_search_replaces_the_web_search_tool() {
+        let host = NativeSearchHost;
+        let registry = crate::tools::Registry::builtin(true, true);
+        let mut request = Request {
+            tools: registry.specs(false, crate::prompts::Prompts::new(false)),
+            ..Default::default()
+        };
+        assert!(request.tools.iter().any(|t| t.name == "WebSearch"));
+        use_native_search(&host, "m", &registry, &mut request);
+        assert!(!request.tools.iter().any(|t| t.name == "WebSearch"), "WebSearch should be gone");
+        assert!(request.web_search, "the provider's search should be on");
+        assert!(request.system.iter().any(|b| b.text.contains("Sources:")));
+
+        // A registry without WebSearch (a subagent kept off the web) gets no search.
+        let off = crate::tools::Registry::builtin(true, false);
+        let mut request = Request {
+            tools: off.specs(false, crate::prompts::Prompts::new(false)),
+            ..Default::default()
+        };
+        use_native_search(&host, "m", &off, &mut request);
+        assert!(!request.web_search, "no search without the tool on offer");
+        assert!(!request.system.iter().any(|b| b.text.contains("Sources:")));
+    }
+
+    /// A model whose provider has no search of its own keeps the Brave tool.
+    #[test]
+    fn a_model_without_native_search_keeps_the_brave_tool() {
+        struct NoNativeHost;
+        #[async_trait::async_trait]
+        impl crate::host::Host for NoNativeHost {
+            fn models(&self) -> Vec<crate::host::ModelInfo> {
+                Vec::new()
+            }
+            async fn model_client(&self, _model_id: &str) -> Result<crate::host::ModelClient, String> {
+                Err("not used".into())
+            }
+            fn data_dir(&self) -> std::path::PathBuf {
+                std::env::temp_dir()
+            }
+        }
+        let registry = crate::tools::Registry::builtin(true, true);
+        let mut request = Request {
+            tools: registry.specs(false, crate::prompts::Prompts::new(false)),
+            ..Default::default()
+        };
+        use_native_search(&NoNativeHost, "m", &registry, &mut request);
+        assert!(request.tools.iter().any(|t| t.name == "WebSearch"), "Brave should stay");
+        assert!(!request.web_search);
+    }
+
+    #[test]
+    fn context_note_only_for_a_big_context() {
+        let p = crate::prompts::Prompts::new(false);
+        assert!(context_note(99_999, Some(200_000), 85, p).is_none());
+        let n = context_note(120_000, Some(200_000), 85, p).unwrap();
+        assert!(n.starts_with("Context: 120k of 200k tokens (60%)"), "{n}");
+        assert!(n.contains("summarized at 85%"), "{n}");
+        let n = context_note(150_000, None, 85, p).unwrap();
+        assert!(n.starts_with("Context: 150k tokens."), "{n}");
+        assert!(context_note(150_000, Some(0), 85, p).unwrap().starts_with("Context: 150k tokens."));
+    }
 
     #[test]
     fn only_a_call_the_limit_cut_short_is_held_back() {

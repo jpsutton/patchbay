@@ -113,6 +113,36 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
 }
+/* "System" theme has no data-theme attribute; its dark palette comes from the prefers-color-scheme
+   block above. Force dark native controls there too: WebView2 / Windows does not reliably pick the
+   dark scheme from `light dark` for OS-rendered <select> popups, so leaving it to auto-detection
+   can draw a light menu while the rest of the app is dark. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+  }
+}
+
+/*
+ * A native <select> dropdown on Windows/WebView2 is drawn with OS widgets that do not reliably
+ * inherit the page's color-scheme: a dark app can still open a white menu. macOS renders the menu
+ * from the OS appearance (which follows the app) and light mode's UA default is already white, so
+ * the mismatch is specific to dark-on-Windows. Give the popup items explicit, theme-aware colours
+ * so the menu matches the app. This is a general native-select fix — the model picker is only one
+ * of many selects — and is scoped to dark so light mode is untouched.
+ */
+:root[data-theme="dark"] select option,
+:root[data-theme="dark"] select optgroup {
+  background-color: var(--color-raised);
+  color: var(--color-fg);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) select option,
+  :root:not([data-theme="light"]) select optgroup {
+    background-color: var(--color-raised);
+    color: var(--color-fg);
+  }
+}
 
 html,
 body,

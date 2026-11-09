@@ -132,6 +132,9 @@ commands! {
     add_attachment_bytes(name, data_base64);
     attachment_thumbnail(id);
     attachment_image(id);
+    create_share(path, cwd, ttl_secs);
+    list_shares();
+    revoke_share(token);
     list_code_sessions();
     create_code_session(cwd, model_ref, agent, host);
     list_agents(host);
@@ -160,6 +163,7 @@ commands! {
     code_set_mode(id, mode_id);
     code_set_permission_mode(id, mode);
     code_rewind(id, ordinal, preview, revert_files);
+    code_fork(id, ordinal, preview);
     code_usage(id);
     plan_accounts();
     cursor_plan_limits();
@@ -177,7 +181,6 @@ commands! {
     code_question_respond(request_id, answers, id);
     code_move(id, target, cwd);
     code_take_over(id, cwd);
-    code_checkpoints();
     mesh_status();
     mesh_create(passphrase, name);
     mesh_join(url, passphrase, name);

@@ -86,6 +86,14 @@ pub enum CodeEvent {
     Notice {
         message: String,
     },
+    /// Patchbay's own: the turn has had nothing from the agent for the stall limit
+    /// (`code::stall`). Shown like a notice and marks the session stalled until the agent sends
+    /// anything else. Nothing is cancelled.
+    #[serde(rename_all = "camelCase")]
+    Stalled {
+        message: String,
+        quiet_secs: u64,
+    },
     #[serde(rename_all = "camelCase")]
     PromptDone {
         stop_reason: Value,
@@ -268,11 +276,16 @@ pub enum AgentCmd {
         force: bool,
         reply: Option<oneshot::Sender<Result<Delivery>>>,
     },
-    /// Drop a queued prompt.
+    /// Drop a queued prompt, or retract one steered into the running turn the agent has not
+    /// taken yet.
     Unqueue { prompt_id: String },
     /// Send a queued prompt, or one steered into the running turn, now: cancel the running turn
-    /// and send it next.
-    SendNow { prompt_id: String },
+    /// and send it next. Answers whether it did (`Ok`), or why it could not (`Err`), so the
+    /// button never does nothing: the UI shows the error as a toast.
+    SendNow {
+        prompt_id: String,
+        reply: Option<oneshot::Sender<Result<()>>>,
+    },
     /// Peer agent messages waiting in the queue (`origin` starts with `agent:`).
     ListQueuedAgent {
         reply: oneshot::Sender<Result<Vec<QueuedAgentMessage>>>,
@@ -297,6 +310,13 @@ pub enum AgentCmd {
         preview: String,
         revert_files: bool,
         reply: oneshot::Sender<Result<()>>,
+    },
+    /// Copy the session into a new agent session and reply with its id: up to (not including)
+    /// the `ordinal`-th user prompt, or whole when `ordinal` is `None`. The session is unchanged.
+    Fork {
+        ordinal: Option<usize>,
+        preview: String,
+        reply: oneshot::Sender<Result<String>>,
     },
     /// Sign in with one of the methods from `CodeEvent::AuthRequired`. Before the session
     /// starts, replies once it is up; mid-session, once the agent accepts the sign-in.
@@ -399,7 +419,7 @@ fn steer_outcome(resp: &Value) -> Steered {
     }
 }
 
-fn answer(reply: Option<oneshot::Sender<Result<Delivery>>>, r: Result<Delivery>) {
+fn answer<T>(reply: Option<oneshot::Sender<Result<T>>>, r: Result<T>) {
     if let Some(reply) = reply {
         let _ = reply.send(r);
     }
@@ -1448,13 +1468,16 @@ async fn run(
             (Box::new(to_agent), Box::new(from_agent), AgentProc::Native { done, task })
         }
         None => {
+            use patchbay_agent::proc::NoWindow;
             let mut cmd = tokio::process::Command::new(&program);
             cmd.args(&args)
                 .current_dir(&cwd)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true);
+                .kill_on_drop(true)
+                // Else Windows opens a console window for the agent that stays as long as it runs.
+                .no_window();
             for k in &env_remove {
                 cmd.env_remove(k);
             }
@@ -1748,6 +1771,9 @@ async fn run(
     let mut steered_in: std::collections::HashMap<String, UserMessage> = Default::default();
     // Steered messages "Send now" has since moved to the queue: their late replies don't count.
     let mut sent_now: std::collections::HashSet<String> = Default::default();
+    // Steered messages the user took back (✕ on the waiting bubble) before the agent answered
+    // the steer: they go nowhere, whatever that answer says. Cleared when the reply arrives.
+    let mut retracted: std::collections::HashSet<String> = Default::default();
     // Armed while a forced send waits on its cancel: an agent that ignores the cancel gets a
     // notice instead of a silent wait. The message still goes when the turn ends.
     let force_wait = tokio::time::sleep(FORCE_PATIENCE);
@@ -1777,6 +1803,11 @@ async fn run(
                 }
             }
             Some((msg, reply, resp, sent_at)) = steered_rx.recv() => {
+                // Taken back by the user: the agent's answer decides nothing, it goes nowhere.
+                if retracted.remove(&msg.id) {
+                    answer(reply, Ok(Delivery::Steered));
+                    continue;
+                }
                 // "Send now" took it from the turn: it is queued, whatever the agent answers.
                 if sent_now.remove(&msg.id) {
                     answer(reply, Ok(Delivery::Queued));
@@ -1868,6 +1899,12 @@ async fn run(
                         if let Some(i) = queue.iter().position(|(_, m)| m.id == prompt_id) {
                             queue.remove(i);
                             emit(&sink, &csid, CodeEvent::Unqueued { prompt_ids: vec![prompt_id], restore: false });
+                        } else if steered_in.remove(&prompt_id).is_some() {
+                            // Steered into the running turn and not taken yet: take it back.
+                            // The steer has already gone to the agent, so its late reply is
+                            // dropped here instead of coming back as a queued message.
+                            retracted.insert(prompt_id.clone());
+                            emit(&sink, &csid, CodeEvent::Unqueued { prompt_ids: vec![prompt_id], restore: false });
                         }
                     }
                     AgentCmd::ListQueuedAgent { reply } => {
@@ -1904,16 +1941,30 @@ async fn run(
                         };
                         let _ = reply.send(r);
                     }
-                    AgentCmd::SendNow { prompt_id } => {
+                    AgentCmd::SendNow { prompt_id, reply } => {
+                        let queued_at = queue.iter().position(|(_, m)| m.id == prompt_id);
+                        if queued_at.is_none() && !steered_in.contains_key(&prompt_id) {
+                            answer(reply, Err(anyhow!("that message is no longer waiting to be sent")));
+                            continue;
+                        }
                         if force_steers {
                             // Nothing is cancelled: a steered message stays steered, once the
                             // shell command it waits on is in the background. A queued one is
                             // steered in now.
+                            let Some(i) = queued_at else {
+                                // It went into the running turn when it was sent, and these
+                                // hosts steer rather than cancel, so there is nothing to stop
+                                // and nothing to send again.
+                                answer(reply, Err(anyhow!(
+                                    "that message is already in the running turn; wait for the agent to take it, or stop the turn"
+                                )));
+                                continue;
+                            };
                             background_tools(&conn);
-                            let Some(i) = queue.iter().position(|(_, m)| m.id == prompt_id) else { continue };
                             let (rank, msg) = queue.remove(i).expect("found above");
                             let Some((method, params)) = steer.and_then(|s| s.request(&session_id, &msg.blocks)) else {
                                 queue.insert(i, (rank, msg));
+                                answer(reply, Err(anyhow!("that message has to wait for the agent's next turn")));
                                 continue;
                             };
                             emit(&sink, &csid, msg.event(Delivery::Steered));
@@ -1923,6 +1974,7 @@ async fn run(
                                 let resp = ext(&conn, method, params).await;
                                 let _ = steered.send((msg, None, resp, sent_at));
                             });
+                            answer(reply, Ok(()));
                             continue;
                         }
                         let (rank, i, msg) = if let Some(i) = queue.iter().position(|(_, m)| m.id == prompt_id) {
@@ -1935,6 +1987,7 @@ async fn run(
                             emit(&sink, &csid, msg.event(Delivery::Queued));
                             (Rank::Normal, 0, msg)
                         } else {
+                            answer(reply, Err(anyhow!("that message is no longer waiting to be sent")));
                             continue;
                         };
                         if running {
@@ -1957,6 +2010,7 @@ async fn run(
                                 Err(e) => emit(&sink, &csid, CodeEvent::Error { message: format!("{e:#}") }),
                             }
                         }
+                        answer(reply, Ok(()));
                     }
                     AgentCmd::Cancel => {
                         cancel_pending(&pending);
@@ -2002,6 +2056,14 @@ async fn run(
                             rewind(&conn, rewind_ns, &session_id, ordinal, &preview, revert_files).await
                         } else {
                             Err(anyhow!("this agent can't rewind a session"))
+                        };
+                        let _ = reply.send(r);
+                    }
+                    AgentCmd::Fork { ordinal, preview, reply } => {
+                        let r = if extensions.fork {
+                            fork(&conn, &session_id, ordinal, &preview).await
+                        } else {
+                            Err(anyhow!("this agent can't fork a session"))
                         };
                         let _ = reply.send(r);
                     }
@@ -2125,6 +2187,9 @@ fn refuse_until_signed_in(cmd: AgentCmd) {
         | AgentCmd::SetMode { reply, .. }
         | AgentCmd::SetConfigOption { reply, .. }
         | AgentCmd::Rewind { reply, .. } => {
+            let _ = reply.send(Err(anyhow!("the agent isn't signed in yet")));
+        }
+        AgentCmd::Fork { reply, .. } => {
             let _ = reply.send(Err(anyhow!("the agent isn't signed in yet")));
         }
         AgentCmd::Authenticate { reply, .. } => {
@@ -2459,6 +2524,22 @@ async fn rewind(
     )
     .await?;
     Ok(())
+}
+
+/// Copy the session with Patchbay's `patchbay/fork`, up to the prompt at transcript position
+/// `ordinal` (mapped to a prompt index the way a rewind maps it) or whole. Returns the new agent
+/// session id, for a new Code session to load.
+async fn fork(conn: &acp::ClientSideConnection, session_id: &str, ordinal: Option<usize>, preview: &str) -> Result<String> {
+    let mut params = json!({ "sessionId": session_id });
+    if let Some(ordinal) = ordinal {
+        let points = ext(conn, "patchbay/rewind/points", json!({ "sessionId": session_id })).await?;
+        let mut points: Vec<RewindPoint> = serde_json::from_value(points["rewind_points"].clone()).unwrap_or_default();
+        points.sort_by_key(|p| p.prompt_index);
+        let target = pick_rewind_point(&points, ordinal, preview).ok_or_else(|| anyhow!("no fork point for that message"))?;
+        params["targetPromptIndex"] = json!(target);
+    }
+    let r = ext(conn, "patchbay/fork", params).await?;
+    r["sessionId"].as_str().map(str::to_owned).ok_or_else(|| anyhow!("the agent returned no session"))
 }
 
 fn norm(s: &str) -> String {
@@ -3669,7 +3750,9 @@ for line in sys.stdin:
         assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
         assert_eq!(prompt(&tx, "first"), Delivery::Queued);
         assert_eq!(prompt(&tx, "second"), Delivery::Queued);
-        tx.send(AgentCmd::SendNow { prompt_id: "second".into() }).unwrap();
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        tx.send(AgentCmd::SendNow { prompt_id: "second".into(), reply: Some(reply) }).unwrap();
+        assert!(rx.blocking_recv().unwrap().is_ok(), "Send now reports what it did");
         // The rest of the queue still follows, after the one sent now.
         wait_for(&events, "three turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 3);
 
@@ -3738,7 +3821,9 @@ for line in sys.stdin:
         ready(&events);
         assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
         assert_eq!(prompt(&tx, "also this"), Delivery::Steered);
-        tx.send(AgentCmd::SendNow { prompt_id: "also this".into() }).unwrap();
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        tx.send(AgentCmd::SendNow { prompt_id: "also this".into(), reply: Some(reply) }).unwrap();
+        assert!(rx.blocking_recv().unwrap().is_ok(), "Send now reports what it did");
         wait_for(&events, "two turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 2);
 
         assert_eq!(agent_heard(&events, 3), ["prompt:hold", "steer:also this", "prompt:also this"]);
@@ -3752,6 +3837,142 @@ for line in sys.stdin:
                 ("also this".into(), Delivery::Sent),
             ]
         );
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// ✕ on the waiting bubble (`code_unqueue`): the steered message comes out of the running
+    /// turn's tracking and the transcript drops it, without touching the turn.
+    #[test]
+    fn unqueue_retracts_a_steered_message() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods", "--steering"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        assert_eq!(prompt(&tx, "also this"), Delivery::Steered);
+        tx.send(AgentCmd::Unqueue { prompt_id: "also this".into() }).unwrap();
+        wait_for(&events, "the retraction", |evs| {
+            evs.iter().any(|e| matches!(e, CodeEvent::Unqueued { prompt_ids, restore: false } if prompt_ids == &["also this"]))
+        });
+        assert_eq!(count(&events, |e| matches!(e, CodeEvent::Unqueued { .. })), 1);
+        // The turn runs on untouched; the message never goes out as a prompt of its own.
+        tx.send(AgentCmd::Cancel).unwrap();
+        wait_for(&events, "the turn to end", |evs| evs.iter().any(prompt_done));
+        assert_eq!(agent_heard(&events, 2), ["prompt:hold", "steer:also this"]);
+        assert_eq!(
+            deliveries(&events),
+            [
+                ("hold".into(), Delivery::Sent),
+                ("also this".into(), Delivery::Steered),
+            ]
+        );
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The agent answers the steer after the user took the message back (the fake answers 0.3s
+    /// late, into a turn a forced send has just cut off): the answer is dropped instead of
+    /// putting the message back in the queue to send again.
+    #[test]
+    fn a_retracted_message_stays_gone_when_the_agents_late_answer_arrives() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods", "--steering"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        let msg = UserMessage {
+            id: "slow".into(),
+            blocks: vec![json!({ "type": "text", "text": "slow" })],
+            text: "slow".into(),
+            origin: "me".into(),
+            attachments: json!([]),
+        };
+        tx.send(AgentCmd::Prompt { msg, force: false, reply: None }).unwrap();
+        tx.send(AgentCmd::Unqueue { prompt_id: "slow".into() }).unwrap();
+        wait_for(&events, "the retraction", |evs| {
+            evs.iter().any(|e| matches!(e, CodeEvent::Unqueued { prompt_ids, restore: false } if prompt_ids == &["slow"]))
+        });
+        // A forced send cuts the turn the steer went into; the late answer must not resend it.
+        assert_eq!(force(&tx, "urgent"), Delivery::Queued);
+        wait_for(&events, "the turn to restart", |evs| {
+            evs.iter().any(|e| matches!(e, CodeEvent::Update { update } if update["content"]["text"] == "prompt:urgent"))
+        });
+        // Past the fake agent's 0.3s steer answer, by now delivered and handled.
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            !deliveries(&events).iter().any(|(id, d)| id == "slow" && *d != Delivery::Steered),
+            "the retracted message went back out: {:?}",
+            deliveries(&events)
+        );
+        assert_eq!(agent_heard(&events, 3), ["prompt:hold", "steer:slow", "prompt:urgent"]);
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Send now on a message that is neither queued nor steered in (it already went out, or the
+    /// turn ended): the button says so instead of doing nothing.
+    #[test]
+    fn send_now_says_so_when_the_message_is_no_longer_waiting() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        tx.send(AgentCmd::SendNow { prompt_id: "gone".into(), reply: Some(reply) }).unwrap();
+        let err = rx.blocking_recv().unwrap().unwrap_err();
+        assert!(err.to_string().contains("no longer waiting"), "{err}");
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Claude Code and Patchbay's agent steer instead of cancelling (`force_steers`): Send now
+    /// under the bubble of a message already in the running turn says why it cannot act there,
+    /// while a message the agent refused to steer (so it queued) still goes in on Send now.
+    #[test]
+    fn send_now_says_so_on_a_force_steers_host_that_cannot_take_the_message_out() {
+        let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
+        let ext = crate::code::agents::Extensions { force_steers: true, ..Default::default() };
+        let Some((events, tx, thread)) = spawn_fake_agent_ext(&dir, &["--no-methods", "--steering"], "", ext) else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        assert_eq!(prompt(&tx, "also this"), Delivery::Steered);
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        tx.send(AgentCmd::SendNow { prompt_id: "also this".into(), reply: Some(reply) }).unwrap();
+        let err = rx.blocking_recv().unwrap().unwrap_err();
+        assert!(err.to_string().contains("already in the running turn"), "{err}");
+        // Nothing moved: no cancel, no queue event, the agent heard nothing new.
+        assert_eq!(count(&events, |e| matches!(e, CodeEvent::PromptDone { .. })), 0);
+        assert_eq!(count(&events, |e| matches!(e, CodeEvent::Unqueued { .. })), 0);
+        assert_eq!(agent_heard(&events, 2), ["prompt:hold", "steer:also this"]);
+        // The agent refused the steer, so the message waited in the queue: Send now steers it in.
+        assert_eq!(prompt(&tx, "refuse"), Delivery::Queued);
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        tx.send(AgentCmd::SendNow { prompt_id: "refuse".into(), reply: Some(reply) }).unwrap();
+        assert!(rx.blocking_recv().unwrap().is_ok(), "a queued message still goes in");
+        wait_for(&events, "the queued message steered in", |evs| {
+            evs.iter()
+                .filter(|e| matches!(e, CodeEvent::UserPrompt { prompt_id, delivery, .. } if prompt_id == "refuse" && *delivery == Delivery::Steered))
+                .count()
+                >= 2
+        });
         no_errors(&events);
         tx.send(AgentCmd::Shutdown).unwrap();
         thread.join().unwrap();
@@ -3796,7 +4017,7 @@ for line in sys.stdin:
         assert_eq!(prompt(&tx, "normal"), Delivery::Queued);
         assert_eq!(force(&tx, "first"), Delivery::Queued);
         assert_eq!(prompt(&tx, "third"), Delivery::Queued);
-        tx.send(AgentCmd::SendNow { prompt_id: "third".into() }).unwrap();
+        tx.send(AgentCmd::SendNow { prompt_id: "third".into(), reply: None }).unwrap();
         assert_eq!(force(&tx, "second"), Delivery::Queued);
         wait_for(&events, "five turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 5);
 

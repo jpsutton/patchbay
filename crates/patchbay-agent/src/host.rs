@@ -146,6 +146,12 @@ pub trait Host: Send + Sync + 'static {
         None
     }
 
+    /// Whether the model's provider runs web search itself (Anthropic's `web_search`, for one).
+    /// Where it does, the provider's search replaces the Brave one and needs no key.
+    fn native_web_search(&self, _model_id: &str) -> bool {
+        false
+    }
+
     fn settings(&self) -> Settings {
         Settings::default()
     }

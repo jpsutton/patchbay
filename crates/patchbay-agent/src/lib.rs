@@ -22,6 +22,7 @@ mod tools;
 mod turn;
 
 pub mod claude;
+pub mod proc;
 pub use agent::serve;
 pub use store::sessions_dir;
 pub use tools::web::{brave_search, web_search_spec};

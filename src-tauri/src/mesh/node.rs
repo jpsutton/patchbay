@@ -1665,6 +1665,7 @@ impl Inner {
             bail!("bad admission signature");
         }
         members::upsert(&self.db, &rec)?;
+        self.changed.send_modify(|v| *v += 1);
         // A phone gets no data key: it holds no secrets and syncs nothing.
         let data_key = match role {
             Some(_) => String::new(),

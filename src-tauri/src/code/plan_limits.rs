@@ -122,11 +122,19 @@ impl PlanLimits {
 }
 
 impl Hit {
-    pub fn message(&self, limit: u8, now: i64) -> String {
+    /// `account` names the account this hit belongs to (a provider or the login's own name),
+    /// so the stop can never be read as another account's limit; empty keeps the generic
+    /// wording for callers with no name to give.
+    pub fn message(&self, limit: u8, now: i64, account: &str) -> String {
         let used = if self.what == "extra usage" {
-            "Your Claude plan is past its limits and using extra usage".to_owned()
+            if account.is_empty() {
+                "Your Claude plan is past its limits and using extra usage".to_owned()
+            } else {
+                format!("Your {account} plan is past its limits and using extra usage")
+            }
         } else {
-            format!("You have used {}% of your Claude plan's {} limit", self.percent, self.what)
+            let subject = if account.is_empty() { "your Claude plan's".to_owned() } else { format!("{account}'s") };
+            format!("You have used {}% of {subject} {} limit", self.percent, self.what)
         };
         format!(
             "{used}, so Patchbay stops its turns at {limit}%. The limit resets in {}. Change this under Settings › Coding agents.",
@@ -355,7 +363,8 @@ mod tests {
         let l = PlanLimits::from_update(&update(0.5, 0.5, true)).unwrap();
         let hit = l.hit(100, 1000).unwrap();
         assert_eq!((hit.what, hit.resets_at), ("extra usage", 5000));
-        assert!(hit.message(100, 1000).contains("extra usage"));
+        assert!(hit.message(100, 1000, "").contains("extra usage"));
+        assert!(hit.message(100, 1000, "Claude (Teams)").contains("Your Claude (Teams) plan"));
     }
 
     #[test]
@@ -414,10 +423,23 @@ mod tests {
     fn message_says_when_it_resets() {
         let hit = Hit { what: "5-hour", percent: 96, resets_at: 1000 + 72 * 60 };
         assert_eq!(
-            hit.message(95, 1000),
+            hit.message(95, 1000, ""),
             "You have used 96% of your Claude plan's 5-hour limit, so Patchbay stops its turns at 95%. The limit resets in 1h 12m. Change this under Settings › Coding agents."
         );
         assert_eq!(fmt_wait(3 * 86400 + 7200), "3d 2h");
         assert_eq!(fmt_wait(10), "1m");
+    }
+
+    /// The account's name in the message is what tells two Claude logins apart: the stop
+    /// must never read as another account's limit.
+    #[test]
+    fn message_names_the_account_it_belongs_to() {
+        let hit = Hit { what: "5-hour", percent: 99, resets_at: 1000 + 3 * 60 };
+        assert_eq!(
+            hit.message(95, 1000, "Claude (Teams)"),
+            "You have used 99% of Claude (Teams)'s 5-hour limit, so Patchbay stops its turns at 95%. The limit resets in 3m. Change this under Settings › Coding agents."
+        );
+        let over = Hit { what: "extra usage", percent: 100, resets_at: 1000 + 60 };
+        assert!(over.message(95, 1000, "Vizius").starts_with("Your Vizius plan is past its limits"));
     }
 }

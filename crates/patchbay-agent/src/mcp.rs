@@ -167,12 +167,20 @@ async fn connect_one(cfg: &Value) -> Result<McpServer, String> {
         "sse" => return Err("the legacy SSE transport is not supported; use streamable HTTP".into()),
         _ => {
             let program = cfg["command"].as_str().ok_or("no command")?;
+            use crate::proc::NoWindow;
             let mut cmd = tokio::process::Command::new(program);
             cmd.args(cfg["args"].as_array().into_iter().flatten().filter_map(Value::as_str))
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null())
-                .kill_on_drop(true);
+                .kill_on_drop(true)
+                .no_window();
+            // The PATH the agents get (a desktop launch's bare one finds no `npx` or `uvx`), set
+            // before the server's own env so a PATH there still wins. Command::new looks the
+            // program up on this PATH too.
+            if let Some(path) = crate::proc::child_path(std::path::Path::new(program).parent()) {
+                cmd.env("PATH", path);
+            }
             for (k, v) in pairs(&cfg["env"]) {
                 cmd.env(k, v);
             }
@@ -351,5 +359,31 @@ for line in sys.stdin:
         assert!(set.problems.is_empty(), "{:?}", set.problems);
         let tools = set.tools();
         assert_eq!(tools[0].spec().name, "mcp__t__echo");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stdio_server_gets_the_extended_path() {
+        // The server names its tool's description after the PATH it was started with.
+        let script = r#"
+import os, sys, json
+for line in sys.stdin:
+    m = json.loads(line)
+    if "id" not in m: continue
+    if m["method"] == "initialize":
+        r = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "t", "version": "1"}}
+    else:
+        r = {"tools": [{"name": "path", "description": os.environ.get("PATH", ""), "inputSchema": {"type": "object"}}]}
+    print(json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": r}), flush=True)
+"#;
+        if std::process::Command::new("python3").arg("--version").output().is_err() {
+            return;
+        }
+        let cfg = json!([{"name": "t", "command": "python3", "args": ["-c", script], "env": []}]);
+        let set = McpSet::connect(&cfg).await;
+        assert!(set.problems.is_empty(), "{:?}", set.problems);
+        let path = set.tools()[0].spec().description.clone();
+        assert_eq!(Some(path.as_str()), crate::proc::child_path(None).as_deref(), "the server's PATH");
+        assert!(path.split(':').any(|d| d == "/opt/homebrew/bin"), "{path}");
     }
 }

@@ -799,6 +799,11 @@ async fn run_one<'a>(hook: &'a Hook, stdin: &str, cwd: &Path) -> (&'a Hook, Resu
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    // The PATH the agents get: a desktop launch's bare one finds no `rtk`, `gh` or `node`.
+    if let Some(path) = crate::proc::child_path(None) {
+        cmd.env("PATH", path);
+    }
+    crate::proc::NoWindow::no_window(&mut cmd);
     if let Some(root) = &hook.plugin_root {
         cmd.env("CLAUDE_PLUGIN_ROOT", root);
     }
@@ -989,6 +994,23 @@ mod tests {
         assert_eq!(stop.notes.len(), 1, "{:?}", stop.notes);
         let slow = vec![Hook { timeout_secs: 1, ..hook("Stop", "sleep 5") }];
         assert!(run_hooks(&slow, "Stop", None, json!({}), &dir).await.notes[0].contains("timed out"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hook_gets_the_extended_path() {
+        let dir = tmp();
+        let hooks = vec![Hook {
+            event: "UserPromptSubmit".into(),
+            matcher: String::new(),
+            command: r#"cat >/dev/null; printf %s "$PATH""#.into(),
+            timeout_secs: 5,
+            plugin_root: None,
+            source: Source::User,
+        }];
+        let out = run_hooks(&hooks, "UserPromptSubmit", None, json!({"prompt": "hi"}), &dir).await;
+        assert_eq!(out.context.first().map(String::as_str), crate::proc::child_path(None).as_deref(), "the hook's PATH");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

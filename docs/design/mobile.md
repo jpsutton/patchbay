@@ -26,7 +26,7 @@ A remote member:
 
 - never receives the mesh data key or `mesh_secrets` (its `Admitted` message carries an empty key), so a lost phone leaks no provider keys;
 - doesn't take part in database sync (`SyncVv`, `SyncOps`), link reports or relaying, and nobody dials it;
-- isn't a host, a move or take-over target, or a checkpoint mirror;
+- isn't a host, or a move or take-over target;
 - shows in Settings → Mesh as a phone, and is removed the same way as any member. Removing it rotates no key, since it never had one. Records don't sync to phones, so its gateway tells it with `Rejected { "this device was removed from the mesh" }`, and the phone forgets the mesh.
 
 Remote control is remote code execution on every host, the same as for a desktop member. Admission stays the trust boundary. The phone can ask for its fingerprint, face or screen lock when the app opens and after five minutes away (`tauri-plugin-biometric`), because phones get lost more often than laptops.

@@ -11,6 +11,9 @@ import { ChipRows } from "./ChipSelect";
 import { isRemoteApp, isWeb } from "../lib/platform";
 
 const MAX_ATTACHMENTS = 10;
+/** How long fetched slash commands are reused, and how soon an empty answer is asked again. */
+const SLASH_TTL_MS = 60_000;
+const SLASH_EMPTY_RETRY_MS = 3_000;
 
 function fmtSize(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -144,6 +147,11 @@ type Draft = { text: string; atts: Attachment[]; mentions: string[] };
 /** Unsent composer contents per `draftKey`, so each conversation or session keeps its own. */
 const drafts = new Map<string, Draft>();
 
+/** Put `text` (and `atts`) in the composer of `key` before it is shown: a fork from a message. */
+export function seedDraft(key: string, text: string, atts: Attachment[] = []) {
+  drafts.set(key, { text, atts, mentions: [] });
+}
+
 export function Composer({
   onSend,
   onStop,
@@ -155,6 +163,7 @@ export function Composer({
   trailing,
   warnNoVision,
   commands,
+  slashCommands,
   mentionFiles,
   onEditLast,
   sendWhileBusy,
@@ -162,6 +171,7 @@ export function Composer({
   restore,
   onRestored,
   onForceSend,
+  beforeSend,
   draftKey,
   seed,
 }: {
@@ -179,6 +189,11 @@ export function Composer({
   warnNoVision?: boolean;
   /** Slash commands the agent advertises (Code tab). */
   commands?: AcpCommand[];
+  /**
+   * Asks for the commands when `commands` has none to give: the phone sees no agent events, so its
+   * host answers. Called when the draft starts with "/", then cached for the draft's session.
+   */
+  slashCommands?: () => Promise<AcpCommand[]>;
   /** Enables @-mentions of project files (Code tab). */
   mentionFiles?: () => Promise<string[]>;
   /** Up arrow in an empty composer. */
@@ -196,10 +211,19 @@ export function Composer({
    * Ctrl+Shift+Enter when Ctrl+Enter is the send key; idle, those keys keep their usual meaning.
    */
   onForceSend?: (text: string, attachments: Attachment[], mentions: string[]) => void | Promise<void>;
+  /**
+   * Asked before a send leaves the composer. Resolve false to keep the draft where it is (the user
+   * backed out); the composer ignores further sends until it settles.
+   */
+  beforeSend?: (text: string) => boolean | Promise<boolean>;
   /** The conversation or session the composer is typing into; each key keeps its own draft. */
   draftKey?: string;
-  /** Puts this text in the composer. A new `id` applies again. `replace` overwrites a draft. */
-  seed?: { id: number; text: string; replace?: boolean } | null;
+  /**
+   * Puts this text in the composer. A new `id` applies again. `replace` overwrites a draft;
+   * `insert` appends `text` at the end of the current draft instead (adding a share link without
+   * losing what the user already typed — pb-20261105-18).
+   */
+  seed?: { id: number; text: string; replace?: boolean; insert?: boolean; mentions?: string[] } | null;
 }) {
   const [text, setText] = useState("");
   const [atts, setAtts] = useState<Attachment[]>([]);
@@ -228,6 +252,22 @@ export function Composer({
 
   useEffect(() => {
     if (!seed?.text) return;
+    if (seed.insert) {
+      // Keep the draft: append the link at the end, then put the caret after it.
+      setText((cur) => (cur.trim() ? `${cur.trimEnd()} ${seed.text}` : seed.text));
+      // A seed can carry @-mentions (e.g. from the Files blade): record them so
+      // submit counts them. Text alone is not enough — mentions are tracked
+      // separately, and only those still in the text are sent.
+      const seedMentions = seed.mentions;
+      if (seedMentions) setMentions((m) => Array.from(new Set([...m, ...seedMentions])));
+      const id = window.setTimeout(() => {
+        const el = ref.current;
+        if (!el) return;
+        el.focus();
+        el.setSelectionRange(el.value.length, el.value.length);
+      }, 30);
+      return () => clearTimeout(id);
+    }
     setText((cur) => (!seed.replace && cur.trim() ? cur : seed.text));
     const pos = seed.text.length;
     const id = window.setTimeout(() => {
@@ -238,6 +278,30 @@ export function Composer({
     }, 30);
     return () => clearTimeout(id);
   }, [seed]);
+
+  // Commands fetched through `slashCommands`, kept per `draftKey`. An agent often advertises its
+  // commands a beat after the session opens, so an empty answer is only trusted for a few seconds.
+  const [fetched, setFetched] = useState<{ key?: string; list: AcpCommand[]; at: number } | null>(null);
+  const fetchSlash = useRef(slashCommands);
+  fetchSlash.current = slashCommands;
+  const slashFetching = useRef(false);
+  const slashTyped = !!slashCommands && /^\/\S*$/.test(text);
+  useEffect(() => {
+    const fetchCommands = fetchSlash.current;
+    if (!slashTyped || !fetchCommands || slashFetching.current) return;
+    if (fetched && fetched.key === draftKey && Date.now() - fetched.at < (fetched.list.length ? SLASH_TTL_MS : SLASH_EMPTY_RETRY_MS)) return;
+    slashFetching.current = true;
+    fetchCommands()
+      .then((list) => (Array.isArray(list) ? list : []))
+      // A failed ask shows no menu, like an empty one, and is tried again on a later keystroke.
+      .catch(() => [] as AcpCommand[])
+      .then((list) => setFetched({ key: draftKey, list, at: Date.now() }))
+      .finally(() => {
+        slashFetching.current = false;
+      });
+  }, [slashTyped, text, fetched, draftKey]);
+  const slashList = fetched && fetched.key === draftKey ? fetched.list : undefined;
+  const menuCommands = commands?.length ? commands : slashList;
 
   useEffect(() => {
     if (!mention || !mentionFiles) return;
@@ -270,8 +334,8 @@ export function Composer({
         },
       }));
     }
-    if (commands?.length) {
-      return matchCommands(commands, text).map((c) => ({
+    if (menuCommands?.length) {
+      return matchCommands(menuCommands, text).map((c) => ({
         key: c.name,
         label: `/${c.name}`,
         hint: c.input?.hint,
@@ -283,7 +347,7 @@ export function Composer({
       }));
     }
     return [];
-  }, [mention, files, commands, text, caret]);
+  }, [mention, files, menuCommands, text, caret]);
   const menuOpen = items.length > 0 && !menuDismissed;
 
   useEffect(() => {
@@ -477,9 +541,18 @@ export function Composer({
   const forcing = busy && !!onForceSend;
   const forceHint = forcing ? `${forceSendKeyLabel(sendKey)} sends now: stops the current turn` : null;
 
+  const asking = useRef(false);
   const submit = async (force = false) => {
-    if ((busy && !sendWhileBusy && !force) || disabled || adding > 0) return;
+    if ((busy && !sendWhileBusy && !force) || disabled || adding > 0 || asking.current) return;
     if (!text.trim() && atts.length === 0) return;
+    if (beforeSend) {
+      asking.current = true;
+      try {
+        if (!(await beforeSend(text))) return;
+      } finally {
+        asking.current = false;
+      }
+    }
     const t = text;
     const a = atts;
     // Only mentions still present in the text count.

@@ -171,7 +171,7 @@ export function PlanUsageButton() {
   const pace = worstPace(limits, now);
   const paceTone = pace == null ? null : tone(Math.round(pace * 100), limit);
   const title = rows.length
-    ? `Claude plan usage${accounts.length > 1 && shown ? ` (${shown.label})` : ""}: ${rows.map((r) => `${r.label === "5h" ? "5-hour" : "weekly"} ${r.pct}%`).join(", ")}${
+    ? `Claude plan usage${accounts.length > 1 && shown ? ` (${shown.label})` : ""}: ${rows.map((r) => `${r.label === "5h" ? "5-hour" : "weekly"} ${r.pct}% used`).join(", ")}${
         pace == null ? "" : `. Burning at ${pace.toFixed(1)}x an even pace`
       }`
     : "Claude plan usage";
@@ -207,7 +207,7 @@ export function PlanUsageButton() {
         </span>
       )}
       {pct != null && (
-        <span className={`meta ${t === "danger" ? "text-danger" : t === "warn" ? "text-warn" : ""}`}>{pct}%</span>
+        <span className={`meta ${t === "danger" ? "text-danger" : t === "warn" ? "text-warn" : ""}`}>{pct}% used</span>
       )}
     </button>
   );
@@ -241,7 +241,7 @@ function WindowRow({
       <div className="flex items-baseline justify-between">
         <span>{label}</span>
         <span className="meta text-faint">
-          {current ? `${pct}% · resets in ${fmtSpan(current.resetsAt - now)}` : "reset since last report"}
+          {current ? `${pct}% used · resets in ${fmtSpan(current.resetsAt - now)}` : "reset since last report"}
         </span>
       </div>
       <div

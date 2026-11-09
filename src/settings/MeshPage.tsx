@@ -197,6 +197,101 @@ function Joining() {
   );
 }
 
+/** Where share links point (`shares.rs` BASE_URL_SETTING). Blank means the default. */
+const BASE_URL_KEY = "artifacts.baseUrl";
+const DEFAULT_BASE_URL = "http://127.0.0.1:4420";
+
+/** Why `v` can't be a share-link base, or null if it can (blank included: the default). */
+function baseUrlError(v: string): string | null {
+  const t = v.trim();
+  if (!t) return null;
+  let u: URL;
+  try {
+    u = new URL(t);
+  } catch {
+    return "Enter a full address, like http://192.168.20.20:4420.";
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return "Use an http:// or https:// address.";
+  if (u.search || u.hash) return "Leave out the ? and # parts.";
+  return null;
+}
+
+/** The base address share links start with. It's read once at startup, hence the restart note. */
+function ShareLinkBase() {
+  const [saved, setSaved] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [status, setStatus] = useState<"idle" | "saved" | string>("idle");
+  useEffect(() => {
+    api
+      .getSetting(BASE_URL_KEY)
+      .then((v) => {
+        setSaved(v?.trim() ?? "");
+        setDraft(v?.trim() ?? "");
+      })
+      .catch((e) => setStatus(errorText(e)));
+  }, []);
+  const invalid = baseUrlError(draft);
+  const dirty = saved !== null && draft.trim() !== saved;
+  const save = async () => {
+    if (invalid || !dirty) return;
+    // share_url trims a trailing slash anyway; store it the way links show it.
+    const v = draft.trim().replace(/\/+$/, "");
+    try {
+      await api.setSetting(BASE_URL_KEY, v);
+      setSaved(v);
+      setDraft(v);
+      setStatus("saved");
+    } catch (e) {
+      setStatus(errorText(e));
+    }
+  };
+  return (
+    <Row
+      label="Artifact links — base URL"
+      hint={
+        <>
+          Share links start with this address. Reachable by your mesh devices, e.g. a gateway's ZeroTier address.{" "}
+          <span className="text-faint">Takes effect after you restart Patchbay.</span>
+        </>
+      }
+    >
+      <div className="flex flex-col items-end gap-1">
+        <div className="flex gap-2">
+          <input
+            className={`${input} w-56 font-mono text-xs ${invalid ? "border-danger!" : ""}`}
+            value={draft}
+            placeholder={DEFAULT_BASE_URL}
+            disabled={saved === null}
+            aria-label="Artifact links base URL"
+            aria-invalid={invalid ? true : undefined}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              setStatus("idle");
+            }}
+            onKeyDown={(e) => e.key === "Enter" && save()}
+          />
+          <button className={secondary} disabled={!dirty || !!invalid} onClick={save}>
+            Save
+          </button>
+        </div>
+        {invalid ? (
+          <span className="max-w-72 text-right text-[12px] text-danger" role="alert">
+            {invalid}
+          </span>
+        ) : status === "saved" ? (
+          <span className="text-[12px] text-ok">Saved. Restart Patchbay to use it.</span>
+        ) : status !== "idle" ? (
+          <span className="max-w-72 text-right text-[12px] text-danger" role="alert">
+            {status}
+          </span>
+        ) : (
+          saved === "" && <span className="text-[12px] text-muted">Using the default, {DEFAULT_BASE_URL}.</span>
+        )}
+      </div>
+    </Row>
+  );
+}
+
 /** What's wrong, and for a passphrase problem, a place to enter it again. */
 function ProblemBox() {
   const mesh = useStore((s) => s.mesh)!;
@@ -414,6 +509,11 @@ function Member() {
             </button>
           </div>
         </Row>
+      </section>
+
+      <section aria-label="Share links">
+        <div className="mb-1 font-mono text-[11px] uppercase tracking-[0.06em] text-faint">Share links</div>
+        <ShareLinkBase />
       </section>
 
       <button

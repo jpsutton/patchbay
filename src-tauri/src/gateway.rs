@@ -33,9 +33,11 @@ const CODE_METHODS: &[&str] = &[
     "code.set_permission_mode",
     "code.set_agent",
     "code.rewind",
+    "code.fork",
     "code.permission",
     "code.question",
     "code.files",
+    "code.commands",
     "code.image",
     "code.auto_title",
 ];
@@ -132,6 +134,14 @@ pub(crate) async fn call(state: &AppState, from: &str, method: &str, p: &Value) 
                 state.mesh.ensure_file(&att.sha256, &att.name).await?;
             }
             json!(tokio::task::spawn_blocking(move || attachments::thumbnail(&att)).await??)
+        }
+        // Phase 2: an artifact share the phone wants to view. `nodeId` comes from the URL; only
+        // the opaque token is forwarded to the owning node, which decides validity. The phone
+        // renders the returned bytes in its embedded viewer (or falls back to the system browser).
+        "remote.share_get" => {
+            let node = s("nodeId")?;
+            let token = s("token")?;
+            json!(crate::shares::gateway_fetch(state, &node, &token).await)
         }
         other => bail!("unknown request {other}"),
     })
@@ -266,6 +276,7 @@ fn index(state: &AppState) -> Result<Value> {
             }
             l.busy = state.code.is_busy(&s.id);
             l.permissions = agents.get(&s.id).map(|a| a.permissions.iter().map(|(r, _)| r.clone()).collect()).unwrap_or_default();
+            l.questions = agents.get(&s.id).map(|a| a.questions.iter().map(|(r, _)| r.clone()).collect()).unwrap_or_default();
         }
     }
     Ok(json!({
