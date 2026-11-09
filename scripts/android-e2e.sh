@@ -32,8 +32,10 @@
 # Environment: PATCHBAY_E2E_AVD (patchbay-e2e), PATCHBAY_E2E_WEB_PORT (4431), PATCHBAY_E2E_MESH_PORT (41895),
 # PATCHBAY_E2E_MOCK_PORT (8766), PATCHBAY_E2E_PYTHON (an interpreter to use instead of pipenv),
 # PATCHBAY_E2E_EMULATOR_CORES (emulator -cores; unset = emulator default),
-# PATCHBAY_E2E_GRADLE_WORKERS (org.gradle.workers.max; unset = gradle default),
-# PATCHBAY_E2E_GRADLE_JVM_PROCESSORS (-XX:ActiveProcessorCount for gradle/kotlin JVMs; unset = JVM default).
+# PATCHBAY_E2E_GRADLE_WORKERS (org.gradle.workers.max via GRADLE_OPTS -D; unset = gradle default),
+# PATCHBAY_E2E_GRADLE_JVM_PROCESSORS (-XX:ActiveProcessorCount for gradle/kotlin JVMs via
+#   JAVA_TOOL_OPTIONS; unset = JVM default; forces a non-daemon Gradle invocation because a
+#   reused daemon started unthrottled ignores JAVA_TOOL_OPTIONS).
 # Throttle knobs are opt-in: leaving them unset keeps current behavior.
 set -euo pipefail
 # Run from a git hook (the local CI gate runs this at pre-push), git exports GIT_DIR and friends. Left
@@ -69,6 +71,8 @@ require_positive_int_if_set() { # var-name value
     local name=$1 value=$2
     [ -z "$value" ] && return 0
     [[ $value =~ ^[1-9][0-9]*$ ]] || die "$name must be a positive integer, got: $value"
+    # Bound absurd values (e.g. 99999999999999999999) that pass the regex but are not sane.
+    [ "${#value}" -le 4 ] && [ "$value" -le 1024 ] || die "$name must be an integer between 1 and 1024, got: $value"
 }
 
 require_positive_int_if_set PATCHBAY_E2E_EMULATOR_CORES "$EMULATOR_CORES"
@@ -341,14 +345,21 @@ build_apk() {
     local -a tauri_env=(env)
     local jvm_opts="" gradle_opts=""
     if [ -n "$GRADLE_WORKERS" ]; then
-        tauri_env+=("ORG_GRADLE_PROJECT_org.gradle.workers.max=$GRADLE_WORKERS")
+        # Mechanism (empirically verified on Gradle 9.6.1, pb-20261109-06 round 3): only
+        # GRADLE_OPTS -Dorg.gradle.workers.max takes effect; ORG_GRADLE_PROJECT_org.gradle.workers.max
+        # is not a working mechanism here (env name dots / not consumed as intended) and was removed.
         gradle_opts="${GRADLE_OPTS:+$GRADLE_OPTS }-Dorg.gradle.workers.max=$GRADLE_WORKERS"
-        say "gradle workers (org.gradle.workers.max)=$GRADLE_WORKERS"
+        say "requesting Gradle workers (GRADLE_OPTS -Dorg.gradle.workers.max=$GRADLE_WORKERS; script request, not Gradle confirmation)"
     fi
     if [ -n "$GRADLE_JVM_PROCESSORS" ]; then
+        # JAVA_TOOL_OPTIONS reaches freshly forked JVMs only. A reused Gradle daemon started
+        # unthrottled ignores it (proven: cpus stayed 18 on daemon reuse while workers -D applied).
+        # Force a non-daemon invocation so ActiveProcessorCount takes effect for this build.
+        gradle_opts="${gradle_opts:+$gradle_opts }-Dorg.gradle.daemon=false"
+        warn "PATCHBAY_E2E_GRADLE_JVM_PROCESSORS=$GRADLE_JVM_PROCESSORS: forcing Gradle non-daemon (-Dorg.gradle.daemon=false) because a reused daemon ignores JAVA_TOOL_OPTIONS/ActiveProcessorCount"
         jvm_opts="${JAVA_TOOL_OPTIONS:+$JAVA_TOOL_OPTIONS }-XX:ActiveProcessorCount=$GRADLE_JVM_PROCESSORS"
         tauri_env+=("JAVA_TOOL_OPTIONS=$jvm_opts")
-        say "gradle JVM processors (-XX:ActiveProcessorCount)=$GRADLE_JVM_PROCESSORS (JAVA_TOOL_OPTIONS=$jvm_opts)"
+        say "requesting Gradle/Kotlin JVM processors (-XX:ActiveProcessorCount=$GRADLE_JVM_PROCESSORS; JVM pickup 'Picked up JAVA_TOOL_OPTIONS' in build log confirms)"
     fi
     if [ -n "$gradle_opts" ]; then
         tauri_env+=("GRADLE_OPTS=$gradle_opts")
