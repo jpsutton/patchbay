@@ -225,12 +225,25 @@ Routing: the three classes in the table above, with the reference desk's example
    Code member (system-prompt path) each named their role and quoted the team's project rule.
    Not verified: a member holding a copied role in a live turn (the delivery path doesn't
    distinguish copies), and the editors and badge seen in a browser.
-3. **Items and decisions.** The item and decision tools with capability checks, the board, the
-   decision queue. Done when: a desk member can only change items through the tools, a worker's
-   `item_set` is refused, and a decision goes desk → advisor → user with the verdict shown.
-4. **Dispatch.** `dispatch_item`, pool limits, worktree creation, `member_release`. Done when: a
-   desk fills a 2-worker pool from mixed agents, a third dispatch is refused until one is released,
-   and the 5-per-creator cap no longer blocks it.
+3. **Items and decisions.** Done 2026-11-09 (`3f265eeb`). Team tools on the messaging MCP for
+   live members only (listed when the agent's MCP starts, checked against teams.db on every
+   call, after the bridge's token and host checks), items with append-only events (enforced by
+   triggers), IDs from a per-day counter (UTC date, never reused), decisions, the board and the
+   decision queue under Settings > Teams. Live: real Claude Code desk, advisor (CLEAR) and worker
+   (`item_set` refused). Decision rules as built:
+   - Status: `awaiting_advisor`, `awaiting_user`, `cleared` (advisor decided), `resolved` (user
+     answered, or class `desk`). The user may answer a decision still awaiting the advisor.
+   - CLEAR needs a `choice` (one of the options when there are options). The advisor disagrees
+     when its choice differs from the desk's recommendation; HUMAN is never a disagreement.
+   - With no `decides` member, `decision_open` records the decision with a warning and the user
+     answers it.
+   Not verified: a real advisor HUMAN verdict and the disagreement flag in a live turn (tests
+   only), and the board and queue in a browser.
+4. **Dispatch.** `dispatch_item`, pool limits, worktree creation, `member_release`, and
+   `item_note` for any member on the item assigned to it (today only `writes_items` roles may
+   note, so workers can report only through `team_send`). Done when: a desk fills a 2-worker
+   pool from mixed agents, a third dispatch is refused until one is released, the 5-per-creator
+   cap no longer blocks it, and a worker notes its own item but not another's.
 
 The Teams sidebar page is deferred until after phase 4; it touches `CodeSidebar.tsx` and
 `App.tsx`, which change daily upstream.
