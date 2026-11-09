@@ -1,11 +1,17 @@
 #![cfg(unix)]
 
-//! Stress test for pb-20261107-34 (fd lifecycle / MCP suite reaping gate).
-//! Runs against CURRENT STAGING behavior: spawns N agent-messaging MCP stdio children
-//! ("MCP suite" components), verifies N actually spawned (#356 trap: N=0 green must fail),
-//! ends them, and asserts host (test process) fd count returns to baseline within a bounded
-//! settle time. Two-ways gate (advisor-binding): growth/no-return => evidence for Fix 2;
-//! no growth => STOP and REPORT before writing lifecycle/reaping code.
+//! pb-20261107-34: MCP-child teardown fd return-to-baseline check (unix).
+//!
+//! **Scope (honest labeling):** proves the **MCP child teardown path only** — spawning N real
+//! `patchbay --agent-messaging-mcp` stdio children, asserting N actually spawned (#356 trap:
+//! N=0/short green cannot pass), observing host `/dev/fd` growth, then explicit teardown
+//! (close parent stdin pipe handles, kill, wait, drop) and asserting host fd count returns
+//! to baseline within bounded settle.
+//!
+//! **Not claimed:** app/session-lifecycle states (stopped, archived, process exited,
+//! replaced agent, mid-turn) remain **unexercised** here — accepted and parked, not claimed.
+//! Fix 2 (reaping) was closed as not-needed-until-demonstrated by advisor gate; os error 24
+//! cause remains unidentified (recurrence runbook: capture lsof before restarting anything).
 
 use std::fs;
 use std::path::PathBuf;
@@ -17,7 +23,7 @@ fn bin() -> PathBuf {
 }
 
 fn count_fds() -> usize {
-    // Host/app process fd count on unix (macOS/Linux): /dev/fd entries in this process.
+    // Host process fd count on unix (macOS/Linux): /dev/fd entries in this process.
     fs::read_dir("/dev/fd")
         .map(|d| d.filter_map(Result::ok).count())
         .unwrap_or_else(|e| panic!("failed to count /dev/fd: {e}"))
@@ -74,7 +80,7 @@ fn wait_started(s: &Spawned, timeout: Duration) -> String {
 }
 
 #[test]
-fn stress_n_sessions_mcp_suites_fds_return_to_baseline() {
+fn mcp_child_teardown_returns_fds_to_baseline() {
     const N: usize = 8;
     const START_TIMEOUT: Duration = Duration::from_secs(15);
     const EXIT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -84,9 +90,9 @@ fn stress_n_sessions_mcp_suites_fds_return_to_baseline() {
     const SLACK: usize = 4;
 
     let baseline = count_fds();
-    eprintln!("pb-20261107-34 stress: baseline_fds={baseline} N={N} bin={:?}", bin());
+    eprintln!("pb-20261107-34 mcp_child_teardown: baseline_fds={baseline} N={N} bin={:?}", bin());
 
-    // (1) Spawn N sessions' MCP suite members and assert N actually spawned (#356 trap).
+    // (1) Spawn N MCP child processes and assert N actually spawned (#356 trap).
     let mut spawned: Vec<Spawned> = Vec::with_capacity(N);
     for i in 0..N {
         spawned.push(spawn_mcp_child(i));
@@ -103,17 +109,17 @@ fn stress_n_sessions_mcp_suites_fds_return_to_baseline() {
     }
     let pids: Vec<u32> = spawned.iter().map(|s| s.child.id()).collect();
     assert_eq!(pids.len(), N, "pid count != N");
-    eprintln!("pb-20261107-34 stress: spawned_and_started N={N} pids={pids:?}");
+    eprintln!("pb-20261107-34 mcp_child_teardown: spawned_and_started N={N} pids={pids:?}");
 
     let peak = count_fds();
-    eprintln!("pb-20261107-34 stress: peak_fds={peak} (delta +{})", peak.saturating_sub(baseline));
+    eprintln!("pb-20261107-34 mcp_child_teardown: peak_fds={peak} (delta +{})", peak.saturating_sub(baseline));
     // Must have grown: each child holds at least stdin pipe fds in the parent.
     assert!(
         peak >= baseline + N / 2,
         "fd count did not grow enough to evidence N={N} spawned MCP children (baseline={baseline}, peak={peak}); cannot trust this run"
     );
 
-    // (2) End sessions / tear down MCP suites: close parent-held stdin, terminate+wait, drop.
+    // (2) MCP child teardown (explicit): close parent-held stdin, terminate+wait, drop.
     for s in &mut spawned {
         let _ = s.stdin.take(); // close parent end of stdin pipe
         let _ = s.child.kill();
@@ -138,13 +144,13 @@ fn stress_n_sessions_mcp_suites_fds_return_to_baseline() {
     let mut last = count_fds();
     loop {
         if last <= baseline + SLACK {
-            eprintln!("pb-20261107-34 stress: fds_returned baseline={baseline} final={last} (slack={SLACK})");
+            eprintln!("pb-20261107-34 mcp_child_teardown: fds_returned baseline={baseline} final={last} (slack={SLACK})");
             return;
         }
         if Instant::now() > settle_deadline {
             panic!(
-                "pb-20261107-34 stress: fd count did NOT return to baseline within {:?} (baseline={baseline}, peak={peak}, final={last}, N={N}). \
-This growth/no-return is evidence Fix 2 (MCP/session fd lifecycle reaping) needs; report to desk before writing reaping code.",
+                "pb-20261107-34 mcp_child_teardown: fd count did NOT return to baseline within {:?} (baseline={baseline}, peak={peak}, final={last}, N={N}). \
+Evidence of MCP-child fd leak under the tested teardown path; report to desk. (This test covers MCP child teardown only, not app session-lifecycle states.)",
                 SETTLE
             );
         }
