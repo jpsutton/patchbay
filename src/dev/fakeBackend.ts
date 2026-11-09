@@ -1525,6 +1525,7 @@ export function install() {
         }
         case "delete_code_session": db.code = db.code.filter((x) => x.id !== a.id); return null;
         case "code_is_running": return false;
+        case "code_history": return null;
         case "code_live":
           return Object.fromEntries(
             [...fakeRunning].map((id) => [

@@ -480,6 +480,25 @@ export interface CodeAttach {
    * must not be saved over it.
    */
   partial?: boolean;
+  /**
+   * A Patchbay-agent session's newest turns, read from its session file on the host. Sent when the
+   * window asked for `history`; it replaces the saved transcript, which a window writes only at
+   * the end of a turn and so lacks turns that ran while none was open. `events` then carry only
+   * the turn still running.
+   */
+  history?: CodeHistoryPage;
+}
+
+/** A page of a Patchbay-agent session's stored history (`code_history`, or `history` in an attach). */
+export interface CodeHistoryPage {
+  /** What the page's entries show, oldest first: the updates `session/load` would replay. */
+  updates: AcpUpdate[];
+  /** Where the page starts among the session's entries; 0 is the start of the conversation. */
+  start: number;
+  end: number;
+  total: number;
+  /** User prompts before the page, which a rewind or fork counts from. */
+  promptsBefore: number;
 }
 
 /** What `code_resume` answers. */
@@ -1251,9 +1270,15 @@ export const api = {
     invoke<void>("code_question_respond", { requestId, answers, id: sessionId }),
   /**
    * `catchUp`: also the events since the session's last finished turn, which the saved transcript
-   * does not hold yet. For a window opening a session that kept running without it.
+   * does not hold yet. For a window opening a session that kept running without it. `history`:
+   * this window reads a Patchbay-agent session's turns from the host's session file (the answer's
+   * `history`, then `codeHistory` for older pages).
    */
-  codeAttach: (id: string, catchUp?: boolean) => invoke<CodeAttach>("code_attach", { id, catchUp }),
+  codeAttach: (id: string, catchUp?: boolean, history?: boolean) =>
+    invoke<CodeAttach>("code_attach", { id, catchUp, history }),
+  /** The page of stored history before the one starting at `before`; null when there is none to read. */
+  codeHistory: (id: string, before: number, prompts?: number) =>
+    invoke<CodeHistoryPage | null>("code_history", { id, before, prompts }),
   /**
    * Catch up on events this window missed (see `code_resume` in lib.rs): from `point`, or a fresh
    * snapshot with the status of the tool calls in `running`.

@@ -378,7 +378,7 @@ impl Session {
     }
 
     pub fn text_chunk(&self, kind: &str, text: &str) {
-        self.update(json!({"sessionUpdate": kind, "content": {"type": "text", "text": text}}));
+        self.update(text_update(kind, text));
     }
 
     pub fn save_meta(&self, model: &str, mode: Mode) {
@@ -408,31 +408,44 @@ impl Session {
     /// Show the stored conversation to the client: what `session/load` replays.
     pub fn replay(&self, entries: &[Entry]) {
         for e in &effective(entries) {
-            match e {
-                Entry::Msg { m } => self.replay_message(m),
-                Entry::Tool { call } => self.update(call.clone()),
-                Entry::Compacted { summary } => {
-                    self.text_chunk("agent_message_chunk", &format!("— Earlier conversation summarized —\n{}", summary.text()))
-                }
-                Entry::Meta { .. } | Entry::Truncate { .. } | Entry::Req(_) => {}
+            for u in entry_updates(e) {
+                self.update(u);
             }
         }
     }
+}
 
-    fn replay_message(&self, m: &Message) {
-        for p in &m.parts {
-            match (m.role, p) {
-                (Role::User, Part::Text(t)) if !crate::prompt::is_reminder(t) => {
-                    self.text_chunk("user_message_chunk", t)
-                }
-                (Role::Assistant, Part::Text(t)) => self.text_chunk("agent_message_chunk", t),
-                (Role::Assistant, Part::Reasoning { text, .. }) if !text.is_empty() => {
-                    self.text_chunk("agent_thought_chunk", text)
-                }
-                _ => {}
-            }
-        }
+fn text_update(kind: &str, text: &str) -> Value {
+    json!({"sessionUpdate": kind, "content": {"type": "text", "text": text}})
+}
+
+/// The `session/update` values that show one stored entry to a client, in order: what
+/// `session/load` replays, and what the paged history (`history.rs`) sends. One function for both,
+/// so a window that reads history back shows the same cards a replay would.
+pub(crate) fn entry_updates(e: &Entry) -> Vec<Value> {
+    match e {
+        Entry::Msg { m } => message_updates(m),
+        Entry::Tool { call } => vec![call.clone()],
+        Entry::Compacted { summary } => vec![text_update(
+            "agent_message_chunk",
+            &format!("— Earlier conversation summarized —\n{}", summary.text()),
+        )],
+        Entry::Meta { .. } | Entry::Truncate { .. } | Entry::Req(_) => Vec::new(),
     }
+}
+
+fn message_updates(m: &Message) -> Vec<Value> {
+    m.parts
+        .iter()
+        .filter_map(|p| match (m.role, p) {
+            (Role::User, Part::Text(t)) if !crate::prompt::is_reminder(t) => Some(text_update("user_message_chunk", t)),
+            (Role::Assistant, Part::Text(t)) => Some(text_update("agent_message_chunk", t)),
+            (Role::Assistant, Part::Reasoning { text, .. }) if !text.is_empty() => {
+                Some(text_update("agent_thought_chunk", text))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// The state a stored session ends in.
