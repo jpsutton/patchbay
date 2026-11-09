@@ -95,8 +95,8 @@ fn mcp_log_rotate_if_needed(path: &Path) -> std::io::Result<()> {
     if !mcp_log_path_is_safe_regular(path) {
         return Ok(());
     }
-    let meta = match fs::metadata(path) {
-        Ok(m) if m.len() >= MCP_LOG_MAX_BYTES => m,
+    match fs::metadata(path) {
+        Ok(m) if m.len() >= MCP_LOG_MAX_BYTES => {}
         _ => return Ok(()),
     };
     // Re-stat immediately before rename (narrows double-rotation race). Best-effort:

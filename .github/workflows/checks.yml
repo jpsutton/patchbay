@@ -171,6 +171,20 @@ jobs:
       - name: Coding agent crate tests
         working-directory: crates/patchbay-agent
         run: cargo test --locked
+      # pb-20261109-03: MCP child lifecycle integration proofs (unix only; tests are #[cfg(unix)]).
+      # Guard (adjustment 1): fail if expected tests did not run (zero-test trap / #356 class).
+      - name: MCP child lifecycle integration tests (agent-messaging)
+        working-directory: src-tauri
+        run: |
+          set -euo pipefail
+          log="$(mktemp)"
+          cargo test --test agent_messaging_mcp_child --locked --features ipc-test 2>&1 | tee "$log"
+          grep -q 'running 4 tests' "$log"
+          grep -q 'test result: ok. 4 passed; 0 failed' "$log"
+          grep -q 'real_child_sigterm_during_inflight_tool_call_exits_by_signal' "$log"
+          grep -q 'real_child_sigterm_logs_signal_term_and_exits_by_signal' "$log"
+          grep -q 'real_child_fifo_log_path_exits_promptly_with_stdin_eof' "$log"
+          grep -q 'real_child_logs_start_and_stdin_eof_exit' "$log"
       # The mock model speaks all four wire formats, so these exercise the client and the agent
       # end to end (and the app's Code smoke tests, which start the agent in process).
       - name: End-to-end tests against the mock model
