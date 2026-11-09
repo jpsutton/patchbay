@@ -838,6 +838,157 @@ mod tests {
     }
 
     #[test]
+    fn tools_list_adds_queue_tools_when_not_steering() {
+        let names = |can_steer| {
+            tools_list_for(can_steer)["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|t| t["name"].as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        };
+        assert!(names(false).iter().any(|n| n == TOOL_LIST_QUEUED));
+        assert!(names(false).iter().any(|n| n == TOOL_ACCEPT_QUEUED));
+        assert!(!names(true).iter().any(|n| n == TOOL_LIST_QUEUED));
+        assert!(!names(true).iter().any(|n| n == TOOL_ACCEPT_QUEUED));
+    }
+
+    #[test]
+    fn tools_list_offers_create_agent_session_in_both_modes() {
+        for can_steer in [true, false] {
+            let list = tools_list_for(can_steer);
+            let tool = list["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == TOOL_CREATE)
+                .expect("create tool listed");
+            assert_eq!(tool["inputSchema"]["required"], json!(["cwd", "prompt"]));
+            for k in ["cwd", "prompt", "title", "agent", "model"] {
+                assert!(tool["inputSchema"]["properties"][k].is_object(), "{k}");
+            }
+        }
+    }
+
+    #[test]
+    fn rate_limit_trips_after_max_sends() {
+        for _ in 0..RATE_MAX {
+            check_rate("rate-test-session").unwrap();
+        }
+        assert!(check_rate("rate-test-session").is_err());
+        assert!(check_rate("other-session").is_ok());
+    }
+
+    #[test]
+    fn pair_rate_trips_after_max_to_same_target() {
+        let src = "pair-src";
+        let dst = "pair-dst";
+        for _ in 0..PAIR_MAX {
+            check_pair_rate(src, dst).unwrap();
+        }
+        assert!(check_pair_rate(src, dst).is_err());
+        assert!(check_pair_rate(src, "other-dst").is_ok(), "other target still allowed");
+        assert!(check_pair_rate(dst, src).is_ok(), "reply direction is a separate pair");
+    }
+
+    #[test]
+    fn identical_deliveries_dedup_within_window() {
+        let src = "dedup-src";
+        let dst = "dedup-dst";
+        assert!(take_duplicate(src, dst, "same body").is_none());
+        remember_delivery(src, dst, "same body", "msg-1");
+        assert_eq!(take_duplicate(src, dst, "same body").as_deref(), Some("msg-1"));
+        assert_eq!(take_duplicate(src, dst, " same body ").as_deref(), Some("msg-1"));
+        assert!(take_duplicate(src, dst, "different").is_none());
+        assert!(take_duplicate(src, "other", "same body").is_none());
+    }
+
+    #[test]
+    fn delivery_notes_discourage_resend_on_queued() {
+        assert!(delivery_note("queued").contains("do not resend"));
+        assert!(delivery_note("duplicate").contains("do not resend"));
+        assert!(delivery_note("sent").contains("accepted"));
+    }
+
+    #[test]
+    fn tools_list_offers_share_artifact_in_both_modes() {
+        for can_steer in [true, false] {
+            let list = tools_list_for(can_steer);
+            let tool = list["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == TOOL_SHARE)
+                .expect("share tool listed");
+            assert_eq!(tool["inputSchema"]["required"], json!(["path"]));
+            assert!(tool["inputSchema"]["properties"]["path"].is_object());
+        }
+    }
+
+    #[test]
+    fn share_result_carries_link_and_visibility_instruction() {
+        let ok = json!({ "name": "report.html", "url": "http://host/share/node/token" });
+        let text = share_tool_result(&ok);
+        assert!(text.contains("[report.html](http://host/share/node/token)"), "{text}");
+        assert!(text.contains("visible reply"), "{text}");
+        assert!(text.contains("never silent"), "{text}");
+        // The label is escaped so a filename with markdown punctuation can't break the link.
+        let tricky = json!({ "name": "a[b].html", "url": "http://host/x" });
+        assert!(share_tool_result(&tricky).contains("[a\\[b\\].html](http://host/x)"));
+    }
+
+    #[test]
+    fn markdown_label_escapes_punctuation() {
+        assert_eq!(markdown_label("a[b]c"), "a\\[b\\]c");
+        assert_eq!(markdown_label("a\\b"), "a\\\\b");
+        assert_eq!(markdown_label("a\nb"), "a b");
+    }
+
+    #[test]
+    fn confined_share_path_stays_inside_cwd() {
+        let dir = crate::test_support::short_dir("share-mcp");
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        let file = dir.join("nested/report.html");
+        std::fs::write(&file, b"hi").unwrap();
+        let canonical = std::fs::canonicalize(&file).unwrap();
+
+        // A relative path and an absolute path inside cwd both work.
+        assert_eq!(confined_share_path(&dir, "nested/report.html").unwrap(), canonical);
+        assert_eq!(confined_share_path(&dir, file.to_str().unwrap()).unwrap(), canonical);
+        // `..` escape, an absolute path outside, a directory, a missing file, and cwd itself fail.
+        assert!(confined_share_path(&dir, "../outside.html").is_err());
+        assert!(confined_share_path(&dir, "/etc/hosts").is_err());
+        assert!(confined_share_path(&dir, "nested").is_err());
+        assert!(confined_share_path(&dir, "missing.html").is_err());
+        assert!(confined_share_path(&dir, ".").is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_share_path_rejects_symlink_escape() {
+        let dir = crate::test_support::short_dir("share-mcp-sym");
+        let outside = crate::test_support::short_dir("share-mcp-outside");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("secret.html");
+        std::fs::write(&secret, b"secret").unwrap();
+        std::os::unix::fs::symlink(&secret, dir.join("link.html")).unwrap();
+        assert!(confined_share_path(&dir, "link.html").is_err(), "symlink escape refused");
+        // A symlink pointing to a file INSIDE cwd is fine (canonical target is inside root).
+        let inner = dir.join("inner.html");
+        std::fs::write(&inner, b"ok").unwrap();
+        std::os::unix::fs::symlink(&inner, dir.join("inner-link.html")).unwrap();
+        assert_eq!(
+            confined_share_path(&dir, "inner-link.html").unwrap(),
+            std::fs::canonicalize(&inner).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+
+    #[test]
     fn server_definition_includes_log_path_when_configured() {
         let log = std::env::temp_dir().join(format!("pb-mcp-log-{}.log", std::process::id()));
         let (bridge, listener) = AgentMessagingBridge::bind(Some(log.clone())).unwrap();
@@ -915,35 +1066,5 @@ mod tests {
         let c = safe_error_cause(&e);
         assert!(!c.contains("SECRET"), "{c}");
         assert!(!c.contains("body=hello"), "{c}");
-    }
-
-    #[test]
-    fn tools_list_adds_queue_tools_when_not_steering() {
-        let names = |can_steer| {
-            tools_list_for(can_steer)["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(|t| t["name"].as_str().map(str::to_string))
-                .collect::<Vec<_>>()
-        };
-        assert!(names(false).iter().any(|n| n == TOOL_LIST_QUEUED));
-        assert!(names(false).iter().any(|n| n == TOOL_ACCEPT_QUEUED));
-        assert!(!names(true).iter().any(|n| n == TOOL_LIST_QUEUED));
-        assert!(!names(true).iter().any(|n| n == TOOL_ACCEPT_QUEUED));
-    }
-
-    #[test]
-    fn tools_list_offers_create_agent_session_in_both_modes() {
-        for can_steer in [true, false] {
-            let names: Vec<_> = tools_list_for(can_steer)["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(|t| t["name"].as_str().map(str::to_string))
-                .collect();
-            assert!(names.iter().any(|n| n == TOOL_CREATE), "missing create tool (can_steer={can_steer})");
-            assert!(names.iter().any(|n| n == TOOL_SHARE), "missing share tool (can_steer={can_steer})");
-        }
     }
 }
