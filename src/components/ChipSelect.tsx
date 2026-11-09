@@ -15,8 +15,8 @@ import {
   type SelectHTMLAttributes,
 } from "react";
 import { createPortal } from "react-dom";
-import { matchByPrefix, placeChipMenu, type MenuPlace } from "../lib/chipMenu";
-import { CheckIcon, ChevronDownIcon } from "./icons";
+import { groupItems, groupNames, matchByPrefix, placeChipMenu, topItems, type MenuItem, type MenuPlace } from "../lib/chipMenu";
+import { CheckIcon, ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon } from "./icons";
 
 /**
  * True inside the phone's composer options sheet, where each chip becomes a full-width row with
@@ -37,11 +37,7 @@ export function ChipText({ label, children }: { label: string; children: ReactNo
   return <span className="flex min-w-0 items-center gap-2 px-1 font-mono text-[12px] text-muted">{children}</span>;
 }
 
-interface ChipOption {
-  value: string;
-  label: string;
-  group?: string;
-}
+type ChipOption = Pick<MenuItem, "value" | "label" | "group">;
 
 function optionText(node: ReactNode): string {
   if (node == null || typeof node === "boolean") return "";
@@ -89,6 +85,11 @@ type ChipProps = SelectHTMLAttributes<HTMLSelectElement> & {
   mono?: boolean;
   /** Short name for the row in the options sheet; defaults to the aria-label. */
   label?: string;
+  /**
+   * Desktop list: when the options span two or more `<optgroup>`s, open on the group names and
+   * show one group's options once it is chosen. The phone's native select keeps the plain groups.
+   */
+  twoLevel?: boolean;
 };
 
 /**
@@ -101,7 +102,7 @@ type ChipProps = SelectHTMLAttributes<HTMLSelectElement> & {
  * The phone options sheet keeps the native select: each chip is already a full-width row, and
  * the OS picker is what a phone expects.
  */
-export function ChipSelect({ lead, mono, label, className = "", children, ...rest }: ChipProps) {
+export function ChipSelect({ lead, mono, label, twoLevel, className = "", children, ...rest }: ChipProps) {
   const rows = useContext(ChipRows);
   if (rows) {
     return (
@@ -125,17 +126,26 @@ export function ChipSelect({ lead, mono, label, className = "", children, ...res
     );
   }
   return (
-    <DesktopChip lead={lead} mono={mono} className={className} {...rest}>
+    <DesktopChip lead={lead} mono={mono} twoLevel={twoLevel} className={className} {...rest}>
       {children}
     </DesktopChip>
   );
 }
 
 /** Desktop chip. Own component so its hooks don't run on the phone's native row. */
-function DesktopChip({ lead, mono, className = "", children, value, onChange, disabled, title, id, ...rest }: ChipProps) {
-  const options = readOptions(children);
+function DesktopChip({ lead, mono, twoLevel, className = "", children, value, onChange, disabled, title, id, ...rest }: ChipProps) {
+  const all = readOptions(children);
   const current = currentValue(value);
-  const selectedLabel = options.find((o) => o.value === current)?.label ?? current;
+  const selected = all.find((o) => o.value === current);
+  const selectedLabel = selected?.label ?? current;
+  const groups = groupNames(all);
+  const drill = !!twoLevel && groups.length >= 2;
+  // Which group's list is showing; null is the list of groups. Always null when the chip opens.
+  const [level, setLevel] = useState<string | null>(null);
+  const openLevel = drill && level !== null && groups.includes(level) ? level : null;
+  const top: MenuItem[] = drill ? topItems(all) : all;
+  const options: MenuItem[] = openLevel !== null ? groupItems(all, openLevel) : top;
+  const isCurrent = (o: MenuItem) => (o.drill ? o.value === selected?.group : o.value === current);
   const ariaLabel = rest["aria-label"];
   const listId = useId();
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -148,7 +158,7 @@ function DesktopChip({ lead, mono, className = "", children, value, onChange, di
   const [open, setOpen] = useState(false);
   const [focus, setFocus] = useState(0);
   const [place, setPlace] = useState<MenuPlace | null>(null);
-  const optionKey = options.map((o) => `${o.group ?? ""}\0${o.value}`).join("\n");
+  const optionKey = `${openLevel ?? ""}\n${options.map((o) => `${o.drill ? "+" : ""}${o.group ?? ""}\0${o.value}`).join("\n")}`;
   const focusIdx = options.length === 0 ? 0 : Math.min(focus, options.length - 1);
 
   const measure = () => {
@@ -221,9 +231,10 @@ function DesktopChip({ lead, mono, className = "", children, value, onChange, di
   }, [open]);
 
   const openMenu = () => {
-    if (disabled || options.length === 0) return;
-    const selected = options.findIndex((o) => o.value === current);
-    setFocus(selected < 0 ? 0 : selected);
+    if (disabled || all.length === 0) return;
+    const at = top.findIndex(isCurrent);
+    setLevel(null);
+    setFocus(at < 0 ? 0 : at);
     typed.current = "";
     setPlace(null);
     setOpen(true);
@@ -233,6 +244,24 @@ function DesktopChip({ lead, mono, className = "", children, value, onChange, di
     setOpen(false);
     if (next !== current) onChange?.({ target: { value: next } } as ChangeEvent<HTMLSelectElement>);
   };
+
+  /** Show one group's options, with the current one focused when it is in that group. */
+  const enter = (group: string) => {
+    const at = groupItems(all, group).findIndex((o) => o.value === current);
+    setLevel(group);
+    setFocus(at < 0 ? 0 : at);
+    typed.current = "";
+  };
+
+  /** Back to the list of groups, with the group just left focused. */
+  const leave = () => {
+    const at = top.findIndex((o) => o.drill && o.value === openLevel);
+    setLevel(null);
+    setFocus(at < 0 ? 0 : at);
+    typed.current = "";
+  };
+
+  const choose = (opt: MenuItem) => (opt.drill ? enter(opt.value) : pick(opt.value));
 
   const onKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
     if (disabled) return;
@@ -257,6 +286,19 @@ function DesktopChip({ lead, mono, className = "", children, value, onChange, di
       setFocus((i) => (i + d + options.length) % options.length);
       return;
     }
+    if (drill && openLevel !== null && (e.key === "ArrowLeft" || e.key === "Backspace")) {
+      e.preventDefault();
+      leave();
+      return;
+    }
+    if (drill && e.key === "ArrowRight") {
+      const opt = options[focusIdx];
+      if (opt?.drill) {
+        e.preventDefault();
+        enter(opt.value);
+      }
+      return;
+    }
     if (e.key === "Home") {
       e.preventDefault();
       setFocus(0);
@@ -278,7 +320,7 @@ function DesktopChip({ lead, mono, className = "", children, value, onChange, di
     } else if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       const opt = options[focusIdx];
-      if (opt) pick(opt.value);
+      if (opt) choose(opt);
       return;
     }
     if (!typing) return;
@@ -293,8 +335,29 @@ function DesktopChip({ lead, mono, className = "", children, value, onChange, di
 
   let lastGroup: string | undefined;
   const rows: ReactNode[] = [];
+  if (openLevel !== null) {
+    rows.push(
+      <button
+        key="back"
+        type="button"
+        tabIndex={-1}
+        aria-label="Back to groups"
+        className={`mb-1 flex h-8 w-full items-center gap-1.5 rounded-lg border-b border-border/60 px-2 text-left text-[12px] text-muted hover:bg-panel-2 hover:text-fg ${
+          mono ? "font-mono" : ""
+        }`}
+        onMouseDown={(ev) => {
+          hold.current = true;
+          ev.preventDefault();
+        }}
+        onClick={leave}
+      >
+        <ChevronLeftIcon size={14} className="shrink-0" />
+        <span className="min-w-0 flex-1 truncate">{openLevel}</span>
+      </button>,
+    );
+  }
   options.forEach((opt, i) => {
-    if (opt.group && opt.group !== lastGroup) {
+    if (!drill && opt.group && opt.group !== lastGroup) {
       rows.push(
         <div key={`g:${opt.group}`} className="px-2.5 pb-0.5 pt-1.5 text-[11px] text-faint">
           {opt.group}
@@ -302,14 +365,14 @@ function DesktopChip({ lead, mono, className = "", children, value, onChange, di
       );
     }
     lastGroup = opt.group;
-    const selected = opt.value === current;
+    const chosen = isCurrent(opt);
     rows.push(
       <button
         key={`${opt.group ?? ""}:${opt.value}:${i}`}
         id={`${listId}-opt-${i}`}
         type="button"
         role="option"
-        aria-selected={selected}
+        aria-selected={chosen}
         data-active={i === focusIdx ? "true" : undefined}
         className={`flex h-8 w-full items-center gap-2 rounded-lg px-2.5 text-left ${
           i === focusIdx ? "bg-panel-2 text-fg" : "text-fg/90"
@@ -319,10 +382,12 @@ function DesktopChip({ lead, mono, className = "", children, value, onChange, di
           ev.preventDefault();
         }}
         onMouseEnter={() => setFocus(i)}
-        onClick={() => pick(opt.value)}
+        onClick={() => choose(opt)}
       >
         <span className="min-w-0 flex-1 truncate">{opt.label}</span>
-        {selected && <CheckIcon size={14} className="shrink-0 text-accent" />}
+        {opt.drill && <span className="shrink-0 text-[11px] text-faint">{opt.count}</span>}
+        {chosen && <CheckIcon size={14} className="shrink-0 text-accent" />}
+        {opt.drill && <ChevronRightIcon size={14} className="shrink-0 text-faint" />}
       </button>,
     );
   });

@@ -63,3 +63,55 @@ export function matchByPrefix(labels: readonly string[], from: number, prefix: s
   }
   return from;
 }
+
+/** An option of a grouped chip list (`<option>` inside `<optgroup>`). */
+export interface GroupedOption {
+  value: string;
+  label: string;
+  group?: string;
+}
+
+/** One row of a two-level chip menu: an option, or a group that opens its own list. */
+export interface MenuItem extends GroupedOption {
+  /** True for a group row: choosing it shows that group's options instead of picking. */
+  drill?: boolean;
+  /** Options inside a group row. */
+  count?: number;
+}
+
+/** Distinct group names, in the order they first appear. */
+export function groupNames(options: readonly GroupedOption[]): string[] {
+  const seen = new Set<string>();
+  for (const o of options) if (o.group) seen.add(o.group);
+  return [...seen];
+}
+
+/**
+ * First level of a two-level menu: one row per group, at the place its first option sits. An
+ * option outside every group stays a row of its own, so it can still be picked.
+ */
+export function topItems(options: readonly GroupedOption[]): MenuItem[] {
+  const seen = new Set<string>();
+  const out: MenuItem[] = [];
+  for (const o of options) {
+    if (!o.group) {
+      out.push(o);
+      continue;
+    }
+    if (seen.has(o.group)) continue;
+    seen.add(o.group);
+    out.push({ value: o.group, label: o.group, drill: true, count: options.filter((x) => x.group === o.group).length });
+  }
+  return out;
+}
+
+/** A model name that carries its provider, "Opus 5.5 (Anthropic)", loses it inside that provider's list. */
+export function stripGroupSuffix(label: string, group: string): string {
+  const suffix = ` (${group})`;
+  return label.length > suffix.length && label.endsWith(suffix) ? label.slice(0, -suffix.length) : label;
+}
+
+/** Second level: the options of one group. */
+export function groupItems(options: readonly GroupedOption[], group: string): MenuItem[] {
+  return options.filter((o) => o.group === group).map((o) => ({ ...o, label: stripGroupSuffix(o.label, group) }));
+}
