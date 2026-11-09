@@ -150,6 +150,7 @@ commands! {
     code_history(id, before, prompts);
     code_resume(id, point, running);
     code_is_running(id);
+    code_live();
     code_stop(id);
     code_prompt(id, text, attachment_ids, mentions, prompt_id, force);
     code_unqueue(id, prompt_id);

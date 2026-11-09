@@ -3,6 +3,7 @@ import type { Activity } from "./activity";
 import type { UpdateInfo } from "./update";
 import type { SidebarEntry } from "./sidebarLayout";
 import { isRemoteApp } from "./platform";
+import type { CodeLive } from "./sessionLive";
 
 export type ProviderKind = "openai_chat" | "openai_responses" | "anthropic" | "gemini";
 export type AuthMode = "api_key" | "claude_login";
@@ -1182,6 +1183,8 @@ export const api = {
   codeAutoTitle: (id: string) => invoke<string>("code_auto_title", { id }),
   codeStart: (id: string) => invoke<void>("code_start", { id }),
   codeIsRunning: (id: string) => invoke<boolean>("code_is_running", { id }),
+  /** What the session list shows for every Code session: agent running, mid-turn, waiting on you. */
+  codeLive: () => invoke<Record<string, CodeLive>>("code_live"),
   codeStop: (id: string) => invoke<void>("code_stop", { id }),
   /**
    * `mentions`: absolute paths of @-mentioned project files. `promptId` names the prompt in the
