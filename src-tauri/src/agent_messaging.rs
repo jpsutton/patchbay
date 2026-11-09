@@ -1,8 +1,11 @@
 //! Patchbay-owned MCP tool and its authenticated, local bridge into the running app.
 
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -10,6 +13,10 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
+#[cfg(unix)]
+use tokio::signal::unix::{signal as unix_signal, SignalKind};
+#[cfg(unix)]
+use std::time::Duration;
 
 use crate::{AppState, api};
 
@@ -22,15 +29,204 @@ const TOOL_CREATE: &str = "create_agent_session";
 const TOOL_SHARE: &str = "share_artifact";
 const MAX_LINE: usize = 64 * 1024;
 
+/// Env var carrying the child-side lifecycle log path (pb-20261109-03). Optional:
+/// when absent the child behaves exactly as before and writes no log.
+const ENV_LOG_PATH: &str = "PATCHBAY_MCP_LOG_PATH";
+/// Host agent kind/name (e.g. opencode, claude) for diagnostics. Non-secret.
+const ENV_HOST_AGENT: &str = "PATCHBAY_MCP_HOST_AGENT";
+/// Max log file size before rotate-to-.1 (best-effort cap). ~512 KiB.
+/// Lifecycle lines are ~100 bytes, so the cap should rarely fire in normal use.
+const MCP_LOG_MAX_BYTES: u64 = 512 * 1024;
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn mcp_log_path_from_env() -> Option<PathBuf> {
+    let v = std::env::var_os(ENV_LOG_PATH)?;
+    if v.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(v))
+}
+
+fn mcp_log_path_is_safe_regular(path: &Path) -> bool {
+    // Skip non-regular log paths (e.g. FIFO) via metadata before opening; prevents FIFO open
+    // blocking/hangs. Best-effort (race possible); does not open the path.
+    match fs::symlink_metadata(path) {
+        Ok(m) => m.file_type().is_file(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn o_nonblock_flag() -> i32 { 0x0004 }
+#[cfg(all(unix, not(target_os = "macos")))]
+// Hand-coded: libc is dev-dep only in this tree; O_NONBLOCK is 0o4000 on Linux.
+fn o_nonblock_flag() -> i32 { 0o4000 }
+#[cfg(not(unix))]
+fn o_nonblock_flag() -> i32 { 0 }
+
+fn mcp_log_open_append(path: &Path) -> std::io::Result<fs::File> {
+    if !mcp_log_path_is_safe_regular(path) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "log path is not a regular file"));
+    }
+    let mut opts = OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+        opts.custom_flags(o_nonblock_flag()); // defense in depth vs odd file types
+    }
+    let f = opts.open(path)?;
+    if let Ok(m) = f.metadata() {
+        if !m.is_file() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "log path is not a regular file"));
+        }
+    }
+    Ok(f)
+}
+
+fn mcp_log_rotate_if_needed(path: &Path) -> std::io::Result<()> {
+    if !mcp_log_path_is_safe_regular(path) {
+        return Ok(());
+    }
+    match fs::metadata(path) {
+        Ok(m) if m.len() >= MCP_LOG_MAX_BYTES => {}
+        _ => return Ok(()),
+    };
+    // Re-stat immediately before rename (narrows double-rotation race). Best-effort:
+    // concurrent rotation can rarely drop .1.
+    let meta2 = fs::metadata(path)?;
+    if meta2.len() < MCP_LOG_MAX_BYTES {
+        return Ok(());
+    }
+    let mut rotated = path.as_os_str().to_owned();
+    rotated.push(".1");
+    fs::rename(path, PathBuf::from(rotated))?;
+    Ok(())
+}
+
+/// Single `write_all` of `line + "\n"` (c): deterministic invariant for (e) — a two-write
+/// mutant is caught by `mcp_log_write_line_single_write_all` regardless of scheduling.
+fn mcp_log_write_line<W: std::io::Write>(w: &mut W, line: &str) -> std::io::Result<()> {
+    let mut payload = line.as_bytes().to_vec();
+    payload.push(b'\n');
+    w.write_all(&payload)
+}
+
+/// Best-effort, size-capped append with rotate-to-.1. Never fails the caller; never logs secrets.
+/// `line` must already be safe (no token, no message bodies, no stderr content beyond error kind).
+/// Issues one `write_all` for the full line+newline (small O_APPEND writes reduce interleaving risk).
+/// Skips non-regular log paths (e.g. FIFO) to avoid open blocking; never hangs/kills the child.
+fn mcp_log_append(path: &Path, line: &str) {
+    let _ = (|| -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if !mcp_log_path_is_safe_regular(path) {
+            return Ok(());
+        }
+        let _ = mcp_log_rotate_if_needed(path);
+        let mut f = mcp_log_open_append(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = f.set_permissions(fs::Permissions::from_mode(0o600));
+        }
+        mcp_log_write_line(&mut f, line)?;
+        Ok(())
+    })();
+}
+
+fn mcp_log_event(path: Option<&Path>, event: &str, fields: &[(&str, String)]) {
+    let Some(path) = path else { return };
+    let mut line = format!("ts={} event={event}", now_ms());
+    for (k, v) in fields {
+        // Values are caller-controlled diagnostics; never include secrets/bodies.
+        // Sanitize newlines to keep one event per line.
+        let v = v.replace(['\n', '\r'], " ");
+        line.push(' ');
+        line.push_str(k);
+        line.push('=');
+        line.push_str(&v);
+    }
+    mcp_log_append(path, &line);
+}
+
+fn mcp_host_agent_from_env() -> String {
+    std::env::var(ENV_HOST_AGENT).unwrap_or_else(|_| "unknown".to_owned())
+}
+
+fn mcp_session_from_env() -> String {
+    std::env::var("PATCHBAY_MESSAGE_SESSION").unwrap_or_else(|_| "unknown".to_owned())
+}
+
+fn mcp_process_fields() -> Vec<(&'static str, String)> {
+    let ppid = parent_pid();
+    vec![
+        ("pid", std::process::id().to_string()),
+        ("ppid", ppid),
+        ("session", mcp_session_from_env()),
+        ("host_agent", mcp_host_agent_from_env()),
+    ]
+}
+
+#[cfg(unix)]
+fn parent_pid() -> String {
+    std::os::unix::process::parent_id().to_string()
+}
+
+#[cfg(not(unix))]
+fn parent_pid() -> String {
+    "unknown".to_owned()
+}
+
+/// Maps an error to a safe, named cause (no message body, no stderr content, no secrets).
+/// Only allows known diagnostic kinds / env-var names; collapses anything else.
+fn safe_error_cause(err: &anyhow::Error) -> String {
+    let msg = format!("{err:#}");
+    for known in [
+        "stdin_eof",
+        "stdin_read_error",
+        "stdout_write_error",
+        "stdout_flush_error",
+        "setup_env_missing:PATCHBAY_MESSAGE_ADDR",
+        "setup_env_missing:PATCHBAY_MESSAGE_TOKEN",
+        "setup_env_missing:PATCHBAY_MESSAGE_SESSION",
+        "mcp child panic",
+    ] {
+        if msg == known || msg.contains(known) {
+            if known == "mcp child panic" {
+                return "panic".to_owned();
+            }
+            return known.to_owned();
+        }
+    }
+    if msg.contains("runtime init") || msg.contains("Tokio runtime") {
+        return "runtime_init_error".to_owned();
+    }
+    "error".to_owned()
+}
+
 #[derive(Clone)]
 pub struct AgentMessagingBridge {
     addr: SocketAddr,
     tokens: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+    /// Optional child lifecycle log path passed to spawned MCP children (pb-20261109-03).
+    mcp_log_path: Option<PathBuf>,
 }
 
 impl AgentMessagingBridge {
     /// Returns the std listener: converting to tokio needs a running runtime, which `serve` has.
-    pub fn bind() -> Result<(Self, StdTcpListener)> {
+    /// `mcp_log_path`: when set, passed to each MCP child via `PATCHBAY_MCP_LOG_PATH` so the
+    /// child can record start/exit evidence. Pass `None` to preserve legacy behavior.
+    pub fn bind(mcp_log_path: Option<PathBuf>) -> Result<(Self, StdTcpListener)> {
         let listener = StdTcpListener::bind(("127.0.0.1", 0))
             .context("binding local agent-messaging bridge")?;
         listener.set_nonblocking(true)?;
@@ -39,6 +235,7 @@ impl AgentMessagingBridge {
             Self {
                 addr,
                 tokens: Arc::default(),
+                mcp_log_path,
             },
             listener,
         ))
@@ -46,23 +243,33 @@ impl AgentMessagingBridge {
 
     /// `can_steer`: this session's agent takes mid-turn prompts (ACP steering or Grok interject).
     /// Non-steering agents get tools to list and accept queued peer messages mid-turn.
-    pub fn server_definition(&self, session_id: &str, can_steer: bool) -> Result<Value> {
+    pub fn server_definition(
+        &self,
+        session_id: &str,
+        host_agent: &str,
+        can_steer: bool,
+    ) -> Result<Value> {
         let command = std::env::current_exe()?.to_string_lossy().into_owned();
         let token = hex::encode(rand::random::<[u8; 32]>());
         self.tokens
             .lock()
             .unwrap()
             .insert(session_id.to_owned(), token.clone());
+        let mut env = vec![
+            json!({ "name": "PATCHBAY_MESSAGE_ADDR", "value": self.addr.to_string() }),
+            json!({ "name": "PATCHBAY_MESSAGE_TOKEN", "value": token }),
+            json!({ "name": "PATCHBAY_MESSAGE_SESSION", "value": session_id }),
+            json!({ "name": "PATCHBAY_MESSAGE_STEERING", "value": if can_steer { "1" } else { "0" } }),
+            json!({ "name": ENV_HOST_AGENT, "value": host_agent }),
+        ];
+        if let Some(path) = &self.mcp_log_path {
+            env.push(json!({ "name": ENV_LOG_PATH, "value": path.to_string_lossy().into_owned() }));
+        }
         Ok(json!({
             "name": "patchbay-agent-messaging",
             "command": command,
             "args": ["--agent-messaging-mcp"],
-            "env": [
-                { "name": "PATCHBAY_MESSAGE_ADDR", "value": self.addr.to_string() },
-                { "name": "PATCHBAY_MESSAGE_TOKEN", "value": token },
-                { "name": "PATCHBAY_MESSAGE_SESSION", "value": session_id },
-                { "name": "PATCHBAY_MESSAGE_STEERING", "value": if can_steer { "1" } else { "0" } },
-            ]
+            "env": env
         }))
     }
 
@@ -491,55 +698,211 @@ fn tools_list_for(can_steer: bool) -> Value {
 }
 
 pub fn run_stdio() -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    runtime.block_on(run_stdio_async())
+    let log_path = mcp_log_path_from_env();
+    // START line before doing work: pid/ppid/session/host_agent/timestamp. No secrets.
+    mcp_log_event(log_path.as_deref(), "start", &mcp_process_fields());
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+        match runtime {
+            Ok(rt) => rt.block_on(run_stdio_async(log_path.clone())),
+            Err(e) => Err(anyhow::Error::new(e).context("tokio runtime init")),
+        }
+    }));
+
+    match result {
+        Ok(Ok(cause)) => {
+            // cause is a named normal-exit reason (e.g. stdin_eof). No error payload.
+            // Signal exits (unix) log and re-raise inside run_stdio_async, so they don't return here.
+            let mut fields = mcp_process_fields();
+            fields.push(("cause", cause));
+            mcp_log_event(log_path.as_deref(), "exit", &fields);
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            let mut fields = mcp_process_fields();
+            // `e` carries our safe named cause via its display chain; extract kind only.
+            fields.push(("cause", safe_error_cause(&e)));
+            mcp_log_event(log_path.as_deref(), "exit", &fields);
+            Err(e)
+        }
+        Err(_panic) => {
+            let mut fields = mcp_process_fields();
+            fields.push(("cause", "panic".to_owned()));
+            mcp_log_event(log_path.as_deref(), "exit", &fields);
+            // Preserve process behavior as much as possible; main.rs will see Err-like path
+            // only if we return Err. A panic should still be visible, but we already logged.
+            // Re-panic would prevent main's stderr+exit(1) formatting; return an error instead
+            // so the existing failure path applies, without leaking panic payload.
+            Err(anyhow!("mcp child panic"))
+        }
+    }
 }
 
-async fn run_stdio_async() -> Result<()> {
-    let addr =
-        std::env::var("PATCHBAY_MESSAGE_ADDR").context("missing Patchbay message address")?;
-    let token =
-        std::env::var("PATCHBAY_MESSAGE_TOKEN").context("missing Patchbay message token")?;
-    let source_session_id =
-        std::env::var("PATCHBAY_MESSAGE_SESSION").context("missing Patchbay source session")?;
+#[cfg(unix)]
+const SIG_DFL: usize = 0;
+#[cfg(unix)]
+unsafe extern "C" {
+    #[link_name = "signal"]
+    fn sys_signal(sig: i32, handler: usize) -> usize;
+    #[link_name = "raise"]
+    fn sys_raise(sig: i32) -> i32;
+}
+#[cfg(unix)]
+const SIGTERM: i32 = 15;
+#[cfg(unix)]
+const SIGINT: i32 = 2;
+#[cfg(unix)]
+const SIGHUP: i32 = 1;
+
+#[cfg(unix)]
+async fn log_signal_exit_and_reraise(log_path: Option<PathBuf>, cause: &'static str, sig: i32) {
+    // Write-then-re-raise with a short bound. Failure to write must NEVER block exit.
+    let path = log_path.clone();
+    let fields = mcp_process_fields();
+    let write = tokio::task::spawn_blocking(move || {
+        let mut f = fields;
+        f.push(("cause", cause.to_owned()));
+        mcp_log_event(path.as_deref(), "exit", &f);
+    });
+    let _ = tokio::time::timeout(Duration::from_millis(200), write).await;
+    unsafe {
+        sys_signal(sig, SIG_DFL);
+        sys_raise(sig);
+    }
+    // Safety net if raise returns (should not for TERM/INT/HUP with DFL).
+    std::process::abort();
+}
+
+#[cfg(unix)]
+async fn await_unix_signal(
+    sigterm: &mut Option<tokio::signal::unix::Signal>,
+    sigint: &mut Option<tokio::signal::unix::Signal>,
+    sighup: &mut Option<tokio::signal::unix::Signal>,
+) -> (&'static str, i32) {
+    let recv_term = async { match sigterm.as_mut() { Some(s) => s.recv().await, None => std::future::pending::<Option<()>>().await } };
+    let recv_int = async { match sigint.as_mut() { Some(s) => s.recv().await, None => std::future::pending::<Option<()>>().await } };
+    let recv_hup = async { match sighup.as_mut() { Some(s) => s.recv().await, None => std::future::pending::<Option<()>>().await } };
+    tokio::select! {
+        biased;
+        _ = recv_term => ("signal_term", SIGTERM),
+        _ = recv_int => ("signal_int", SIGINT),
+        _ = recv_hup => ("signal_hup", SIGHUP),
+    }
+}
+
+/// Returns Ok(named_cause) on normal end (stdin EOF), Err on failures.
+/// Error messages are mapped to safe kinds by callers; this keeps causes explicit.
+/// On unix, SIGTERM/SIGINT/SIGHUP are logged as signal_* then re-raised (host sees signal termination),
+/// including while a tools/call is in flight (raced against line processing).
+async fn run_stdio_async(log_path: Option<PathBuf>) -> Result<String> {
+    let addr = std::env::var("PATCHBAY_MESSAGE_ADDR")
+        .map_err(|_| anyhow!("setup_env_missing:PATCHBAY_MESSAGE_ADDR"))?;
+    let token = std::env::var("PATCHBAY_MESSAGE_TOKEN")
+        .map_err(|_| anyhow!("setup_env_missing:PATCHBAY_MESSAGE_TOKEN"))?;
+    let source_session_id = std::env::var("PATCHBAY_MESSAGE_SESSION")
+        .map_err(|_| anyhow!("setup_env_missing:PATCHBAY_MESSAGE_SESSION"))?;
+
     let mut input = BufReader::new(tokio::io::stdin()).lines();
     let mut output = tokio::io::stdout();
-    while let Some(line) = input.next_line().await? {
-        let request: Value = match serde_json::from_str(&line) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        if request["method"]
-            .as_str()
-            .is_some_and(|m| m.starts_with("notifications/"))
+
+    #[cfg(unix)]
+    let mut sigterm = unix_signal(SignalKind::terminate()).ok();
+    #[cfg(unix)]
+    let mut sigint = unix_signal(SignalKind::interrupt()).ok();
+    #[cfg(unix)]
+    let mut sighup = unix_signal(SignalKind::hangup()).ok();
+
+    loop {
+        #[cfg(unix)]
         {
-            continue;
+            let line = tokio::select! {
+                biased;
+                (cause, sig) = await_unix_signal(&mut sigterm, &mut sigint, &mut sighup) => {
+                    log_signal_exit_and_reraise(log_path.clone(), cause, sig).await;
+                    unreachable!();
+                }
+                line = input.next_line() => line,
+            };
+            let line = match line {
+                Ok(Some(line)) => line,
+                Ok(None) => return Ok("stdin_eof".to_owned()),
+                Err(_) => return Err(anyhow!("stdin_read_error")),
+            };
+            tokio::select! {
+                biased;
+                (cause, sig) = await_unix_signal(&mut sigterm, &mut sigint, &mut sighup) => {
+                    log_signal_exit_and_reraise(log_path.clone(), cause, sig).await;
+                    unreachable!();
+                }
+                res = handle_stdio_line(&addr, &token, &source_session_id, &mut output, line) => {
+                    res?;
+                }
+            }
         }
-        let id = request.get("id").cloned().unwrap_or(Value::Null);
-        let method = request["method"].as_str().unwrap_or_default();
-        let result = match method {
-            "initialize" => Ok(json!({
-                "protocolVersion": request["params"]["protocolVersion"].as_str().unwrap_or("2025-03-26"),
-                "capabilities": { "tools": {} },
-                "serverInfo": { "name": "patchbay-agent-messaging", "version": env!("CARGO_PKG_VERSION") }
-            })),
-            "ping" => Ok(json!({})),
-            "tools/list" => Ok(tools_list()),
-            "tools/call" => call_tool(&addr, &token, &source_session_id, &request["params"]).await,
-            _ => Err(anyhow!("unknown MCP method {method}")),
-        };
-        let response = match result {
-            Ok(value) => json!({ "jsonrpc": "2.0", "id": id, "result": value }),
-            Err(error) => json!({
-                "jsonrpc": "2.0", "id": id,
-                "result": ToolReply { content: vec![json!({ "type": "text", "text": format!("{error:#}") })], is_error: true }
-            }),
-        };
-        output.write_all(response.to_string().as_bytes()).await?;
-        output.write_all(b"\n").await?;
-        output.flush().await?;
+        #[cfg(not(unix))]
+        {
+            let line = match input.next_line().await {
+                Ok(Some(line)) => line,
+                Ok(None) => return Ok("stdin_eof".to_owned()),
+                Err(_) => return Err(anyhow!("stdin_read_error")),
+            };
+            handle_stdio_line(&addr, &token, &source_session_id, &mut output, line).await?;
+        }
+    }
+}
+
+async fn handle_stdio_line(
+    addr: &str,
+    token: &str,
+    source_session_id: &str,
+    output: &mut tokio::io::Stdout,
+    line: String,
+) -> Result<()> {
+    let request: Value = match serde_json::from_str(&line) {
+        Ok(value) => value,
+        Err(_) => return Ok(()),
+    };
+    if request["method"]
+        .as_str()
+        .is_some_and(|m| m.starts_with("notifications/"))
+    {
+        return Ok(());
+    }
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let method = request["method"].as_str().unwrap_or_default();
+    let result = match method {
+        "initialize" => Ok(json!({
+            "protocolVersion": request["params"]["protocolVersion"].as_str().unwrap_or("2025-03-26"),
+            "capabilities": { "tools": {} },
+            "serverInfo": { "name": "patchbay-agent-messaging", "version": env!("CARGO_PKG_VERSION") }
+        })),
+        "ping" => Ok(json!({})),
+        "tools/list" => Ok(tools_list()),
+        "tools/call" => call_tool(addr, token, source_session_id, &request["params"]).await,
+        _ => Err(anyhow!("unknown MCP method {method}")),
+    };
+    let response = match result {
+        Ok(value) => json!({ "jsonrpc": "2.0", "id": id, "result": value }),
+        Err(error) => json!({
+            "jsonrpc": "2.0", "id": id,
+            "result": ToolReply { content: vec![json!({ "type": "text", "text": format!("{error:#}") })], is_error: true }
+        }),
+    };
+    if output
+        .write_all(response.to_string().as_bytes())
+        .await
+        .is_err()
+    {
+        return Err(anyhow!("stdout_write_error"));
+    }
+    if output.write_all(b"\n").await.is_err() {
+        return Err(anyhow!("stdout_write_error"));
+    }
+    if output.flush().await.is_err() {
+        return Err(anyhow!("stdout_flush_error"));
     }
     Ok(())
 }
@@ -635,8 +998,8 @@ mod tests {
 
     #[test]
     fn server_definition_name_matches_acp_pattern() {
-        let (bridge, listener) = AgentMessagingBridge::bind().unwrap();
-        let def = bridge.server_definition("session-1", false).unwrap();
+        let (bridge, listener) = AgentMessagingBridge::bind(None).unwrap();
+        let def = bridge.server_definition("session-1", "opencode", false).unwrap();
         drop(listener);
         let name = def["name"].as_str().unwrap();
         assert_eq!(name, "patchbay-agent-messaging");
@@ -647,6 +1010,9 @@ mod tests {
             .find(|e| e["name"] == "PATCHBAY_MESSAGE_STEERING")
             .unwrap();
         assert_eq!(steering["value"], "0");
+        let host = env.iter().find(|e| e["name"] == ENV_HOST_AGENT).unwrap();
+        assert_eq!(host["value"], "opencode");
+        assert!(env.iter().all(|e| e["name"] != ENV_LOG_PATH));
     }
 
     #[test]
@@ -797,5 +1163,259 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn server_definition_includes_log_path_when_configured() {
+        let log = std::env::temp_dir().join(format!("pb-mcp-log-{}.log", std::process::id()));
+        let (bridge, listener) = AgentMessagingBridge::bind(Some(log.clone())).unwrap();
+        let def = bridge.server_definition("session-1", "claude", true).unwrap();
+        drop(listener);
+        let env = def["env"].as_array().unwrap();
+        let lp = env.iter().find(|e| e["name"] == ENV_LOG_PATH).unwrap();
+        assert_eq!(lp["value"].as_str().unwrap(), log.to_string_lossy().as_ref());
+        // Token is required for auth - present but must never appear in child lifecycle log content.
+        assert!(env.iter().any(|e| e["name"] == "PATCHBAY_MESSAGE_TOKEN"));
+    }
+
+    #[test]
+    fn mcp_log_failure_does_not_panic_and_writes_no_secrets() {
+        // (i) Open/write failure path must not panic/kill: point log path directly at a
+        // read-only FILE or DIR so open/write is reached (not create_dir_all on parent).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let rodir = std::env::temp_dir().join(format!("pb-mcp-rof-{}-{}", std::process::id(), now_ms()));
+            let _ = std::fs::remove_dir_all(&rodir);
+            std::fs::create_dir_all(&rodir).unwrap();
+            let ro_file = rodir.join("readonly.log");
+            std::fs::write(&ro_file, b"seed\n").unwrap();
+            std::fs::set_permissions(&ro_file, fs::Permissions::from_mode(0o400)).unwrap();
+            mcp_log_event(Some(&ro_file), "start", &[("pid", "1".into())]); // open append fails: must not panic
+            let _ = std::fs::set_permissions(&ro_file, fs::Permissions::from_mode(0o600));
+            let as_dir = rodir.join("logdir");
+            std::fs::create_dir_all(&as_dir).unwrap();
+            mcp_log_append(&as_dir, "ts=1 event=start"); // dir path: must not panic
+            let _ = std::fs::remove_dir_all(&rodir);
+        }
+
+        // A path whose parent cannot be created as a normal file write target: best-effort.
+        let dir = std::env::temp_dir().join(format!("pb-mcp-logdir-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::create_dir_all(dir.join("blocked"));
+        let _ = std::fs::write(dir.join("blocked").join("log.txt"), b"x");
+        let impossible = dir.join("blocked").join("log.txt").join("nope.log");
+        mcp_log_event(Some(&impossible), "start", &[("pid", "1".into())]);
+        mcp_log_event(None, "start", &[("pid", "1".into())]); // absent path: no-op
+
+        // Successful write: verify content has diagnostics and no secrets. (h/h2) mode 0600 on unix.
+        let ok_path = std::env::temp_dir().join(format!("pb-mcp-log-ok-{}-{}.log", std::process::id(), now_ms()));
+        let token = "SUPER_SECRET_TOKEN_VALUE";
+        let body = "private message body";
+        let fields = vec![
+            ("pid", "123".to_owned()),
+            ("ppid", "45".to_owned()),
+            ("session", "sess-1".to_owned()),
+            ("host_agent", "opencode".to_owned()),
+            ("cause", "stdin_eof".to_owned()),
+        ];
+        mcp_log_event(Some(&ok_path), "exit", &fields);
+        let content = std::fs::read_to_string(&ok_path).unwrap();
+        assert!(content.contains("event=exit"), "{content}");
+        assert!(content.contains("cause=stdin_eof"), "{content}");
+        assert!(content.contains("pid=123"), "{content}");
+        assert!(content.contains("ppid=45"), "{content}");
+        assert!(content.contains("session=sess-1"), "{content}");
+        assert!(content.contains("host_agent=opencode"), "{content}");
+        assert!(!content.contains(token), "token leaked: {content}");
+        assert!(!content.contains(body), "body leaked: {content}");
+        assert!(!content.contains("PATCHBAY_MESSAGE_TOKEN"), "token env name value context must not imply secret: {content}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&ok_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "log file mode must be 0600, got {mode:o}");
+        }
+        let _ = std::fs::remove_file(&ok_path);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mcp_log_is_size_capped() {
+        let path = std::env::temp_dir().join(format!("pb-mcp-log-cap-{}-{}.log", std::process::id(), now_ms()));
+        let rotated = PathBuf::from(format!("{}.1", path.display()));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&rotated);
+        // Pre-fill beyond cap with identifiable old content.
+        let old_marker = "OLD_START_LINE_SHOULD_ROTATE";
+        let mut big = vec![b'x'; (MCP_LOG_MAX_BYTES as usize) + 64];
+        // Embed marker near start.
+        let m = old_marker.as_bytes();
+        big[..m.len()].copy_from_slice(m);
+        std::fs::write(&path, &big).unwrap();
+        // Trigger append: should rotate-to-.1 then write the new line fresh.
+        mcp_log_event(Some(&path), "start", &[("pid", "1".into()), ("cause", "new".into())]);
+        let meta = std::fs::metadata(&path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        // AND (not OR): active file is bounded AND old content is gone from active file.
+        assert!(meta.len() <= MCP_LOG_MAX_BYTES, "log not capped (active too large): {}", meta.len());
+        assert!(!content.contains(old_marker), "old content still in active file: {content}");
+        assert!(content.contains("event=start"), "new line missing from active file: {content}");
+        // .1 holds the old lines.
+        let r1 = std::fs::read_to_string(&rotated).unwrap_or_default();
+        assert!(r1.contains(old_marker), "rotated .1 missing old content: {r1}");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&rotated);
+    }
+
+    #[test]
+    fn safe_cause_never_echoes_arbitrary_content() {
+        let e = anyhow!("stdout_write_error");
+        assert_eq!(safe_error_cause(&e), "stdout_write_error");
+        let e = anyhow!("setup_env_missing:PATCHBAY_MESSAGE_ADDR");
+        assert_eq!(safe_error_cause(&e), "setup_env_missing:PATCHBAY_MESSAGE_ADDR");
+        // Unknown/internal errors collapse to a kind, not full payload.
+        let e = anyhow!("weird {} {}", "SECRET=abc", "body=hello");
+        let c = safe_error_cause(&e);
+        assert!(!c.contains("SECRET"), "{c}");
+        assert!(!c.contains("body=hello"), "{c}");
+    }
+
+    #[test]
+    fn mcp_log_rotation_failure_does_not_panic_and_does_not_kill() {
+        // Rotation/append failure is best-effort and must never kill the caller.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join(format!("pb-mcp-ro-{}-{}", std::process::id(), now_ms()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("log.txt");
+            std::fs::write(&path, vec![b'x'; (MCP_LOG_MAX_BYTES as usize) + 64]).unwrap();
+            // Read-only directory: rename/create may fail. Must not panic.
+            std::fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+            mcp_log_event(Some(&path), "start", &[("pid", "1".into())]);
+            mcp_log_append(&path, "ts=1 event=exit cause=stdin_eof");
+            // Restore for cleanup.
+            let _ = std::fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        // Non-unix: best-effort no-panic path.
+        #[cfg(not(unix))]
+        {
+            let impossible = std::path::Path::new("/\0/impossible-mcp-log");
+            mcp_log_event(Some(impossible), "start", &[("pid", "1".into())]);
+        }
+    }
+
+    #[test]
+    fn mcp_process_fields_real_function_never_includes_token_env() {
+        // Real mcp_process_fields() (not planted fields) must not surface token secrets.
+        let token_val = "PLANTED_TOKEN_MUST_NOT_APPEAR_9f2a";
+        // SAFETY: test-local env mutation; value checked immediately.
+        unsafe { std::env::set_var("PATCHBAY_MESSAGE_TOKEN", token_val); }
+        let fields = mcp_process_fields();
+        let rendered = fields
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        unsafe { std::env::remove_var("PATCHBAY_MESSAGE_TOKEN"); }
+        assert!(!rendered.contains(token_val), "token leaked from real mcp_process_fields: {rendered}");
+        assert!(rendered.contains("pid="), "{rendered}");
+        assert!(rendered.contains("ppid="), "{rendered}");
+        assert!(fields.iter().any(|(k, _)| *k == "session"), "{rendered}");
+        assert!(fields.iter().any(|(k, _)| *k == "host_agent"), "{rendered}");
+    }
+
+    #[test]
+    fn mcp_log_atomic_append_no_interleaving() {
+        // (e, a+b) N-writer stress with Barrier: each append must be one logical record.
+        // (a) exact full-pattern match + multiset equality of all (t,i) in {0..T}x{0..I}
+        // catches drops/dupes/merges/partial records. (b) Barrier for tighter contention.
+        // White-box deterministic proof is `mcp_log_write_line_single_write_all` (c).
+        use std::sync::{Arc, Barrier};
+        let path = std::env::temp_dir().join(format!("pb-mcp-atomic-{}-{}.log", std::process::id(), now_ms()));
+        let _ = std::fs::remove_file(&path);
+        let n_threads = 20usize;
+        let n_each = 25usize;
+        let barrier = Arc::new(Barrier::new(n_threads));
+        let mut handles = Vec::new();
+        for t in 0..n_threads {
+            let p = path.clone();
+            let b = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                b.wait();
+                for i in 0..n_each {
+                    mcp_log_append(&p, &format!("ts=1 event=test t={t} i={i}"));
+                }
+            }));
+        }
+        for h in handles { h.join().unwrap(); }
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), n_threads * n_each, "expected {} lines, got {} (interleaving/corruption?):\n{}", n_threads*n_each, lines.len(), content);
+        let mut seen = std::collections::BTreeSet::new();
+        for (idx, line) in lines.iter().enumerate() {
+            let mut parts = line.split_whitespace();
+            assert_eq!(parts.next(), Some("ts=1"), "malformed line {idx}: {line:?}");
+            assert_eq!(parts.next(), Some("event=test"), "malformed line {idx}: {line:?}");
+            let tpart = parts.next().unwrap_or("");
+            let ipart = parts.next().unwrap_or("");
+            assert_eq!(parts.next(), None, "extra content (partial/merged) line {idx}: {line:?}");
+            let tval: usize = tpart.strip_prefix("t=").unwrap_or_else(|| panic!("bad t in line {idx}: {line:?}")).parse().unwrap();
+            let ival: usize = ipart.strip_prefix("i=").unwrap_or_else(|| panic!("bad i in line {idx}: {line:?}")).parse().unwrap();
+            assert!(tval < n_threads && ival < n_each, "out of range line {idx}: {line:?}");
+            assert!(seen.insert((tval, ival)), "duplicate (t,i) line {idx}: {line:?}");
+        }
+        assert_eq!(seen.len(), n_threads * n_each, "missing (t,i) pairs: got {}", seen.len());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mcp_log_write_line_single_write_all() {
+        // (e, c) Deterministic white-box: fixed path issues exactly one write_all of text+"\n".
+        // A two-write mutant (text, then "\n") fails regardless of scheduling.
+        struct CountWrites(Vec<u8>, usize);
+        impl std::io::Write for CountWrites {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.1 += 1;
+                self.0.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+                self.1 += 1;
+                self.0.extend_from_slice(buf);
+                Ok(())
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let mut w = CountWrites(Vec::new(), 0);
+        mcp_log_write_line(&mut w, "ts=1 event=test k=v").unwrap();
+        assert_eq!(w.1, 1, "must issue exactly one write_all (two-write mutant would call twice)");
+        assert_eq!(w.0, b"ts=1 event=test k=v\n", "payload must be line + newline");
+    }
+
+    #[test]
+    fn mcp_log_write_failure_does_not_panic() {
+        // (i, item 1) open-success / write-failure path: logging failure never kills the child.
+        // Uses testable mcp_log_write_line(&mut impl Write) with a failing writer (cross-platform).
+        // A write_all().unwrap() mutant panics (red, proven); correct path returns Err, no panic.
+        struct FailingWriter;
+        impl std::io::Write for FailingWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(std::io::ErrorKind::Other, "injected write failure"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let mut w = FailingWriter;
+        let r = mcp_log_write_line(&mut w, "ts=1 event=exit cause=stdin_eof");
+        assert!(r.is_err(), "write failure must surface as Err, not panic");
+        // mcp_log_append swallows errors (best-effort) — must not panic.
+        let bad = std::env::temp_dir().join(format!("pb-mcp-not-a-parent-file-{}", std::process::id()));
+        let _ = std::fs::write(&bad, b"x");
+        let impossible = bad.join("child").join("log.txt");
+        mcp_log_append(&impossible, "ts=1 event=start"); // must not panic
+        let _ = std::fs::remove_file(&bad);
     }
 }

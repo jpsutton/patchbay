@@ -3849,13 +3849,15 @@ pub fn open_locked_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow:
     let db = Arc::new(Db::open(&data_dir.join("patchbay.sqlite"))?);
     let keys = Arc::new(mesh::keys::OsKeyStore::new(&data_dir));
     let mesh = Mesh::new(db.clone(), data_dir.clone(), keys)?;
+    let mcp_log_path = data_dir.join("logs").join("agent-messaging-mcp.log");
     let state = AppState::new(db, data_dir, mesh.clone(), emit);
     // A desktop app (or a daemon built without `web`) owns the data folder itself, so it must
     // serve artifact shares from its own loopback HTTP server. A `web`-enabled daemon serves
     // them from its main axum server instead (web.rs), and tests must not bind any port.
     #[cfg(all(not(feature = "web"), not(test)))]
     shares::spawn(&state);
-    let (agent_messaging, message_listener) = agent_messaging::AgentMessagingBridge::bind()?;
+    let (agent_messaging, message_listener) =
+        agent_messaging::AgentMessagingBridge::bind(Some(mcp_log_path))?;
     let _ = state.agent_message_bridge.set(agent_messaging.clone());
     agent_messaging.serve(message_listener, state.clone());
     if mesh.is_member() {
