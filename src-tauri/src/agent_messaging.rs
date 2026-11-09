@@ -54,18 +54,48 @@ fn mcp_log_path_from_env() -> Option<PathBuf> {
     Some(PathBuf::from(v))
 }
 
+fn mcp_log_path_is_safe_regular(path: &Path) -> bool {
+    // Skip non-regular log paths (e.g. FIFO) via metadata before opening; prevents FIFO open
+    // blocking/hangs. Best-effort (race possible); does not open the path.
+    match fs::symlink_metadata(path) {
+        Ok(m) => m.file_type().is_file(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn o_nonblock_flag() -> i32 { 0x0004 }
+#[cfg(all(unix, not(target_os = "macos")))]
+fn o_nonblock_flag() -> i32 { 0o4000 }
+#[cfg(not(unix))]
+fn o_nonblock_flag() -> i32 { 0 }
+
 fn mcp_log_open_append(path: &Path) -> std::io::Result<fs::File> {
+    if !mcp_log_path_is_safe_regular(path) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "log path is not a regular file"));
+    }
     let mut opts = OpenOptions::new();
     opts.create(true).append(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
+        opts.custom_flags(o_nonblock_flag()); // defense in depth vs odd file types
     }
-    opts.open(path)
+    let f = opts.open(path)?;
+    if let Ok(m) = f.metadata() {
+        if !m.is_file() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "log path is not a regular file"));
+        }
+    }
+    Ok(f)
 }
 
 fn mcp_log_rotate_if_needed(path: &Path) -> std::io::Result<()> {
+    if !mcp_log_path_is_safe_regular(path) {
+        return Ok(());
+    }
     let meta = match fs::metadata(path) {
         Ok(m) if m.len() >= MCP_LOG_MAX_BYTES => m,
         _ => return Ok(()),
@@ -73,23 +103,26 @@ fn mcp_log_rotate_if_needed(path: &Path) -> std::io::Result<()> {
     // Re-stat immediately before rename (narrows double-rotation race). Best-effort:
     // concurrent rotation can rarely drop .1.
     let meta2 = fs::metadata(path)?;
-    if meta2.len() < MCP_LOG_MAX_BYTES || meta2.len() != meta.len() && meta2.len() < MCP_LOG_MAX_BYTES {
+    if meta2.len() < MCP_LOG_MAX_BYTES {
         return Ok(());
     }
     let mut rotated = path.as_os_str().to_owned();
     rotated.push(".1");
-    let rotated = PathBuf::from(rotated);
-    fs::rename(path, rotated)?;
+    fs::rename(path, PathBuf::from(rotated))?;
     Ok(())
 }
 
 /// Best-effort, size-capped append with rotate-to-.1. Never fails the caller; never logs secrets.
 /// `line` must already be safe (no token, no message bodies, no stderr content beyond error kind).
 /// Issues one `write_all` for the full line+newline (small O_APPEND writes reduce interleaving risk).
+/// Skips non-regular log paths (e.g. FIFO) to avoid open blocking; never hangs/kills the child.
 fn mcp_log_append(path: &Path, line: &str) {
     let _ = (|| -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
+        }
+        if !mcp_log_path_is_safe_regular(path) {
+            return Ok(());
         }
         let _ = mcp_log_rotate_if_needed(path);
         let mut f = mcp_log_open_append(path)?;
@@ -738,9 +771,27 @@ async fn log_signal_exit_and_reraise(log_path: Option<PathBuf>, cause: &'static 
     std::process::abort();
 }
 
+#[cfg(unix)]
+async fn await_unix_signal(
+    sigterm: &mut Option<tokio::signal::unix::Signal>,
+    sigint: &mut Option<tokio::signal::unix::Signal>,
+    sighup: &mut Option<tokio::signal::unix::Signal>,
+) -> (&'static str, i32) {
+    let recv_term = async { match sigterm.as_mut() { Some(s) => s.recv().await, None => std::future::pending::<Option<()>>().await } };
+    let recv_int = async { match sigint.as_mut() { Some(s) => s.recv().await, None => std::future::pending::<Option<()>>().await } };
+    let recv_hup = async { match sighup.as_mut() { Some(s) => s.recv().await, None => std::future::pending::<Option<()>>().await } };
+    tokio::select! {
+        biased;
+        _ = recv_term => ("signal_term", SIGTERM),
+        _ = recv_int => ("signal_int", SIGINT),
+        _ = recv_hup => ("signal_hup", SIGHUP),
+    }
+}
+
 /// Returns Ok(named_cause) on normal end (stdin EOF), Err on failures.
 /// Error messages are mapped to safe kinds by callers; this keeps causes explicit.
-/// On unix, SIGTERM/SIGINT/SIGHUP are logged as signal_* then re-raised (host sees signal termination).
+/// On unix, SIGTERM/SIGINT/SIGHUP are logged as signal_* then re-raised (host sees signal termination),
+/// including while a tools/call is in flight (raced against line processing).
 async fn run_stdio_async(log_path: Option<PathBuf>) -> Result<String> {
     let addr = std::env::var("PATCHBAY_MESSAGE_ADDR")
         .map_err(|_| anyhow!("setup_env_missing:PATCHBAY_MESSAGE_ADDR"))?;
@@ -762,36 +813,27 @@ async fn run_stdio_async(log_path: Option<PathBuf>) -> Result<String> {
     loop {
         #[cfg(unix)]
         {
-            let recv_term = async {
-                match sigterm.as_mut() {
-                    Some(s) => s.recv().await,
-                    None => std::future::pending::<Option<()>>().await,
+            let line = tokio::select! {
+                biased;
+                (cause, sig) = await_unix_signal(&mut sigterm, &mut sigint, &mut sighup) => {
+                    log_signal_exit_and_reraise(log_path.clone(), cause, sig).await;
+                    unreachable!();
                 }
+                line = input.next_line() => line,
             };
-            let recv_int = async {
-                match sigint.as_mut() {
-                    Some(s) => s.recv().await,
-                    None => std::future::pending::<Option<()>>().await,
-                }
-            };
-            let recv_hup = async {
-                match sighup.as_mut() {
-                    Some(s) => s.recv().await,
-                    None => std::future::pending::<Option<()>>().await,
-                }
+            let line = match line {
+                Ok(Some(line)) => line,
+                Ok(None) => return Ok("stdin_eof".to_owned()),
+                Err(_) => return Err(anyhow!("stdin_read_error")),
             };
             tokio::select! {
                 biased;
-                _ = recv_term => { log_signal_exit_and_reraise(log_path.clone(), "signal_term", SIGTERM).await; }
-                _ = recv_int => { log_signal_exit_and_reraise(log_path.clone(), "signal_int", SIGINT).await; }
-                _ = recv_hup => { log_signal_exit_and_reraise(log_path.clone(), "signal_hup", SIGHUP).await; }
-                line = input.next_line() => {
-                    let line = match line {
-                        Ok(Some(line)) => line,
-                        Ok(None) => return Ok("stdin_eof".to_owned()),
-                        Err(_) => return Err(anyhow!("stdin_read_error")),
-                    };
-                    handle_stdio_line(&addr, &token, &source_session_id, &mut output, line).await?;
+                (cause, sig) = await_unix_signal(&mut sigterm, &mut sigint, &mut sighup) => {
+                    log_signal_exit_and_reraise(log_path.clone(), cause, sig).await;
+                    unreachable!();
+                }
+                res = handle_stdio_line(&addr, &token, &source_session_id, &mut output, line) => {
+                    res?;
                 }
             }
         }
@@ -1134,19 +1176,35 @@ mod tests {
 
     #[test]
     fn mcp_log_failure_does_not_panic_and_writes_no_secrets() {
-        // A path whose parent cannot be created as a normal file write target: use a directory
-        // as the log path so append fails. Best-effort must swallow it.
+        // (i) Open/write failure path must not panic/kill: point log path directly at a
+        // read-only FILE or DIR so open/write is reached (not create_dir_all on parent).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let rodir = std::env::temp_dir().join(format!("pb-mcp-rof-{}-{}", std::process::id(), now_ms()));
+            let _ = std::fs::remove_dir_all(&rodir);
+            std::fs::create_dir_all(&rodir).unwrap();
+            let ro_file = rodir.join("readonly.log");
+            std::fs::write(&ro_file, b"seed\n").unwrap();
+            std::fs::set_permissions(&ro_file, fs::Permissions::from_mode(0o400)).unwrap();
+            mcp_log_event(Some(&ro_file), "start", &[("pid", "1".into())]); // open append fails: must not panic
+            let _ = std::fs::set_permissions(&ro_file, fs::Permissions::from_mode(0o600));
+            let as_dir = rodir.join("logdir");
+            std::fs::create_dir_all(&as_dir).unwrap();
+            mcp_log_append(&as_dir, "ts=1 event=start"); // dir path: must not panic
+            let _ = std::fs::remove_dir_all(&rodir);
+        }
+
+        // A path whose parent cannot be created as a normal file write target: best-effort.
         let dir = std::env::temp_dir().join(format!("pb-mcp-logdir-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        // Make parent a file so create_dir_all/open fail on most platforms.
         let _ = std::fs::create_dir_all(dir.join("blocked"));
         let _ = std::fs::write(dir.join("blocked").join("log.txt"), b"x");
-        // Point at a path under a file - append should fail; must not panic.
         let impossible = dir.join("blocked").join("log.txt").join("nope.log");
         mcp_log_event(Some(&impossible), "start", &[("pid", "1".into())]);
         mcp_log_event(None, "start", &[("pid", "1".into())]); // absent path: no-op
 
-        // Successful write: verify content has diagnostics and no secrets.
+        // Successful write: verify content has diagnostics and no secrets. (h/h2) mode 0600 on unix.
         let ok_path = std::env::temp_dir().join(format!("pb-mcp-log-ok-{}-{}.log", std::process::id(), now_ms()));
         let token = "SUPER_SECRET_TOKEN_VALUE";
         let body = "private message body";
@@ -1168,6 +1226,12 @@ mod tests {
         assert!(!content.contains(token), "token leaked: {content}");
         assert!(!content.contains(body), "body leaked: {content}");
         assert!(!content.contains("PATCHBAY_MESSAGE_TOKEN"), "token env name value context must not imply secret: {content}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&ok_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "log file mode must be 0600, got {mode:o}");
+        }
         let _ = std::fs::remove_file(&ok_path);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1258,5 +1322,34 @@ mod tests {
         assert!(rendered.contains("ppid="), "{rendered}");
         assert!(fields.iter().any(|(k, _)| *k == "session"), "{rendered}");
         assert!(fields.iter().any(|(k, _)| *k == "host_agent"), "{rendered}");
+    }
+
+
+    #[test]
+    fn mcp_log_atomic_append_no_interleaving() {
+        // (e) N-writer stress: each append is one write_all(line+\n). A two-write mutant
+        // (e.g. writeln! split) can interleave/corrupt lines under concurrency.
+        let path = std::env::temp_dir().join(format!("pb-mcp-atomic-{}-{}.log", std::process::id(), now_ms()));
+        let _ = std::fs::remove_file(&path);
+        let n_threads = 20usize;
+        let n_each = 25usize;
+        let mut handles = Vec::new();
+        for t in 0..n_threads {
+            let p = path.clone();
+            handles.push(std::thread::spawn(move || {
+                for i in 0..n_each {
+                    mcp_log_append(&p, &format!("ts=1 event=test t={t} i={i}"));
+                }
+            }));
+        }
+        for h in handles { h.join().unwrap(); }
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), n_threads * n_each, "expected {} lines, got {} (interleaving/corruption?):\n{}", n_threads*n_each, lines.len(), content);
+        for (idx, line) in lines.iter().enumerate() {
+            assert!(line.starts_with("ts=1 event=test "), "malformed line {idx}: {line:?}");
+            assert_eq!(line.matches("ts=").count(), 1, "merged/interleaved line {idx}: {line:?}");
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }
