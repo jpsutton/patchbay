@@ -115,6 +115,17 @@ If you start the desktop app while `patchbayd` runs on the same data folder, the
 
 Patchbay's agent and Chat can use a Claude subscription through a provider set to "Use Claude Code login". On a server with no `claude` login, run `claude setup-token` on any computer and set the token it prints as `CLAUDE_CODE_OAUTH_TOKEN` in the daemon's environment, for example in a root-owned `EnvironmentFile=` (mode 600) of its systemd unit. Patchbay then uses that token for providers with no Claude config directory, ahead of any `~/.claude` login, as Claude Code does. It never renews the token: when it expires or is revoked, make a new one. Providers that name a config directory keep using that directory's login.
 
+## Grok subscription on a server
+
+A provider set to "Use Grok login (subscription)" reuses the sign-in that `grok login` keeps in `<grok home>/auth.json`: `$GROK_HOME` in the daemon's environment when it is set, else `~/.grok`, or the provider's own "Grok home". On a server, sign in as the user the daemon runs as, with the device-code flow (no browser on the server):
+
+```bash
+grok login --device-auth                  # default home, ~/.grok
+GROK_HOME=/srv/grok-team grok login --device-auth   # another account; name that folder as the provider's Grok home
+```
+
+Unlike Claude's `setup-token`, there is no long-lived token to copy. Don't copy one computer's `auth.json` to another either: Grok's refresh tokens rotate, and xAI revokes the newer token when an older one is used again, so two copies sign each other out. Sign in on each computer. The login refreshes itself (Patchbay and `grok` share the file under a lock), so it keeps working until it is revoked or `grok logout` removes it; then sign in again.
+
 ## Joining a mesh
 
 Use **Settings → Mesh** in the web UI to create a mesh, or to join one with another member's address and the mesh passphrase, the same as in the desktop app. Once joined, phones can use the daemon as their gateway, and the desktop app can move Code sessions to and from it.

@@ -108,7 +108,14 @@ pub fn render(db: &Db, default_model_ref: Option<&str>) -> Result<Rendered> {
             ProviderKind::Anthropic => "messages",
         };
         t.insert("api_backend".into(), s(backend));
-        if let Some(key) = providers::load_key(&p.id, inline.as_deref()) {
+        // A Grok login has no stored key: Grok Build gets the login's token, which the caller
+        // refreshed just before launch (`grok_auth::credentials`). Grok attaches no session
+        // credential to a custom model's provider, so without this its requests go unsigned.
+        let key = match p.auth_mode {
+            crate::db::AuthMode::GrokLogin => crate::grok_auth::cached_token(p.grok_home.as_deref()),
+            _ => providers::load_key(&p.id, inline.as_deref()),
+        };
+        if let Some(key) = key {
             let var = format!("PATCHBAY_KEY_{i}");
             if p.kind == ProviderKind::Anthropic {
                 t.insert("env_http_headers".into(), table(&[("x-api-key", s(&var))]));
@@ -223,7 +230,7 @@ mod tests {
                 base_url: "http://x/v1".into(),
                 has_key: false,
             auth_mode: Default::default(),
-            claude_config_dir: None,
+            claude_config_dir: None, grok_home: None,
         },
             None,
         )
@@ -278,6 +285,58 @@ mod tests {
         ] {
             assert!(t.contains(want), "missing {want} in\n{t}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_grok_login_provider_gets_its_token_in_the_environment() {
+        let dir = std::env::temp_dir().join(format!("pb-gc-grok-{}", crate::db::new_id()));
+        let home = dir.join("grok-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let login = serde_json::json!({ "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": {
+            "key": "tok-123", "auth_mode": "oidc", "refresh_token": "r", "user_id": "user-1",
+            "expires_at": "2099-01-01T00:00:00Z"
+        }});
+        std::fs::write(home.join("auth.json"), login.to_string()).unwrap();
+        let db = Db::open(&dir.join("db.sqlite")).unwrap();
+        db.upsert_provider(
+            &Provider {
+                id: "g".into(),
+                name: "Grok".into(),
+                kind: ProviderKind::OpenaiResponses,
+                base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+                has_key: false,
+                auth_mode: crate::db::AuthMode::GrokLogin,
+                claude_config_dir: None,
+                grok_home: Some(home.to_string_lossy().into_owned()),
+            },
+            None,
+        )
+        .unwrap();
+        db.upsert_model(&Model {
+            id: "m".into(),
+            provider_id: "g".into(),
+            model_id: "grok-4.7".into(),
+            display_name: "Grok 4.7".into(),
+            vision: false,
+            context_window: None,
+            params: ModelParams::default(),
+        })
+        .unwrap();
+        let keys = |r: &super::Rendered| r.env.iter().filter(|(k, _)| k.starts_with("PATCHBAY_KEY_")).cloned().collect::<Vec<_>>();
+
+        // Before the login was read there is no token to hand over.
+        let before = super::render(&db, Some("m")).unwrap();
+        assert!(keys(&before).is_empty());
+        assert!(!before.toml.contains("env_key"), "{}", before.toml);
+
+        crate::grok_auth::credentials(home.to_str()).await.unwrap();
+        let after = super::render(&db, Some("m")).unwrap();
+        assert_eq!(keys(&after), vec![("PATCHBAY_KEY_0".to_owned(), "tok-123".to_owned())]);
+        let cfg: toml::Table = toml::from_str(&after.toml).unwrap();
+        assert_eq!(cfg["model_providers"]["p0"]["env_key"].as_str(), Some("PATCHBAY_KEY_0"));
+        assert_eq!(cfg["model_providers"]["p0"]["api_backend"].as_str(), Some("responses"));
+        assert_eq!(cfg["model_providers"]["p0"]["base_url"].as_str(), Some("https://cli-chat-proxy.grok.com/v1"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

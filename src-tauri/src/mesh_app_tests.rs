@@ -535,7 +535,7 @@ async fn phone_chat_runs_on_the_picked_computer() {
         base_url: "http://127.0.0.1:9/v1".into(),
         has_key: true,
             auth_mode: Default::default(),
-            claude_config_dir: None,
+            claude_config_dir: None, grok_home: None,
         };
     db.upsert_provider(&prov, Some("k")).unwrap();
     let model = db::Model {
@@ -608,7 +608,7 @@ async fn manual_phone_gateway() {
         base_url: std::env::var("PATCHBAY_MOCK_URL").unwrap_or_else(|_| "http://127.0.0.1:8765/v1".into()),
         has_key: true,
             auth_mode: Default::default(),
-            claude_config_dir: None,
+            claude_config_dir: None, grok_home: None,
         };
     db.upsert_provider(&p, Some("mock-key")).unwrap();
     for (id, model) in [("m-echo", "mock-echo"), ("m-agent", "mock-agent")] {
@@ -844,6 +844,7 @@ async fn usage_limit_stops_claude_turns() {
         has_key: false,
         auth_mode: db::AuthMode::ClaudeLogin,
         claude_config_dir: Some("/tmp/pb-other-claude".into()),
+        grok_home: None,
     };
     a.state.db.upsert_provider(&teams, None).unwrap();
     let model = db::Model {
@@ -953,6 +954,7 @@ async fn a_session_is_gated_only_by_its_own_accounts_report() {
                     has_key: false,
                     auth_mode: db::AuthMode::ClaudeLogin,
                     claude_config_dir: Some(dir.to_string_lossy().into_owned()),
+                    grok_home: None,
                 },
                 None,
             )
@@ -1000,6 +1002,92 @@ async fn a_session_is_gated_only_by_its_own_accounts_report() {
     prompt(sb).await.expect("B is not gated by A's numbers");
     // C has no report of its own: no report, no block — never another account's numbers.
     prompt(sc).await.expect("an account with no report is not blocked by another's");
+}
+
+/// A Grok seat is a plan account like a Claude one: a session on a Grok-login provider is gated by
+/// its own seat's weekly report, and by nothing else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_grok_seat_gates_its_own_sessions() {
+    use code::acp::{AgentCmd, Delivery};
+    use code::plan_limits::{PlanLimits, Window, now};
+    let a = node("alpha-grok-seat");
+    let cwd = a.dir.to_string_lossy().into_owned();
+    let resets = now() + 3600;
+    // A Grok home whose login names the seat; the seat is over the limit.
+    let home = a.dir.join("grok-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let login = serde_json::json!({ "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": {
+        "key": "tok", "auth_mode": "oidc", "refresh_token": "r", "user_id": "user-1", "team_id": "team-1",
+        "team_name": "Acme", "expires_at": "2099-01-01T00:00:00Z"
+    }});
+    std::fs::write(home.join("auth.json"), login.to_string()).unwrap();
+    let (seat, _) = crate::grok_auth::account(&home);
+    assert_eq!(seat, "grok:team-1:user-1");
+    a.state.code.plan.record(
+        &seat,
+        Some("Acme".into()),
+        PlanLimits { seven_day: Some(Window { utilization: 0.99, resets_at: resets }), observed_at: now() - 60, ..Default::default() },
+    );
+    let provider = |id: &str, name: &str, kind: db::ProviderKind, mode: db::AuthMode, grok_home: Option<String>| {
+        a.state
+            .db
+            .upsert_provider(
+                &db::Provider {
+                    id: id.into(),
+                    name: name.into(),
+                    kind,
+                    base_url: "https://cli-chat-proxy.grok.com/v1".into(),
+                    has_key: false,
+                    auth_mode: mode,
+                    claude_config_dir: None,
+                    grok_home,
+                },
+                None,
+            )
+            .unwrap();
+        let model = db::Model {
+            id: format!("m-{id}"),
+            provider_id: id.into(),
+            model_id: "grok-4.7".into(),
+            display_name: name.into(),
+            vision: false,
+            context_window: None,
+            params: Default::default(),
+        };
+        a.state.db.upsert_model(&model).unwrap();
+        model.id
+    };
+    let on = |model: &str| {
+        let s = a.state.db.create_code_session(&cwd, Some(model), "patchbay", "default").unwrap();
+        let mut rx = a.state.code.attach_test_agent(&s.id);
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                if let AgentCmd::Prompt { reply, .. } = cmd
+                    && let Some(reply) = reply
+                {
+                    let _ = reply.send(Ok(Delivery::Sent));
+                }
+            }
+        });
+        s.id
+    };
+    let seat_model = provider("grok", "Grok Team", db::ProviderKind::OpenaiResponses, db::AuthMode::GrokLogin, Some(home.to_string_lossy().into_owned()));
+    let key_model = provider("plain", "Plain", db::ProviderKind::OpenaiResponses, db::AuthMode::ApiKey, None);
+    let (on_seat, on_key) = (on(&seat_model), on(&key_model));
+    let chans: crate::api::ChanFactory = Arc::new(|_| None);
+    let prompt = |id: String| crate::api::call(&a.state, "code_prompt", json!({ "id": id, "text": "more", "attachmentIds": [] }), &chans);
+
+    let err = prompt(on_seat).await.unwrap_err();
+    assert!(err.0.starts_with("Not sent. You have used 99% of Grok Team's weekly limit"), "{}", err.0);
+    // A provider that bills by the token has no plan to run out of.
+    prompt(on_key).await.expect("an API-key provider is not gated by a Grok seat");
+    // The panel names the seat by the provider that runs on it.
+    let views = crate::plan_views(&a.state);
+    assert_eq!(views.len(), 1);
+    let v = serde_json::to_value(&views[0]).unwrap();
+    assert_eq!(v["account"], "grok:team-1:user-1");
+    assert_eq!(v["label"], "Grok Team");
+    assert_eq!(v["latest"]["sevenDay"]["utilization"], 0.99);
 }
 
 /// Plan usage one member sees reaches the others, a member that was away catches up when it
@@ -1363,8 +1451,8 @@ async fn the_mcp_create_tool_reaches_the_app_through_the_bridge() {
     let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
     *a.state.code.test_started.lock().unwrap() = Some(started_tx);
 
-    let (bridge, listener) = agent_messaging::AgentMessagingBridge::bind().unwrap();
-    let def = bridge.server_definition(&sa.id, true).unwrap();
+    let (bridge, listener) = agent_messaging::AgentMessagingBridge::bind(None).unwrap();
+    let def = bridge.server_definition(&sa.id, "grok", true).unwrap();
     bridge.serve(listener, a.state.clone());
     let env = |k: &str| def["env"].as_array().unwrap().iter().find(|e| e["name"] == k).unwrap()["value"].as_str().unwrap().to_owned();
 

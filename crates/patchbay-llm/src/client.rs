@@ -18,6 +18,11 @@ pub struct Config {
     pub key: Option<String>,
     pub auth: AuthScheme,
     pub extra_headers: Vec<(String, String)>,
+    /// Headers that carry the request's `cache_key` (the session id), for endpoints that group
+    /// a conversation's requests by header (Grok's `x-grok-conv-id`, `x-grok-session-id`).
+    pub session_headers: Vec<String>,
+    /// A header that carries a fresh id on every attempt (Grok's `x-grok-req-id`).
+    pub request_id_header: Option<String>,
     pub max_output_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
@@ -48,6 +53,8 @@ impl Config {
                 _ => AuthScheme::Bearer,
             },
             extra_headers: Vec::new(),
+            session_headers: Vec::new(),
+            request_id_header: None,
             max_output_tokens: None,
             temperature: None,
             top_p: None,
@@ -65,6 +72,37 @@ impl Config {
     pub fn cache_ttl_secs(&self) -> Option<u64> {
         (self.format == WireFormat::Anthropic).then(|| self.cache_ttl.secs())
     }
+}
+
+/// The headers that differ per request: the session id under each of `cfg.session_headers`
+/// (when the request has one), and a fresh id under `cfg.request_id_header`.
+fn request_headers(cfg: &Config, session: Option<&str>) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Some(s) = session.filter(|s| !s.is_empty()) {
+        for name in &cfg.session_headers {
+            out.push((name.clone(), s.to_owned()));
+        }
+    }
+    if let Some(name) = &cfg.request_id_header {
+        out.push((name.clone(), request_id()));
+    }
+    out
+}
+
+/// A random id in UUID layout. It needs no uniqueness guarantee beyond "different each time", so
+/// it draws on the standard library's per-process random hasher keys instead of a new dependency.
+fn request_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let word = || std::collections::hash_map::RandomState::new().build_hasher().finish();
+    let (a, b) = (word(), word());
+    format!(
+        "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
+        (a >> 32) as u32,
+        (a >> 16) as u16,
+        a & 0xfff,
+        ((b >> 48) as u16 & 0x3fff) | 0x8000,
+        b & 0xffff_ffff_ffff,
+    )
 }
 
 #[derive(Clone)]
@@ -96,7 +134,7 @@ impl Client {
         let mut attempt = 0u32;
         loop {
             let mut emitted = false;
-            match self.attempt(&url, &body, cancel, &mut emitted, &mut on_event).await {
+            match self.attempt(&url, &body, req.cache_key.as_deref(), cancel, &mut emitted, &mut on_event).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) if e.cancelled => return Err(e),
                 // Some Anthropic models refuse adaptive thinking; ask again with a token budget.
@@ -134,6 +172,7 @@ impl Client {
         &self,
         url: &str,
         body: &serde_json::Value,
+        session: Option<&str>,
         cancel: &CancellationToken,
         emitted: &mut bool,
         on_event: &mut (impl FnMut(Event) + Send),
@@ -152,7 +191,11 @@ impl Client {
                 AuthScheme::GoogApiKey => rb.header("x-goog-api-key", k),
             };
         }
-        for (k, v) in wire::default_headers(cfg).iter().chain(cfg.extra_headers.iter()) {
+        for (k, v) in wire::default_headers(cfg)
+            .iter()
+            .chain(cfg.extra_headers.iter())
+            .chain(request_headers(cfg, session).iter())
+        {
             rb = rb.header(k, v);
         }
         let resp = tokio::select! {
@@ -246,5 +289,37 @@ impl Client {
             }
         }
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_session_id_goes_under_each_named_header() {
+        let mut cfg = Config::new(WireFormat::Responses, "http://x/v1", "m");
+        assert!(request_headers(&cfg, Some("s1")).is_empty(), "nothing configured, nothing sent");
+        cfg.session_headers = vec!["x-conv-id".into(), "x-session-id".into()];
+        let h = request_headers(&cfg, Some("s1"));
+        assert_eq!(h, vec![("x-conv-id".to_owned(), "s1".to_owned()), ("x-session-id".to_owned(), "s1".to_owned())]);
+        assert!(request_headers(&cfg, None).is_empty(), "a request with no session sends none");
+        assert!(request_headers(&cfg, Some("")).is_empty());
+    }
+
+    #[test]
+    fn every_attempt_gets_its_own_request_id() {
+        let mut cfg = Config::new(WireFormat::Responses, "http://x/v1", "m");
+        cfg.request_id_header = Some("x-req-id".into());
+        let a = request_headers(&cfg, None);
+        let b = request_headers(&cfg, None);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].0, "x-req-id");
+        assert_ne!(a[0].1, b[0].1);
+        let id = &a[0].1;
+        assert_eq!(id.len(), 36, "{id}");
+        assert_eq!(id.matches('-').count(), 4, "{id}");
+        assert!(id.chars().all(|c| c == '-' || c.is_ascii_hexdigit()), "{id}");
+        assert_eq!(id.as_bytes()[14], b'4', "version nibble: {id}");
     }
 }

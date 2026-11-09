@@ -1222,16 +1222,23 @@ export function install() {
             apiKey?: string;
             authMode?: Provider["authMode"];
             claudeConfigDir?: string;
+            grokHome?: string;
           };
           let x = db.providers.find((q) => q.id === i.id);
           if (!x) {
             x = { id: id(), name: "", kind: i.kind, baseUrl: "", hasKey: false, authMode: "api_key" };
             db.providers.push(x);
           }
-          const authMode = i.kind === "anthropic" && i.authMode === "claude_login" ? "claude_login" : "api_key";
+          const authMode =
+            i.kind === "anthropic" && i.authMode === "claude_login"
+              ? "claude_login"
+              : i.kind === "openai_responses" && i.authMode === "grok_login"
+                ? "grok_login"
+                : "api_key";
           const claudeConfigDir = authMode === "claude_login" ? i.claudeConfigDir?.trim() || null : null;
-          Object.assign(x, { name: i.name, kind: i.kind, baseUrl: i.baseUrl, authMode, claudeConfigDir });
-          if (authMode === "claude_login") x.hasKey = false;
+          const grokHome = authMode === "grok_login" ? i.grokHome?.trim() || null : null;
+          Object.assign(x, { name: i.name, kind: i.kind, baseUrl: i.baseUrl, authMode, claudeConfigDir, grokHome });
+          if (authMode === "claude_login" || authMode === "grok_login") x.hasKey = false;
           else if (i.apiKey !== undefined) x.hasKey = i.apiKey !== "";
           return { ...x };
         }
@@ -1847,15 +1854,22 @@ export function install() {
             autoCompactPercent: 85,
           };
         case "plan_accounts": {
-          // `?plan=two` adds a second, lightly used account.
+          // `?plan=two` adds a second, lightly used account; `?plan=grok` adds a Grok seat (one weekly window).
           const latest = fakePlanLimits();
           if (!latest) return [];
-          const accounts = [{ account: "/home/demo/.claude", label: "Claude Code login", latest, history: fakePlanHistory() }];
+          const accounts: Record<string, unknown>[] = [{ account: "/home/demo/.claude", label: "Claude Code login", latest, history: fakePlanHistory() }];
           if (new URLSearchParams(location.search).get("plan") === "two")
             accounts.push({
               account: "/home/demo/.claude-team",
               label: "Claude (Teams)",
               latest: { ...latest, fiveHour: { ...latest.fiveHour, utilization: 0.18 }, sevenDay: { ...latest.sevenDay, utilization: 0.07 } },
+              history: [],
+            });
+          if (new URLSearchParams(location.search).get("plan") === "grok")
+            accounts.push({
+              account: "grok:team-demo:user-demo",
+              label: "Grok (Acme)",
+              latest: { fiveHour: null, sevenDay: { ...latest.sevenDay, utilization: 0.31 }, overageUntil: null, observedAt: latest.observedAt },
               history: [],
             });
           return accounts;

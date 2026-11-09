@@ -583,6 +583,7 @@ pub fn run() {
     #[cfg(target_os = "linux")]
     gtk::gdk::set_allowed_backends(GDK_BACKENDS);
     crate::init_tracing();
+    crate::fd_limit::raise_at_startup();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())

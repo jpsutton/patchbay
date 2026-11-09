@@ -2,12 +2,14 @@ pub mod api;
 mod attachments;
 mod chat;
 mod claude_auth;
+mod grok_auth;
 mod code;
 mod db;
 #[cfg(feature = "desktop")]
 mod daemon_link;
 #[cfg(feature = "desktop")]
 mod desktop;
+pub mod fd_limit;
 mod files;
 mod gateway;
 mod handoff;
@@ -213,6 +215,9 @@ struct ProviderInput {
     /// For Claude login: another Claude Code config directory (`CLAUDE_CONFIG_DIR`) to sign in with.
     #[serde(default)]
     claude_config_dir: Option<String>,
+    /// For Grok login: another Grok home directory (`GROK_HOME`) to sign in with.
+    #[serde(default)]
+    grok_home: Option<String>,
 }
 
 async fn list_providers(state: &AppState) -> CmdResult<Vec<Provider>> {
@@ -222,6 +227,8 @@ async fn list_providers(state: &AppState) -> CmdResult<Vec<Provider>> {
 async fn save_provider(state: &AppState, input: ProviderInput) -> CmdResult<Provider> {
     let auth_mode = match (&input.kind, input.auth_mode) {
         (db::ProviderKind::Anthropic, db::AuthMode::ClaudeLogin) => db::AuthMode::ClaudeLogin,
+        // Grok's proxy speaks the Responses API.
+        (db::ProviderKind::OpenaiResponses, db::AuthMode::GrokLogin) => db::AuthMode::GrokLogin,
         _ => db::AuthMode::ApiKey,
     };
     let p = Provider {
@@ -234,6 +241,10 @@ async fn save_provider(state: &AppState, input: ProviderInput) -> CmdResult<Prov
             .claude_config_dir
             .map(|d| d.trim().to_owned())
             .filter(|d| !d.is_empty() && auth_mode == db::AuthMode::ClaudeLogin),
+        grok_home: input
+            .grok_home
+            .map(|d| d.trim().to_owned())
+            .filter(|d| !d.is_empty() && auth_mode == db::AuthMode::GrokLogin),
         auth_mode,
     };
     if p.name.is_empty() || p.base_url.is_empty() {
@@ -244,8 +255,12 @@ async fn save_provider(state: &AppState, input: ProviderInput) -> CmdResult<Prov
             return Err(CmdError(format!("Claude config directory {d} does not exist")));
         }
     }
+    if p.auth_mode == db::AuthMode::GrokLogin {
+        // The error says where it looked and to run `grok login`.
+        grok_auth::check(p.grok_home.as_deref())?;
+    }
     state.db.upsert_provider(&p, None)?;
-    if p.auth_mode == db::AuthMode::ClaudeLogin {
+    if matches!(p.auth_mode, db::AuthMode::ClaudeLogin | db::AuthMode::GrokLogin) {
         providers::delete_key(&p.id);
         state.db.clear_inline_key(&p.id)?;
     } else {
@@ -283,13 +298,20 @@ async fn discover_models(
         .ok_or_else(|| CmdError("provider not found".into()))?;
     let auth = match p.auth_mode {
         db::AuthMode::ClaudeLogin => providers::Auth::ClaudeLogin,
+        db::AuthMode::GrokLogin => providers::Auth::GrokLogin,
         db::AuthMode::ApiKey => providers::Auth::Key,
     };
+    let mut grok_user = None;
     let key = match auth {
         providers::Auth::ClaudeLogin => Some(claude_auth::access_token(p.claude_config_dir.as_deref()).await?),
+        providers::Auth::GrokLogin => {
+            let c = grok_auth::credentials(p.grok_home.as_deref()).await?;
+            grok_user = Some(c.user_id);
+            Some(c.token)
+        }
         providers::Auth::Key => providers::load_key(&p.id, inline.as_deref()),
     };
-    Ok(providers::discover_models(&p.kind, &p.base_url, key.as_deref(), auth).await?)
+    Ok(providers::discover_models_for(&p.kind, &p.base_url, key.as_deref(), auth, grok_user.as_deref()).await?)
 }
 
 async fn list_models(state: &AppState) -> CmdResult<Vec<Model>> {
@@ -944,6 +966,14 @@ fn on_session_lost(state: &AppState, id: String, message: code::acp::UserMessage
 
 fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     use code::acp::CodeEvent;
+    // A session on a Grok login has no response headers to read its usage from: ask the billing
+    // endpoint after each model call and each finished turn (at most once per gap per login).
+    if matches!(env.event, CodeEvent::ContextUsage { .. } | CodeEvent::SessionStatus { .. } | CodeEvent::PromptDone { .. })
+        && let Some((home, base_url)) = grok_login_of_session(state, &env.code_session_id)
+    {
+        let s = state.clone();
+        api::spawn(async move { poll_grok_plan(&s, home, base_url, false).await });
+    }
     if let CodeEvent::PlanLimits { limits } = env.event {
         // Only sessions on a Claude plan report limits; one that can't be placed counts as the default login's.
         let (account, name) = plan_account(state, &prefs::load(&state.db), &env.code_session_id).unwrap_or_else(default_plan_account);
@@ -1221,7 +1251,7 @@ fn plan_views(state: &AppState) -> Vec<PlanView> {
         .map(|(account, usage)| {
             let names: Vec<_> = providers
                 .iter()
-                .filter(|(p, _)| p.auth_mode == db::AuthMode::ClaudeLogin && provider_plan_account(p).as_deref() == Some(account.as_str()))
+                .filter(|(p, _)| is_login_provider(p) && provider_plan_account(p).as_deref() == Some(account.as_str()))
                 .map(|(p, _)| p.name.as_str())
                 .collect();
             let label = if account == default {
@@ -1608,8 +1638,66 @@ async fn poll_cursor_plan(state: &AppState) {
     }
 }
 
+/// The Grok login a session's model runs on, as (Grok home, provider base URL): Patchbay's agent
+/// on a model whose provider uses a Grok login.
+fn grok_login_of_session(state: &AppState, id: &str) -> Option<(Option<String>, String)> {
+    let session = state.db.get_code_session(id).ok().flatten()?;
+    // Patchbay's agent and Grok Build both run on Patchbay's models, so both can be on a Grok seat.
+    if !matches!(
+        code::agents::AgentKind::parse(&session.agent),
+        Some(code::agents::AgentKind::Patchbay | code::agents::AgentKind::Grok)
+    ) {
+        return None;
+    }
+    let model = state.db.get_model(&session.model_ref?).ok().flatten()?;
+    let (p, _) = state.db.get_provider(&model.provider_id).ok().flatten()?;
+    (p.auth_mode == db::AuthMode::GrokLogin).then_some((p.grok_home, p.base_url))
+}
+
+/// Every Grok login a provider here uses, once each: (Grok home, provider base URL).
+fn grok_logins(db: &Db) -> Vec<(Option<String>, String)> {
+    let mut seen = std::collections::HashSet::new();
+    db.list_providers()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(p, _)| p.auth_mode == db::AuthMode::GrokLogin)
+        .filter(|(p, _)| seen.insert(grok_auth::resolve_dir(p.grok_home.as_deref()).map(|d| d.to_string_lossy().into_owned()).unwrap_or_default()))
+        .map(|(p, _)| (p.grok_home, p.base_url))
+        .collect()
+}
+
+/// A Grok seat's usage, seen here: tell the mesh, then count it like any plan report.
+fn report_grok_plan(state: &AppState, plan: code::grok_plan::GrokPlan) {
+    let tagged = serde_json::json!({ "account": plan.account, "name": plan.name, "limits": plan.limits });
+    state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, tagged);
+    adopt_plan_limits(state, &plan.account, plan.name, plan.limits, true);
+}
+
+/// Ask Grok's billing endpoint for one login's usage, unless that login was asked a moment ago
+/// (`force` ignores that).
+async fn poll_grok_plan(state: &AppState, home: Option<String>, base_url: String, force: bool) {
+    let key = grok_auth::resolve_dir(home.as_deref()).map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+    if !force && !code::grok_plan::may_poll(&key, code::plan_limits::now()) {
+        return;
+    }
+    match code::grok_plan::fetch(home.as_deref(), &base_url).await {
+        Ok(plan) => report_grok_plan(state, plan),
+        Err(e) => tracing::debug!("grok plan: {e:#}"),
+    }
+}
+
+/// The plan account a subscription-login provider runs on: a Claude or a Grok seat.
 fn provider_plan_account(p: &Provider) -> Option<String> {
-    claude_auth::resolve_dir(p.claude_config_dir.as_deref()).ok().map(|d| claude_auth::account(&d).0)
+    match p.auth_mode {
+        db::AuthMode::ClaudeLogin => claude_auth::resolve_dir(p.claude_config_dir.as_deref()).ok().map(|d| claude_auth::account(&d).0),
+        db::AuthMode::GrokLogin => grok_auth::resolve_dir(p.grok_home.as_deref()).ok().map(|d| grok_auth::account(&d).0),
+        db::AuthMode::ApiKey => None,
+    }
+}
+
+/// Providers whose usage counts against a subscription plan (Claude or Grok login).
+fn is_login_provider(p: &Provider) -> bool {
+    matches!(p.auth_mode, db::AuthMode::ClaudeLogin | db::AuthMode::GrokLogin)
 }
 
 // The ACP wire log (Settings > Diagnostics): this computer's agents only, kept in memory.
@@ -1642,9 +1730,10 @@ async fn wire_log_save(state: &AppState) -> CmdResult<String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// The Claude plan account the session runs on, if it runs on one with usage limits: Claude
-/// Code on its own sign-in (not on a Patchbay provider, which bills by the token), or Patchbay's
-/// agent on a model whose provider uses a Claude login. Accounts are `claude_auth::account`s.
+/// The plan account the session runs on, if it runs on one with usage limits: Claude Code on its
+/// own sign-in (not on a Patchbay provider, which bills by the token), or Patchbay's agent or Grok
+/// Build on a model whose provider uses a Claude or a Grok login. Accounts are `claude_auth::account`s or
+/// `grok_auth::account`s.
 fn plan_account(state: &AppState, prefs: &prefs::Preferences, id: &str) -> Option<(String, Option<String>)> {
     use code::agents::AgentKind;
     let session = state.db.get_code_session(id).ok().flatten()?;
@@ -1652,13 +1741,15 @@ fn plan_account(state: &AppState, prefs: &prefs::Preferences, id: &str) -> Optio
         Some(AgentKind::ClaudeCode) if !prefs.agent_providers.contains_key(AgentKind::ClaudeCode.id()) => {
             Some(default_plan_account())
         }
-        Some(AgentKind::Patchbay) => session
+        Some(AgentKind::Patchbay | AgentKind::Grok) => session
             .model_ref
             .and_then(|r| state.db.get_model(&r).ok().flatten())
             .and_then(|m| state.db.get_provider(&m.provider_id).ok().flatten())
-            .filter(|(p, _)| p.auth_mode == db::AuthMode::ClaudeLogin)
-            .and_then(|(p, _)| claude_auth::resolve_dir(p.claude_config_dir.as_deref()).ok())
-            .map(|d| claude_auth::account(&d)),
+            .and_then(|(p, _)| match p.auth_mode {
+                db::AuthMode::ClaudeLogin => claude_auth::resolve_dir(p.claude_config_dir.as_deref()).ok().map(|d| claude_auth::account(&d)),
+                db::AuthMode::GrokLogin => grok_auth::resolve_dir(p.grok_home.as_deref()).ok().map(|d| grok_auth::account(&d)),
+                db::AuthMode::ApiKey => None,
+            }),
         _ => None,
     }
 }
@@ -1671,7 +1762,7 @@ fn plan_account_label(state: &AppState, account: &str) -> String {
     let providers = state.db.list_providers().unwrap_or_default();
     let names: Vec<&str> = providers
         .iter()
-        .filter(|(p, _)| p.auth_mode == db::AuthMode::ClaudeLogin && provider_plan_account(p).as_deref() == Some(account))
+        .filter(|(p, _)| is_login_provider(p) && provider_plan_account(p).as_deref() == Some(account))
         .map(|(p, _)| p.name.as_str())
         .collect();
     if !names.is_empty() {
@@ -1927,6 +2018,15 @@ async fn code_start_local(state: &AppState, id: String) -> anyhow::Result<()> {
     let sink = code_sink(state);
     let (code, db, dir) = (state.code.clone(), state.db.clone(), state.data_dir.clone());
     let message_bridge = state.agent_message_bridge.get().cloned();
+    // Grok Build gets a Grok login's token in its environment at launch, and the launch can't
+    // wait on a refresh: do it here, so the token it reads is fresh.
+    if state.db.get_code_session(&id)?.is_some_and(|s| s.agent == "grok") {
+        for (home, _) in grok_logins(&state.db) {
+            if let Err(e) = grok_auth::credentials(home.as_deref()).await {
+                tracing::debug!("grok login: {e:#}");
+            }
+        }
+    }
     // `start` may block briefly while a previous agent for this session shuts down.
     tokio::task::spawn_blocking(move || code.start(sink, db, &dir, &id, message_bridge)).await??;
     Ok(())
@@ -3849,13 +3949,15 @@ pub fn open_locked_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow:
     let db = Arc::new(Db::open(&data_dir.join("patchbay.sqlite"))?);
     let keys = Arc::new(mesh::keys::OsKeyStore::new(&data_dir));
     let mesh = Mesh::new(db.clone(), data_dir.clone(), keys)?;
+    let mcp_log_path = data_dir.join("logs").join("agent-messaging-mcp.log");
     let state = AppState::new(db, data_dir, mesh.clone(), emit);
     // A desktop app (or a daemon built without `web`) owns the data folder itself, so it must
     // serve artifact shares from its own loopback HTTP server. A `web`-enabled daemon serves
     // them from its main axum server instead (web.rs), and tests must not bind any port.
     #[cfg(all(not(feature = "web"), not(test)))]
     shares::spawn(&state);
-    let (agent_messaging, message_listener) = agent_messaging::AgentMessagingBridge::bind()?;
+    let (agent_messaging, message_listener) =
+        agent_messaging::AgentMessagingBridge::bind(Some(mcp_log_path))?;
     let _ = state.agent_message_bridge.set(agent_messaging.clone());
     agent_messaging.serve(message_listener, state.clone());
     if mesh.is_member() {
@@ -3890,6 +3992,22 @@ pub fn open_locked_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow:
         loop {
             tokio::time::sleep(code::cursor_plan::TICK).await;
             poll_cursor_plan(&cursor_poller).await;
+        }
+    });
+    let grok_poller = state.clone();
+    api::spawn(async move {
+        // Once at start, for the gauge before the first turn; then while a session runs on a Grok
+        // login, so a limit reached between its model calls still shows.
+        for (home, base_url) in grok_logins(&grok_poller.db) {
+            poll_grok_plan(&grok_poller, home, base_url, true).await;
+        }
+        loop {
+            tokio::time::sleep(code::grok_plan::TICK).await;
+            for id in grok_poller.code.busy_sessions() {
+                if let Some((home, base_url)) = grok_login_of_session(&grok_poller, &id) {
+                    poll_grok_plan(&grok_poller, home, base_url, false).await;
+                }
+            }
         }
     });
     let antigravity_poller = state.clone();
