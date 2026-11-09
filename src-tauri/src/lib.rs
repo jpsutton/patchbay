@@ -2087,6 +2087,14 @@ async fn code_resume(
     Ok(code_resume_local(state, &id, point, &running))
 }
 
+/// What the session list shows for each Code session: whether its agent runs, is mid-turn or waits
+/// on the user. A window that has not opened a session cannot know this from its own events, and a
+/// window opened while patchbayd kept agents running has seen none of theirs.
+async fn code_live(state: &AppState) -> CmdResult<std::collections::HashMap<String, mesh::remote::Live>> {
+    let sessions = state.db.list_code_sessions()?;
+    Ok(gateway::live_map(state, &sessions))
+}
+
 async fn code_is_running(state: &AppState, id: String) -> CmdResult<bool> {
     if let Some(host) = remote_host(state, &id)? {
         if !state.mesh.connected(&host) {

@@ -259,26 +259,7 @@ pub(crate) fn create_local(state: &AppState, p: &Value) -> Result<crate::db::Cod
 /// and folders, and the replies streaming.
 fn index(state: &AppState) -> Result<Value> {
     let sessions = state.db.list_code_sessions()?;
-    let mut live = state.mesh.live();
-    // Sessions hosted here: the agent manager knows better than the events seen so far.
-    let me = state.mesh.node_id().to_owned();
-    {
-        let agents = state.live.lock().unwrap();
-        for s in sessions.iter().filter(|s| s.host_node.as_deref().is_none_or(|h| h == me)) {
-            let running = state.code.is_running(&s.id);
-            let l = live.entry(s.id.clone()).or_insert_with(Live::default);
-            if !running {
-                *l = Live { status: "exited".into(), last: l.last, ..Live::default() };
-                continue;
-            }
-            if l.status.is_empty() || l.status == "exited" {
-                l.status = "ready".into();
-            }
-            l.busy = state.code.is_busy(&s.id);
-            l.permissions = agents.get(&s.id).map(|a| a.permissions.iter().map(|(r, _)| r.clone()).collect()).unwrap_or_default();
-            l.questions = agents.get(&s.id).map(|a| a.questions.iter().map(|(r, _)| r.clone()).collect()).unwrap_or_default();
-        }
-    }
+    let live = live_map(state, &sessions);
     Ok(json!({
         "conversations": state.db.list_conversations()?,
         "codeSessions": sessions,
@@ -286,6 +267,35 @@ fn index(state: &AppState) -> Result<Value> {
         "live": live,
         "streams": state.mesh.all_streams(),
     }))
+}
+
+/// What the session list shows for each Code session: the events this node has seen, corrected for
+/// the sessions hosted here by the agent manager, which knows better. A phone gets it with the
+/// index; a desktop window gets it from `code_live` so a session it has not opened yet still shows
+/// whether its agent runs and is mid-turn.
+pub(crate) fn live_map(
+    state: &AppState,
+    sessions: &[crate::db::CodeSession],
+) -> std::collections::HashMap<String, Live> {
+    let mut live = state.mesh.live();
+    // Sessions hosted here: the agent manager knows better than the events seen so far.
+    let me = state.mesh.node_id().to_owned();
+    let agents = state.live.lock().unwrap();
+    for s in sessions.iter().filter(|s| s.host_node.as_deref().is_none_or(|h| h == me)) {
+        let running = state.code.is_running(&s.id);
+        let l = live.entry(s.id.clone()).or_insert_with(Live::default);
+        if !running {
+            *l = Live { status: "exited".into(), last: l.last, ..Live::default() };
+            continue;
+        }
+        if l.status.is_empty() || l.status == "exited" {
+            l.status = "ready".into();
+        }
+        l.busy = state.code.is_busy(&s.id);
+        l.permissions = agents.get(&s.id).map(|a| a.permissions.iter().map(|(r, _)| r.clone()).collect()).unwrap_or_default();
+        l.questions = agents.get(&s.id).map(|a| a.questions.iter().map(|(r, _)| r.clone()).collect()).unwrap_or_default();
+    }
+    live
 }
 
 /// Longest a chat turn passed from a gateway waits for what it needs to sync here.

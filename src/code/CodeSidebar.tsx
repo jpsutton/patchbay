@@ -25,6 +25,7 @@ import {
   type TopItem,
 } from "../lib/sidebarLayout";
 import { startSessionDrag } from "../lib/paneDrag";
+import { rowStatus } from "../lib/sessionLive";
 
 const COLLAPSED_KEY = "patchbay.codeSidebar.collapsed";
 /** The folder order from before the layout synced. It seeds the first layout. */
@@ -94,6 +95,7 @@ export function CodeSidebar() {
   const select = useStore((s) => s.selectCodeSession);
   const refresh = useStore((s) => s.refreshCodeSessions);
   const code = useStore((s) => s.code);
+  const codeLive = useStore((s) => s.codeLive);
   const askConfirm = useStore((s) => s.askConfirm);
   const query = useStore((s) => s.sidebarQuery);
   const prefs = useStore((s) => s.prefs);
@@ -394,7 +396,10 @@ export function CodeSidebar() {
     // composer present a sign-in as plain text. So the row stays neutral: no light, no
     // dimming. Attention stays with real permission/question requests — `authRequired` never
     // touches those, so a sign-in can't light it.
-    const signedOut = !!st?.auth;
+    // A session this window has not opened has no state of its own: its row shows what the
+    // backend reports (`codeLive`), so one still running in patchbayd reads as running, mid-turn
+    // or waiting on you before anyone clicks it.
+    const row = rowStatus(st, codeLive[s.id]);
     // Live tool calls show a new edit or commit before the turn ends and it's saved.
     const live = st ? activityOf(Object.values(st.toolCalls)) : null;
     return (
@@ -407,13 +412,13 @@ export function CodeSidebar() {
         subtitle={inPinned ? basename(s.cwd) : undefined}
         active={s.id === activeId || panes.includes(s.id)}
         selected={picked.has(s.id) && s.archivedAt == null}
-        busy={signedOut ? false : st?.busy}
-        attention={(st?.permissions.length ?? 0) > 0 || (st?.questions.length ?? 0) > 0}
-        stalled={!signedOut && !!st?.busy && st.stalled != null}
+        busy={row.busy}
+        attention={row.attention}
+        stalled={row.stalled}
         meta={fmtShort(s.updatedAt)}
         host={prefs.groupByProject ? hostLabel(s) : undefined}
         pinned={s.pinned}
-        status={!signedOut && st && (st.status === "ready" || st.status === "starting") ? "running" : "idle"}
+        status={row.running ? "running" : "idle"}
         onPointerDown={s.archivedAt == null ? (e) => startSessionDrag(e, s.id, s.title) : undefined}
         onSelect={async (e) => {
           // Alt+click opens the session beside the open one.
