@@ -7,11 +7,13 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use libc;
 
 use anyhow::{Result, anyhow};
 use patchbay_agent::proc::search_dirs;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::{agent_providers, grok_config};
 use crate::db::{CodeSession, Db};
@@ -93,7 +95,11 @@ impl AgentKind {
             // rarely on PATH; Settings takes its path. The registry passes `--uid=` on Linux.
             AgentKind::Antigravity => (
                 &["agy_acp_server", "agy_acp_server.par", "agy-acp-server"],
-                if cfg!(target_os = "linux") { &["--uid="] } else { &[] },
+                if cfg!(target_os = "linux") {
+                    &["--uid="]
+                } else {
+                    &[]
+                },
             ),
         }
     }
@@ -127,8 +133,12 @@ impl AgentKind {
             AgentKind::ClaudeCode => {
                 "Install Node.js (Patchbay then runs the adapter through npx), or `npm install -g @agentclientprotocol/claude-agent-acp`. Sign in with `claude`."
             }
-            AgentKind::Opencode => "Install from https://opencode.ai, then run `opencode auth login`.",
-            AgentKind::Cursor => "Install from https://cursor.com/cli, then run `cursor-agent login`.",
+            AgentKind::Opencode => {
+                "Install from https://opencode.ai, then run `opencode auth login`."
+            }
+            AgentKind::Cursor => {
+                "Install from https://cursor.com/cli, then run `cursor-agent login`."
+            }
             AgentKind::Kilo => "`npm install -g @kilocode/cli`, then run `kilo auth login`.",
             AgentKind::Codex => {
                 "Install Node.js (Patchbay then runs the adapter through npx), or `npm install -g @agentclientprotocol/codex-acp`. Sign in with `codex login`, or set OPENAI_API_KEY."
@@ -147,7 +157,9 @@ impl AgentKind {
             AgentKind::Opencode => "Run `opencode auth login` in a terminal.",
             AgentKind::Cursor => "Run `cursor-agent login` in a terminal.",
             AgentKind::Kilo => "Run `kilo auth login` in a terminal.",
-            AgentKind::Codex => "Run `codex login` in a terminal (`npm install -g @openai/codex` gets it), or set OPENAI_API_KEY.",
+            AgentKind::Codex => {
+                "Run `codex login` in a terminal (`npm install -g @openai/codex` gets it), or set OPENAI_API_KEY."
+            }
             AgentKind::Antigravity => {
                 "Set `auth.type` in ~/.gemini/antigravity-acp/settings.json (for example `gemini-api-key` with GEMINI_API_KEY set), or sign in from an editor that runs the Antigravity ACP server."
             }
@@ -217,7 +229,9 @@ impl ApprovalSetup {
             AgentKind::ClaudeCode => Self {
                 select_mode: Some("default".into()),
                 hide_modes: &["acceptEdits", "auto", "bypassPermissions", "dontAsk"],
-                gaps: &["Rules in your own Claude Code settings (permissions.allow) run without asking."],
+                gaps: &[
+                    "Rules in your own Claude Code settings (permissions.allow) run without asking.",
+                ],
             },
             // Codex's modes are approval and sandbox presets. Read-only asks before every edit
             // and network use; its sandbox still runs shell commands without asking.
@@ -250,10 +264,383 @@ impl ApprovalSetup {
 /// Codex mode that asks before edits; also its starting mode (`INITIAL_AGENT_MODE`).
 const CODEX_ASKING_MODE: &str = "read-only";
 
+const OPCODE_ALWAYS_APPROVE_MODE: &str = "always-approve";
+
 /// Config that makes OpenCode and Kilo ask over ACP for every tool. Both read inline config
-/// from an env var; deny rules in the user's own config still apply.
-fn ask_everything() -> serde_json::Map<String, Value> {
-    serde_json::Map::from_iter([("permission".to_owned(), json!({ "*": "ask" }))])
+/// from an env var; deny rules in the user's own config still apply when not overridden here.
+fn ask_everything() -> Map<String, Value> {
+    Map::from_iter([("permission".to_owned(), json!({ "*": "ask" }))])
+}
+
+#[cfg(test)]
+thread_local! {
+    static OPCODE_DENY_PROBE_OVERRIDE: std::cell::RefCell<Option<std::result::Result<Vec<Value>, String>>> =
+        const { std::cell::RefCell::new(None) };
+    static OPCODE_PROBE_SPAWN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn normalize_permission_action(key: &str) -> &str {
+    if key == "bash" { "shell" } else { key }
+}
+
+fn extract_deny_rules_from_permission_object(obj: &serde_json::Map<String, Value>) -> Vec<Value> {
+    let mut out = Vec::new();
+    for (key, val) in obj {
+        let action = normalize_permission_action(key);
+        match val {
+            Value::String(effect) if effect == "deny" => {
+                out.push(json!({ "action": action, "resource": "*", "effect": "deny" }));
+            }
+            Value::Object(patterns) => {
+                for (resource, effect) in patterns {
+                    if effect.as_str() == Some("deny") {
+                        out.push(
+                            json!({ "action": action, "resource": resource, "effect": "deny" }),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Extract deny rules from a single config value (opencode-normalized or legacy forms).
+/// Collects from `permissions` array, `permission` object, and `agents.*.permissions`
+/// / `agents.*.permission` so no deny source shape is silently dropped.
+fn extract_deny_permission_rules(config: &Value) -> Vec<Value> {
+    let mut out = Vec::new();
+    if let Some(arr) = config.get("permissions").and_then(Value::as_array) {
+        for rule in arr {
+            if rule.get("effect").and_then(Value::as_str) == Some("deny") {
+                out.push(rule.clone());
+            }
+        }
+    }
+    if let Some(obj) = config.get("permission").and_then(Value::as_object) {
+        out.extend(extract_deny_rules_from_permission_object(obj));
+    }
+    if let Some(agents) = config.get("agents").and_then(Value::as_object) {
+        for (_name, agent) in agents {
+            if let Some(arr) = agent.get("permissions").and_then(Value::as_array) {
+                for rule in arr {
+                    if rule.get("effect").and_then(Value::as_str) == Some("deny") {
+                        out.push(rule.clone());
+                    }
+                }
+            }
+            if let Some(obj) = agent.get("permission").and_then(Value::as_object) {
+                out.extend(extract_deny_rules_from_permission_object(obj));
+            }
+        }
+    }
+    out
+}
+
+/// Extract deny rules from all sources returned by opencode's resolved config for the
+/// session cwd (fresh probe, without injected content). Covers project/global/env config
+/// and opencode's normalized formats as reported by opencode.
+fn extract_deny_rules_from_opencode_sources(sources: &Value) -> Vec<Value> {
+    let mut out = Vec::new();
+    let Some(arr) = sources.as_array() else {
+        return out;
+    };
+    for doc in arr {
+        if let Some(info) = doc.get("info") {
+            out.extend(extract_deny_permission_rules(info));
+        }
+    }
+    out
+}
+
+fn probe_http_get_config(port: u16, auth: &str) -> std::result::Result<String, String> {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+    let addr: SocketAddr = format!("127.0.0.1:{port}")
+        .parse()
+        .map_err(|e| format!("probe addr parse failed: {e}"))?;
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+        .map_err(|e| format!("probe connect failed: {e}"))?;
+    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+    let req = format!(
+        "GET /api/config HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: {auth}\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| format!("probe request failed: {e}"))?;
+    let mut resp = Vec::new();
+    stream
+        .read_to_end(&mut resp)
+        .map_err(|e| format!("probe read failed: {e}"))?;
+    let resp = String::from_utf8_lossy(&resp);
+    let mut parts = resp.splitn(2, "\r\n\r\n");
+    let status = parts.next().unwrap_or("");
+    let body = parts.next().unwrap_or("");
+    if !status.contains(" 200 ") {
+        return Err(format!(
+            "probe config HTTP status not 200 (status_len={})",
+            status.len()
+        ));
+    }
+    Ok(body.to_owned())
+}
+
+/// Probe opencode's resolved config sources for `cwd` (no injected content) and return deny
+/// rules from all sources. Uses a fresh `opencode serve --port 0` child in the session cwd
+/// with OPENCODE_CONFIG_CONTENT unset, so config resolves under the session's env/cwd (not
+/// the shared background service). Drains stdout/stderr concurrently. Fail-safe: any error
+/// => Err, no allows. Error messages MUST NOT include config bodies or credentials.
+fn probe_opencode_deny_rules(
+    program: &Path,
+    cwd: &Path,
+) -> std::result::Result<Vec<Value>, String> {
+    #[cfg(test)]
+    {
+        let overridden = OPCODE_DENY_PROBE_OVERRIDE.with(|c| c.borrow().clone());
+        if let Some(r) = overridden {
+            return r;
+        }
+        OPCODE_PROBE_SPAWN_COUNT.with(|c| c.set(c.get() + 1));
+    }
+    use std::io::Read;
+    use std::net::TcpListener;
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    let port = TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .map(|a| a.port())
+        .map_err(|e| format!("probe port reserve failed: {e}"))?;
+    let mut cmd = Command::new(program);
+    cmd.args([
+        "serve",
+        "--port",
+        &port.to_string(),
+        "--hostname",
+        "127.0.0.1",
+    ])
+    .current_dir(cwd)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .env_remove("OPENCODE_CONFIG_CONTENT");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("probe start failed in {}: {e}", cwd.display()))?;
+    let child_pid = child.id();
+
+    // Drain pipes concurrently (avoids 64KB pipe deadlock/truncation).
+    let out_buf = Arc::new(Mutex::new(String::new()));
+    let err_buf = Arc::new(Mutex::new(String::new()));
+    if let Some(mut pipe) = child.stdout.take() {
+        let buf = out_buf.clone();
+        std::thread::spawn(move || {
+            let mut b = [0u8; 8192];
+            loop {
+                match pipe.read(&mut b) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if let Ok(mut g) = buf.lock() {
+                            g.push_str(&String::from_utf8_lossy(&b[..n]));
+                        }
+                    }
+                }
+            }
+        });
+    }
+    if let Some(mut pipe) = child.stderr.take() {
+        let buf = err_buf.clone();
+        std::thread::spawn(move || {
+            let mut b = [0u8; 8192];
+            loop {
+                match pipe.read(&mut b) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if let Ok(mut g) = buf.lock() {
+                            g.push_str(&String::from_utf8_lossy(&b[..n]));
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let auth = loop {
+        let combined = {
+            let o = out_buf.lock().ok().map(|g| g.clone()).unwrap_or_default();
+            let e = err_buf.lock().ok().map(|g| g.clone()).unwrap_or_default();
+            format!("{o}\n{e}")
+        };
+        if let Some(pw) = combined
+            .lines()
+            .find_map(|l| l.split("server password ").nth(1))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            use base64::Engine;
+            break Some(format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(format!("opencode:{pw}"))
+            ));
+        }
+        if Instant::now() > deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(75));
+    };
+
+    let result = (|| {
+        let auth = auth.ok_or_else(|| {
+            let (ol, el) = (
+                out_buf.lock().ok().map(|g| g.len()).unwrap_or(0),
+                err_buf.lock().ok().map(|g| g.len()).unwrap_or(0),
+            );
+            format!(
+                "probe not ready in {} (stdout_len={ol}, stderr_len={el})",
+                cwd.display()
+            )
+        })?;
+        let body = probe_http_get_config(port, &auth)?;
+        // Parse; on failure report length/parse error only (NEVER config body).
+        let sources: Value = serde_json::from_str(&body).map_err(|e| {
+            format!(
+                "probe config parse failed (body_len={}, parse_error={e})",
+                body.len()
+            )
+        })?;
+        Ok(extract_deny_rules_from_opencode_sources(&sources))
+    })();
+
+    // Kill process group (unix, leader set via process_group(0)) AND direct child on every
+    // exit path so launchers/grandchildren do not leak and wait() cannot hang.
+    let mut kill_note = String::new();
+    #[cfg(unix)]
+    {
+        // Direct syscall (deterministic; no external kill binary / arg-form / PATH ambiguity).
+        // Negative pid targets the process group. ESRCH = already gone => success.
+        let rc = unsafe { libc::kill(-(child_pid as i32), libc::SIGKILL) };
+        if rc != 0 {
+            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
+            if errno != libc::ESRCH {
+                kill_note = format!("group_kill_failed(pgid={child_pid},errno={errno})");
+                tracing::warn!(cwd=%cwd.display(), pgid=child_pid, rc, errno, "opencode probe process-group kill failed");
+            }
+        }
+    }
+    let _ = child.kill();
+    let wait_deadline = Instant::now() + Duration::from_secs(2);
+    let mut direct_reaped = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => { direct_reaped = true; break; }
+            Err(_) => break,
+            Ok(None) if Instant::now() > wait_deadline => break,
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+        }
+    }
+    if !direct_reaped {
+        let note = format!("direct_child_wait_timeout(pid={child_pid})");
+        tracing::warn!(cwd=%cwd.display(), pid=child_pid, "opencode probe child not reaped within bound");
+        kill_note = if kill_note.is_empty() { note } else { format!("{kill_note};{note}") };
+    }
+    // Reader threads are detached and never joined; killing the group/child closes pipe
+    // write ends so they observe EOF. All blocking waits above are bounded.
+    if kill_note.is_empty() {
+        result
+    } else {
+        result.map_err(|e| format!("{e}; cleanup={kill_note}"))
+    }
+}
+
+#[derive(Debug)]
+struct OpencodeConfigBuild {
+    config: Map<String, Value>,
+    warning: Option<String>,
+    allows_injected: bool,
+    deny_rules_reemitted: usize,
+}
+
+fn build_opencode_config_from_probe(
+    permission_mode: &str,
+    providers_config: Map<String, Value>,
+    probe: std::result::Result<Vec<Value>, String>,
+) -> OpencodeConfigBuild {
+    let mut base = ask_everything();
+    base.extend(providers_config.clone());
+    if permission_mode != OPCODE_ALWAYS_APPROVE_MODE {
+        return OpencodeConfigBuild {
+            config: base,
+            warning: None,
+            allows_injected: false,
+            deny_rules_reemitted: 0,
+        };
+    }
+
+    match probe {
+        Ok(deny_rules) => {
+            // User ask rules for shell/external_directory are intentionally not re-emitted:
+            // in always-approve mode Patchbay would auto-approve these; allows replace asks.
+            // Specific/pattern deny rules (including any deny for shell/external_directory)
+            // are re-emitted AFTER allows so they win.
+            let mut permissions = vec![
+                json!({ "action": "*", "resource": "*", "effect": "ask" }),
+                json!({ "action": "shell", "resource": "*", "effect": "allow" }),
+                json!({ "action": "external_directory", "resource": "*", "effect": "allow" }),
+            ];
+            let deny_rules_reemitted = deny_rules.len();
+            permissions.extend(deny_rules);
+            let mut config = Map::new();
+            config.insert("permissions".to_owned(), Value::Array(permissions));
+            config.extend(providers_config);
+            OpencodeConfigBuild {
+                config,
+                warning: None,
+                allows_injected: true,
+                deny_rules_reemitted,
+            }
+        }
+        Err(err) => {
+            let warning = format!(
+                "PATCHBAY OPENCODE PERMISSION SAFETY: NOT injecting shell/external_directory allows for always-approve session because opencode's resolved config/denies could not be determined ({}). Falling back to ask-everything so denies cannot be silently outranked.",
+                err
+            );
+            OpencodeConfigBuild {
+                config: base,
+                warning: Some(warning),
+                allows_injected: false,
+                deny_rules_reemitted: 0,
+            }
+        }
+    }
+}
+
+fn opencode_launch_config(
+    permission_mode: &str,
+    providers_config: Map<String, Value>,
+    opencode_program: &Path,
+    cwd: &Path,
+) -> String {
+    let probe = if permission_mode == OPCODE_ALWAYS_APPROVE_MODE {
+        probe_opencode_deny_rules(opencode_program, cwd)
+    } else {
+        Ok(Vec::new())
+    };
+    let built = build_opencode_config_from_probe(permission_mode, providers_config, probe);
+    if let Some(warning) = &built.warning {
+        tracing::error!("{}", warning);
+        eprintln!("{}", warning);
+    }
+    Value::Object(built.config).to_string()
 }
 
 /// Where an agent's executable was found.
@@ -306,7 +693,11 @@ fn child_path(program: &Path) -> Option<String> {
 
 /// Locate an executable on [`search_dirs`].
 pub fn which(name: &str) -> Option<PathBuf> {
-    let exts: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ".bat", ""] } else { &[""] };
+    let exts: &[&str] = if cfg!(windows) {
+        &[".exe", ".cmd", ".bat", ""]
+    } else {
+        &[""]
+    };
     for dir in search_dirs() {
         for ext in exts {
             let p = dir.join(format!("{name}{ext}"));
@@ -340,9 +731,17 @@ pub fn resolve(kind: AgentKind, overrides: &AgentPaths) -> Result<Resolved> {
     let (names, acp_args) = kind.program();
     let args: Vec<String> = acp_args.iter().map(|s| (*s).to_owned()).collect();
     if kind.is_builtin() {
-        return Ok(Resolved { program: PathBuf::new(), args, source: Source::Builtin });
+        return Ok(Resolved {
+            program: PathBuf::new(),
+            args,
+            source: Source::Builtin,
+        });
     }
-    if let Some(p) = overrides.get(kind.id()).map(|p| p.trim()).filter(|p| !p.is_empty()) {
+    if let Some(p) = overrides
+        .get(kind.id())
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+    {
         let program = PathBuf::from(p);
         if !program.is_file() {
             return Err(anyhow!("{} path {p} does not exist", kind.label()));
@@ -353,19 +752,35 @@ pub fn resolve(kind: AgentKind, overrides: &AgentPaths) -> Result<Resolved> {
                 program.display()
             ));
         }
-        return Ok(Resolved { program, args, source: Source::Override });
+        return Ok(Resolved {
+            program,
+            args,
+            source: Source::Override,
+        });
     }
     if let Some(program) = names.iter().find_map(|n| which(n)) {
-        return Ok(Resolved { program, args, source: Source::Path });
+        return Ok(Resolved {
+            program,
+            args,
+            source: Source::Path,
+        });
     }
     if let Some((package, acp_args)) = kind.npx_package()
         && let Some(npx) = which("npx")
     {
         let mut args = vec!["-y".to_owned(), package.to_owned()];
         args.extend(acp_args.iter().map(|s| (*s).to_owned()));
-        return Ok(Resolved { program: npx, args, source: Source::Npx });
+        return Ok(Resolved {
+            program: npx,
+            args,
+            source: Source::Npx,
+        });
     }
-    Err(anyhow!("{} not found. {}", kind.label(), kind.install_hint()))
+    Err(anyhow!(
+        "{} not found. {}",
+        kind.label(),
+        kind.install_hint()
+    ))
 }
 
 /// True if `program` points to the interactive Antigravity CLI (`agy`) rather than its ACP server.
@@ -635,7 +1050,10 @@ fn session_meta(kind: AgentKind, rules: &str) -> Value {
             }
             // The server advertises `_meta.antigravity.systemPrompt.append` in `initialize`.
             AgentKind::Antigravity => {
-                meta.insert("antigravity".into(), json!({ "systemPrompt": { "append": rules } }));
+                meta.insert(
+                    "antigravity".into(),
+                    json!({ "systemPrompt": { "append": rules } }),
+                );
             }
             // Codex takes them through `CODEX_CONFIG` (see `prepare`).
             _ => {}
@@ -676,46 +1094,73 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
         env.push(("PATH".to_owned(), path));
     }
     // Patchbay's providers, only for an agent the user set to use them.
-    let providers = match prefs.agent_providers.get(kind.id()).filter(|_| agent_providers::supported(kind)) {
+    let providers = match prefs
+        .agent_providers
+        .get(kind.id())
+        .filter(|_| agent_providers::supported(kind))
+    {
         Some(model_ref) => agent_providers::setup(db, kind, model_ref)?,
         None => agent_providers::Setup::default(),
     };
-    let mut config = ask_everything();
-    config.extend(providers.config);
-    let config = Value::Object(config).to_string();
+    let mut base_config = ask_everything();
+    base_config.extend(providers.config.clone());
+    let base_config = Value::Object(base_config).to_string();
     match kind {
         AgentKind::Opencode => {
             env.push(("OPENCODE_DISABLE_AUTOUPDATE".to_owned(), "1".to_owned()));
+            let config = opencode_launch_config(
+                &session.permission_mode,
+                providers.config,
+                &resolved.program,
+                Path::new(&session.cwd),
+            );
             env.push(("OPENCODE_CONFIG_CONTENT".to_owned(), config));
         }
-        AgentKind::Kilo => env.push(("KILO_CONFIG_CONTENT".to_owned(), config)),
+        AgentKind::Kilo => env.push(("KILO_CONFIG_CONTENT".to_owned(), base_config)),
         AgentKind::Codex => {
-            env.push(("INITIAL_AGENT_MODE".to_owned(), CODEX_ASKING_MODE.to_owned()));
+            env.push((
+                "INITIAL_AGENT_MODE".to_owned(),
+                CODEX_ASKING_MODE.to_owned(),
+            ));
             // The adapter reads an API key from the environment only when told to sign in with
             // one; without a login it otherwise stops at `auth_required`.
             if ["CODEX_API_KEY", "OPENAI_API_KEY"]
                 .iter()
                 .any(|v| std::env::var(v).is_ok_and(|k| !k.trim().is_empty()))
             {
-                env.push(("DEFAULT_AUTH_REQUEST".to_owned(), json!({ "methodId": "api-key" }).to_string()));
+                env.push((
+                    "DEFAULT_AUTH_REQUEST".to_owned(),
+                    json!({ "methodId": "api-key" }).to_string(),
+                ));
             }
             // Merged into every thread's config; `developer_instructions` joins Codex's prompt.
             let rules = prefs.agent_instructions.trim();
             if !rules.is_empty() {
-                env.push(("CODEX_CONFIG".to_owned(), json!({ "developer_instructions": rules }).to_string()));
+                env.push((
+                    "CODEX_CONFIG".to_owned(),
+                    json!({ "developer_instructions": rules }).to_string(),
+                ));
             }
         }
-        AgentKind::Cursor => env.extend(cursor_preload(data_dir, std::env::var("NODE_OPTIONS").ok())),
+        AgentKind::Cursor => {
+            env.extend(cursor_preload(data_dir, std::env::var("NODE_OPTIONS").ok()))
+        }
         AgentKind::Antigravity => {
             // Google ships `localharness_external` beside `agy_acp_server.par`. When the server is
             // invoked through a symlink or PATH, point ANTIGRAVITY_HARNESS_PATH at it if found beside
             // the canonical binary.
-            let prog = resolved.program.canonicalize().unwrap_or_else(|_| resolved.program.clone());
+            let prog = resolved
+                .program
+                .canonicalize()
+                .unwrap_or_else(|_| resolved.program.clone());
             if let Some(dir) = prog.parent() {
                 for name in ["localharness_external", "localharness"] {
                     let harness = dir.join(name);
                     if harness.is_file() {
-                        env.push(("ANTIGRAVITY_HARNESS_PATH".to_owned(), harness.to_string_lossy().into_owned()));
+                        env.push((
+                            "ANTIGRAVITY_HARNESS_PATH".to_owned(),
+                            harness.to_string_lossy().into_owned(),
+                        ));
                         break;
                     }
                 }
@@ -736,7 +1181,10 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
         args: resolved.args,
         env,
         env_remove: providers.env_remove,
-        ext: Extensions { force_steers: kind == AgentKind::ClaudeCode, ..Extensions::default() },
+        ext: Extensions {
+            force_steers: kind == AgentKind::ClaudeCode,
+            ..Extensions::default()
+        },
         session_meta,
         initial_model: session.agent_model.clone(),
         login_hint: kind.login_hint(),
@@ -868,6 +1316,8 @@ fn prepare_grok(
 mod tests {
     use super::*;
 
+    /// pb-20261107-32 item 1: restored from staging e8f6b6c (deleted by this PR's earlier
+    /// refactor, not rebase noise; `git log e8f6b6c..origin/staging -- agents.rs` is empty).
     #[test]
     fn ids_round_trip() {
         for k in AgentKind::ALL {
@@ -877,9 +1327,13 @@ mod tests {
         assert_eq!(AgentKind::parse("nope"), None);
     }
 
+    /// pb-20261107-32 item 1: restored from staging e8f6b6c.
     #[test]
     fn instructions_reach_agents_that_read_them() {
-        assert_eq!(session_meta(AgentKind::Grok, " be terse "), json!({ "rules": "be terse" }));
+        assert_eq!(
+            session_meta(AgentKind::Grok, " be terse "),
+            json!({ "rules": "be terse" })
+        );
         let claude = session_meta(AgentKind::ClaudeCode, "be terse");
         assert_eq!(claude["systemPrompt"], json!({ "append": "be terse" }));
         assert_eq!(
@@ -899,6 +1353,722 @@ mod tests {
         );
     }
 
+    #[cfg(test)]
+    fn with_probe_override<T>(
+        r: std::result::Result<Vec<Value>, String>,
+        f: impl FnOnce() -> T,
+    ) -> T {
+        OPCODE_DENY_PROBE_OVERRIDE.with(|c| *c.borrow_mut() = Some(r));
+        let out = f();
+        OPCODE_DENY_PROBE_OVERRIDE.with(|c| *c.borrow_mut() = None);
+        out
+    }
+
+    fn with_probe_count<T>(f: impl FnOnce() -> T) -> (T, usize) {
+        OPCODE_PROBE_SPAWN_COUNT.with(|c| c.set(0));
+        let out = f();
+        let n = OPCODE_PROBE_SPAWN_COUNT.with(|c| c.get());
+        OPCODE_PROBE_SPAWN_COUNT.with(|c| c.set(0));
+        (out, n)
+    }
+
+    /// pb-20261107-32 E: prepare() output includes allows+re-emitted denies (last) in always-approve.
+    #[test]
+    fn opencode_prepare_output_always_approve_includes_denies_last() {
+        with_probe_override(
+            Ok(vec![
+                json!({"action":"shell","resource":"rm -rf /tmp/pb*","effect":"deny"}),
+            ]),
+            || {
+                let dir = std::env::temp_dir().join(format!("pb-opc-p-{}", crate::db::new_id()));
+                std::fs::create_dir_all(&dir).unwrap();
+                let db = std::sync::Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
+                let mut o = AgentPaths::new();
+                o.insert(
+                    "opencode".into(),
+                    std::env::current_exe()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+                let prefs = crate::prefs::Preferences {
+                    agent_paths: o,
+                    ..Default::default()
+                };
+                crate::prefs::save(&db, &prefs).unwrap();
+                let session = db
+                    .create_code_session(
+                        &dir.to_string_lossy(),
+                        None,
+                        "opencode",
+                        OPCODE_ALWAYS_APPROVE_MODE,
+                    )
+                    .unwrap();
+                let launch = prepare(&db, &dir, &session).unwrap();
+                let cfg: Value = serde_json::from_str(
+                    &launch
+                        .env
+                        .iter()
+                        .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+                        .unwrap()
+                        .1,
+                )
+                .unwrap();
+                let perms = cfg.get("permissions").unwrap().as_array().unwrap();
+                assert_eq!(
+                    perms[1],
+                    json!({"action":"shell","resource":"*","effect":"allow"})
+                );
+                assert_eq!(
+                    perms[2],
+                    json!({"action":"external_directory","resource":"*","effect":"allow"})
+                );
+                let deny = perms.last().unwrap();
+                assert_eq!(deny["effect"], "deny");
+                assert_eq!(deny["resource"], "rm -rf /tmp/pb*");
+                let allow_i = perms
+                    .iter()
+                    .position(|r| {
+                        r["effect"] == "allow" && r["action"] == "shell" && r["resource"] == "*"
+                    })
+                    .unwrap();
+                let deny_i = perms.iter().rposition(|r| r["effect"] == "deny").unwrap();
+                assert!(
+                    deny_i > allow_i,
+                    "deny must be last/after allows in prepare() output"
+                );
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        );
+    }
+
+    /// pb-20261107-32 E/B: missing/bad probe => NO allows in prepare() output.
+    #[test]
+    fn opencode_prepare_output_no_allows_when_probe_fails() {
+        with_probe_override(Err("config unreadable".into()), || {
+            let dir = std::env::temp_dir().join(format!("pb-opc-pf-{}", crate::db::new_id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let db = std::sync::Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
+            let mut o = AgentPaths::new();
+            o.insert(
+                "opencode".into(),
+                std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            let prefs = crate::prefs::Preferences {
+                agent_paths: o,
+                ..Default::default()
+            };
+            crate::prefs::save(&db, &prefs).unwrap();
+            let session = db
+                .create_code_session(
+                    &dir.to_string_lossy(),
+                    None,
+                    "opencode",
+                    OPCODE_ALWAYS_APPROVE_MODE,
+                )
+                .unwrap();
+            let launch = prepare(&db, &dir, &session).unwrap();
+            let cfg: Value = serde_json::from_str(
+                &launch
+                    .env
+                    .iter()
+                    .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+                    .unwrap()
+                    .1,
+            )
+            .unwrap();
+            assert_eq!(cfg.get("permission"), Some(&json!({"*":"ask"})));
+            assert!(
+                cfg.get("permissions").is_none(),
+                "must not inject allow-bearing permissions when probe fails"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// pb-20261107-32 spec(2)/E: prepare() output, real mode id `default` keeps current ask-everything.
+    #[test]
+    fn opencode_prepare_output_default_mode_no_allows() {
+        let deny = vec![json!({"action":"shell","resource":"git push*","effect":"deny"})];
+        with_probe_override(Ok(deny), || {
+            let dir = std::env::temp_dir().join(format!("pb-opc-def-{}", crate::db::new_id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let db = std::sync::Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
+            let mut o = AgentPaths::new();
+            o.insert(
+                "opencode".into(),
+                std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            crate::prefs::save(
+                &db,
+                &crate::prefs::Preferences {
+                    agent_paths: o,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let session = db
+                .create_code_session(&dir.to_string_lossy(), None, "opencode", "default")
+                .unwrap();
+            let launch = prepare(&db, &dir, &session).unwrap();
+            let cfg: Value = serde_json::from_str(
+                &launch
+                    .env
+                    .iter()
+                    .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+                    .unwrap()
+                    .1,
+            )
+            .unwrap();
+            assert_eq!(
+                cfg.get("permission"),
+                Some(&json!({"*":"ask"})),
+                "default must keep current ask-everything"
+            );
+            assert!(
+                cfg.get("permissions").is_none(),
+                "default must not inject permissions array/allows"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// pb-20261107-32 spec(2)/E: prepare() output, real mode id `auto` keeps current ask-everything.
+    #[test]
+    fn opencode_prepare_output_auto_mode_no_allows() {
+        let deny = vec![json!({"action":"shell","resource":"git push*","effect":"deny"})];
+        with_probe_override(Ok(deny), || {
+            let dir = std::env::temp_dir().join(format!("pb-opc-auto-{}", crate::db::new_id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let db = std::sync::Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
+            let mut o = AgentPaths::new();
+            o.insert(
+                "opencode".into(),
+                std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            crate::prefs::save(
+                &db,
+                &crate::prefs::Preferences {
+                    agent_paths: o,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let session = db
+                .create_code_session(&dir.to_string_lossy(), None, "opencode", "auto")
+                .unwrap();
+            let launch = prepare(&db, &dir, &session).unwrap();
+            let cfg: Value = serde_json::from_str(
+                &launch
+                    .env
+                    .iter()
+                    .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+                    .unwrap()
+                    .1,
+            )
+            .unwrap();
+            assert_eq!(
+                cfg.get("permission"),
+                Some(&json!({"*":"ask"})),
+                "auto must keep current ask-everything"
+            );
+            assert!(
+                cfg.get("permissions").is_none(),
+                "auto must not inject permissions array/allows"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// pb-20261107-32 spec(2)/E: prepare() output, real mode id `always-approve` injects allows and denies last.
+    #[test]
+    fn opencode_prepare_output_always_approve_mode_allows_and_denies_last() {
+        let deny = vec![json!({"action":"shell","resource":"git push*","effect":"deny"})];
+        with_probe_override(Ok(deny), || {
+            let dir = std::env::temp_dir().join(format!("pb-opc-aa-{}", crate::db::new_id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let db = std::sync::Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
+            let mut o = AgentPaths::new();
+            o.insert(
+                "opencode".into(),
+                std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            crate::prefs::save(
+                &db,
+                &crate::prefs::Preferences {
+                    agent_paths: o,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let session = db
+                .create_code_session(
+                    &dir.to_string_lossy(),
+                    None,
+                    "opencode",
+                    OPCODE_ALWAYS_APPROVE_MODE,
+                )
+                .unwrap();
+            let launch = prepare(&db, &dir, &session).unwrap();
+            let cfg: Value = serde_json::from_str(
+                &launch
+                    .env
+                    .iter()
+                    .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+                    .unwrap()
+                    .1,
+            )
+            .unwrap();
+            let perms = cfg["permissions"]
+                .as_array()
+                .expect("always-approve must use permissions array");
+            assert!(
+                perms.iter().any(|r| r["action"] == "shell"
+                    && r["effect"] == "allow"
+                    && r["resource"] == "*")
+            );
+            assert!(perms.iter().any(|r| r["action"] == "external_directory"
+                && r["effect"] == "allow"
+                && r["resource"] == "*"));
+            let deny_i = perms.iter().rposition(|r| r["effect"] == "deny").unwrap();
+            let allow_i = perms
+                .iter()
+                .position(|r| r["action"] == "shell" && r["effect"] == "allow")
+                .unwrap();
+            assert!(
+                deny_i > allow_i,
+                "deny must be after allows in prepare() output"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// pb-20261107-32 item 8: probe not spawned for default/auto (mode gate happens before probe).
+    #[test]
+    fn opencode_probe_not_spawned_for_default_and_auto_modes() {
+        let dir = std::env::temp_dir().join(format!("pb-opc-nsp-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Ensure override is clear so a real spawn attempt would count (but should not happen).
+        OPCODE_DENY_PROBE_OVERRIDE.with(|c| *c.borrow_mut() = None);
+        let (_, n_def) = with_probe_count(|| {
+            let _ = build_opencode_config_from_probe("default", Map::new(), Ok(vec![]));
+            // Also exercise the launch-config path which gates the probe in non-always-approve.
+            let _ = opencode_launch_config(
+                "default",
+                Map::new(),
+                Path::new("/nonexistent/opencode"),
+                &dir,
+            );
+        });
+        // Note: opencode_launch_config calls probe only in always-approve; build_* takes result.
+        // The gate is in opencode_launch_config. With /nonexistent binary, a real probe would fail,
+        // but it must not be attempted for default/auto.
+        let (_, n_auto) = with_probe_count(|| {
+            let _ = opencode_launch_config(
+                "auto",
+                Map::new(),
+                Path::new("/nonexistent/opencode"),
+                &dir,
+            );
+        });
+        assert_eq!(n_def, 0, "default mode must not spawn probe");
+        assert_eq!(n_auto, 0, "auto mode must not spawn probe");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// pb-20261107-32 C: mixed sources extract denies from permissions array AND legacy permission object.
+    #[test]
+    fn opencode_deny_extraction_mixed_formats_from_sources() {
+        let sources = json!([
+            {"type":"document","info":{"permissions":[{"action":"shell","resource":"ok","effect":"allow"}],"permission":{"bash":{"rm *":"deny"}}}},
+            {"type":"document","info":{"permission":{"edit":"deny"}}}
+        ]);
+        let denies = extract_deny_rules_from_opencode_sources(&sources);
+        assert!(
+            denies
+                .iter()
+                .any(|r| r["resource"] == "rm *" && r["effect"] == "deny"),
+            "legacy deny in mixed doc: {denies:?}"
+        );
+        assert!(
+            denies
+                .iter()
+                .any(|r| r["action"] == "edit" && r["effect"] == "deny"),
+            "edit deny: {denies:?}"
+        );
+        assert!(!denies.iter().any(|r| r["effect"] != "deny"));
+    }
+
+    /// pb-20261107-32 item 2: agent-level denies in info.agents.<name>.permissions[] (real shape).
+    /// Verified shape: {"agents":{"build":{"permissions":[{"action":"shell","resource":"rm *","effect":"deny"}]}}}
+    #[test]
+    fn opencode_deny_extraction_agent_level_permissions_real_shape() {
+        let sources = json!([
+            {"type":"document","path":"/tmp/opencode.json","info":{
+                "agents":{"build":{"permissions":[{"action":"shell","resource":"rm *","effect":"deny"}]}}
+            }}
+        ]);
+        let denies = extract_deny_rules_from_opencode_sources(&sources);
+        assert_eq!(denies.len(), 1, "must extract agent-level deny: {denies:?}");
+        assert_eq!(denies[0]["action"], "shell");
+        assert_eq!(denies[0]["resource"], "rm *");
+        assert_eq!(denies[0]["effect"], "deny");
+    }
+
+    /// pb-20261107-32 item 5: committed fixture using REAL probe-source output shape
+    /// (array of {type,path,info:{permissions}} incl. a directory doc), consistent with the
+    /// fresh `opencode serve --port 0` + /api/config probe (item 7).
+    #[test]
+    fn opencode_deny_extraction_real_serve_api_config_source_shape() {
+        let sources = json!([
+            {"type":"directory","path":"/tmp/project","info":{}},
+            {"type":"document","path":"/tmp/home/.config/opencode/opencode.json","info":{
+                "$schema":"https://opencode.ai/config.json",
+                "permissions":[{"action":"shell","resource":"git push*","effect":"deny"}]
+            }},
+            {"type":"document","path":"/tmp/project/opencode.json","info":{
+                "permissions":[{"action":"shell","resource":"echo PROJ*","effect":"deny"},{"action":"shell","resource":"*","effect":"allow"}],
+                "agents":{"build":{"permissions":[{"action":"external_directory","resource":"/secret","effect":"deny"}]}}
+            }},
+            {"type":"document","path":null,"info":{"permissions":[{"action":"*","resource":"*","effect":"ask"}]}}
+        ]);
+        let denies = extract_deny_rules_from_opencode_sources(&sources);
+        assert!(
+            denies.iter().any(|r| r["action"] == "shell"
+                && r["resource"] == "git push*"
+                && r["effect"] == "deny"),
+            "global deny: {denies:?}"
+        );
+        assert!(
+            denies.iter().any(|r| r["action"] == "shell"
+                && r["resource"] == "echo PROJ*"
+                && r["effect"] == "deny"),
+            "project deny: {denies:?}"
+        );
+        assert!(
+            denies.iter().any(|r| r["action"] == "external_directory"
+                && r["resource"] == "/secret"
+                && r["effect"] == "deny"),
+            "agent-level deny: {denies:?}"
+        );
+        assert!(
+            !denies.iter().any(|r| r["effect"] != "deny"),
+            "only denies: {denies:?}"
+        );
+    }
+
+
+
+    #[cfg(unix)]
+    fn with_test_timeout<T: Send + 'static>(secs: u64, name: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || { let _ = tx.send(f()); });
+        match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+            Ok(v) => v,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("{name}: timed out after {secs}s (unbounded hang guard)")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // Worker panicked/dropped sender — join to propagate the real panic (do not mask as timeout).
+                match handle.join() {
+                    Err(payload) => std::panic::resume_unwind(payload),
+                    Ok(_) => panic!("{name}: worker disconnected without result (not a timeout)"),
+                }
+            }
+        }
+    }
+    #[cfg(unix)]
+    fn write_fake_opencode(dir: &Path, name: &str, script: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join(name);
+        std::fs::write(&p, script).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+    /// pb-20261107-32 item 4 (real probe, fake program): parse/HTTP errors must not leak
+    /// config body or credentials. Fake serves 200 with bad JSON body containing
+    /// sk-FAKE-SECRET-123, and 404 containing the secret — Err must lack the secret.
+    #[cfg(unix)]
+    #[test]
+    fn opencode_probe_errors_contain_no_config_body_or_credentials_real_probe() {
+        with_test_timeout(30, "opencode_probe_errors_contain_no_config_body_or_credentials_real_probe", || {
+        OPCODE_DENY_PROBE_OVERRIDE.with(|c| *c.borrow_mut() = None);
+        let dir = std::env::temp_dir().join(format!("pb-opc-sec-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = dir.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let base = r#"#!/usr/bin/env python3
+import sys, socket, threading
+port = int(sys.argv[sys.argv.index('--port')+1])
+sys.stderr.write('server password testpw\n'); sys.stderr.flush()
+MODE = '__MODE__'
+def handle(c):
+    try:
+        c.recv(4096)
+        if MODE == 'notfound':
+            body = '{"error":"sk-FAKE-SECRET-123","Authorization":"Bearer TOPSECRET"}'
+            status = '404 Not Found'
+        else:
+            body = 'NOT_JSON sk-FAKE-SECRET-123 {"Authorization":"Bearer TOPSECRET"}'
+            status = '200 OK'
+        c.sendall(('HTTP/1.1 %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' % (status,len(body.encode()),body)).encode())
+    except Exception: pass
+    finally:
+        try: c.close()
+        except: pass
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('127.0.0.1',port)); s.listen(5)
+while True:
+    c,_=s.accept(); threading.Thread(target=handle,args=(c,),daemon=True).start()
+"#;
+        let p_bad = write_fake_opencode(&dir, "fake-badbody", &base.replace("__MODE__", "badbody"));
+        let err = probe_opencode_deny_rules(&p_bad, &cwd).unwrap_err();
+        assert!(!err.contains("sk-FAKE-SECRET"), "bad-body Err must not leak secret: {err}");
+        assert!(!err.contains("TOPSECRET"), "bad-body Err must not leak credential: {err}");
+        assert!(!err.contains("NOT_JSON"), "bad-body Err must not leak body: {err}");
+        assert!(err.contains("body_len=") || err.contains("parse"), "bad-body Err should indicate parse/length: {err}");
+        let p_nf = write_fake_opencode(&dir, "fake-notfound", &base.replace("__MODE__", "notfound"));
+        let err2 = probe_opencode_deny_rules(&p_nf, &cwd).unwrap_err();
+        assert!(!err2.contains("sk-FAKE-SECRET"), "404 Err must not leak secret: {err2}");
+        assert!(!err2.contains("TOPSECRET"), "404 Err must not leak credential: {err2}");
+        let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// pb-20261107-32 item 3 (real probe, fake program): drain handles >64KB output before password.
+    /// Fake prints 70KB + "server password testpw" then serves 200/[] on the probe port.
+    /// Planted break-after-first-chunk in production drain must go RED (timeout / password not found).
+    #[cfg(unix)]
+    #[test]
+    fn opencode_probe_drains_large_output_real_probe() {
+        with_test_timeout(30, "opencode_probe_drains_large_output_real_probe", || {
+        OPCODE_DENY_PROBE_OVERRIDE.with(|c| *c.borrow_mut() = None);
+        let dir = std::env::temp_dir().join(format!("pb-opc-drain-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = dir.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let script = r#"#!/usr/bin/env python3
+import sys, socket, threading
+port = int(sys.argv[sys.argv.index('--port')+1])
+# >64KB before password so a broken/single-chunk drain misses it
+sys.stdout.write('X' * 70000 + '\n')
+sys.stdout.write('server password testpw\n')
+sys.stdout.flush()
+body = '[]'
+def handle(c):
+    try:
+        c.recv(4096)
+        c.sendall(('HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' % (len(body),body)).encode())
+    except Exception: pass
+    finally:
+        try: c.close()
+        except: pass
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('127.0.0.1',port)); s.listen(5)
+while True:
+    c,_=s.accept(); threading.Thread(target=handle,args=(c,),daemon=True).start()
+"#;
+        let prog = write_fake_opencode(&dir, "fake-drain", script);
+        let denies = probe_opencode_deny_rules(&prog, &cwd).expect("probe must drain >64KB and find password");
+        assert!(denies.is_empty(), "expected empty denies from [] config: {denies:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// pb-20261107-32 item 7 (real probe, fake program): argv is `serve --port <n> --hostname 127.0.0.1`
+    /// with NO --service/debug; resolves under session cwd. Planted --service must go RED.
+    #[cfg(unix)]
+    #[test]
+    fn opencode_probe_argv_fresh_session_serve_no_service_real_probe() {
+        with_test_timeout(30, "opencode_probe_argv_fresh_session_serve_no_service_real_probe", || {
+        OPCODE_DENY_PROBE_OVERRIDE.with(|c| *c.borrow_mut() = None);
+        let dir = std::env::temp_dir().join(format!("pb-opc-argv-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = dir.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let argv_file = dir.join("argv.txt");
+        let script = format!(r#"#!/usr/bin/env python3
+import sys, socket, threading, json
+with open({argv:?}, 'w') as f: json.dump(sys.argv, f)
+port = int(sys.argv[sys.argv.index('--port')+1])
+sys.stderr.write('server password testpw\n'); sys.stderr.flush()
+body = '[]'
+def handle(c):
+    try:
+        c.recv(4096)
+        c.sendall(('HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' % (len(body),body)).encode())
+    except Exception: pass
+    finally:
+        try: c.close()
+        except: pass
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('127.0.0.1',port)); s.listen(5)
+while True:
+    c,_=s.accept(); threading.Thread(target=handle,args=(c,),daemon=True).start()
+"#, argv=argv_file.to_string_lossy());
+        let prog = write_fake_opencode(&dir, "fake-argv", &script);
+        let denies = probe_opencode_deny_rules(&prog, &cwd).expect("probe should succeed");
+        assert!(denies.is_empty());
+        let argv: Vec<String> = serde_json::from_str(&std::fs::read_to_string(&argv_file).unwrap()).unwrap();
+        assert!(argv.iter().any(|a| a == "serve"), "argv must contain 'serve': {argv:?}");
+        assert!(argv.iter().any(|a| a == "--port"), "argv must contain --port: {argv:?}");
+        assert!(argv.iter().any(|a| a == "--hostname"), "argv must contain --hostname: {argv:?}");
+        assert!(argv.iter().any(|a| a == "127.0.0.1"), "argv must contain 127.0.0.1: {argv:?}");
+        assert!(!argv.iter().any(|a| a == "--service"), "argv must NOT contain --service (shared service): {argv:?}");
+        assert!(!argv.iter().any(|a| a == "debug"), "argv must NOT contain debug (debug config path): {argv:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// pb-20261107-32 item 2 (process leak): fake launcher spawns `sleep 302 &` (grandchild)
+    /// and never serves HTTP (conn-refused). Probe must kill the whole process group so the
+    /// grandchild is gone on exit (npm-style launchers would otherwise leak one server per start).
+    #[cfg(unix)]
+    #[test]
+    fn opencode_probe_kills_process_group_no_grandchild_leak() {
+        with_test_timeout(30, "opencode_probe_kills_process_group_no_grandchild_leak", || {
+        OPCODE_DENY_PROBE_OVERRIDE.with(|c| *c.borrow_mut() = None);
+        let dir = std::env::temp_dir().join(format!("pb-opc-leak-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = dir.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let pid_file = dir.join("grandchild.pid");
+        let script = format!(r#"#!/usr/bin/env python3
+import sys, os, time
+# Grandchild inherits the launcher's process group (probe set process_group(0) on launcher).
+# Do NOT setsid: a plain backgrounded grandchild stays in the group and must be reaped by killpg.
+pid = os.fork()
+if pid == 0:
+    os.execvp('sleep', ['sleep', '302'])
+with open({pidf:?}, 'w') as f: f.write(str(pid))
+sys.stderr.write('server password testpw\n'); sys.stderr.flush()
+# never listen on --port => conn refused; stay alive so group-kill is what reaps us
+time.sleep(60)
+"#, pidf=pid_file.to_string_lossy());
+        let prog = write_fake_opencode(&dir, "fake-leak", &script);
+        let err = probe_opencode_deny_rules(&prog, &cwd).unwrap_err();
+        assert!(err.contains("probe") || err.contains("connect") || err.contains("read") || err.contains("HTTP") || err.contains("ready"),
+            "expected probe failure on conn-refused path, got: {err}");
+        // give a moment for signals
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let gpid: i32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+        // Poll up to ~2s (SIGKILL async). Zombie-aware: kill -0 succeeds for zombies; on Linux
+        // /proc/<pid>/stat state 'Z' means not a live leak. Missing/zombie => gone.
+        let is_live = || {
+            let sig0 = std::process::Command::new("kill")
+                .args(["-0", &gpid.to_string()])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !sig0 { return false; }
+            match std::fs::read_to_string(format!("/proc/{gpid}/stat")) {
+                Ok(stat) => !stat.split(')').nth(1).and_then(|r| r.trim_start().chars().next()).map(|c| c == 'Z').unwrap_or(false),
+                Err(_) => sig0, // no /proc (e.g. macOS): fall back to kill -0
+            }
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
+        let mut alive = is_live();
+        while alive && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            alive = is_live();
+        }
+        if alive {
+            let _ = std::process::Command::new("kill").args(["-9", &gpid.to_string()]).status();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!alive, "grandchild pid {gpid} leaked (live, not zombie) after probe returned ({err})");
+        });
+    }
+
+    /// pb-20261107-32 item 5: #[ignore] live test calling the REAL probe (fresh serve child,
+    /// session cwd/env). Requires `opencode` on PATH. Exercises the same source the fix uses.
+    #[test]
+    #[ignore]
+    fn opencode_live_probe_reads_session_cwd_config_and_agent_denies() {
+        let opencode = std::env::var("OPENCODE_BIN").unwrap_or_else(|_| "opencode".into());
+        let dir = std::env::temp_dir().join(format!("pb-opc-live-{}", crate::db::new_id()));
+        let project = dir.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        // Project-level deny + agent-level deny (item 2 real shape)
+        std::fs::write(project.join("opencode.json"), r#"{"permissions":[{"action":"shell","resource":"echo LIVE_DENY*","effect":"deny"}],"agents":{"build":{"permissions":[{"action":"shell","resource":"rm LIVE*","effect":"deny"}]}}}"#).unwrap();
+        OPCODE_DENY_PROBE_OVERRIDE.with(|c| *c.borrow_mut() = None);
+        let denies = probe_opencode_deny_rules(Path::new(&opencode), &project)
+            .expect("live probe should succeed");
+        assert!(
+            denies
+                .iter()
+                .any(|r| r["resource"] == "echo LIVE_DENY*" && r["effect"] == "deny"),
+            "project deny not seen by live probe: {denies:?}"
+        );
+        assert!(
+            denies
+                .iter()
+                .any(|r| r["resource"] == "rm LIVE*" && r["effect"] == "deny"),
+            "agent-level deny not seen by live probe (item 2): {denies:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// pb-20261107-32 D ordering pin: deny re-emitted after allows.
+    #[test]
+    fn opencode_deny_rules_appended_after_allows() {
+        let built = build_opencode_config_from_probe(
+            OPCODE_ALWAYS_APPROVE_MODE,
+            Map::new(),
+            Ok(vec![
+                json!({"action":"shell","resource":"*","effect":"deny"}),
+            ]),
+        );
+        let perms = built.config.get("permissions").unwrap().as_array().unwrap();
+        let a = perms
+            .iter()
+            .position(|r| r["action"] == "shell" && r["effect"] == "allow" && r["resource"] == "*")
+            .unwrap();
+        let d = perms
+            .iter()
+            .position(|r| r["action"] == "shell" && r["effect"] == "deny" && r["resource"] == "*")
+            .unwrap();
+        assert!(d > a);
+    }
+
+    /// pb-20261107-32 B: probe failure / unreadable => no allows + warning.
+    #[test]
+    fn opencode_probe_failure_means_no_allows() {
+        let built = build_opencode_config_from_probe(
+            OPCODE_ALWAYS_APPROVE_MODE,
+            Map::new(),
+            Err("cannot read".into()),
+        );
+        assert!(!built.allows_injected);
+        assert!(
+            built
+                .warning
+                .as_deref()
+                .unwrap_or("")
+                .contains("NOT injecting")
+        );
+        assert_eq!(built.config["permission"], json!({"*":"ask"}));
+    }
+
+    /// pb-20261107-32 D/B: probe success with zero denies => allows OK (file exists+parses+ZERO denies case).
+    #[test]
+    fn opencode_probe_success_zero_denies_allows_injected() {
+        let built =
+            build_opencode_config_from_probe(OPCODE_ALWAYS_APPROVE_MODE, Map::new(), Ok(vec![]));
+        assert!(built.allows_injected);
+        assert_eq!(built.deny_rules_reemitted, 0);
+    }
+
+    /// pb-20261107-32 item 1: restored doc comment context from staging e8f6b6c.
     /// OpenCode set to use Patchbay's providers: they join its config next to the approval rule.
     /// `PB_PRINT_LAUNCH=1` prints the env, for trying it against a real `opencode acp`.
     #[test]
@@ -906,8 +2076,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pb-ag-{}", crate::db::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = std::sync::Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
-        let url = std::env::var("PB_MOCK_URL").unwrap_or_else(|_| "http://127.0.0.1:8799/v1".into());
-        let p = crate::db::Provider { id: "fw".into(), name: "Fireworks".into(), kind: crate::db::ProviderKind::OpenaiChat, base_url: url, has_key: true, auth_mode: Default::default(), claude_config_dir: None, grok_home: None, };
+        let url =
+            std::env::var("PB_MOCK_URL").unwrap_or_else(|_| "http://127.0.0.1:8799/v1".into());
+        let p = crate::db::Provider {
+            id: "fw".into(),
+            name: "Fireworks".into(),
+            kind: crate::db::ProviderKind::OpenaiChat,
+            base_url: url,
+            has_key: true,
+            auth_mode: Default::default(),
+            claude_config_dir: None,
+            grok_home: None,
+        };
         db.upsert_provider(&p, Some("secret")).unwrap();
         let m = crate::db::Model {
             id: "echo".into(),
@@ -920,26 +2100,53 @@ mod tests {
         };
         db.upsert_model(&m).unwrap();
         let mut o = AgentPaths::new();
-        o.insert("opencode".into(), std::env::current_exe().unwrap().to_string_lossy().into_owned());
-        let mut prefs = crate::prefs::Preferences { agent_paths: o, ..Default::default() };
+        o.insert(
+            "opencode".into(),
+            std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let mut prefs = crate::prefs::Preferences {
+            agent_paths: o,
+            ..Default::default()
+        };
         crate::prefs::save(&db, &prefs).unwrap();
-        let session = db.create_code_session(&dir.to_string_lossy(), None, "opencode", "default").unwrap();
+        let session = db
+            .create_code_session(&dir.to_string_lossy(), None, "opencode", "default")
+            .unwrap();
         let config = |l: &Launch| -> Value {
-            serde_json::from_str(&l.env.iter().find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT").unwrap().1).unwrap()
+            serde_json::from_str(
+                &l.env
+                    .iter()
+                    .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+                    .unwrap()
+                    .1,
+            )
+            .unwrap()
         };
 
         // Off by default: only the approval rule.
         let own = prepare(&db, &dir, &session).unwrap();
         assert_eq!(config(&own), json!({ "permission": { "*": "ask" } }));
 
-        prefs.agent_providers.insert("opencode".into(), "echo".into());
+        prefs
+            .agent_providers
+            .insert("opencode".into(), "echo".into());
         crate::prefs::save(&db, &prefs).unwrap();
         let l = prepare(&db, &dir, &session).unwrap();
         let c = config(&l);
         assert_eq!(c["permission"], json!({ "*": "ask" }));
         assert_eq!(c["model"], "patchbay-fw/mock-echo");
-        assert_eq!(c["provider"]["patchbay-fw"]["options"]["apiKey"], "{env:PATCHBAY_KEY_0}");
-        assert!(l.env.iter().any(|(k, v)| k == "PATCHBAY_KEY_0" && v == "secret"));
+        assert_eq!(
+            c["provider"]["patchbay-fw"]["options"]["apiKey"],
+            "{env:PATCHBAY_KEY_0}"
+        );
+        assert!(
+            l.env
+                .iter()
+                .any(|(k, v)| k == "PATCHBAY_KEY_0" && v == "secret")
+        );
         if std::env::var_os("PB_PRINT_LAUNCH").is_some() {
             for (k, v) in l.env.iter().filter(|(k, _)| k != "PATH") {
                 println!("{k}={v}");
@@ -955,10 +2162,21 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let db = std::sync::Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
         let mut o = AgentPaths::new();
-        o.insert("codex".into(), std::env::current_exe().unwrap().to_string_lossy().into_owned());
-        let mut prefs = crate::prefs::Preferences { agent_paths: o, ..Default::default() };
+        o.insert(
+            "codex".into(),
+            std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let mut prefs = crate::prefs::Preferences {
+            agent_paths: o,
+            ..Default::default()
+        };
         crate::prefs::save(&db, &prefs).unwrap();
-        let session = db.create_code_session(&dir.to_string_lossy(), None, "codex", "default").unwrap();
+        let session = db
+            .create_code_session(&dir.to_string_lossy(), None, "codex", "default")
+            .unwrap();
         let env = |l: &Launch, k: &str| l.env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
 
         let l = prepare(&db, &dir, &session).unwrap();
@@ -976,7 +2194,10 @@ mod tests {
 
     #[test]
     fn acp_arguments_per_agent() {
-        let exe = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        let exe = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         let args = |kind: AgentKind| {
             let mut o = AgentPaths::new();
             o.insert(kind.id().into(), exe.clone());
@@ -984,7 +2205,14 @@ mod tests {
         };
         assert_eq!(args(AgentKind::Codex), Vec::<String>::new());
         let agy = args(AgentKind::Antigravity);
-        assert_eq!(agy, if cfg!(target_os = "linux") { vec!["--uid=".to_owned()] } else { vec![] });
+        assert_eq!(
+            agy,
+            if cfg!(target_os = "linux") {
+                vec!["--uid=".to_owned()]
+            } else {
+                vec![]
+            }
+        );
         assert_eq!(AgentKind::Antigravity.npx_package(), None);
     }
 
@@ -1008,8 +2236,14 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), CURSOR_PRELOAD);
         let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
         let quoted = path.to_string_lossy().replace('\\', "\\\\");
-        assert_eq!(get("NODE_OPTIONS").unwrap(), format!("--require \"{quoted}\" --max-old-space-size=4096"));
-        assert_eq!(get("PATCHBAY_ORIG_NODE_OPTIONS").unwrap(), "--max-old-space-size=4096");
+        assert_eq!(
+            get("NODE_OPTIONS").unwrap(),
+            format!("--require \"{quoted}\" --max-old-space-size=4096")
+        );
+        assert_eq!(
+            get("PATCHBAY_ORIG_NODE_OPTIONS").unwrap(),
+            "--max-old-space-size=4096"
+        );
         // Without the user's own options; and again over the file already there.
         let env = cursor_preload(&dir, None);
         assert_eq!(env[0].1, format!("--require \"{quoted}\""));
@@ -1021,8 +2255,12 @@ mod tests {
     fn interactive_cli_is_detected_and_rejected() {
         assert!(is_interactive_cli(Path::new("/Users/me/.local/bin/agy")));
         assert!(is_interactive_cli(Path::new("C:\\Users\\me\\bin\\agy.exe")));
-        assert!(!is_interactive_cli(Path::new("/Users/me/bin/agy_acp_server")));
-        assert!(!is_interactive_cli(Path::new("/Users/me/bin/agy_acp_server.par")));
+        assert!(!is_interactive_cli(Path::new(
+            "/Users/me/bin/agy_acp_server"
+        )));
+        assert!(!is_interactive_cli(Path::new(
+            "/Users/me/bin/agy_acp_server.par"
+        )));
 
         let mut o = AgentPaths::new();
         let tmp_dir = std::env::temp_dir().join(format!("agy-test-{}", crate::db::new_id()));
@@ -1040,7 +2278,10 @@ mod tests {
         let release = antigravity_release();
         assert!(release.is_some());
         let r = release.unwrap();
-        assert!(r.url.starts_with("https://dl.google.com/agy-extensions/releases/"));
+        assert!(
+            r.url
+                .starts_with("https://dl.google.com/agy-extensions/releases/")
+        );
         assert!(!r.sha256.is_empty());
     }
 
@@ -1054,7 +2295,10 @@ mod tests {
         std::fs::write(&settings, br#"{"auth": {"type": "oauth-personal"}}"#).unwrap();
 
         unsafe { std::env::set_var("GEMINI_HOME", &dir) };
-        assert_eq!(antigravity_auth_status(), Some("Google Account (Personal)".to_owned()));
+        assert_eq!(
+            antigravity_auth_status(),
+            Some("Google Account (Personal)".to_owned())
+        );
 
         clear_antigravity_auth().unwrap();
         assert_eq!(antigravity_auth_status(), None);
