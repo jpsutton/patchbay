@@ -35,6 +35,7 @@ import { EditMessage } from "../components/EditMessage";
 import { UsageBar, fmtTokens } from "../components/UsageBar";
 import { sessionModel, sessionModelRef } from "../components/SessionUsage";
 import { coldCacheExpiredAt, isCacheCommand } from "./coldCache";
+import { agentMessageBody, isAgentOrigin, parseAgentMessageLabel } from "../lib/agentMessage";
 import { MobilePlanUsage } from "../components/MobilePlanUsage";
 import { TerminalPane } from "../terminal/TerminalPane";
 import { QuestionCard } from "./QuestionCard";
@@ -459,6 +460,9 @@ function UserEntry({
       </div>
     );
   }
+  const fromAgent = isAgentOrigin(e.origin);
+  const agent = fromAgent ? parseAgentMessageLabel(e.text, e.origin) : null;
+  const body = fromAgent ? agentMessageBody(e.text) : e.text;
   const atts = e.attachments ?? [];
   const images = atts.filter((a) => a.kind === "image");
   const files = atts.filter((a) => a.kind !== "image");
@@ -478,9 +482,20 @@ function UserEntry({
         </div>
       )}
       {files.length > 0 && names(files)}
-      {e.text && (
-        <div className="max-w-[82%] whitespace-pre-wrap rounded-[16px_16px_4px_16px] border border-line bg-panel-2 px-3.5 py-2.5 leading-6">
-          {e.text}
+      {fromAgent && agent && (
+        <div className="flex max-w-[82%] items-center gap-1.5 self-end font-mono text-[10px] uppercase tracking-[0.08em] text-accent-ink/80" title={e.origin}>
+          <span aria-hidden="true">◆</span>
+          <span className="truncate">{agent.label}</span>
+        </div>
+      )}
+      {body && (
+        <div
+          className={`max-w-[82%] whitespace-pre-wrap rounded-[16px_16px_4px_16px] border px-3.5 py-2.5 leading-6 ${
+            fromAgent ? "border-accent/35 bg-accent/[0.04]" : "border-line bg-panel-2"
+          }`}
+          data-origin={fromAgent ? "agent" : undefined}
+        >
+          {body}
         </div>
       )}
       {e.pending && (
@@ -2089,34 +2104,44 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
           <div className="mx-auto w-full max-w-[var(--chat-width)] px-6 pb-3 pt-2">
             {(s?.queued.length ?? 0) > 0 && (
               <ul className="mb-2 flex flex-col gap-1" aria-label="Queued messages">
-                {s!.queued.map((q) => (
-                  <li
-                    key={q.promptId}
-                    className="flex items-center gap-2 rounded-[10px] border border-border bg-panel px-3 py-1.5 text-xs"
-                  >
-                    <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.08em] text-faint">Queued</span>
-                    <span className="min-w-0 flex-1 truncate text-muted">
-                      {q.text.trim() || q.attachments?.map((a) => a.name).join(", ")}
-                    </span>
-                    {forceSend && (
-                      <button
-                        className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-accent-ink hover:bg-panel-2"
-                        onClick={() => api.codeSendNow(session.id, q.promptId).catch((e) => setToast(errorText(e)))}
-                        title="Stop the current turn and send this now"
-                      >
-                        Send now
-                      </button>
-                    )}
-                    <button
-                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted hover:bg-panel-2 hover:text-fg"
-                      onClick={() => api.codeUnqueue(session.id, q.promptId).catch((e) => setToast(errorText(e)))}
-                      title="Don't send"
-                      aria-label="Remove queued message"
+                {s!.queued.map((q) => {
+                  const fromAgent = isAgentOrigin(q.origin);
+                  const agent = fromAgent ? parseAgentMessageLabel(q.text, q.origin) : null;
+                  const body = fromAgent ? agentMessageBody(q.text) : q.text;
+                  return (
+                    <li
+                      key={q.promptId}
+                      className={`flex items-center gap-2 rounded-[10px] border px-3 py-1.5 text-xs ${
+                        fromAgent ? "border-accent/35 bg-accent/[0.04]" : "border-border bg-panel"
+                      }`}
+                      data-origin={fromAgent ? "agent" : undefined}
                     >
-                      <XIcon size={12} />
-                    </button>
-                  </li>
-                ))}
+                      <span className={`shrink-0 font-mono text-[10px] uppercase tracking-[0.08em] ${fromAgent ? "text-accent-ink/80" : "text-faint"}`}>
+                        {fromAgent ? `Queued · ${agent?.label ?? "Agent"}` : "Queued"}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-muted">
+                        {body.trim() || q.attachments?.map((a) => a.name).join(", ")}
+                      </span>
+                      {forceSend && (
+                        <button
+                          className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-accent-ink hover:bg-panel-2"
+                          onClick={() => api.codeSendNow(session.id, q.promptId).catch((e) => setToast(errorText(e)))}
+                          title="Stop the current turn and send this now"
+                        >
+                          Send now
+                        </button>
+                      )}
+                      <button
+                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted hover:bg-panel-2 hover:text-fg"
+                        onClick={() => api.codeUnqueue(session.id, q.promptId).catch((e) => setToast(errorText(e)))}
+                        title="Don't send"
+                        aria-label="Remove queued message"
+                      >
+                        <XIcon size={12} />
+                      </button>
+                    </li>
+                  );
+                })}
               </ul>
             )}
             {remote && changes.length > 0 && (
