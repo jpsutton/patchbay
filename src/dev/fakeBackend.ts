@@ -1222,16 +1222,23 @@ export function install() {
             apiKey?: string;
             authMode?: Provider["authMode"];
             claudeConfigDir?: string;
+            grokHome?: string;
           };
           let x = db.providers.find((q) => q.id === i.id);
           if (!x) {
             x = { id: id(), name: "", kind: i.kind, baseUrl: "", hasKey: false, authMode: "api_key" };
             db.providers.push(x);
           }
-          const authMode = i.kind === "anthropic" && i.authMode === "claude_login" ? "claude_login" : "api_key";
+          const authMode =
+            i.kind === "anthropic" && i.authMode === "claude_login"
+              ? "claude_login"
+              : i.kind === "openai_responses" && i.authMode === "grok_login"
+                ? "grok_login"
+                : "api_key";
           const claudeConfigDir = authMode === "claude_login" ? i.claudeConfigDir?.trim() || null : null;
-          Object.assign(x, { name: i.name, kind: i.kind, baseUrl: i.baseUrl, authMode, claudeConfigDir });
-          if (authMode === "claude_login") x.hasKey = false;
+          const grokHome = authMode === "grok_login" ? i.grokHome?.trim() || null : null;
+          Object.assign(x, { name: i.name, kind: i.kind, baseUrl: i.baseUrl, authMode, claudeConfigDir, grokHome });
+          if (authMode === "claude_login" || authMode === "grok_login") x.hasKey = false;
           else if (i.apiKey !== undefined) x.hasKey = i.apiKey !== "";
           return { ...x };
         }
