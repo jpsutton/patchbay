@@ -35,7 +35,8 @@ const MAX_LINE: usize = 64 * 1024;
 const ENV_LOG_PATH: &str = "PATCHBAY_MCP_LOG_PATH";
 /// Host agent kind/name (e.g. opencode, claude) for diagnostics. Non-secret.
 const ENV_HOST_AGENT: &str = "PATCHBAY_MCP_HOST_AGENT";
-/// Max log file size before truncation (best-effort cap). ~512 KiB.
+/// Max log file size before rotate-to-.1 (best-effort cap). ~512 KiB.
+/// Lifecycle lines are ~100 bytes, so the cap should rarely fire in normal use.
 const MCP_LOG_MAX_BYTES: u64 = 512 * 1024;
 
 fn now_ms() -> u64 {
@@ -53,21 +54,53 @@ fn mcp_log_path_from_env() -> Option<PathBuf> {
     Some(PathBuf::from(v))
 }
 
-/// Best-effort, size-capped append. Never fails the caller; never logs secrets.
+fn mcp_log_open_append(path: &Path) -> std::io::Result<fs::File> {
+    let mut opts = OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)
+}
+
+fn mcp_log_rotate_if_needed(path: &Path) -> std::io::Result<()> {
+    let meta = match fs::metadata(path) {
+        Ok(m) if m.len() >= MCP_LOG_MAX_BYTES => m,
+        _ => return Ok(()),
+    };
+    // Re-stat immediately before rename (narrows double-rotation race). Best-effort:
+    // concurrent rotation can rarely drop .1.
+    let meta2 = fs::metadata(path)?;
+    if meta2.len() < MCP_LOG_MAX_BYTES || meta2.len() != meta.len() && meta2.len() < MCP_LOG_MAX_BYTES {
+        return Ok(());
+    }
+    let mut rotated = path.as_os_str().to_owned();
+    rotated.push(".1");
+    let rotated = PathBuf::from(rotated);
+    fs::rename(path, rotated)?;
+    Ok(())
+}
+
+/// Best-effort, size-capped append with rotate-to-.1. Never fails the caller; never logs secrets.
 /// `line` must already be safe (no token, no message bodies, no stderr content beyond error kind).
+/// Issues one `write_all` for the full line+newline (small O_APPEND writes reduce interleaving risk).
 fn mcp_log_append(path: &Path, line: &str) {
     let _ = (|| -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        if let Ok(meta) = fs::metadata(path) {
-            if meta.len() >= MCP_LOG_MAX_BYTES {
-                // Truncate to keep a single size-capped file.
-                let _ = fs::write(path, b"# truncated (size cap reached)\n");
-            }
+        let _ = mcp_log_rotate_if_needed(path);
+        let mut f = mcp_log_open_append(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = f.set_permissions(fs::Permissions::from_mode(0o600));
         }
-        let mut f = OpenOptions::new().create(true).append(true).open(path)?;
-        writeln!(f, "{line}")?;
+        let mut payload = line.as_bytes().to_vec();
+        payload.push(b'\n');
+        f.write_all(&payload)?;
         Ok(())
     })();
 }
@@ -1086,7 +1119,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(outside);
     }
 
-
     #[test]
     fn server_definition_includes_log_path_when_configured() {
         let log = std::env::temp_dir().join(format!("pb-mcp-log-{}.log", std::process::id()));
@@ -1143,15 +1175,29 @@ mod tests {
     #[test]
     fn mcp_log_is_size_capped() {
         let path = std::env::temp_dir().join(format!("pb-mcp-log-cap-{}-{}.log", std::process::id(), now_ms()));
-        // Pre-fill beyond cap.
-        let big = vec![b'x'; (MCP_LOG_MAX_BYTES as usize) + 64];
-        std::fs::write(&path, &big).unwrap();
-        mcp_log_event(Some(&path), "start", &[("pid", "1".into())]);
-        let meta = std::fs::metadata(&path).unwrap();
-        assert!(meta.len() < MCP_LOG_MAX_BYTES + 1024, "log not capped: {}", meta.len());
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("truncated") || content.contains("event=start"), "{content}");
+        let rotated = PathBuf::from(format!("{}.1", path.display()));
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&rotated);
+        // Pre-fill beyond cap with identifiable old content.
+        let old_marker = "OLD_START_LINE_SHOULD_ROTATE";
+        let mut big = vec![b'x'; (MCP_LOG_MAX_BYTES as usize) + 64];
+        // Embed marker near start.
+        let m = old_marker.as_bytes();
+        big[..m.len()].copy_from_slice(m);
+        std::fs::write(&path, &big).unwrap();
+        // Trigger append: should rotate-to-.1 then write the new line fresh.
+        mcp_log_event(Some(&path), "start", &[("pid", "1".into()), ("cause", "new".into())]);
+        let meta = std::fs::metadata(&path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        // AND (not OR): active file is bounded AND old content is gone from active file.
+        assert!(meta.len() <= MCP_LOG_MAX_BYTES, "log not capped (active too large): {}", meta.len());
+        assert!(!content.contains(old_marker), "old content still in active file: {content}");
+        assert!(content.contains("event=start"), "new line missing from active file: {content}");
+        // .1 holds the old lines.
+        let r1 = std::fs::read_to_string(&rotated).unwrap_or_default();
+        assert!(r1.contains(old_marker), "rotated .1 missing old content: {r1}");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&rotated);
     }
 
     #[test]
@@ -1165,5 +1211,52 @@ mod tests {
         let c = safe_error_cause(&e);
         assert!(!c.contains("SECRET"), "{c}");
         assert!(!c.contains("body=hello"), "{c}");
+    }
+
+    #[test]
+    fn mcp_log_rotation_failure_does_not_panic_and_does_not_kill() {
+        // Rotation/append failure is best-effort and must never kill the caller.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join(format!("pb-mcp-ro-{}-{}", std::process::id(), now_ms()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("log.txt");
+            std::fs::write(&path, vec![b'x'; (MCP_LOG_MAX_BYTES as usize) + 64]).unwrap();
+            // Read-only directory: rename/create may fail. Must not panic.
+            std::fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+            mcp_log_event(Some(&path), "start", &[("pid", "1".into())]);
+            mcp_log_append(&path, "ts=1 event=exit cause=stdin_eof");
+            // Restore for cleanup.
+            let _ = std::fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        // Non-unix: best-effort no-panic path.
+        #[cfg(not(unix))]
+        {
+            let impossible = std::path::Path::new("/\0/impossible-mcp-log");
+            mcp_log_event(Some(impossible), "start", &[("pid", "1".into())]);
+        }
+    }
+
+    #[test]
+    fn mcp_process_fields_real_function_never_includes_token_env() {
+        // Real mcp_process_fields() (not planted fields) must not surface token secrets.
+        let token_val = "PLANTED_TOKEN_MUST_NOT_APPEAR_9f2a";
+        // SAFETY: test-local env mutation; value checked immediately.
+        unsafe { std::env::set_var("PATCHBAY_MESSAGE_TOKEN", token_val); }
+        let fields = mcp_process_fields();
+        let rendered = fields
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        unsafe { std::env::remove_var("PATCHBAY_MESSAGE_TOKEN"); }
+        assert!(!rendered.contains(token_val), "token leaked from real mcp_process_fields: {rendered}");
+        assert!(rendered.contains("pid="), "{rendered}");
+        assert!(rendered.contains("ppid="), "{rendered}");
+        assert!(fields.iter().any(|(k, _)| *k == "session"), "{rendered}");
+        assert!(fields.iter().any(|(k, _)| *k == "host_agent"), "{rendered}");
     }
 }
