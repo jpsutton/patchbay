@@ -40,6 +40,7 @@ import { setIconSize } from "./iconSize";
 import { notifyInBackground } from "./notify";
 import { activityOf, strongest, type Activity } from "./activity";
 import { isRemoteApp } from "./platform";
+import type { CodeLive } from "./sessionLive";
 import { loadStringList, saveStringList } from "./manualOrder";
 import * as paneLogic from "./panes";
 import { isForegroundUpdate } from "./codeWorking";
@@ -47,6 +48,7 @@ import { chunkChars, phaseOf, type Phase } from "./workingStatus";
 import { trackStall } from "./stall";
 import { adoptEarlier } from "./earlierHistory";
 import { appendText } from "./streamText";
+import { readSteers } from "./readSteers";
 import { appendUserChunk } from "./harness";
 import { planUpdateOf } from "./todoPlan";
 import { applyChange, type LayoutChange, type SidebarEntry } from "./sidebarLayout";
@@ -99,6 +101,11 @@ export interface TranscriptPart {
   toolCalls: Record<string, AcpToolCall>;
 }
 
+/** A page of this agent's older history, read back from its session file. `id` keeps its rows' keys. */
+export interface OlderPage extends TranscriptPart {
+  id: number;
+}
+
 export interface CodeState {
   status: "idle" | "starting" | "ready" | "exited";
   busy: boolean;
@@ -141,6 +148,20 @@ export interface CodeState {
   history: TranscriptPart | null;
   /** Turns run by agents the session had before its current one: shown, never replayed. */
   earlier: TranscriptPart | null;
+  /**
+   * Pages of this agent's history older than `entries`, read back from its session file when the
+   * user scrolled to the top (`loadOlderHistory`); oldest first.
+   */
+  older: OlderPage[];
+  /** Where the oldest page read so far starts in the session file. Above 0, earlier turns can still be read. */
+  pagedFrom: number;
+  /** User prompts before the first page this window read: a rewind or fork counts from there. */
+  promptBase: number;
+  /** `entries` is the newest part of the conversation only, so it must not be saved over the cached transcript. */
+  windowed: boolean;
+  olderLoading: boolean;
+  /** The last read of an older page failed: stop loading on scroll, offer a retry. */
+  olderError: boolean;
   /** `agentConfigRev` this agent was started with; older ones restart when idle. */
   configRev: number;
   /** `catalogRev` this agent was started with, for agents that run on Patchbay's models. */
@@ -199,6 +220,12 @@ const emptyCode = (): CodeState => ({
   autoApproved: {},
   history: null,
   earlier: null,
+  older: [],
+  pagedFrom: 0,
+  promptBase: 0,
+  windowed: false,
+  olderLoading: false,
+  olderError: false,
   configRev: 0,
   catalogRev: 0,
   lastForegroundAt: null,
@@ -262,7 +289,7 @@ function handBack(prev: ComposerRestore | null, dropped: QueuedPrompt[], me: str
 
 /** Persist what the transcript shows, so the session renders before the agent replays it. */
 function saveTranscript(id: string, s: CodeState) {
-  if (s.entries.length === 0 || s.partial) return;
+  if (s.entries.length === 0 || s.partial || s.windowed) return;
   const earlier = s.earlier ?? undefined;
   let json = JSON.stringify({ v: 1, earlier, entries: s.entries, toolCalls: s.toolCalls });
   if (json.length > 3_500_000) {
@@ -296,6 +323,18 @@ async function loadTranscript(id: string): Promise<{ history: TranscriptPart | n
     return { history: null, earlier: null };
   }
 }
+
+/**
+ * The cards a page of stored history shows: its updates run through the reducer live events use,
+ * on an empty state, so they come out as `session/load` would have built them.
+ */
+function partFromUpdates(id: string, updates: AcpUpdate[]): TranscriptPart {
+  let s = emptyCode();
+  for (const update of updates) s = stepCodeEvent(id, s, { type: "update", update });
+  return { entries: s.entries, toolCalls: s.toolCalls };
+}
+
+let olderPageSeq = 0;
 
 /** Hide the context note Patchbay put before a prompt (see `handoff.rs`) when the agent replays it. */
 function withoutNote(text: string): string {
@@ -408,6 +447,13 @@ interface Store {
   conversations: Conversation[];
   activeConversationId: string | null;
   codeSessions: CodeSession[];
+  /**
+   * What the backend says each Code session is doing (`code_live`): the sidebar shows it for a
+   * session this window has no state of its own for, such as one still running in patchbayd
+   * from before the app was opened. Desktop and browser windows only.
+   */
+  codeLive: Record<string, CodeLive>;
+  refreshCodeLive: () => Promise<void>;
   activeCodeSessionId: string | null;
   /** Code sessions in split panes (left→right or top→bottom); empty when not split. `activeCodeSessionId` is the focused one. */
   panes: string[];
@@ -505,6 +551,8 @@ interface Store {
   applyMeshChat: (p: MeshChatEvent) => void;
   /** Show a session that is already running (here, or on another node) without restarting it. */
   attachAgent: (id: string) => Promise<void>;
+  /** Read the next older page of a Patchbay-agent session's history into `older`. */
+  loadOlderHistory: (id: string) => Promise<void>;
   /** Apply a `code_resume` snapshot: the turn's state and the end of calls no longer running. */
   applyCodeResume: (id: string, r: Extract<CodeResume, { mode: "snapshot" }>) => void;
 }
@@ -608,35 +656,6 @@ function noPending(entries: Entry[]): Entry[] {
   return entries.some((x) => x.kind === "user" && x.pending)
     ? entries.map((x) => (x.kind === "user" && x.pending ? { ...x, pending: false, waitFor: undefined } : x))
     : entries;
-}
-
-/**
- * Steered messages the agent has probably read: it takes one in before its next model request, so
- * once a tool call after the message has finished and the agent goes on, it is no longer waiting.
- * A message that came in while tool calls ran is read as soon as those finish and the agent goes
- * on: those calls sit above it in the transcript, so the rule above would only fire a whole step
- * later, long after the model has seen it. ACP says nothing when a steer is read, so this is a
- * guess from the transcript.
- */
-function readSteers(s: CodeState): CodeState {
-  if (!s.entries.some((x) => x.kind === "user" && x.pending)) return s;
-  const done = (id: string) => {
-    const status = s.toolCalls[id]?.status;
-    return status === undefined || status === "completed" || status === "failed";
-  };
-  let stepped = false;
-  let entries = s.entries;
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const x = entries[i];
-    if (x.kind === "tool") {
-      const status = s.toolCalls[x.id]?.status;
-      if (status === "completed" || status === "failed") stepped = true;
-    } else if (x.kind === "user" && x.pending && (stepped || (x.waitFor?.length && x.waitFor.every(done)))) {
-      if (entries === s.entries) entries = [...entries];
-      entries[i] = { ...x, pending: false, waitFor: undefined };
-    }
-  }
-  return entries === s.entries ? s : { ...s, entries };
 }
 
 function reduceUpdate(s: CodeState, u: AcpUpdate, agent: AgentId | undefined): CodeState {
@@ -1011,6 +1030,30 @@ function loadSidebarCollapsed(): boolean {
 let catalogKey: string | null = null;
 /** Counts session-list loads, so only the latest one's answer is kept. */
 let codeSessionsSeq = 0;
+let codeLiveSeq = 0;
+let codeLiveTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Ask the backend again what each session is doing, once a burst of events has settled. */
+function scheduleCodeLive() {
+  if (isRemoteApp() || codeLiveTimer !== null) return;
+  codeLiveTimer = setTimeout(() => {
+    codeLiveTimer = null;
+    void useStore.getState().refreshCodeLive();
+  }, 400);
+}
+
+/** The events after which a session's row can read differently: its turn or agent started or ended, or it asks. */
+const LIVE_EVENTS = new Set([
+  "status",
+  "sessionReady",
+  "userPrompt",
+  "promptDone",
+  "permission",
+  "permissionResolved",
+  "question",
+  "questionResolved",
+  "stalled",
+]);
 /** Same for the sidebar layout. */
 let sidebarLayoutSeq = 0;
 
@@ -1156,6 +1199,7 @@ export const useStore = create<Store>((set, get) => ({
   conversations: [],
   activeConversationId: null,
   codeSessions: [],
+  codeLive: {},
   sidebarLayout: null,
   activeCodeSessionId: null,
   panes: [],
@@ -1309,6 +1353,25 @@ export const useStore = create<Store>((set, get) => ({
     set({ codeSessions: list });
     syncPanes(list);
     backfillActivity();
+    scheduleCodeLive();
+  },
+  refreshCodeLive: async () => {
+    if (isRemoteApp()) return;
+    const seq = ++codeLiveSeq;
+    try {
+      const live = await api.codeLive();
+      if (seq !== codeLiveSeq) return;
+      // Same answer apart from timestamps: keep the object, so nothing re-renders for it.
+      const same = (a: CodeLive, b?: CodeLive) =>
+        !!b && a.status === b.status && a.busy === b.busy && !!a.stalled === !!b.stalled &&
+        a.permissions.join() === b.permissions.join() && (a.questions ?? []).join() === (b.questions ?? []).join();
+      const cur = get().codeLive;
+      const ids = Object.keys(live);
+      if (ids.length === Object.keys(cur).length && ids.every((id) => same(live[id], cur[id]))) return;
+      set({ codeLive: live });
+    } catch {
+      /* an older backend without the command: rows keep to this window's own state */
+    }
   },
   refreshSidebarLayout: async () => {
     const seq = ++sidebarLayoutSeq;
@@ -1512,7 +1575,13 @@ export const useStore = create<Store>((set, get) => ({
       if (last) lastPoint.set(id, last);
     };
     // Both go to the gateway: ask at once rather than one round trip after the other.
-    const attached = api.codeAttach(id);
+    // A running session may have gone on without this window (patchbayd kept it going while the
+    // app was closed), so ask for what happened since its last finished turn too. The phone app's
+    // own backend does that on its own.
+    // `history`: a Patchbay-agent session's turns come from its session file on the host, which
+    // holds turns that finished while no window was open, unlike the transcript a window saves.
+    // The phone app keeps to the saved transcript.
+    const attached = api.codeAttach(id, isRemoteApp() ? undefined : true, isRemoteApp() ? undefined : true);
     attached.catch(() => {});
     const { history, earlier } = await loadTranscript(id);
     let info;
@@ -1535,6 +1604,11 @@ export const useStore = create<Store>((set, get) => ({
     }
     const rev = get().agentConfigRev;
     const catalogRev = get().catalogRev;
+    // The host sent the newest turns itself: they are this agent's conversation, shown as live
+    // entries (not as a cached copy to be replayed over or moved to `earlier`), and what is above
+    // them is read on request.
+    const page = isRemoteApp() ? undefined : info.history;
+    const paged = page ? partFromUpdates(id, page.updates) : null;
     set((st) => ({
       code: {
         ...st.code,
@@ -1542,8 +1616,17 @@ export const useStore = create<Store>((set, get) => ({
           ...emptyCode(),
           configRev: rev,
           catalogRev,
-          history,
+          history: paged ? null : history,
           earlier,
+          ...(page && paged
+            ? {
+                entries: paged.entries,
+                toolCalls: paged.toolCalls,
+                pagedFrom: page.start,
+                promptBase: page.promptsBefore,
+                windowed: page.start > 0,
+              }
+            : {}),
           status: "ready",
           busy: info.busy,
           partial: !!info.partial,
@@ -1560,6 +1643,38 @@ export const useStore = create<Store>((set, get) => ({
       }));
     }
     finish(info.point);
+  },
+  loadOlderHistory: async (id) => {
+    const s = get().code[id];
+    if (!s || s.olderLoading || s.pagedFrom <= 0) return;
+    const from = s.pagedFrom;
+    const patch = (p: Partial<CodeState>) =>
+      set((st) => (st.code[id] && st.code[id].pagedFrom === from ? { code: { ...st.code, [id]: { ...st.code[id], ...p } } } : {}));
+    patch({ olderLoading: true, olderError: false });
+    try {
+      const page = await api.codeHistory(id, from);
+      if (!page) {
+        // Nothing to read (an older host, or no session file): what is shown is all there is.
+        patch({ olderLoading: false, pagedFrom: 0 });
+        get().setToast("Earlier messages aren't available here");
+        return;
+      }
+      const part = partFromUpdates(id, page.updates);
+      set((st) => {
+        const cur = st.code[id];
+        // The session restarted (or was reloaded) meanwhile: this page belongs to a view that is gone.
+        if (!cur || cur.pagedFrom !== from) return {};
+        return {
+          code: {
+            ...st.code,
+            [id]: { ...cur, older: [{ id: ++olderPageSeq, ...part }, ...cur.older], pagedFrom: page.start, olderLoading: false },
+          },
+        };
+      });
+    } catch (e) {
+      patch({ olderLoading: false, olderError: true });
+      get().setToast(errorText(e));
+    }
   },
 }));
 
@@ -1658,6 +1773,7 @@ export function codeEventArrived(env: CodeEnvelope) {
     const missed = last ? (last.s === pt.s ? pt.n > last.n + 1 : pt.n > 1) : false;
     if (missed) void resyncCode(id, last);
   }
+  if (LIVE_EVENTS.has(env.event.type)) scheduleCodeLive();
   const held = attaching.get(id);
   if (held) {
     held.push({ e: env.event, pt });

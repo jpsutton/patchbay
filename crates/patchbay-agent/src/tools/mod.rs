@@ -18,6 +18,7 @@ pub mod misc;
 pub mod notebook;
 pub mod search;
 pub mod shell;
+pub mod shell_lint;
 pub mod skill;
 pub mod task;
 pub mod web;

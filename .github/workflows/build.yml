@@ -105,6 +105,12 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper/dists
+          key: gradle-${{ hashFiles('remote/src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
       - name: Android NDK
         run: |
           sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
@@ -124,9 +130,32 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build:remote
+      # services.gradle.org occasionally 504s; the wrapper does not retry the download.
+      - name: Prefetch Gradle distribution
+        working-directory: remote/src-tauri/gen/android
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5 6; do
+            if ./gradlew --version --quiet; then
+              exit 0
+            fi
+            echo "gradle prefetch attempt ${attempt} failed; waiting"
+            sleep $((attempt * 15))
+          done
+          exit 1
       - name: Build the APK
         working-directory: remote
-        run: ../node_modules/.bin/tauri android build --apk --target aarch64 --ci --config '{"build":{"beforeBuildCommand":""}}'
+        run: |
+          set -euo pipefail
+          # Gradle/Kotlin artifact hosts (services.gradle.org, github.com) occasionally 504.
+          for attempt in 1 2 3 4 5; do
+            if ../node_modules/.bin/tauri android build --apk --target aarch64 --ci --config '{"build":{"beforeBuildCommand":""}}'; then
+              exit 0
+            fi
+            echo "android build attempt ${attempt} failed; waiting"
+            sleep $((attempt * 30))
+          done
+          exit 1
       - uses: actions/upload-artifact@v4
         with:
           name: patchbay-android

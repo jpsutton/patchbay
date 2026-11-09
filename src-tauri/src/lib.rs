@@ -1983,15 +1983,71 @@ fn code_attach_local(state: &AppState, id: &str) -> serde_json::Value {
     serde_json::json!({ "running": running, "busy": state.code.is_busy(id), "events": events })
 }
 
-async fn code_attach(state: &AppState, id: String) -> CmdResult<serde_json::Value> {
+/// `catch_up`: also bring what happened since the session's last finished turn. A window opening
+/// a session whose agent kept running without it (the app was closed, or reloaded, while patchbayd
+/// went on) needs that, as a window on another computer always gets it. `history`: the window
+/// reads a Patchbay-agent session's older turns from its session file (see `code_history`), so
+/// the answer carries the newest page instead of leaving that to the window's saved transcript.
+async fn code_attach(
+    state: &AppState,
+    id: String,
+    catch_up: Option<bool>,
+    history: Option<bool>,
+) -> CmdResult<serde_json::Value> {
     if let Some(host) = remote_host(state, &id)? {
         if !state.mesh.connected(&host) {
             return Ok(serde_json::json!({ "running": false, "busy": false, "events": [], "offline": true }));
         }
-        let p = serde_json::json!({ "id": id, "catchUp": true });
+        let p = serde_json::json!({ "id": id, "catchUp": true, "history": history == Some(true) });
         return Ok(state.mesh.rpc(&host, "code.attach", p).await?);
     }
+    if catch_up == Some(true) {
+        let st = state.clone();
+        let with_history = history == Some(true);
+        return Ok(tokio::task::spawn_blocking(move || code_attach_catch_up(&st, &id, with_history)).await?);
+    }
     Ok(code_attach_local(state, &id))
+}
+
+/// How many of a Patchbay-agent session's newest prompts one page of its history holds.
+const HISTORY_PROMPTS: usize = 30;
+
+/// The agent session id of a session run by Patchbay's own agent, which keeps the whole
+/// conversation on disk (`agent/sessions/<id>.jsonl`), written as it goes with or without a window.
+fn native_session(state: &AppState, id: &str) -> Option<String> {
+    let s = state.db.get_code_session(id).ok().flatten()?;
+    (s.agent == "patchbay").then_some(s.acp_session_id).flatten()
+}
+
+/// One page of that file (`patchbay_agent::history_window`), as JSON; None when the session isn't
+/// the native agent's or has no file.
+fn native_history(state: &AppState, id: &str, before: Option<usize>, prompts: usize, in_flight: bool) -> Option<serde_json::Value> {
+    let sid = native_session(state, id)?;
+    let page = patchbay_agent::history_window(&state.data_dir, &sid, before, prompts, in_flight)?;
+    serde_json::to_value(page).ok()
+}
+
+/// A page of a Patchbay-agent session's stored history, for a window that read the newest turns
+/// when it attached (`history` in `code_attach`'s answer) and the user scrolled back. `before` is
+/// the `start` of the page it holds. Null when the session has nothing to read: the window keeps
+/// what it has.
+async fn code_history(
+    state: &AppState,
+    id: String,
+    before: Option<usize>,
+    prompts: Option<usize>,
+) -> CmdResult<Option<serde_json::Value>> {
+    if let Some(host) = remote_host(state, &id)? {
+        if !state.mesh.connected(&host) {
+            return Ok(None);
+        }
+        let p = serde_json::json!({ "id": id, "before": before, "prompts": prompts });
+        let v = state.mesh.rpc(&host, "code.history", p).await?;
+        return Ok(if v.is_null() { None } else { Some(v) });
+    }
+    let st = state.clone();
+    let prompts = prompts.unwrap_or(HISTORY_PROMPTS);
+    Ok(tokio::task::spawn_blocking(move || native_history(&st, &id, before, prompts, false)).await?)
 }
 
 fn has_transcript(state: &AppState, id: &str) -> bool {
@@ -2006,18 +2062,33 @@ fn has_transcript(state: &AppState, id: &str) -> bool {
 ///
 /// `partial`: part of the turn is gone from the ring, so the window must not save its view over
 /// the saved transcript. With no saved transcript there is nothing to lose, and it may.
-fn code_attach_catch_up(state: &AppState, id: &str) -> serde_json::Value {
+fn code_attach_catch_up(state: &AppState, id: &str, with_history: bool) -> serde_json::Value {
     use serde_json::{Value, json};
     let mut answer = code_attach_local(state, id);
+    // A Patchbay-agent session keeps the whole conversation in its session file, so for the
+    // window that reads it (`with_history`) the saved transcript does not matter: the file gives
+    // the newest turns, and the ring only has to give the turn still running.
+    let native = with_history && native_session(state, id).is_some();
     let has = has_transcript(state, id);
-    let (tail, covered, point) = state.mesh.code_catch_up(id, has);
+    let (mut tail, mut covered, mut point) = state.mesh.code_catch_up(id, native || has);
+    let mut history = None;
+    if native {
+        let in_flight = state.code.is_busy(id) && covered && !tail.is_empty();
+        history = native_history(state, id, None, HISTORY_PROMPTS, in_flight);
+        if history.is_some() && !in_flight {
+            // Nothing the file lacks: whatever the ring holds is in the page already.
+            tail.clear();
+        } else if history.is_none() {
+            (tail, covered, point) = state.mesh.code_catch_up(id, has);
+        }
+    }
     // The attach events already bring the ready state, usage and open requests.
     let open: std::collections::HashSet<String> = answer["events"]
         .as_array()
         .map(|a| a.iter().filter_map(|e| e["requestId"].as_str().map(str::to_owned)).collect())
         .unwrap_or_default();
     let mut events: Vec<Value> = answer["events"].as_array().cloned().unwrap_or_default();
-    if !covered && !tail.is_empty() {
+    if !covered && !tail.is_empty() && history.is_none() {
         events.push(json!({ "type": "notice", "message": "Earlier output from this turn isn't available here" }));
     }
     for env in tail {
@@ -2035,7 +2106,10 @@ fn code_attach_catch_up(state: &AppState, id: &str) -> serde_json::Value {
     }
     answer["events"] = Value::Array(events);
     answer["point"] = json!(point);
-    answer["partial"] = json!(!covered && has);
+    answer["partial"] = json!(!covered && has && history.is_none());
+    if let Some(h) = history {
+        answer["history"] = h;
+    }
     answer
 }
 
@@ -2085,6 +2159,14 @@ async fn code_resume(
     }
     let point = point.and_then(|p| serde_json::from_value(p).ok());
     Ok(code_resume_local(state, &id, point, &running))
+}
+
+/// What the session list shows for each Code session: whether its agent runs, is mid-turn or waits
+/// on the user. A window that has not opened a session cannot know this from its own events, and a
+/// window opened while patchbayd kept agents running has seen none of theirs.
+async fn code_live(state: &AppState) -> CmdResult<std::collections::HashMap<String, mesh::remote::Live>> {
+    let sessions = state.db.list_code_sessions()?;
+    Ok(gateway::live_map(state, &sessions))
 }
 
 async fn code_is_running(state: &AppState, id: String) -> CmdResult<bool> {
@@ -2983,7 +3065,14 @@ impl mesh::RpcHandler for MeshRpc {
         match method.as_str() {
             "code.start" => code_start_local(state, id()?).await.map(|_| Value::Null),
             "code.is_running" => Ok(json!(state.code.is_running(&id()?))),
-            "code.attach" if p["catchUp"] == true => Ok(code_attach_catch_up(state, &id()?)),
+            "code.attach" if p["catchUp"] == true => Ok(code_attach_catch_up(state, &id()?, p["history"] == true)),
+            "code.history" => {
+                let id = id()?;
+                ensure_local_host(state, &id)?;
+                let before = p["before"].as_u64().map(|n| n as usize);
+                let prompts = p["prompts"].as_u64().map_or(HISTORY_PROMPTS, |n| n as usize);
+                Ok(native_history(state, &id, before, prompts, false).unwrap_or(Value::Null))
+            }
             "code.attach" => Ok(code_attach_local(state, &id()?)),
             "code.save_transcript" => {
                 let id = id()?;

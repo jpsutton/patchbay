@@ -864,6 +864,50 @@ function runRow(r: Run, key: string, dim: boolean, one: (e: Entry, i: number) =>
     : { key: `${key}${r.i}`, dim, render: () => one(r.e, r.i) };
 }
 
+/**
+ * The top row of a transcript that has more history on the host. It loads the next page when it
+ * scrolls into view, so reading back just keeps going, and it offers a button for a failed read.
+ */
+function LoadEarlier({
+  loading,
+  failed,
+  onLoad,
+  scroller,
+}: {
+  loading: boolean;
+  failed: boolean;
+  onLoad: () => void;
+  scroller: HTMLElement | null;
+}) {
+  const box = useRef<HTMLDivElement>(null);
+  const latest = useRef(onLoad);
+  latest.current = onLoad;
+  useEffect(() => {
+    const el = box.current;
+    if (!el || !scroller || loading || failed) return;
+    const io = new IntersectionObserver((entries) => entries.some((x) => x.isIntersecting) && latest.current(), {
+      root: scroller,
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [scroller, loading, failed]);
+  return (
+    <div ref={box} className="flex justify-center py-1 text-[12px] text-faint">
+      {failed ? (
+        <button className="rounded-md px-2 py-1 hover:bg-panel-2 hover:text-fg" onClick={onLoad}>
+          Couldn't load earlier messages. Try again
+        </button>
+      ) : loading ? (
+        "Loading earlier messages…"
+      ) : (
+        <button className="rounded-md px-2 py-1 hover:bg-panel-2 hover:text-fg" onClick={onLoad}>
+          Show earlier messages
+        </button>
+      )}
+    </div>
+  );
+}
+
 const STATUS = {
   added: { letter: "A", label: "Added", tone: "text-ok" },
   modified: { letter: "M", label: "Modified", tone: "text-accent-ink" },
@@ -1032,8 +1076,17 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
       return;
     }
     api.codeIsRunning(activeId).then((running) => {
-      // A running agent without UI state (e.g. after a reload) is restarted so history replays.
-      if (!running || !cur) start(activeId);
+      if (!running) {
+        start(activeId);
+        return;
+      }
+      // A running agent this window has no real state for: a reload, or the app reopened on a
+      // patchbayd that kept the agent going. Live events may already have made a placeholder
+      // (status "idle", entries streaming in) that nothing would ever mark ready, leaving the
+      // composer disabled until the user restarted the agent. Attach rather than start: it
+      // replays `ready` and what the turn has done so far, and a start would end the turn.
+      const now = useStore.getState().code[activeId];
+      if (!now || now.status === "idle") attach(activeId);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, meshLoaded]);
@@ -1043,6 +1096,32 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     () => (state?.earlier ? runsOf(state.earlier.entries, { toolCalls: state.earlier.toolCalls, permissions: [] }) : []),
     [state?.earlier],
   );
+  const olderRuns = useMemo(
+    () =>
+      (state?.older ?? []).map((p) => ({
+        page: p,
+        runs: runsOf(p.entries, { toolCalls: p.toolCalls, permissions: [] }, session?.agent),
+      })),
+    [state?.older, session?.agent],
+  );
+  const loadOlder = useStore((st) => st.loadOlderHistory);
+  // What the scroller measured just before an older page went in above, so the reader's place holds.
+  const olderAnchor = useRef<{ height: number; top: number } | null>(null);
+  const askOlder = useCallback(() => {
+    const el = sticky.el;
+    if (el) olderAnchor.current = { height: el.scrollHeight, top: el.scrollTop };
+    if (activeId) void loadOlder(activeId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sticky.el, activeId, loadOlder]);
+  useLayoutEffect(() => {
+    const a = olderAnchor.current;
+    const el = sticky.el;
+    if (!a || !el || !state || state.olderLoading) return;
+    olderAnchor.current = null;
+    // New rows went in above the viewport: move down by what they added.
+    el.scrollTop = a.top + (el.scrollHeight - a.height);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state?.older.length, state?.olderLoading]);
   const historyRuns = useMemo(
     () =>
       state?.history
@@ -1428,7 +1507,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     if (!activeId || !s) return false;
     const entry = s.entries[entryIndex];
     if (entry?.kind !== "user") return false;
-    const ordinal = s.entries.slice(0, entryIndex).filter((x) => x.kind === "user").length;
+    const ordinal = s.promptBase + s.entries.slice(0, entryIndex).filter((x) => x.kind === "user").length;
     const laterTurns = s.entries.slice(entryIndex + 1).filter((x) => x.kind === "user").length;
     const { ok, checked } = await askConfirm({
       title: "Resend edited message?",
@@ -1463,7 +1542,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     if (!activeId || !s) return;
     const entry = entryIndex == null ? null : s.entries[entryIndex];
     if (entry && entry.kind !== "user") return;
-    const ordinal = entryIndex == null ? null : s.entries.slice(0, entryIndex).filter((x) => x.kind === "user").length;
+    const ordinal = entryIndex == null ? null : s.promptBase + s.entries.slice(0, entryIndex).filter((x) => x.kind === "user").length;
     try {
       const made = await api.codeFork(activeId, ordinal, entry?.text ?? "");
       if (entry) seedDraft(`code:${made.id}`, entry.text, entry.attachments ?? []);
@@ -1503,6 +1582,25 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
       );
     }
     rows.push({ key: "earlier-end", dim: true, render: () => <div className="border-t border-line" /> });
+  }
+  if (s && s.pagedFrom > 0) {
+    rows.push({
+      key: "older-more",
+      dim: true,
+      render: () => (
+        <LoadEarlier loading={s.olderLoading} failed={s.olderError} onLoad={askOlder} scroller={sticky.el} />
+      ),
+    });
+  }
+  for (const { page, runs } of olderRuns) {
+    const calls = page.toolCalls;
+    for (const r of runs) {
+      rows.push(
+        runRow(r, `o${page.id}_`, false, (e, i) => (
+          <EntryView key={i} e={e} i={i} tc={e.kind === "tool" ? calls[e.id] : undefined} cwd={session.cwd} editing={false} canEdit={false} speechId={`${session.id}:older${page.id}:${i}`} settled sessionId={session.id} />
+        )),
+      );
+    }
   }
   if (s?.history) {
     const calls = s.history.toolCalls;

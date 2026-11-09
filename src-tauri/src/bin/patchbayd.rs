@@ -19,6 +19,7 @@ Options:
   --listen <addr>    Web UI address (default: 127.0.0.1:4420)
   --ui-dir <dir>     Built frontend to serve (default: found next to the binary)
   --no-web           Don't serve the web UI
+  -V, --version      Show the version
   -h, --help         Show this help
 
 Commands:
@@ -75,6 +76,10 @@ fn parse_args() -> Result<Args> {
             word if a.mesh.is_some() && !word.starts_with('-') => a.mesh.as_mut().unwrap().push(word.to_owned()),
             "-h" | "--help" => {
                 print!("{USAGE}");
+                std::process::exit(0);
+            }
+            "-V" | "--version" => {
+                println!("patchbayd {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             other => bail!("unknown argument {other}\n\n{USAGE}"),

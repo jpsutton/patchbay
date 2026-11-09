@@ -3,6 +3,7 @@ import type { Activity } from "./activity";
 import type { UpdateInfo } from "./update";
 import type { SidebarEntry } from "./sidebarLayout";
 import { isRemoteApp } from "./platform";
+import type { CodeLive } from "./sessionLive";
 
 export type ProviderKind = "openai_chat" | "openai_responses" | "anthropic" | "gemini";
 export type AuthMode = "api_key" | "claude_login";
@@ -479,6 +480,25 @@ export interface CodeAttach {
    * must not be saved over it.
    */
   partial?: boolean;
+  /**
+   * A Patchbay-agent session's newest turns, read from its session file on the host. Sent when the
+   * window asked for `history`; it replaces the saved transcript, which a window writes only at
+   * the end of a turn and so lacks turns that ran while none was open. `events` then carry only
+   * the turn still running.
+   */
+  history?: CodeHistoryPage;
+}
+
+/** A page of a Patchbay-agent session's stored history (`code_history`, or `history` in an attach). */
+export interface CodeHistoryPage {
+  /** What the page's entries show, oldest first: the updates `session/load` would replay. */
+  updates: AcpUpdate[];
+  /** Where the page starts among the session's entries; 0 is the start of the conversation. */
+  start: number;
+  end: number;
+  total: number;
+  /** User prompts before the page, which a rewind or fork counts from. */
+  promptsBefore: number;
 }
 
 /** What `code_resume` answers. */
@@ -1163,6 +1183,8 @@ export const api = {
   codeAutoTitle: (id: string) => invoke<string>("code_auto_title", { id }),
   codeStart: (id: string) => invoke<void>("code_start", { id }),
   codeIsRunning: (id: string) => invoke<boolean>("code_is_running", { id }),
+  /** What the session list shows for every Code session: agent running, mid-turn, waiting on you. */
+  codeLive: () => invoke<Record<string, CodeLive>>("code_live"),
   codeStop: (id: string) => invoke<void>("code_stop", { id }),
   /**
    * `mentions`: absolute paths of @-mentioned project files. `promptId` names the prompt in the
@@ -1246,7 +1268,17 @@ export const api = {
     invoke<void>("code_permission_respond", { requestId, optionId, id: sessionId }),
   codeQuestionRespond: (requestId: string, answers: AgentQuestionAnswer[], sessionId?: string) =>
     invoke<void>("code_question_respond", { requestId, answers, id: sessionId }),
-  codeAttach: (id: string) => invoke<CodeAttach>("code_attach", { id }),
+  /**
+   * `catchUp`: also the events since the session's last finished turn, which the saved transcript
+   * does not hold yet. For a window opening a session that kept running without it. `history`:
+   * this window reads a Patchbay-agent session's turns from the host's session file (the answer's
+   * `history`, then `codeHistory` for older pages).
+   */
+  codeAttach: (id: string, catchUp?: boolean, history?: boolean) =>
+    invoke<CodeAttach>("code_attach", { id, catchUp, history }),
+  /** The page of stored history before the one starting at `before`; null when there is none to read. */
+  codeHistory: (id: string, before: number, prompts?: number) =>
+    invoke<CodeHistoryPage | null>("code_history", { id, before, prompts }),
   /**
    * Catch up on events this window missed (see `code_resume` in lib.rs): from `point`, or a fresh
    * snapshot with the status of the tool calls in `running`.
