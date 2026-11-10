@@ -375,8 +375,11 @@ export interface Team {
   id: string; slug: string; templateId: string; cwd: string; idPrefix: string; prBase: string;
   worktreeRoot: string; projectRules: string; exportDir: string; createdAt: number; archivedAt: number | null;
 }
+export interface TeamMember {
+  teamId: string; sessionId: string; seat: string; roleId: string; status: string; itemId: string | null;
+}
 export interface TeamMemberRow {
-  member: { teamId: string; sessionId: string; seat: string; roleId: string; status: string; itemId: string | null };
+  member: TeamMember;
   role: string | null; title: string | null; agent: string | null; model: string | null;
   /** running / waiting / stalled / idle / stopped; null for a session on another computer. */
   activity: string | null;
@@ -1396,7 +1399,7 @@ export const api = {
     invoke<TeamDecision>("team_decision_answer", { teamId, decisionId, answer }),
   teamAttach: (teamId: string, sessionId: string, seat: string) => invoke<unknown>("team_attach", { teamId, sessionId, seat }),
   teamDetach: (teamId: string, sessionId: string) => invoke<void>("team_detach", { teamId, sessionId }),
-  teamRestartMember: (teamId: string, sessionId: string) => invoke<unknown>("team_restart_member", { teamId, sessionId }),
+  teamRestartMember: (teamId: string, sessionId: string) => invoke<TeamMember>("team_restart_member", { teamId, sessionId }),
   teamArchive: (teamId: string) => invoke<void>("team_archive", { teamId }),
 
   listPrompts: () => invoke<Prompt[]>("list_prompts"),

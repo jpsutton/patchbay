@@ -90,7 +90,10 @@ export async function restartTeamMember(
     throw new Error(`Team not found for session ${sessionId}`);
   }
 
-  await api.teamRestartMember(resolvedTeamId, sessionId);
+  const member = await api.teamRestartMember(resolvedTeamId, sessionId);
+  if (member?.sessionId) {
+    useStore.getState().swapPaneSession(sessionId, member.sessionId);
+  }
   window.dispatchEvent(new Event("teams-changed"));
   void useStore.getState().refreshCodeSessions().catch(() => {});
   return true;

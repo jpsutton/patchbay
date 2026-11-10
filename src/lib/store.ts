@@ -529,6 +529,7 @@ interface Store {
   /** Move focus to the next or previous pane. */
   cyclePane: (delta: 1 | -1) => void;
   swapPanes: () => void;
+  swapPaneSession: (from: string, to: string) => void;
   insertPaneAt: (id: string, atIndex: number) => void;
   replacePaneAt: (id: string, atIndex: number) => void;
   movePane: (fromIdx: number, toIdx: number) => void;
@@ -1444,6 +1445,11 @@ export const useStore = create<Store>((set, get) => ({
   closePane: (id) => applyPanes(paneLogic.closePane(paneState(), id)),
   cyclePane: (delta) => applyPanes(paneLogic.cyclePane(paneState(), delta)),
   swapPanes: () => applyPanes(paneLogic.swapPanes(paneState())),
+  swapPaneSession: (from, to) => {
+    const cur = paneState();
+    const next = paneLogic.swapPane(cur, from, to);
+    if (next !== cur) applyPanes(next);
+  },
   insertPaneAt: (id, atIndex) => applyPanes(paneLogic.insertPaneAt(paneState(), id, atIndex, PANE_MAX)),
   replacePaneAt: (id, atIndex) => applyPanes(paneLogic.replacePaneAt(paneState(), id, atIndex)),
   movePane: (fromIdx, toIdx) => applyPanes(paneLogic.movePane(paneState(), fromIdx, toIdx)),

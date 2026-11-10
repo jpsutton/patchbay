@@ -1817,7 +1817,40 @@ export function install() {
         }
         case "team_attach": fakeMembers.push({ teamId: a.teamId as string, sessionId: a.sessionId as string, seat: a.seat as string, roleId: fakeTemplate.seats.find((s) => s.seat === a.seat)!.roleId, status: "active", itemId: null }); return null;
         case "team_detach": fakeMembers = fakeMembers.filter((m) => !(m.teamId === a.teamId && m.sessionId === a.sessionId)); return null;
-        case "team_restart_member": return null;
+        case "team_restart_member": {
+          const oldSessionId = a.sessionId as string;
+          const oldSession = db.code.find((c) => c.id === oldSessionId);
+          const newSessionId = id();
+          const newSession: CodeSession = {
+            id: newSessionId,
+            cwd: oldSession?.cwd ?? "/",
+            acpSessionId: null,
+            title: oldSession ? `${oldSession.title} (restarted)` : "Restarted session",
+            modelRef: oldSession?.modelRef ?? null,
+            pinned: false,
+            createdAt: now(),
+            updatedAt: now(),
+            activity: null,
+            agent: oldSession?.agent ?? "patchbay",
+            agentModel: oldSession?.agentModel ?? null,
+            hostNode: oldSession?.hostNode ?? ME,
+            epoch: 0,
+            archivedAt: null,
+            permissionMode: oldSession?.permissionMode ?? "default",
+          };
+          if (oldSession) {
+            oldSession.archivedAt = now();
+          }
+          db.code.push(newSession);
+          const member = fakeMembers.find((m) => m.teamId === a.teamId && m.sessionId === oldSessionId);
+          if (member) {
+            member.sessionId = newSessionId;
+            return member;
+          }
+          const fresh = { teamId: a.teamId as string, sessionId: newSessionId, seat: "worker", roleId: fakeRoles[0]?.id ?? "r1", status: "active", itemId: null };
+          fakeMembers.push(fresh);
+          return fresh;
+        }
         case "team_archive": fakeTeams = fakeTeams.filter((t) => t.id !== a.teamId); return null;
         case "team_detail": {
           const roles = fakeRoles;

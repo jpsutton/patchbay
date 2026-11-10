@@ -113,6 +113,19 @@ export function swapPanes(s: PaneState): PaneState {
   return { panes: [...s.panes].reverse(), active: s.active };
 }
 
+/**
+ * Replace each instance of `from` in `s.panes` with `to`, and update `active` if it matches `from`.
+ * Returns `s` unchanged if `from` is not in `s.panes` and not equal to `s.active`.
+ */
+export function swapPane(s: PaneState, from: string, to: string): PaneState {
+  const hasPane = s.panes.includes(from);
+  const isActive = s.active === from;
+  if (!hasPane && !isActive) return s;
+  const panes = hasPane ? s.panes.map((p) => (p === from ? to : p)) : s.panes;
+  const active = isActive ? to : s.active;
+  return { panes, active };
+}
+
 /** Insert a pane at a specific index up to `maxPanes`. */
 export function insertPaneAt(s: PaneState, id: string, atIndex: number, maxPanes: number = MAX_PANES): PaneState {
   if (s.panes.includes(id) || s.panes.length >= maxPanes) return s;
