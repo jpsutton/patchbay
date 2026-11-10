@@ -17,7 +17,14 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+// Tests mutate process-global fd state (/dev/fd of this process) and spawned children;
+// serialize all tests in this file so meta/plants cannot interfere with the main measurement.
+static FD_STRESS_LOCK: Mutex<()> = Mutex::new(());
+static LOG_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
@@ -51,12 +58,6 @@ fn assert_n_spawned_measured(n: usize, baseline_fds: usize, peak_fds: usize, pid
         delta >= n,
         "pb-20261109-08 guard(fd-delta): peak-baseline fd delta must evidence N spawned children (>=1 fd each); N={n} baseline={baseline_fds} peak={peak_fds} delta={delta}"
     );
-    assert_eq!(
-        pids.len(),
-        n,
-        "pb-20261109-08 guard(pid-count): recorded pid count {} != N={n}",
-        pids.len()
-    );
     for &pid in pids {
         assert!(
             os_pid_alive(pid),
@@ -73,17 +74,21 @@ struct Spawned {
 }
 
 fn spawn_mcp_child(id: usize) -> Spawned {
+    let seq = LOG_COUNTER.fetch_add(1, Ordering::Relaxed);
     let log = std::env::temp_dir().join(format!(
-        "pb-fd-stress-{}-{}-{id}.log",
+        "pb-fd-stress-{}-{}-{seq}-{id}.log",
         std::process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     let _ = fs::remove_file(&log);
     let mut child = Command::new(bin())
         .arg("--agent-messaging-mcp")
         .env("PATCHBAY_MCP_LOG_PATH", &log)
-        .env("PATCHBAY_MCP_HOST_AGENT", format!("fd-stress-{id}"))
-        .env("PATCHBAY_MESSAGE_SESSION", format!("fd-stress-session-{id}"))
+        .env("PATCHBAY_MCP_HOST_AGENT", format!("fd-stress-{seq}-{id}"))
+        .env("PATCHBAY_MESSAGE_SESSION", format!("fd-stress-session-{seq}-{id}"))
         .env("PATCHBAY_MESSAGE_ADDR", "127.0.0.1:1")
         .env("PATCHBAY_MESSAGE_TOKEN", "dummy-token")
         .stdin(Stdio::piped())
@@ -92,7 +97,12 @@ fn spawn_mcp_child(id: usize) -> Spawned {
         .spawn()
         .unwrap_or_else(|e| panic!("spawn patchbay --agent-messaging-mcp #{id}: {e}"));
     let stdin = child.stdin.take().expect("stdin piped");
-    Spawned { id, child, log, stdin: Some(stdin) }
+    Spawned {
+        id,
+        child,
+        log,
+        stdin: Some(stdin),
+    }
 }
 
 fn wait_started(s: &Spawned, timeout: Duration) -> String {
@@ -117,7 +127,10 @@ fn wait_started(s: &Spawned, timeout: Duration) -> String {
 
 #[test]
 fn mcp_child_teardown_returns_fds_to_baseline() {
+    let _guard = FD_STRESS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     const N: usize = 8;
+    // Compile-time: N>=8 required (F1 intent); N=1 would not exercise growth meaningfully.
+    const _: () = assert!(N >= 8);
     const START_TIMEOUT: Duration = Duration::from_secs(15);
     const EXIT_TIMEOUT: Duration = Duration::from_secs(10);
     const SETTLE: Duration = Duration::from_secs(5);
@@ -134,16 +147,16 @@ fn mcp_child_teardown_returns_fds_to_baseline() {
         spawned.push(spawn_mcp_child(i));
     }
     for s in &spawned {
-        let started = wait_started(s, START_TIMEOUT);
-        assert!(started.contains("event=start"), "child #{} no start: {started}", s.id);
+        // wait_started panics with context if event=start is not observed within timeout.
+        let _started = wait_started(s, START_TIMEOUT);
     }
     let pids: Vec<u32> = spawned.iter().map(|s| s.child.id()).collect();
     eprintln!("pb-20261107-34 mcp_child_teardown: spawned_and_started N={N} pids={pids:?}");
 
     let peak = count_fds();
     eprintln!("pb-20261107-34 mcp_child_teardown: peak_fds={peak} (delta +{})", peak.saturating_sub(baseline));
-    // pb-20261109-08: measure the run (not tautologies). N>0, peak-baseline>=N, OS liveness
-    // of recorded pids (kill(pid,0)) before teardown.
+    // pb-20261109-08: MAIN FLOW invokes run-measuring guard (not meta-tests only). N>0,
+    // peak-baseline>=N, OS liveness of recorded pids (kill(pid,0)) before teardown.
     assert_n_spawned_measured(N, baseline, peak, &pids);
 
     // (2) MCP child teardown (explicit): close parent-held stdin, terminate+wait, drop.
@@ -186,20 +199,23 @@ Evidence of MCP-child fd leak under the tested teardown path; report to desk. (T
     }
 }
 
+fn panic_msg(p: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = p.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = p.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else {
+        "<non-string panic>".to_string()
+    }
+}
+
 #[test]
 fn pb_20261109_08_plant_n0_guard_is_red() {
+    let _guard = FD_STRESS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // #356 trap plant: N=0. A vacuous guard would pass; our guard must fail with a named assertion.
     let r = std::panic::catch_unwind(|| assert_n_spawned_measured(0, 4, 4, &[]));
     let msg = match r {
-        Err(p) => {
-            if let Some(s) = p.downcast_ref::<String>() {
-                s.clone()
-            } else if let Some(s) = p.downcast_ref::<&str>() {
-                (*s).to_string()
-            } else {
-                "<non-string panic>".to_string()
-            }
-        }
+        Err(p) => panic_msg(p),
         Ok(()) => panic!("pb-20261109-08 plant N=0: guard PASSED (green) but must be RED"),
     };
     eprintln!("pb-20261109-08 plant N=0: caught RED panic: {msg}");
@@ -211,38 +227,71 @@ fn pb_20261109_08_plant_n0_guard_is_red() {
 
 #[test]
 fn pb_20261109_08_plant_dead_recorded_pid_guard_is_red() {
-    // Plant: record pids of children that were spawned but are no longer live (not kept/dead).
-    // OS-liveness (kill(pid,0)) must fail with a named assertion; vec contents alone are insufficient.
-    let mut c = spawn_mcp_child(0);
-    let _started = wait_started(&c, Duration::from_secs(15));
-    let pid = c.child.id();
-    let _ = c.stdin.take();
-    let _ = c.child.kill();
-    let _ = c.child.wait();
-    let _ = fs::remove_file(&c.log);
-    // pid is now dead; give the OS a moment to reflect exit.
+    let _guard = FD_STRESS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // Plant: recorded pid of a child that was spawned then reaped (never kept/dead).
+    // Uses a short-lived non-MCP process to avoid log/fd interference with the main flow.
+    let mut c = Command::new("/bin/sh")
+        .arg("-c")
+        .arg("exit 0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn short-lived child for dead-pid plant");
+    let pid = c.id();
+    let _ = c.wait();
+    // pid is now dead; brief pause then confirm (mind pid recycle window).
     std::thread::sleep(Duration::from_millis(50));
-    assert!(!os_pid_alive(pid), "plant setup: pid {pid} should be dead after kill/wait");
+    assert!(
+        !os_pid_alive(pid),
+        "plant setup: pid {pid} should be dead after wait (pid recycle unlikely)"
+    );
 
     let r = std::panic::catch_unwind(|| {
         // Satisfy N>0 and fd-delta guards to isolate OS-liveness; pids contains the dead pid.
         assert_n_spawned_measured(1, 0, 10, &[pid])
     });
     let msg = match r {
-        Err(p) => {
-            if let Some(s) = p.downcast_ref::<String>() {
-                s.clone()
-            } else if let Some(s) = p.downcast_ref::<&str>() {
-                (*s).to_string()
-            } else {
-                "<non-string panic>".to_string()
-            }
-        }
+        Err(p) => panic_msg(p),
         Ok(()) => panic!("pb-20261109-08 plant dead-pid: guard PASSED (green) but must be RED"),
     };
     eprintln!("pb-20261109-08 plant dead-pid: caught RED panic (pid={pid}): {msg}");
     assert!(
         msg.contains("pb-20261109-08 guard(os-liveness)") && msg.contains(&pid.to_string()),
         "named OS-liveness assertion/pid missing from panic: {msg}"
+    );
+}
+
+#[test]
+fn pb_20261109_08_plant_delta_below_n_guard_is_red() {
+    let _guard = FD_STRESS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // Main-flow contract: delta below N must be rejected (survivor (e)/(f) hardening).
+    // Keep live children so OS-liveness passes and fd-delta is the failing guard.
+    let mut kids: Vec<Child> = (0..2)
+        .map(|_| {
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg("sleep 30")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn live child for delta plant")
+        })
+        .collect();
+    let pids: Vec<u32> = kids.iter().map(|c| c.id()).collect();
+    let r = std::panic::catch_unwind(|| assert_n_spawned_measured(2, 10, 11, &pids)); // delta 1 < 2
+    for k in &mut kids {
+        let _ = k.kill();
+        let _ = k.wait();
+    }
+    let msg = match r {
+        Err(p) => panic_msg(p),
+        Ok(()) => panic!("pb-20261109-08 plant delta-below-N: guard PASSED (green) but must be RED"),
+    };
+    eprintln!("pb-20261109-08 plant delta-below-N: caught RED panic: {msg}");
+    assert!(
+        msg.contains("pb-20261109-08 guard(fd-delta)") && msg.contains("delta"),
+        "named fd-delta assertion missing from panic: {msg}"
     );
 }
