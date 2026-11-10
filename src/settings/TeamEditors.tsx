@@ -168,6 +168,13 @@ export function RolesEditor() {
       )
   );
 
+  useEffect(() => {
+    useStore.getState().setSettingsDirty(isDirty);
+    return () => {
+      useStore.getState().setSettingsDirty(false);
+    };
+  }, [isDirty]);
+
   return (
     <div className="flex gap-4">
       <div className="flex w-44 shrink-0 flex-col gap-0.5">
@@ -183,7 +190,7 @@ export function RolesEditor() {
       </div>
       <div className="min-w-0 flex-1">
         {sel && (
-          <div className="flex flex-col gap-2 text-xs" onKeyDown={(e) => { if (e.key === "Escape" && isDirty) e.stopPropagation(); }}>
+          <div className="flex flex-col gap-2 text-xs">
             <input className={input} placeholder="Name, e.g. Careful worker" value={draft.name} readOnly={ro} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
             <textarea className={`${input} h-48 resize-y font-mono text-xs`} placeholder="What this role does and may not do" value={draft.instructions} readOnly={ro} onChange={(e) => setDraft({ ...draft, instructions: e.target.value })} />
             <label className="flex items-center gap-2">
@@ -263,6 +270,14 @@ export function TemplatesEditor() {
         (draft.seats[0]?.choices?.length ?? 0) > 0
       )
   );
+
+  useEffect(() => {
+    useStore.getState().setSettingsDirty(isDirty);
+    return () => {
+      useStore.getState().setSettingsDirty(false);
+    };
+  }, [isDirty]);
+
   // Changing what the user acknowledged (agent, model, choices or mode) takes the tick back.
   const setSeat = (i: number, patch: Partial<TeamSeat>) =>
     setDraft({
@@ -285,7 +300,7 @@ export function TemplatesEditor() {
       </div>
       <div className="min-w-0 flex-1">
         {sel && (
-          <div className="flex flex-col gap-2 text-xs" onKeyDown={(e) => { if (e.key === "Escape" && isDirty) e.stopPropagation(); }}>
+          <div className="flex flex-col gap-2 text-xs">
             <input className={input} placeholder="Template name" value={draft.name} readOnly={ro} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
             {draft.seats.map((s, i) => {
               const role = roles.find((r) => r.id === s.roleId);

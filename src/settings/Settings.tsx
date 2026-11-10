@@ -45,7 +45,7 @@ export function Settings() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !useStore.getState().confirm) setSettingsOpen(false);
+      if (e.key === "Escape" && !useStore.getState().confirm && !useStore.getState().settingsDirty) setSettingsOpen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);

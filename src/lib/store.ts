@@ -420,6 +420,8 @@ interface Store {
   startAgent: (id: string) => Promise<void>;
   restartStaleAgents: () => void;
   settingsOpen: boolean;
+  settingsDirty: boolean;
+  setSettingsDirty: (dirty: boolean) => void;
   sidebarCollapsed: boolean;
   shortcutsOpen: boolean;
   /** The New session dialog (Code). */
@@ -1303,6 +1305,8 @@ export const useStore = create<Store>((set, get) => ({
 
   setMode: (mode) => set({ mode }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+  settingsDirty: false,
+  setSettingsDirty: (settingsDirty) => set({ settingsDirty }),
   setSidebarCollapsed: (sidebarCollapsed) => {
     try {
       localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed ? "1" : "0");
