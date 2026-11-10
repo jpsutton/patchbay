@@ -15,3 +15,6 @@ src-tauri/gen/
 # Local agent notes and scratch exports
 /CLAUDE.md
 /test.md
+
+# Python bytecode (scripts/ci/*.py tests)
+__pycache__/
