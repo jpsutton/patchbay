@@ -2114,7 +2114,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
           </div>
           <div className="mx-auto w-full max-w-[var(--chat-width)] px-6 pb-3 pt-2">
             {(s?.queued.length ?? 0) > 0 && (
-              <ul className="mb-2 flex flex-col gap-1" aria-label="Queued messages">
+              <ul className="@container mb-2 flex flex-col gap-1" aria-label="Queued messages">
                 {s!.queued.map((q) => {
                   const fromAgent = isAgentOrigin(q.origin);
                   const agent = fromAgent ? parseAgentMessageLabel(q.text, q.origin) : null;
@@ -2126,13 +2126,14 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                         fromAgent ? "border-accent/35 bg-accent/[0.04]" : "border-border bg-panel"
                       }`}
                       data-origin={fromAgent ? "agent" : undefined}
+                      title={[agent?.label, body.trim()].filter(Boolean).join("\n") || undefined}
                     >
-                      {/* The word shrinks last: the sender (shrink-[1000]) gives way first. */}
-                      <span className={`min-w-0 truncate font-mono text-[10px] uppercase tracking-[0.08em] ${fromAgent ? "text-accent-ink/80" : "text-faint"}`}>
+                      {/* Under 12rem the word, "Send now" and the X cannot all fit, so the word goes. */}
+                      <span className={`hidden shrink-0 font-mono text-[10px] uppercase tracking-[0.08em] @[12rem]:inline ${fromAgent ? "text-accent-ink/80" : "text-faint"}`}>
                         Queued
                       </span>
                       {agent && (
-                        <span className="min-w-0 max-w-[50%] shrink-[1000] truncate font-mono text-[10px] uppercase tracking-[0.08em] text-accent-ink/80" title={agent.label}>
+                        <span className="min-w-0 max-w-[50%] shrink truncate font-mono text-[10px] uppercase tracking-[0.08em] text-accent-ink/80">
                           · {agent.title ?? agent.label}
                         </span>
                       )}
