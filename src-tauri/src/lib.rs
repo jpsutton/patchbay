@@ -1306,7 +1306,9 @@ fn fold_plan_accounts(
 
 /// The account Claude Code itself signs in with, and its organization's name.
 fn default_plan_account() -> (String, Option<String>) {
-    claude_auth::resolve_dir(None).map(|d| claude_auth::account(&d)).unwrap_or_default()
+    // The setting IS known here (none: the ambient one), so the tier is read from the item
+    // `access_token` reads, not from a guess about a resolved path.
+    claude_auth::account_for(None).unwrap_or_default()
 }
 
 /// One Claude account's usage, named for the panel.

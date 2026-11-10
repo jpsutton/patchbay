@@ -270,21 +270,21 @@ fn account_with(dir: &Path, setting: Option<&str>) -> (String, Option<String>) {
         (cur.key, cur.name)
     };
     let Ok(modified) = std::fs::metadata(&file).and_then(|m| m.modified()) else {
-        let mut guard = SEEN.lock().unwrap();
+        let mut guard = SEEN.lock().unwrap_or_else(|e| e.into_inner());
         return guard.get_mut(&file).map_or_else(fallback, resolve);
     };
     // The file can run to megabytes, so read it again only when it changes.
-    if let Some(seen) = SEEN.lock().unwrap().get_mut(&file)
+    if let Some(seen) = SEEN.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&file)
         && seen.modified == Some(modified)
     {
         return resolve(seen);
     }
     let Some(profile) = parse_profile(&file) else {
         // Claude Code rewrites the file often: a read that lands mid-write keeps the last account seen.
-        let mut guard = SEEN.lock().unwrap();
+        let mut guard = SEEN.lock().unwrap_or_else(|e| e.into_inner());
         return guard.get_mut(&file).map_or_else(fallback, resolve);
     };
-    let mut guard = SEEN.lock().unwrap();
+    let mut guard = SEEN.lock().unwrap_or_else(|e| e.into_inner());
     let seen = guard.entry(file).or_default();
     seen.modified = Some(modified);
     seen.current = Some(profile);
@@ -433,12 +433,12 @@ pub(crate) static FAKE_KEYCHAIN: std::sync::Mutex<BTreeMap<String, String>> = st
 
 #[cfg(all(target_os = "macos", test))]
 fn keychain_get(service: &str, _account: &str) -> Result<String> {
-    FAKE_KEYCHAIN.lock().unwrap().get(service).cloned().ok_or_else(|| anyhow!("no such item"))
+    FAKE_KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner()).get(service).cloned().ok_or_else(|| anyhow!("no such item"))
 }
 
 #[cfg(all(target_os = "macos", test))]
 fn keychain_put(service: &str, _account: &str, secret: &str) -> Result<()> {
-    FAKE_KEYCHAIN.lock().unwrap().insert(service.to_owned(), secret.to_owned());
+    FAKE_KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner()).insert(service.to_owned(), secret.to_owned());
     Ok(())
 }
 
@@ -508,10 +508,10 @@ fn note_keychain_choice(service: &str, outcome: &str) {
     static SEEN: std::sync::Mutex<std::collections::BTreeSet<String>> =
         std::sync::Mutex::new(std::collections::BTreeSet::new());
     let line = format!("claude keychain: using {service} ({outcome})");
-    if SEEN.lock().unwrap().insert(line.clone()) {
+    if SEEN.lock().unwrap_or_else(|e| e.into_inner()).insert(line.clone()) {
         tracing::info!("{line}");
         #[cfg(test)]
-        KEYCHAIN_CHOICE_LOGS.lock().unwrap().push(line);
+        KEYCHAIN_CHOICE_LOGS.lock().unwrap_or_else(|e| e.into_inner()).push(line);
     }
 }
 
@@ -893,15 +893,17 @@ mod tests {
         // Default directory named by the variable, primary absent => fallback to plain, logged.
         let c = keychain_candidates(Some("~/.claude"), None, home).unwrap();
         assert_eq!(pick_service(&c, &items(&[(plain, "default")])), plain);
-        assert!(KEYCHAIN_CHOICE_LOGS.lock().unwrap().iter().any(|l| l == &format!("claude keychain: using {plain} (fallback; primary absent)")));
+        assert!(KEYCHAIN_CHOICE_LOGS.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|l| l == &format!("claude keychain: using {plain} (fallback; primary absent)")));
         // Both present and different: the primary wins and the conflict is logged.
         assert_eq!(pick_service(&c, &items(&[(plain, "default"), (hashed_default, "other")])), hashed_default);
-        let logs = KEYCHAIN_CHOICE_LOGS.lock().unwrap().clone();
+        let logs = KEYCHAIN_CHOICE_LOGS.lock().unwrap_or_else(|e| e.into_inner()).clone();
         assert!(logs.iter().any(|l| l.starts_with(&format!("claude keychain: using {hashed_default} (primary; conflict"))), "{logs:?}");
-        // Logged once, not per lookup.
-        let n = logs.len();
+        // Logged once, not per lookup: count THIS line (other tests log into the same vector
+        // concurrently, so the vector's length proves nothing).
+        let conflict_line = |logs: &[String]| logs.iter().filter(|l| l.starts_with(&format!("claude keychain: using {hashed_default} (primary; conflict"))).count();
         pick_service(&c, &items(&[(plain, "default"), (hashed_default, "other")]));
-        assert_eq!(KEYCHAIN_CHOICE_LOGS.lock().unwrap().len(), n);
+        pick_service(&c, &items(&[(plain, "default"), (hashed_default, "other")]));
+        assert_eq!(conflict_line(&KEYCHAIN_CHOICE_LOGS.lock().unwrap_or_else(|e| e.into_inner())), 1);
         // Both present and the same: just the primary.
         assert_eq!(pick_service(&c, &items(&[(plain, "same"), (hashed_default, "same")])), hashed_default);
     }
@@ -917,17 +919,17 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn access_token_reads_the_item_named_by_the_setting() {
-        let _lock = TEST_LOCK.lock().unwrap();
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_cache();
         let _env = ENV_LOCK.lock().await;
         set_test_env(Some(PathBuf::from("/Users/u")), Some(String::new()));
         let creds = |t: &str| format!(r#"{{"claudeAiOauth":{{"accessToken":"{t}","refreshToken":"r","expiresAt":{}}}}}"#, now_ms() + 3_600_000);
-        *FAKE_KEYCHAIN.lock().unwrap() = BTreeMap::from([
+        *FAKE_KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner()) = BTreeMap::from([
             ("Claude Code-credentials-23e8fe31".to_owned(), creds("tok-slash")),
             ("Claude Code-credentials-facf62bf".to_owned(), creds("tok-normalized")),
         ]);
         let got = access_token(Some("/Users/u/.claudetvg/")).await.unwrap();
-        FAKE_KEYCHAIN.lock().unwrap().clear();
+        FAKE_KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner()).clear();
         set_test_env(None, None);
         clear_cache();
         assert_eq!(got, "tok-slash");
@@ -971,7 +973,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn account_for_reads_the_tier_from_the_item_the_setting_names() {
-        let _lock = TEST_LOCK.lock().unwrap();
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _env = ENV_LOCK.lock().await;
         let base = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
         let dir = base.join(".claudetvg");
@@ -983,16 +985,33 @@ mod tests {
         set_test_env(Some(base.clone()), Some(String::new()));
         let setting = format!("{}/", dir.to_string_lossy());
         let creds = |tier: &str| format!(r#"{{"claudeAiOauth":{{"accessToken":"t","refreshToken":"r","expiresAt":1,"rateLimitTier":"{tier}"}}}}"#);
-        *FAKE_KEYCHAIN.lock().unwrap() = BTreeMap::from([
+        *FAKE_KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner()) = BTreeMap::from([
             (keychain_service(Some(&setting)), creds("tier-right")),
             (keychain_service(Some(&dir.to_string_lossy())), creds("tier-wrong")),
             (keychain_service(None), creds("tier-wrong")),
         ]);
         let got = account_for(Some(&setting)).unwrap();
-        FAKE_KEYCHAIN.lock().unwrap().clear();
+        FAKE_KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner()).clear();
         set_test_env(None, None);
         let _ = std::fs::remove_dir_all(&base);
         assert_eq!(got.0, "u1:o1");
+    }
+
+    /// The tier side takes the same fallback as the token side: the default directory named by the
+    /// variable (`~/.claude`) with only the plain item present reads its tier from the plain item.
+    #[test]
+    fn tier_side_falls_back_to_the_plain_item_for_the_default_directory() {
+        let home = Path::new("/Users/u");
+        let plain = "Claude Code-credentials";
+        let store: BTreeMap<String, String> = BTreeMap::from([(
+            plain.to_owned(),
+            r#"{"claudeAiOauth":{"accessToken":"t","refreshToken":"r","expiresAt":1,"rateLimitTier":"from-plain"}}"#.to_owned(),
+        )]);
+        let get = |svc: &str| store.get(svc).cloned();
+        assert_eq!(chosen_service(Some("~/.claude"), None, home, &get).unwrap(), plain, "token side");
+        assert_eq!(keychain_tier_with(Some("~/.claude"), None, home, &get).as_deref(), Some("from-plain"), "tier side");
+        // A directory that is not the default never borrows the plain item.
+        assert_eq!(keychain_tier_with(Some("/Users/u/.claudetvg"), None, home, &get), None);
     }
 
     #[test]
@@ -1169,7 +1188,7 @@ mod tests {
     /// Two directories are two accounts: neither's cached token answers for the other.
     #[tokio::test]
     async fn caches_each_account_separately() {
-        let _lock = TEST_LOCK.lock().unwrap();
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_cache();
         let base = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
         let (a, b) = (base.join("a"), base.join("b"));
@@ -1197,7 +1216,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_fresh_token_without_http() {
-        let _lock = TEST_LOCK.lock().unwrap();
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_cache();
         let dir = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1249,7 +1268,7 @@ mod tests {
 
     #[tokio::test]
     async fn refreshes_expired_token_and_rewrites_file() {
-        let _lock = TEST_LOCK.lock().unwrap();
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_cache();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
