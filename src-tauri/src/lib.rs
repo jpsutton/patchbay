@@ -1124,6 +1124,27 @@ pub(crate) const UNIDENTIFIED_DEFAULT_PLAN_LOG: &str =
 pub(crate) static UNIDENTIFIED_DEFAULT_PLAN_LOGS: std::sync::Mutex<Vec<(String, String)>> =
     std::sync::Mutex::new(Vec::new());
 
+pub(crate) const UNTAGGED_PLAN_LOG: &str =
+    "ignoring untagged plan usage (older Patchbay; upgrade to share usage)";
+
+#[cfg(test)]
+pub(crate) static UNTAGGED_PLAN_LOGS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// Log once per member per state change when a peer sends plan usage with no account tag, and
+/// forget it once the member sends a tagged report (so a downgrade or upgrade logs again).
+fn note_untagged_plan_member(member: &str, untagged: bool) {
+    static UNTAGGED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let mut set = UNTAGGED.lock().unwrap();
+    if !untagged {
+        set.remove(member);
+    } else if set.insert(member.to_owned()) {
+        tracing::info!("{UNTAGGED_PLAN_LOG} from {member}");
+        #[cfg(test)]
+        UNTAGGED_PLAN_LOGS.lock().unwrap().push((member.to_owned(), UNTAGGED_PLAN_LOG.to_owned()));
+    }
+}
+
 /// Log once per state transition per node when the sender's default Claude account lacks a
 /// portable identity, and clear that state once a portable default identity is observed.
 fn note_default_plan_portable(node_id: &str, portable: bool) {
@@ -3474,7 +3495,7 @@ impl mesh::RpcHandler for MeshRpc {
         }
     }
 
-    fn event(&self, name: &str, payload: &serde_json::Value) {
+    fn event(&self, from: &str, name: &str, payload: &serde_json::Value) {
         if name == "mesh://term" {
             let terms = self.state.remote_terms.lock().unwrap();
             if let Some(t) = payload["termId"].as_str().and_then(|id| terms.get(id))
@@ -3487,15 +3508,11 @@ impl mesh::RpcHandler for MeshRpc {
         if name == MESH_PLAN_LIMITS_EVENT {
             use code::plan_limits::PlanLimits;
             let tagged = payload["account"].as_str().zip(serde_json::from_value::<PlanLimits>(payload["limits"].clone()).ok());
-            let (account, name, mut l) = match tagged {
-                Some((a, l)) => (a.to_owned(), payload["name"].as_str().map(str::to_owned), l),
-                // Untagged, from a member before accounts were told apart: the default login's.
-                None => {
-                    let Ok(l) = serde_json::from_value::<PlanLimits>(payload.clone()) else { return };
-                    let (a, n) = default_plan_account();
-                    (a, n, l)
-                }
-            };
+            note_untagged_plan_member(from, tagged.is_none());
+            // Untagged, from a member before accounts were told apart: which account it describes is
+            // unknown, so it is filed under none (a missing report never gates, so nothing is blocked).
+            let Some((account, l)) = tagged else { return };
+            let (account, name, mut l) = (account.to_owned(), payload["name"].as_str().map(str::to_owned), l);
             // Their clock may run ahead of ours; a later report seen here must still win.
             l.observed_at = l.observed_at.min(code::plan_limits::now());
             adopt_plan_limits(&self.state, &account, name, l, false);

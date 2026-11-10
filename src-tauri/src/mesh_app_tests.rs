@@ -1210,26 +1210,41 @@ async fn plan_limits_reach_every_member() {
     // B's older report, sent to A on reconnect, didn't replace A's.
     assert_eq!(five(&a), Some(0.5));
 
-    // An untagged report, from a member before accounts were told apart, is the default login's.
-    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &json!(report(0.1, 120)));
+    // An untagged report, from a member before accounts were told apart, names no account: it is
+    // ignored, however new (this one is the newest B has seen, so adopting it would show), and
+    // the member is logged once. A tagged report sent after it is filed: the channel works.
+    let before = b.state.code.plan.accounts();
+    let newest = json!(report(0.1, 0));
+    let logged = || UNTAGGED_PLAN_LOGS.lock().unwrap().iter().filter(|(m, _)| *m == bn).count();
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &newest);
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &newest);
+    assert_eq!(b.state.code.plan.accounts(), before, "an untagged report is filed in no bucket");
     assert_eq!(five(&b), Some(0.5));
+    assert_eq!(logged(), 1, "logged once per member, not once per report");
+    let tagged = json!({ "account": me, "limits": report(0.6, 20) });
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &tagged);
+    assert_eq!(five(&b), Some(0.6), "a tagged report in the same run is filed");
+    // Back to untagged after a tagged one is a state change: logged again.
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &newest);
+    assert_eq!(logged(), 2);
+    assert_eq!(five(&b), Some(0.6));
     // Another account's report is kept apart, under its own name.
     let other = json!({ "account": "u2:o2", "name": "Team", "limits": report(0.9, 10) });
-    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &other);
-    assert_eq!((five(&b), five_of(&b, "u2:o2")), (Some(0.5), Some(0.9)));
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &other);
+    assert_eq!((five(&b), five_of(&b, "u2:o2")), (Some(0.6), Some(0.9)));
     assert_eq!(b.state.code.plan.account("u2:o2").name.as_deref(), Some("Team"));
 
     // A path-keyed report from another member (Claude Code had no oauthAccount there) is the
     // same login as the default here — not a second account under that foreign path.
     let foreign = json!({ "account": "/home/molly/.claude", "limits": report(0.53, 5) });
-    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &foreign);
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &foreign);
     assert_eq!(five(&b), Some(0.53));
     assert!(
         !b.state.code.plan.accounts().contains_key("/home/molly/.claude"),
         "foreign path fallbacks must not appear as their own account"
     );
     let foreign_work = json!({ "account": "/Users/other/work", "limits": report(0.55, 2) });
-    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &foreign_work);
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &foreign_work);
     assert_eq!(five(&b), Some(0.55));
     assert!(
         !b.state.code.plan.accounts().contains_key("/Users/other/work"),
@@ -1819,6 +1834,7 @@ async fn cursor_plan_limits_reach_peers_on_the_same_account() {
     until("B takes the newer report", 10, || b.state.code.cursor_plan.latest().is_some_and(|l| l.auto == Some(55.0))).await;
     mesh::RpcHandler::event(
         &MeshRpc { state: b.state.clone() },
+        "a-member",
         MESH_CURSOR_PLAN_EVENT,
         &json!({ "accountId": "other", "limits": report(99.0, 5, "other") }),
     );
