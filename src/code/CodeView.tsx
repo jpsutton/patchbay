@@ -2127,11 +2127,12 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                       }`}
                       data-origin={fromAgent ? "agent" : undefined}
                     >
-                      <span className={`shrink-0 font-mono text-[10px] uppercase tracking-[0.08em] ${fromAgent ? "text-accent-ink/80" : "text-faint"}`}>
+                      {/* The word shrinks last: the sender (shrink-[1000]) gives way first. */}
+                      <span className={`min-w-0 truncate font-mono text-[10px] uppercase tracking-[0.08em] ${fromAgent ? "text-accent-ink/80" : "text-faint"}`}>
                         Queued
                       </span>
                       {agent && (
-                        <span className="min-w-0 max-w-[50%] shrink truncate font-mono text-[10px] uppercase tracking-[0.08em] text-accent-ink/80" title={agent.label}>
+                        <span className="min-w-0 max-w-[50%] shrink-[1000] truncate font-mono text-[10px] uppercase tracking-[0.08em] text-accent-ink/80" title={agent.label}>
                           · {agent.title ?? agent.label}
                         </span>
                       )}

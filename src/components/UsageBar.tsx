@@ -137,7 +137,7 @@ export function UsageBar({
           <div className="flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap" title={remote ? undefined : detail}>
             <span>
               In <span className="text-muted">{fmtTokens(totals.input)}</span>
-              {totals.cachedRead > 0 && <span className="hidden @md:inline"> ({fmtTokens(totals.cachedRead)} cached)</span>}
+              {totals.cachedRead > 0 && <span className="hidden @sm:inline"> ({fmtTokens(totals.cachedRead)} cached)</span>}
             </span>
             <span>·</span>
             <span>
@@ -145,8 +145,8 @@ export function UsageBar({
             </span>
             {cost != null && (
               <>
-                <span className="hidden @xs:inline">·</span>
-                <span className="hidden @xs:inline">{reported != null ? fmtCost(cost) : `~${fmtCost(cost)}`}</span>
+                <span className="hidden @[14rem]:inline">·</span>
+                <span className="hidden @[14rem]:inline">{reported != null ? fmtCost(cost) : `~${fmtCost(cost)}`}</span>
               </>
             )}
           </div>
