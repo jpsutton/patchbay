@@ -291,7 +291,7 @@ export function TemplatesEditor() {
               const role = roles.find((r) => r.id === s.roleId);
               const isWorker = role && !role.standing;
               return (
-              <div key={i} className="grid grid-cols-[1fr_1fr_1fr_1fr_4rem_auto] gap-1">
+              <div key={i} className="grid grid-cols-[1fr_1fr_1fr_1fr_auto_auto] items-center gap-1">
                 <input className={input} placeholder="Seat" value={s.seat} readOnly={ro} onChange={(e) => setSeat(i, { seat: e.target.value })} />
                 <select className={input} value={s.roleId} disabled={ro} onChange={(e) => setSeat(i, { roleId: e.target.value })}>
                   {roles.map((r) => (
@@ -304,7 +304,18 @@ export function TemplatesEditor() {
                   ))}
                 </select>
                 <SeatModelPicker agent={s.agent} value={s.model ?? null} readOnly={ro} onChange={(m) => setSeat(i, { model: m })} />
-                <input className={input} type="number" min={1} value={s.count} readOnly={ro} onChange={(e) => setSeat(i, { count: Math.max(1, Number(e.target.value) || 1) })} />
+                <label className="flex items-center gap-1 whitespace-nowrap text-muted">
+                  <span>{isWorker ? "Max workers" : "Sessions"}</span>
+                  <input
+                    className={`${input} w-14`}
+                    type="number"
+                    min={1}
+                    value={s.count}
+                    readOnly={ro}
+                    aria-label={isWorker ? "Max workers" : "Sessions"}
+                    onChange={(e) => setSeat(i, { count: Math.max(1, Number(e.target.value) || 1) })}
+                  />
+                </label>
                 <select className={input} value={s.permissionMode} disabled={ro} onChange={(e) => setSeat(i, { permissionMode: e.target.value })}>
                   {MODES.map((m) => (
                     <option key={m} value={m}>{m}</option>
