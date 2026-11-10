@@ -5,6 +5,7 @@
 //! be appended to the history as it is (reasoning signatures and encrypted reasoning included).
 
 mod client;
+mod diag;
 mod sse;
 mod types;
 pub mod wire;

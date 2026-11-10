@@ -49,6 +49,20 @@ impl Sse {
         out
     }
 
+    /// What has arrived of the event in progress: its data lines so far, then the unfinished line.
+    /// For error messages; the next [`Sse::push`] still completes the event as before.
+    pub fn pending(&self) -> String {
+        let mut out = self.data.join("\n");
+        let rest = String::from_utf8_lossy(&self.buf);
+        if !rest.is_empty() {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&rest);
+        }
+        out
+    }
+
     /// A stream that ends without a trailing blank line still delivers its last event.
     pub fn flush(&mut self) -> Option<SseEvent> {
         if !self.buf.is_empty() {
