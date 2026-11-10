@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, errorText, type Team, type TeamDetail, type TeamTemplate } from "../lib/ipc";
+import { AGENT_LABELS, api, errorText, type AgentId, type Team, type TeamDetail, type TeamTemplate } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { input } from "./ProviderPage";
 import { RolesEditor, TemplatesEditor } from "./TeamEditors";
@@ -35,7 +35,7 @@ function TeamsPanel() {
   const [teams, setTeams] = useState<Team[]>([]);
   const [sel, setSel] = useState<string | "new" | null>(null);
   const [detail, setDetail] = useState<TeamDetail | null>(null);
-  const [draft, setDraft] = useState({ templateId: "", slug: "", cwd: "", projectRules: "" });
+  const [draft, setDraft] = useState({ templateId: "", slug: "", cwd: "", projectRules: "", exportDir: "" });
   const [pick, setPick] = useState<Record<string, string>>({});
   const fail = (e: unknown) => setToast(errorText(e));
 
@@ -91,13 +91,15 @@ function TeamsPanel() {
             </select>
             <input className={input} placeholder="Name (letters, digits, - _)" value={draft.slug} onChange={(e) => setDraft({ ...draft, slug: e.target.value })} />
             <input className={input} placeholder="Project folder, e.g. /home/me/project" value={draft.cwd} onChange={(e) => setDraft({ ...draft, cwd: e.target.value })} />
+            <input className={input} placeholder={`Export folder (default ~/.hub/desks/${draft.slug.trim() || "<slug>"})`} value={draft.exportDir} onChange={(e) => setDraft({ ...draft, exportDir: e.target.value })} />
             <textarea className={`${input} h-28 resize-y font-mono text-xs`} placeholder="Project rules, given to every member" value={draft.projectRules} onChange={(e) => setDraft({ ...draft, projectRules: e.target.value })} />
             <button
               className="self-start rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg disabled:opacity-40"
               disabled={!draft.slug.trim() || !draft.cwd.trim() || !draft.templateId}
               onClick={async () => {
                 try {
-                  const t = await api.createTeam({ ...draft, slug: draft.slug.trim(), cwd: draft.cwd.trim() });
+                  const exportDir = draft.exportDir.trim() || undefined;
+                  const t = await api.createTeam({ ...draft, slug: draft.slug.trim(), cwd: draft.cwd.trim(), exportDir });
                   await reload();
                   setSel(t.id);
                 } catch (e) {
@@ -116,7 +118,9 @@ function TeamsPanel() {
               const here = detail.members.filter((m) => m.member.seat === seat.seat);
               const role = detail.roles.find((r) => r.id === seat.roleId)?.name ?? seat.roleId;
               const taken = new Set(detail.members.map((m) => m.member.sessionId));
-              const free = sessions.filter((s) => !taken.has(s.id) && s.archivedAt == null);
+              const free = sessions
+                .filter((s) => !taken.has(s.id) && s.archivedAt == null)
+                .sort((a, b) => (b.agent === seat.agent ? 1 : 0) - (a.agent === seat.agent ? 1 : 0));
               return (
                 <div key={seat.seat} className="rounded-md border border-border p-2">
                   <div className="mb-1 flex items-baseline gap-2">
@@ -132,9 +136,28 @@ function TeamsPanel() {
                     </div>
                   ))}
                   {here.length < seat.count && (
-                    <div className="mt-1 flex gap-2">
+                    <div className="mt-1 flex flex-wrap gap-2">
+                      <button
+                        className="rounded-md border border-border px-2 text-xs hover:border-accent"
+                        onClick={async () => {
+                          try {
+                            const s = await api.createCodeSession(
+                              detail.team.cwd,
+                              seat.model || null,
+                              seat.agent as AgentId,
+                            );
+                            await api.teamAttach(detail.team.id, s.id, seat.seat);
+                            changed();
+                            await refresh();
+                          } catch (e) {
+                            fail(e);
+                          }
+                        }}
+                      >
+                        Start {(AGENT_LABELS as Record<string, string>)[seat.agent] ?? seat.agent} session
+                      </button>
                       <select className={`${input} flex-1`} value={pick[seat.seat] ?? ""} onChange={(e) => setPick({ ...pick, [seat.seat]: e.target.value })}>
-                        <option value="">Add a session…</option>
+                        <option value="">Add an existing session…</option>
                         {free.map((s) => (
                           <option key={s.id} value={s.id}>{s.title} ({s.agent})</option>
                         ))}
