@@ -289,7 +289,7 @@ fn triage_template() -> Template {
         id: "builtin-triage-desk".into(),
         name: "Triage desk".into(),
         seats: vec![
-            seat("coordinator", "builtin-desk", "opencode", None, 1, vec![]),
+            seat("coordinator", "builtin-desk", "claude-code", Some("sonnet"), 1, vec![]),
             seat("advisor", "builtin-advisor", "claude-code", Some("opus"), 1, vec![]),
             seat("lead", "builtin-lead", "claude-code", Some("sonnet"), 1, vec![]),
             seat(

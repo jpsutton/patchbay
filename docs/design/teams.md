@@ -251,7 +251,7 @@ From the reference desk:
 
 | Seat | Role | Agent / model (default, editable) | Count |
 |---|---|---|---|
-| coordinator | Coordinator | OpenCode | 1 |
+| coordinator | Coordinator | Claude Code, Sonnet | 1 |
 | advisor | Advisor | Claude Code, Opus | 1 |
 | lead | Ship Lead | Claude Code, Sonnet | 1 |
 | workers | Worker | Claude Code Sonnet, Cursor Auto, Antigravity Gemini, OpenCode | pool 4 |

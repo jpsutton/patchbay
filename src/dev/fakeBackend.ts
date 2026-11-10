@@ -1107,7 +1107,7 @@ const CLAUDE_SESSIONS = [
 const fakeTemplate = {
   id: "builtin-triage-desk", name: "Triage desk", routing: [],
   seats: [
-    { seat: "coordinator", roleId: "builtin-desk", agent: "opencode", model: null, permissionMode: "default", count: 1 },
+    { seat: "coordinator", roleId: "builtin-desk", agent: "claude-code", model: "sonnet", permissionMode: "default", count: 1 },
     { seat: "advisor", roleId: "builtin-advisor", agent: "claude-code", model: "opus", permissionMode: "default", count: 1 },
     { seat: "lead", roleId: "builtin-lead", agent: "claude-code", model: "sonnet", permissionMode: "default", count: 1 },
     { seat: "workers", roleId: "builtin-worker", agent: "claude-code", model: "sonnet", permissionMode: "default", count: 4 },
