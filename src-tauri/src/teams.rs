@@ -774,7 +774,7 @@ fn build_instructions(data_dir: &Path, db: &Db, session_id: &str) -> Result<Opti
         }
     }
     out.push_str(
-        "Tools: team_roster, team_send (by role or session id), item_list, item_get; roles with the right capability also get item_add, item_set, item_note, decision_open and decision_answer, and the host refuses the rest. send_agent_message and list_agent_sessions work as usual.",
+        "Tools: team_roster, team_send (by role or session id), item_list, item_get; roles with the right capability also get item_add, item_set, item_note, decision_open and decision_answer, and the host refuses the rest. send_agent_message and list_agent_sessions work as usual.\nIf your earlier context was summarized or lost, re-read the board with item_list before acting.",
     );
     Ok(Some(out))
 }
@@ -1151,8 +1151,10 @@ mod tests {
         assert!(text.contains("set CARGO_TARGET_DIR"));
         assert!(text.contains("team \"demo\" as Coordinator"));
         assert!(text.contains(&format!("session {} (you)", s.id)));
+        assert!(text.contains("If your earlier context was summarized or lost, re-read the board with item_list before acting."));
         // opencode has no prompt hook, so it gets the preamble form.
         assert!(preamble_for(&d, &db, &s.id).unwrap().starts_with("<team-instructions>"));
+        assert!(preamble_for(&d, &db, &s.id).unwrap().contains("If your earlier context was summarized or lost, re-read the board with item_list before acting."));
         t.archive(&team.id).unwrap();
         assert!(instructions_for(&d, &db, &s.id).is_none(), "archived teams stop instructing");
     }
