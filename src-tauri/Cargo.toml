@@ -127,3 +127,4 @@ tower = { version = "0.5", features = ["util"] }
 
 [profile.dev.package."*"]
 opt-level = 1
+debug = "line-tables-only"
