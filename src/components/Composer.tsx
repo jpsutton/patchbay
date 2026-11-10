@@ -14,8 +14,9 @@ const MAX_ATTACHMENTS = 10;
 /** How long fetched slash commands are reused, and how soon an empty answer is asked again. */
 const SLASH_TTL_MS = 60_000;
 const SLASH_EMPTY_RETRY_MS = 3_000;
-/** Below this composer width (px) the footer chips overlap each other and Send; use the settings sheet. */
-const NARROW_COMPOSER_PX = 340;
+/** Inner width (px) the fullest footer needs: three chips at their minimum widths, the options and listen
+ *  buttons, Stop and Send both showing. Below it the chips go behind the settings button. */
+const NARROW_COMPOSER_PX = 412;
 
 function fmtSize(n: number): string {
   if (n < 1024) return `${n} B`;

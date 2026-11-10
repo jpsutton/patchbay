@@ -392,12 +392,10 @@ function DesktopChip({ lead, mono, twoLevel, className = "", children, value, on
     );
   });
 
+  // The floor is the button's side padding plus room for about two characters of the label, so the icon, label and chevron never overlap.
   return (
     <span
-      className={`relative inline-flex h-8 shrink items-center rounded-[9px] border border-border text-muted focus-within:border-accent hover:bg-panel-2/60 hover:text-fg ${
-        // Floor = the button's side padding (56px with a lead, 38px without) + ~2 characters (16px), so icon, text and chevron never overlap.
-        lead ? "min-w-18" : "min-w-14"
-      } ${
+      className={`relative inline-flex h-8 shrink items-center rounded-[9px] border border-border text-muted focus-within:border-accent hover:bg-panel-2/60 hover:text-fg ${lead ? "min-w-18" : "min-w-14"} ${
         disabled ? "pointer-events-none opacity-50" : ""
       } ${className}`}
     >
