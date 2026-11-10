@@ -1,7 +1,122 @@
 import { useEffect, useState } from "react";
-import { AGENT_LABELS, api, errorText, type TeamCaps, type TeamRole, type TeamSeat, type TeamTemplate } from "../lib/ipc";
+import { AGENT_LABELS, api, errorText, usesPatchbayModels, type TeamCaps, type TeamRole, type TeamSeat, type TeamTemplate } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { input } from "./ProviderPage";
+
+function SeatModelPicker({
+  agent,
+  value,
+  readOnly,
+  onChange,
+}: {
+  agent: string;
+  value: string | null;
+  readOnly?: boolean;
+  onChange: (v: string | null) => void;
+}) {
+  const models = useStore((s) => s.models);
+  const providers = useStore((s) => s.providers);
+  const code = useStore((s) => s.code);
+  const codeSessions = useStore((s) => s.codeSessions);
+
+  if (usesPatchbayModels(agent)) {
+    if (models.length === 0) {
+      return (
+        <input
+          className={input}
+          placeholder="Model (optional)"
+          value={value ?? ""}
+          readOnly={readOnly}
+          onChange={(e) => onChange(e.target.value || null)}
+        />
+      );
+    }
+    return (
+      <select
+        className={input}
+        value={value ?? ""}
+        disabled={readOnly}
+        aria-label="Model"
+        onChange={(e) => onChange(e.target.value || null)}
+      >
+        <option value="">Default model</option>
+        {value && !models.some((m) => m.id === value) && (
+          <option value={value}>{value}</option>
+        )}
+        {providers.map((p) => {
+          const ms = models.filter((m) => m.providerId === p.id);
+          if (ms.length === 0) return null;
+          return (
+            <optgroup key={p.id} label={p.name}>
+              {ms.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.displayName}
+                </option>
+              ))}
+            </optgroup>
+          );
+        })}
+      </select>
+    );
+  }
+
+  // Other agents (claude-code, codex, cursor, etc.): check store session cache
+  const cachedModels = (() => {
+    for (const s of codeSessions) {
+      if (s.agent === agent) {
+        const av = code[s.id]?.models?.availableModels;
+        if (av && av.length > 0) return av;
+      }
+    }
+    for (const [id, c] of Object.entries(code)) {
+      const av = c.models?.availableModels;
+      if (av && av.length > 0) {
+        const sess = codeSessions.find((s) => s.id === id);
+        if (sess?.agent === agent) return av;
+      }
+    }
+    return null;
+  })();
+
+  if (cachedModels && cachedModels.length > 0) {
+    return (
+      <select
+        className={input}
+        value={value ?? ""}
+        disabled={readOnly}
+        aria-label="Model"
+        onChange={(e) => onChange(e.target.value || null)}
+      >
+        <option value="">Default model</option>
+        {value && !cachedModels.some((m) => m.modelId === value) && (
+          <option value={value}>{value}</option>
+        )}
+        {cachedModels.map((m) => (
+          <option key={m.modelId} value={m.modelId}>
+            {m.name || m.modelId}
+          </option>
+        ))}
+      </select>
+    );
+  }
+
+  return (
+    <div className="flex flex-col">
+      <input
+        className={input}
+        placeholder="Model (optional)"
+        value={value ?? ""}
+        readOnly={readOnly}
+        onChange={(e) => onChange(e.target.value || null)}
+      />
+      {!readOnly && (
+        <span className="truncate text-[10px] text-muted">
+          models load after the agent's first session
+        </span>
+      )}
+    </div>
+  );
+}
 
 const CAPS: { key: keyof TeamCaps; label: string }[] = [
   { key: "writesItems", label: "Creates and changes items" },
@@ -188,7 +303,7 @@ export function TemplatesEditor() {
                     <option key={id} value={id}>{label}</option>
                   ))}
                 </select>
-                <input className={input} placeholder="Model (optional)" value={s.model ?? ""} readOnly={ro} onChange={(e) => setSeat(i, { model: e.target.value || null })} />
+                <SeatModelPicker agent={s.agent} value={s.model ?? null} readOnly={ro} onChange={(m) => setSeat(i, { model: m })} />
                 <input className={input} type="number" min={1} value={s.count} readOnly={ro} onChange={(e) => setSeat(i, { count: Math.max(1, Number(e.target.value) || 1) })} />
                 <select className={input} value={s.permissionMode} disabled={ro} onChange={(e) => setSeat(i, { permissionMode: e.target.value })}>
                   {MODES.map((m) => (
@@ -213,14 +328,13 @@ export function TemplatesEditor() {
                             <option key={id} value={id}>{label}</option>
                           ))}
                         </select>
-                        <input
-                          className={input}
-                          placeholder="Model (optional)"
-                          value={c.model ?? ""}
+                        <SeatModelPicker
+                          agent={c.agent}
+                          value={c.model ?? null}
                           readOnly={ro}
-                          onChange={(e) => {
+                          onChange={(m) => {
                             const cur = s.choices ?? [];
-                            setSeat(i, { choices: cur.map((x, cj) => (cj === ci ? { ...x, model: e.target.value || null } : x)) });
+                            setSeat(i, { choices: cur.map((x, cj) => (cj === ci ? { ...x, model: m } : x)) });
                           }}
                         />
                         {!ro && (
