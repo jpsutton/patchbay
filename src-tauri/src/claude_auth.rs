@@ -316,7 +316,12 @@ fn read_login_tier(dir: &Path) -> Option<String> {
 /// Claude login even when a credentials file exists holding only MCP logins.
 #[cfg(all(target_os = "macos", not(test)))]
 fn keychain_login_tier(dir: &Path) -> Option<String> {
-    let (root, _) = Store::locate(dir).ok()?.read().ok()?;
+    // Only the resolved path reaches here, not the setting it came from: guess the setting is the
+    // path itself, except for the default directory when no variable is set. A miss reads as "no
+    // login tier", so the profile's key stands.
+    let ambient_default = raw_config_dir_env().is_none_or(|e| e.trim().is_empty()) && same_dir(dir, &home().ok()?.join(".claude"));
+    let raw = (!ambient_default).then(|| dir.to_string_lossy().into_owned());
+    let (root, _) = Store::locate(dir, raw.as_deref()).ok()?.read().ok()?;
     root.get("claudeAiOauth")
         .and_then(|o| o.get("rateLimitTier"))
         .and_then(Value::as_str)
@@ -346,13 +351,15 @@ fn has_file_login(file: &Path) -> bool {
 }
 
 impl Store {
-    /// The credentials file when it holds a Claude login; on macOS, otherwise Claude Code's Keychain item.
-    fn locate(dir: &Path) -> Result<Store> {
+    /// The credentials file when it holds a Claude login; on macOS, otherwise Claude Code's Keychain
+    /// item. `raw` is the directory setting as given (see `keychain_hash_input`); `None` means the
+    /// ambient `CLAUDE_CONFIG_DIR`.
+    fn locate(dir: &Path, raw: Option<&str>) -> Result<Store> {
         let file = dir.join(".credentials.json");
         #[cfg(target_os = "macos")]
         if !has_file_login(&file) {
             let account = std::env::var("USER").context("USER is not set")?;
-            return Ok(Store::Keychain { service: keychain_service(dir, &home()?), account });
+            return Ok(Store::Keychain { service: keychain_service(keychain_hash_input(raw)?.as_deref()), account });
         }
         Ok(Store::File(file))
     }
@@ -384,15 +391,39 @@ impl Store {
     }
 }
 
-/// Claude Code's Keychain service name for `dir`: plain for `~/.claude`, else suffixed with the
-/// first 8 hex digits of the directory's SHA-256.
+/// The string Claude Code hashes into its Keychain service name: the `CLAUDE_CONFIG_DIR` it is
+/// run with, untouched. `raw` is the provider's directory setting (`~/` expanded, as a shell
+/// would before Claude Code sees it); with none, the one Patchbay's own environment passes down.
+/// `None` when Claude Code runs with no such variable, which is the only time it uses the plain
+/// name. Deliberately not normalized: `/x/y/` and `/x/y` are two Keychain items to Claude Code.
+fn keychain_hash_input(raw: Option<&str>) -> Result<Option<String>> {
+    let raw = raw.map(str::trim).filter(|d| !d.is_empty());
+    let env = raw_config_dir_env();
+    let Some(d) = raw.or_else(|| env.as_deref().map(str::trim).filter(|d| !d.is_empty())) else {
+        return Ok(None);
+    };
+    Ok(Some(match d {
+        "~" => home()?.to_string_lossy().into_owned(),
+        _ => match d.strip_prefix("~/") {
+            Some(rest) => home()?.join(rest).to_string_lossy().into_owned(),
+            None => d.to_owned(),
+        },
+    }))
+}
+
+/// Claude Code's Keychain service name (claude-code 2.1.304 `uB`): plain when run with no
+/// `CLAUDE_CONFIG_DIR`, else suffixed with the first 8 hex digits of the SHA-256 of that
+/// variable's value, NFC-normalized. Not keyed on the path being `~/.claude`: an explicit
+/// `CLAUDE_CONFIG_DIR=~/.claude` is suffixed too.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn keychain_service(dir: &Path, home: &Path) -> String {
+fn keychain_service(hash_input: Option<&str>) -> String {
     use sha2::{Digest, Sha256};
-    if same_dir(dir, &home.join(".claude")) {
+    use unicode_normalization::UnicodeNormalization;
+    let Some(input) = hash_input else {
         return "Claude Code-credentials".into();
-    }
-    let hash = hex::encode(Sha256::digest(dir.to_string_lossy().as_bytes()));
+    };
+    let nfc: String = input.nfc().collect();
+    let hash = hex::encode(Sha256::digest(nfc.as_bytes()));
     format!("Claude Code-credentials-{}", &hash[..8])
 }
 
@@ -555,6 +586,7 @@ pub async fn access_token(dir: Option<&str>) -> Result<String> {
     if let Some(t) = env_token(dir, std::env::var(ENV_TOKEN).ok()) {
         return Ok(t);
     }
+    let dir_setting = dir;
     let dir = resolve_dir(dir)?;
     if let Some(t) = cache_get(&dir) {
         return Ok(t);
@@ -564,7 +596,7 @@ pub async fn access_token(dir: Option<&str>) -> Result<String> {
     if let Some(t) = cache_get(&dir) {
         return Ok(t);
     }
-    token_from(&dir, &Store::locate(&dir)?).await
+    token_from(&dir, &Store::locate(&dir, dir_setting)?).await
 }
 
 async fn token_from(dir: &Path, store: &Store) -> Result<String> {
@@ -642,15 +674,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Service name for a `CLAUDE_CONFIG_DIR` setting as Claude Code 2.1.304 derives it: `uB()` in
+    /// the binary hashes `(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude")).normalize("NFC")`
+    /// untouched, and is plain only when the variable is unset or empty. Expected hex is
+    /// `sha256(NFC(value))[:8]`, computed outside this code (python hashlib).
+    fn service_for(setting: Option<&str>, ambient: Option<&str>) -> String {
+        let _env = ENV_LOCK.blocking_lock();
+        set_test_env(Some(PathBuf::from("/Users/u")), Some(ambient.unwrap_or("").to_owned()));
+        let svc = keychain_service(keychain_hash_input(setting).unwrap().as_deref());
+        set_test_env(None, None);
+        svc
+    }
+
     #[test]
     fn keychain_service_matches_claude_code() {
-        let home = Path::new("/Users/u");
-        assert_eq!(keychain_service(&home.join(".claude"), home), "Claude Code-credentials");
-        // sha256("/Users/dfrazer/.claudetvg") starts 986364fc: a real Claude Code item.
-        assert_eq!(
-            keychain_service(Path::new("/Users/dfrazer/.claudetvg"), home),
-            "Claude Code-credentials-986364fc"
-        );
+        // No variable: the plain item.
+        assert_eq!(service_for(None, None), "Claude Code-credentials");
+        // A real Claude Code item for a secondary directory.
+        assert_eq!(service_for(Some("/Users/dfrazer/.claudetvg"), None), "Claude Code-credentials-986364fc");
+        // `~/` is expanded the way a shell does before Claude Code sees it.
+        assert_eq!(service_for(Some("~/.claudetvg"), None), service_for(Some("/Users/u/.claudetvg"), None));
+        // Claude Code hashes the string as given: slash, `.` and `//` variants are different items.
+        assert_eq!(service_for(Some("/Users/u/.claudetvg"), None), "Claude Code-credentials-facf62bf");
+        assert_eq!(service_for(Some("/Users/u/.claudetvg/"), None), "Claude Code-credentials-23e8fe31");
+        assert_eq!(service_for(Some("/Users/u/./.claudetvg"), None), "Claude Code-credentials-12b52fb7");
+        assert_eq!(service_for(Some("/Users/u//.claudetvg"), None), "Claude Code-credentials-be26a373");
+        // Set to the default path (or a symlink to it) it is still a hashed item, not the plain one.
+        assert_eq!(service_for(Some("/Users/u/.claude"), None), "Claude Code-credentials-ff2684fe");
+        // The ambient variable stands in when the setting names none.
+        assert_eq!(service_for(None, Some("/Users/u/.claudetvg/")), "Claude Code-credentials-23e8fe31");
+        // NFC: a decomposed name hashes as its composed form (`caf\u{e9}`).
+        assert_eq!(service_for(Some("/Users/u/cafe\u{301}"), None), "Claude Code-credentials-27bcdf80");
     }
 
     #[test]
@@ -772,10 +826,10 @@ mod tests {
         std::fs::write(&file, r#"{"mcpOAuth":{"srv":{"accessToken":"x"}}}"#).unwrap();
         assert!(!has_file_login(&file));
         #[cfg(target_os = "macos")]
-        assert!(matches!(Store::locate(&dir).unwrap(), Store::Keychain { .. }));
+        assert!(matches!(Store::locate(&dir, None).unwrap(), Store::Keychain { .. }));
         std::fs::write(&file, r#"{"claudeAiOauth":{"accessToken":"t","refreshToken":"r","expiresAt":1}}"#).unwrap();
         assert!(has_file_login(&file));
-        assert!(matches!(Store::locate(&dir).unwrap(), Store::File(_)));
+        assert!(matches!(Store::locate(&dir, None).unwrap(), Store::File(_)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
