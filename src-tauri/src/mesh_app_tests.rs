@@ -1217,30 +1217,138 @@ async fn plan_limits_reach_every_member() {
     // B's older report, sent to A on reconnect, didn't replace A's.
     assert_eq!(five(&a), Some(0.5));
 
-    // An untagged report, from a member before accounts were told apart, is the default login's.
-    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &json!(report(0.1, 120)));
+    // An untagged report, from a member before accounts were told apart, names no account: it is
+    // ignored, however new (this one is the newest B has seen, so adopting it would show), and
+    // the member is logged once. A tagged report sent after it is filed: the channel works.
+    let before = b.state.code.plan.accounts();
+    let newest = json!(report(0.1, 0));
+    let logged = || UNTAGGED_PLAN_LOGS.lock().unwrap().iter().filter(|(m, _)| *m == bn).count();
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &newest);
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &newest);
+    assert_eq!(b.state.code.plan.accounts(), before, "an untagged report is filed in no bucket");
     assert_eq!(five(&b), Some(0.5));
+    assert_eq!(logged(), 1, "logged once per member, not once per report");
+    let tagged = json!({ "account": me, "limits": report(0.6, 20) });
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &tagged);
+    assert_eq!(five(&b), Some(0.6), "a tagged report in the same run is filed");
+    // Back to untagged after a tagged one is a state change: logged again, with the member named.
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &newest);
+    assert_eq!(logged(), 2);
+    assert_eq!(five(&b), Some(0.6));
+    assert!(
+        UNTAGGED_PLAN_LOGS.lock().unwrap().iter().any(|(m, line)| *m == bn && *line == format!("{UNTAGGED_PLAN_LOG} from {bn}")),
+        "the log line names the member"
+    );
+    // An empty or blank account is untagged too: same drop, same state (already untagged: no new
+    // log), the accounts untouched, and a control tagged report sent after them is filed.
+    let held = b.state.code.plan.accounts();
+    for blank in ["", "   "] {
+        let blanked = json!({ "account": blank, "limits": report(0.2, 0) });
+        mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &blanked);
+    }
+    assert_eq!(b.state.code.plan.accounts(), held, "a blank account is filed in no bucket");
+    assert_eq!(logged(), 2, "still the same untagged state");
+    let control = json!({ "account": me, "limits": report(0.7, 15) });
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &control);
+    assert_eq!(five(&b), Some(0.7), "the control after the blank ones is filed");
+    // A tagged report whose limits don't parse is not an old member: nothing filed, nothing logged
+    // (and before this change such a payload was filed as an empty report under the default).
+    // A FRESH account key, so a parse guard that quietly files an empty report would show at once
+    // (an account already holding a newer report would hide it: adoption keeps the newer one).
+    let held = b.state.code.plan.accounts();
+    assert!(!held.contains_key("u8:o8"));
+    let garbage = json!({ "account": "u8:o8", "limits": "garbage" });
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &garbage);
+    assert!(!b.state.code.plan.accounts().contains_key("u8:o8"), "unparseable limits file nothing, not even an empty account");
+    assert_eq!(b.state.code.plan.accounts(), held, "unparseable limits are not filed");
+    assert_eq!(logged(), 2, "and the member is not blamed as an older Patchbay");
     // Another account's report is kept apart, under its own name.
     let other = json!({ "account": "u2:o2", "name": "Team", "limits": report(0.9, 10) });
-    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &other);
-    assert_eq!((five(&b), five_of(&b, "u2:o2")), (Some(0.5), Some(0.9)));
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &other);
+    assert_eq!((five(&b), five_of(&b, "u2:o2")), (Some(0.7), Some(0.9)));
     assert_eq!(b.state.code.plan.account("u2:o2").name.as_deref(), Some("Team"));
 
     // A path-keyed report from another member (Claude Code had no oauthAccount there) is the
     // same login as the default here — not a second account under that foreign path.
     let foreign = json!({ "account": "/home/molly/.claude", "limits": report(0.53, 5) });
-    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &foreign);
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &foreign);
     assert_eq!(five(&b), Some(0.53));
     assert!(
         !b.state.code.plan.accounts().contains_key("/home/molly/.claude"),
         "foreign path fallbacks must not appear as their own account"
     );
     let foreign_work = json!({ "account": "/Users/other/work", "limits": report(0.55, 2) });
-    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &foreign_work);
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &foreign_work);
     assert_eq!(five(&b), Some(0.55));
     assert!(
         !b.state.code.plan.accounts().contains_key("/Users/other/work"),
         "foreign non-default path must collapse onto default, not stay as a ghost account"
+    );
+}
+
+/// Senders never broadcast an unidentified account: empty/blank (read as "untagged" by receivers)
+/// and machine-local path keys stay local; portable ids are shared.
+#[test]
+fn senders_share_only_identified_plan_reports() {
+    let limits = code::plan_limits::PlanLimits::default();
+    let share = |a: &str| crate::shareable_plan_report(a, &Some("N".into()), &limits);
+    assert!(share("").is_none());
+    assert!(share("   ").is_none());
+    assert!(share("/home/molly/.claude").is_none());
+    assert!(share("~/foo/.claude").is_none());
+    let ok = share("u1:o1").expect("a portable account is shared");
+    assert_eq!(ok["account"], "u1:o1");
+    assert_eq!(ok["name"], "N");
+}
+
+/// Over a real link the receiver names the SENDING node (`handle` passes the session's peer id),
+/// not some other id; a tagged report with unreadable limits sent the same way is not logged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn untagged_plan_usage_over_a_live_link_names_the_sender() {
+    let (a, b) = (node("alpha-untagged"), node("bravo-untagged"));
+    link(&a, &b).await;
+    let an = a.state.mesh.node_id().to_owned();
+    let line = format!("{UNTAGGED_PLAN_LOG} from {an}");
+    let logged = || UNTAGGED_PLAN_LOGS.lock().unwrap().iter().filter(|(m, l)| *m == an && *l == line).count();
+    a.state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, json!({ "fiveHour": { "utilization": 0.99, "resetsAt": 1 }, "observedAt": 1 }));
+    until("B logs A's node id", 10, || logged() == 1).await;
+    a.state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, json!({ "account": "u8:o8", "limits": "garbage" }));
+    // A later control (tagged, readable) is delivered, which also proves the garbage one was processed first.
+    let ok = json!({ "account": "u9:o9", "limits": { "fiveHour": { "utilization": 0.3, "resetsAt": code::plan_limits::now() + 3600 }, "observedAt": code::plan_limits::now() } });
+    a.state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, ok);
+    until("B files the control", 10, || b.state.code.plan.account("u9:o9").latest.is_some()).await;
+    // Delivery is ordered, so the garbage report (sent first, for a key nothing else uses) was
+    // processed before the control became visible: it must have filed nothing.
+    assert!(!b.state.code.plan.accounts().contains_key("u8:o8"), "unparseable limits file nothing, not even an empty account");
+    assert_eq!(logged(), 1, "the unreadable tagged report was not logged as untagged");
+    assert!(b.state.code.plan.accounts().keys().all(|k| k == "u9:o9"), "nothing else was filed");
+}
+
+/// A report relayed through a middle node (A and C cannot reach each other) arrives on a session
+/// with the ORIGIN: C names A, not the relay B (circuits handshake end to end).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn relayed_untagged_plan_usage_names_the_origin_not_the_relay() {
+    let (a, b, c) = (node("alpha-relay-plan"), node("bravo-relay-plan"), node("charlie-relay-plan"));
+    link(&a, &b).await;
+    let (an, bn, cn) = (a.state.mesh.node_id().to_owned(), b.state.mesh.node_id().to_owned(), c.state.mesh.node_id().to_owned());
+    a.state.mesh.block_direct(&cn);
+    c.state.mesh.block_direct(&an);
+    until("B listens", 5, || b.state.mesh.bound_port().is_some()).await;
+    let url = format!("127.0.0.1:{}", b.state.mesh.bound_port().unwrap());
+    c.state.mesh.join(&url, PASS, "c").unwrap();
+    until("join request", 10, || !b.state.mesh.status()["pending"].as_array().unwrap().is_empty()).await;
+    b.state.mesh.approve(&cn).await.unwrap();
+    until("C is a member", 10, || c.state.mesh.is_member()).await;
+    let state_of = |n: &Node, id: &str| {
+        n.state.mesh.status()["members"].as_array().unwrap().iter().find(|m| m["nodeId"] == id).map(|m| m["state"].as_str().unwrap().to_owned()).unwrap_or_default()
+    };
+    until("A reaches C via B", 20, || state_of(&a, &cn) == "relay").await;
+    a.state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, json!({ "fiveHour": { "utilization": 0.99, "resetsAt": 1 }, "observedAt": 1 }));
+    let from_a = format!("{UNTAGGED_PLAN_LOG} from {an}");
+    until("C names A", 10, || UNTAGGED_PLAN_LOGS.lock().unwrap().iter().any(|(m, l)| *m == an && *l == from_a)).await;
+    assert!(
+        !UNTAGGED_PLAN_LOGS.lock().unwrap().iter().any(|(m, _)| *m == bn),
+        "the relay is never named for A's report"
     );
 }
 
@@ -1826,6 +1934,7 @@ async fn cursor_plan_limits_reach_peers_on_the_same_account() {
     until("B takes the newer report", 10, || b.state.code.cursor_plan.latest().is_some_and(|l| l.auto == Some(55.0))).await;
     mesh::RpcHandler::event(
         &MeshRpc { state: b.state.clone() },
+        "a-member",
         MESH_CURSOR_PLAN_EVENT,
         &json!({ "accountId": "other", "limits": report(99.0, 5, "other") }),
     );

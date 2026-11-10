@@ -964,6 +964,16 @@ fn on_session_lost(state: &AppState, id: String, message: code::acp::UserMessage
     });
 }
 
+/// The mesh payload for a plan report, or `None` when the account is unidentified: empty or
+/// blank (receivers read that as an untagged report, from an older Patchbay) or a machine-local
+/// path key. Never broadcast either. Residual, by design: with HOME unresolvable a local session
+/// can still resolve to the empty account and be gated under it (`default_plan_account` falls back
+/// to `("", None)`; `Hit::message` already handles an empty name).
+fn shareable_plan_report<L: serde::Serialize>(account: &str, name: &Option<String>, limits: &L) -> Option<serde_json::Value> {
+    (!account.trim().is_empty() && !claude_auth::is_path_account_key(account))
+        .then(|| serde_json::json!({ "account": account, "name": name, "limits": limits }))
+}
+
 fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     use code::acp::CodeEvent;
     // A session on a Grok login has no response headers to read its usage from: ask the billing
@@ -979,13 +989,12 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
         let (account, name) = plan_account(state, &prefs::load(&state.db), &env.code_session_id).unwrap_or_else(default_plan_account);
         // Upgrade a local path fallback to the portable account id when `.claude.json` has it.
         let (account, name) = resolve_plan_account(&state.db, &account, name);
-        if !claude_auth::is_path_account_key(&account) {
+        if let Some(tagged) = shareable_plan_report(&account, &name, &limits) {
             if account == default_plan_account().0 {
                 note_default_plan_portable(state.mesh.node_id(), true);
             }
-            let tagged = serde_json::json!({ "account": account, "name": name, "limits": limits });
             state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, tagged);
-        } else if is_default_claude_dir_path(&account) {
+        } else if account.trim().is_empty() || is_default_claude_dir_path(&account) {
             note_default_plan_portable(state.mesh.node_id(), false);
         }
         adopt_plan_limits(state, &account, name, limits, true);
@@ -1123,6 +1132,28 @@ pub(crate) const UNIDENTIFIED_DEFAULT_PLAN_LOG: &str =
 #[cfg(test)]
 pub(crate) static UNIDENTIFIED_DEFAULT_PLAN_LOGS: std::sync::Mutex<Vec<(String, String)>> =
     std::sync::Mutex::new(Vec::new());
+
+pub(crate) const UNTAGGED_PLAN_LOG: &str =
+    "ignoring untagged plan usage (older Patchbay; upgrade to share usage)";
+
+#[cfg(test)]
+pub(crate) static UNTAGGED_PLAN_LOGS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// Log once per member per state change when a peer sends plan usage with no account tag, and
+/// forget it once the member sends a tagged report (so a downgrade or upgrade logs again).
+fn note_untagged_plan_member(member: &str, untagged: bool) {
+    static UNTAGGED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let mut set = UNTAGGED.lock().unwrap();
+    if !untagged {
+        set.remove(member);
+    } else if set.insert(member.to_owned()) {
+        let line = format!("{UNTAGGED_PLAN_LOG} from {member}");
+        tracing::info!("{line}");
+        #[cfg(test)]
+        UNTAGGED_PLAN_LOGS.lock().unwrap().push((member.to_owned(), line));
+    }
+}
 
 /// Log once per state transition per node when the sender's default Claude account lacks a
 /// portable identity, and clear that state once a portable default identity is observed.
@@ -1753,8 +1784,9 @@ fn grok_logins(db: &Db) -> Vec<(Option<String>, String)> {
 
 /// A Grok seat's usage, seen here: tell the mesh, then count it like any plan report.
 fn report_grok_plan(state: &AppState, plan: code::grok_plan::GrokPlan) {
-    let tagged = serde_json::json!({ "account": plan.account, "name": plan.name, "limits": plan.limits });
-    state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, tagged);
+    if let Some(tagged) = shareable_plan_report(&plan.account, &plan.name, &plan.limits) {
+        state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, tagged);
+    }
     adopt_plan_limits(state, &plan.account, plan.name, plan.limits, true);
 }
 
@@ -3474,7 +3506,7 @@ impl mesh::RpcHandler for MeshRpc {
         }
     }
 
-    fn event(&self, name: &str, payload: &serde_json::Value) {
+    fn event(&self, from: &str, name: &str, payload: &serde_json::Value) {
         if name == "mesh://term" {
             let terms = self.state.remote_terms.lock().unwrap();
             if let Some(t) = payload["termId"].as_str().and_then(|id| terms.get(id))
@@ -3486,16 +3518,16 @@ impl mesh::RpcHandler for MeshRpc {
         }
         if name == MESH_PLAN_LIMITS_EVENT {
             use code::plan_limits::PlanLimits;
-            let tagged = payload["account"].as_str().zip(serde_json::from_value::<PlanLimits>(payload["limits"].clone()).ok());
-            let (account, name, mut l) = match tagged {
-                Some((a, l)) => (a.to_owned(), payload["name"].as_str().map(str::to_owned), l),
-                // Untagged, from a member before accounts were told apart: the default login's.
-                None => {
-                    let Ok(l) = serde_json::from_value::<PlanLimits>(payload.clone()) else { return };
-                    let (a, n) = default_plan_account();
-                    (a, n, l)
-                }
-            };
+            // An absent, null, empty or blank `account` is untagged: one branch, so the forms cannot
+            // drift. Untagged, from a member before accounts were told apart: which account it
+            // describes is unknown, so it is filed under none (a missing report never gates, so
+            // nothing is blocked). Only a payload with no usable tag blames the sender's age: a
+            // tagged one whose limits don't parse comes from a newer peer and is dropped silently.
+            let account = payload["account"].as_str().map(str::trim).filter(|a| !a.is_empty());
+            note_untagged_plan_member(from, account.is_none());
+            let Some(account) = account else { return };
+            let Ok(l) = serde_json::from_value::<PlanLimits>(payload["limits"].clone()) else { return };
+            let (account, name, mut l) = (account.to_owned(), payload["name"].as_str().map(str::to_owned), l);
             // Their clock may run ahead of ours; a later report seen here must still win.
             l.observed_at = l.observed_at.min(code::plan_limits::now());
             adopt_plan_limits(&self.state, &account, name, l, false);
