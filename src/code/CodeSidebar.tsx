@@ -90,6 +90,12 @@ interface Group {
   latest: number;
 }
 
+interface TeamGroup {
+  id: string;
+  name: string;
+  sessions: CodeSession[];
+}
+
 export function CodeSidebar() {
   const sessions = useStore((s) => s.codeSessions);
   const activeId = useStore((s) => s.activeCodeSessionId);
@@ -102,6 +108,7 @@ export function CodeSidebar() {
   const query = useStore((s) => s.sidebarQuery);
   const prefs = useStore((s) => s.prefs);
   const mesh = useStore((s) => s.mesh);
+  const teamRoles = useTeamRoles();
   const [collapsed, setCollapsed] = useState(loadCollapsed);
   const [showArchived, setShowArchived] = useState(false);
   const layout = useStore((s) => s.sidebarLayout);
@@ -139,6 +146,7 @@ export function CodeSidebar() {
     const layoutKeys = new Map<string, string>();
     for (const s of hits) {
       if (s.pinned) continue;
+      if (prefs.groupByTeam && teamRoles[s.id]) continue;
       const host = remoteHost(s, mesh);
       const dir = dirOf(s);
       const key = prefs.groupByProject ? projectLayoutKey(s) : host ? `${host}:${dir}` : dir;
@@ -172,7 +180,35 @@ export function CodeSidebar() {
         };
       })
       .sort((a, b) => b.latest - a.latest);
-  }, [hits, mesh, prefs.groupByProject]);
+  }, [hits, mesh, prefs.groupByProject, prefs.groupByTeam, teamRoles]);
+
+  const teamGroups = useMemo<TeamGroup[]>(() => {
+    if (!prefs.groupByTeam) return [];
+    const map = new Map<string, { name: string; sessions: CodeSession[] }>();
+    for (const s of hits) {
+      if (s.pinned) continue;
+      const role = teamRoles[s.id];
+      if (!role) continue;
+      const existing = map.get(role.teamId);
+      if (existing) {
+        existing.sessions.push(s);
+      } else {
+        map.set(role.teamId, { name: role.teamName, sessions: [s] });
+      }
+    }
+    const result: TeamGroup[] = [];
+    for (const [id, { name, sessions }] of map.entries()) {
+      sessions.sort((a, b) => {
+        const ra = teamRoles[a.id];
+        const rb = teamRoles[b.id];
+        const orderDiff = (ra?.seatOrder ?? Infinity) - (rb?.seatOrder ?? Infinity);
+        if (orderDiff !== 0) return orderDiff;
+        return (ra?.joinedAt ?? 0) - (rb?.joinedAt ?? 0);
+      });
+      result.push({ id, name, sessions });
+    }
+    return result.sort((a, b) => a.name.localeCompare(b.name));
+  }, [hits, prefs.groupByTeam, teamRoles]);
 
   // Folders and groups keep the layout the user gave them, which syncs across the mesh. A folder
   // seen for the first time goes on top, and one that drops out of view keeps its place.
@@ -317,7 +353,11 @@ export function CodeSidebar() {
     setCollapsed(() => {
       // While searching everything is shown, so leave the saved state alone.
       const next = fold
-        ? new Set([...groups.map((g) => g.key), ...top.flatMap((t) => (t.type === "group" ? [t.key] : []))])
+        ? new Set([
+            ...groups.map((g) => g.key),
+            ...top.flatMap((t) => (t.type === "group" ? [t.key] : [])),
+            ...teamGroups.map((tg) => `team:${tg.id}`),
+          ])
         : new Set<string>();
       if (!query.trim()) saveCollapsed(next);
       return next;
@@ -325,7 +365,11 @@ export function CodeSidebar() {
 
   /** The rows a Shift-click can span: the pinned list, or one folder's. */
   const listOf = (id: string): CodeSession[] =>
-    pinned.some((s) => s.id === id) ? pinned : (groups.find((g) => g.sessions.some((s) => s.id === id))?.sessions ?? []);
+    pinned.some((s) => s.id === id)
+      ? pinned
+      : teamGroups.find((tg) => tg.sessions.some((s) => s.id === id))?.sessions
+      ?? groups.find((g) => g.sessions.some((s) => s.id === id))?.sessions
+      ?? [];
 
   /** Shift-click picks everything from the last click to this row; Ctrl/Cmd-click adds or drops one. */
   const pick = (s: CodeSession, shift: boolean) => {
@@ -363,8 +407,6 @@ export function CodeSidebar() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [hasChosen]);
-
-  const teamRoles = useTeamRoles();
 
   // Show a drop mark only where the move changes something.
   const dropTarget = drag && planMove(layout ?? [], top, drag.key, drag.target) ? drag.target : null;
@@ -700,6 +742,32 @@ export function CodeSidebar() {
     return [...into, { label: "New group…", onSelect: () => newGroup(key) }, ...out, ...fold];
   };
 
+  const renderTeamGroup = (team: TeamGroup) => {
+    const key = `team:${team.id}`;
+    const isCollapsed = !searching && collapsed.has(key);
+    const hasActive = team.sessions.some((s) => s.id === activeId);
+    return (
+      <div key={key} className="relative mb-1">
+        <div className="group/header mx-2 mt-2 flex min-w-0 items-center gap-1 rounded-lg py-1 pl-2.5 pr-1 hover:bg-panel-2/50">
+          <button
+            className="flex min-w-0 flex-1 items-baseline gap-1.5 text-left"
+            onClick={() => toggle(key)}
+            aria-expanded={!isCollapsed}
+          >
+            <span className="min-w-0 truncate text-[13px] font-medium text-fg/90">{team.name}</span>
+            <span
+              className={`flex shrink-0 self-center text-faint transition-transform ${isCollapsed ? "" : "rotate-90"}`}
+            >
+              <ChevronRightIcon size={12} />
+            </span>
+            {isCollapsed && hasActive && <Dot size={6} className="self-center text-accent" />}
+          </button>
+        </div>
+        {!isCollapsed && team.sessions.map((s) => item(s, false))}
+      </div>
+    );
+  };
+
   return (
     <>
       {chosen.length > 0 && (
@@ -725,6 +793,7 @@ export function CodeSidebar() {
           {pinned.map((s) => item(s, true))}
         </div>
       )}
+      {prefs.groupByTeam && teamGroups.map(renderTeamGroup)}
       {pinned.length > 0 && groups.length > 0 && <SectionLabel>Folders</SectionLabel>}
       {top.map((t) => {
         if (t.type === "group") return renderGroup(t);

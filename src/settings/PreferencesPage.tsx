@@ -215,6 +215,9 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
         >
           <Toggle label="Group Code sessions by project name" checked={prefs.groupByProject} onChange={(v) => set("groupByProject", v)} />
         </Row>
+        <Row label="Group Code sessions by team">
+          <Toggle label="Group Code sessions by team" checked={prefs.groupByTeam} onChange={(v) => set("groupByTeam", v)} />
+        </Row>
         <Row label="Open on launch">
           <Choice
             value={prefs.launchTab}
