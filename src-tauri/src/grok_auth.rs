@@ -83,7 +83,12 @@ fn expand_home(d: &str) -> Result<PathBuf> {
 /// A provider's Grok home (`~/` expanded). With none named: `$GROK_HOME` when it is set and not
 /// empty, else `~/.grok`.
 pub fn resolve_dir(dir: Option<&str>) -> Result<PathBuf> {
-    resolve_dir_with(dir, std::env::var("GROK_HOME").ok())
+    // Tests never read the shell's `GROK_HOME` (a login lives there).
+    #[cfg(test)]
+    let env = None;
+    #[cfg(not(test))]
+    let env = std::env::var("GROK_HOME").ok();
+    resolve_dir_with(dir, env)
 }
 
 fn resolve_dir_with(dir: Option<&str>, env_home: Option<String>) -> Result<PathBuf> {

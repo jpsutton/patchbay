@@ -400,12 +400,28 @@ fn read_access_token() -> Option<(String, Option<String>)> {
     read_vscdb_token()
 }
 
+/// `$XDG_CONFIG_HOME` / `$HOME` for the places Cursor keeps its login. Tests read neither the
+/// shell's variables nor the developer's real files: no XDG, and the pinned (else scratch) home.
+fn env_xdg_config_home() -> Option<std::ffi::OsString> {
+    #[cfg(test)]
+    return None;
+    #[cfg(not(test))]
+    std::env::var_os("XDG_CONFIG_HOME")
+}
+
+fn env_home() -> Option<std::ffi::OsString> {
+    #[cfg(test)]
+    return crate::claude_auth::home().ok().map(Into::into);
+    #[cfg(not(test))]
+    std::env::var_os("HOME")
+}
+
 fn auth_json_paths() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+    if let Some(xdg) = env_xdg_config_home() {
         out.push(PathBuf::from(xdg).join("cursor/auth.json"));
     }
-    if let Some(home) = std::env::var_os("HOME") {
+    if let Some(home) = env_home() {
         let home = PathBuf::from(home);
         out.push(home.join(".config/cursor/auth.json"));
         out.push(home.join(".cursor/auth.json"));
@@ -454,10 +470,10 @@ fn vscdb_paths() -> Vec<PathBuf> {
         out.push(base.join("Cursor/User/globalStorage/state.vscdb"));
         out.push(base.join("cursor/User/globalStorage/state.vscdb"));
     };
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+    if let Some(xdg) = env_xdg_config_home() {
         push(PathBuf::from(xdg), &mut out);
     }
-    if let Some(home) = std::env::var_os("HOME") {
+    if let Some(home) = env_home() {
         let home = PathBuf::from(home);
         push(home.join(".config"), &mut out);
         #[cfg(target_os = "macos")]
@@ -510,7 +526,11 @@ fn agent_status(cursor_agent: Option<&Path>) -> Option<Value> {
         .map(|p| p.to_path_buf())
         .or_else(|| crate::code::agents::which("cursor-agent"))?;
     use patchbay_agent::proc::NoWindow;
-    let out = Command::new(program).args(["status", "--format", "json"]).no_window().output().ok()?;
+    let mut cmd = Command::new(program);
+    cmd.args(["status", "--format", "json"]).no_window();
+    #[cfg(test)]
+    crate::test_support::isolate_std(&mut cmd);
+    let out = cmd.output().ok()?;
     if !out.status.success() {
         return None;
     }

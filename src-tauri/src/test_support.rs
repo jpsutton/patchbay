@@ -33,3 +33,57 @@ pub fn raise_fd_limit() {
         });
     }
 }
+
+/// One scratch HOME for every child process a test spawns (shells, agent CLIs, version probes).
+/// Children write their own state under `$HOME` (`~/.config/opencode`, `~/.cursor`, shell history,
+/// ...), which must never land in the developer's real home. Created once per test process.
+pub fn sandbox_home() -> &'static std::path::Path {
+    static HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("pb-test-home-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    })
+}
+
+/// The variables a child resolves its state directories from, pointed into `sandbox_home()`,
+/// and the ambient account directory variable dropped (a developer shell may export one).
+fn sandbox_env() -> Vec<(&'static str, PathBuf)> {
+    let h = sandbox_home();
+    vec![
+        ("HOME", h.to_path_buf()),
+        ("XDG_CONFIG_HOME", h.join(".config")),
+        ("XDG_DATA_HOME", h.join(".local/share")),
+        ("XDG_STATE_HOME", h.join(".local/state")),
+        ("XDG_CACHE_HOME", h.join(".cache")),
+    ]
+}
+
+const SANDBOX_REMOVED: [&str; 2] = ["CLAUDE_CONFIG_DIR", "GROK_HOME"];
+
+pub fn isolate_std(cmd: &mut std::process::Command) {
+    for (k, v) in sandbox_env() {
+        cmd.env(k, v);
+    }
+    for k in SANDBOX_REMOVED {
+        cmd.env_remove(k);
+    }
+}
+
+pub fn isolate_tokio(cmd: &mut tokio::process::Command) {
+    for (k, v) in sandbox_env() {
+        cmd.env(k, v);
+    }
+    for k in SANDBOX_REMOVED {
+        cmd.env_remove(k);
+    }
+}
+
+pub fn isolate_pty(cmd: &mut portable_pty::CommandBuilder) {
+    for (k, v) in sandbox_env() {
+        cmd.env(k, v);
+    }
+    for k in SANDBOX_REMOVED {
+        cmd.env_remove(k);
+    }
+}

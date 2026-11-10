@@ -54,23 +54,37 @@ static TEST_CONFIG_DIR: RwLock<Option<String>> = RwLock::new(None);
 
 #[cfg(test)]
 pub(crate) fn set_test_env(home: Option<PathBuf>, config_dir: Option<String>) {
-    *TEST_HOME.write().unwrap() = home;
-    *TEST_CONFIG_DIR.write().unwrap() = config_dir;
+    // A poisoned lock still holds a valid pin: restoring must not panic a second test.
+    *TEST_HOME.write().unwrap_or_else(|e| e.into_inner()) = home;
+    *TEST_CONFIG_DIR.write().unwrap_or_else(|e| e.into_inner()) = config_dir;
+}
+
+/// The current pin, so a guard can restore exactly what it replaced.
+#[cfg(test)]
+pub(crate) fn test_pin() -> (Option<PathBuf>, Option<String>) {
+    (
+        TEST_HOME.read().unwrap_or_else(|e| e.into_inner()).clone(),
+        TEST_CONFIG_DIR.read().unwrap_or_else(|e| e.into_inner()).clone(),
+    )
 }
 
 fn raw_config_dir_env() -> Option<String> {
     #[cfg(test)]
-    if let Some(dir) = TEST_CONFIG_DIR.read().unwrap().clone() {
+    if let Some(dir) = TEST_CONFIG_DIR.read().unwrap_or_else(|e| e.into_inner()).clone() {
         return Some(dir);
     }
     std::env::var("CLAUDE_CONFIG_DIR").ok()
 }
 
 pub(crate) fn home() -> Result<PathBuf> {
+    // A test sees its pin, else the shared scratch home: never the developer's real one.
     #[cfg(test)]
-    if let Some(h) = TEST_HOME.read().unwrap().clone() {
-        return Ok(h);
-    }
+    return Ok(TEST_HOME
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_else(|| crate::test_support::sandbox_home().to_path_buf()));
+    #[cfg(not(test))]
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(PathBuf::from)
         .ok_or_else(|| anyhow!("cannot find home directory"))

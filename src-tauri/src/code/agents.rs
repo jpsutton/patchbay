@@ -428,6 +428,8 @@ fn probe_opencode_deny_rules(
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
     .env_remove("OPENCODE_CONFIG_CONTENT");
+    #[cfg(test)]
+    crate::test_support::isolate_std(&mut cmd);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -710,6 +712,10 @@ pub fn which(name: &str) -> Option<PathBuf> {
 }
 
 pub(crate) fn home_dir() -> Option<PathBuf> {
+    // Tests: the pinned home, else the scratch one. Callers write under it (`~/.gemini/...`).
+    #[cfg(test)]
+    return crate::claude_auth::home().ok();
+    #[cfg(not(test))]
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
 }
 
@@ -1012,14 +1018,15 @@ fn detect(kind: AgentKind, overrides: &AgentPaths) -> AgentInfo {
 
 fn version_of(program: &Path) -> Option<String> {
     use patchbay_agent::proc::NoWindow;
-    let mut child = std::process::Command::new(program)
-        .arg("--version")
+    let mut cmd = std::process::Command::new(program);
+    cmd.arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .no_window()
-        .spawn()
-        .ok()?;
+        .no_window();
+    #[cfg(test)]
+    crate::test_support::isolate_std(&mut cmd);
+    let mut child = cmd.spawn().ok()?;
     let t0 = std::time::Instant::now();
     while child.try_wait().ok()?.is_none() {
         if t0.elapsed() > std::time::Duration::from_secs(5) {

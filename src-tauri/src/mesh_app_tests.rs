@@ -824,12 +824,19 @@ fn unidentified_default_logs_for(node_id: &str) -> Vec<String> {
 struct TempClaudeEnv {
     _guard: tokio::sync::MutexGuard<'static, ()>,
     dir: PathBuf,
+    /// The pin this one replaced, put back on drop.
+    prev: Option<(Option<PathBuf>, Option<String>)>,
 }
 
 impl TempClaudeEnv {
-    async fn new(portable_default: Option<(&str, &str, &str)>, config_dir: Option<String>) -> Self {
+    /// Pin HOME to a fresh temp dir and the account-directory variable to `config_dir`; `None`
+    /// pins it to "unset" (empty), NOT to whatever the developer's shell exports.
+    fn pin(
+        guard: tokio::sync::MutexGuard<'static, ()>,
+        portable_default: Option<(&str, &str, &str)>,
+        config_dir: Option<String>,
+    ) -> Self {
         ensure_test_tracing();
-        let guard = claude_auth::ENV_LOCK.lock().await;
         let dir = std::env::temp_dir().join(format!("pb-claude-home-{}", db::new_id()));
         std::fs::create_dir_all(dir.join(".claude")).unwrap();
         if let Some((u, o, name)) = portable_default {
@@ -838,31 +845,95 @@ impl TempClaudeEnv {
             }});
             std::fs::write(dir.join(".claude.json"), profile.to_string()).unwrap();
         }
-        claude_auth::set_test_env(Some(dir.clone()), config_dir);
-        Self { _guard: guard, dir }
+        let prev = claude_auth::test_pin();
+        claude_auth::set_test_env(Some(dir.clone()), Some(config_dir.unwrap_or_default()));
+        Self { _guard: guard, dir, prev: Some(prev) }
+    }
+
+    async fn new(portable_default: Option<(&str, &str, &str)>, config_dir: Option<String>) -> Self {
+        Self::pin(claude_auth::ENV_LOCK.lock().await, portable_default, config_dir)
+    }
+
+    /// Put back the pin this one replaced (once; `Drop` calls it too).
+    fn restore(&mut self) {
+        if let Some((home, cfg)) = self.prev.take() {
+            claude_auth::set_test_env(home, cfg);
+        }
     }
 
     fn new_blocking(portable_default: Option<(&str, &str, &str)>, config_dir: Option<String>) -> Self {
-        ensure_test_tracing();
-        let guard = claude_auth::ENV_LOCK.blocking_lock();
-        let dir = std::env::temp_dir().join(format!("pb-claude-home-{}", db::new_id()));
-        std::fs::create_dir_all(dir.join(".claude")).unwrap();
-        if let Some((u, o, name)) = portable_default {
-            let profile = serde_json::json!({ "oauthAccount": {
-                "accountUuid": u, "organizationUuid": o, "organizationName": name
-            }});
-            std::fs::write(dir.join(".claude.json"), profile.to_string()).unwrap();
-        }
-        claude_auth::set_test_env(Some(dir.clone()), config_dir);
-        Self { _guard: guard, dir }
+        Self::pin(claude_auth::ENV_LOCK.blocking_lock(), portable_default, config_dir)
     }
 }
 
 impl Drop for TempClaudeEnv {
     fn drop(&mut self) {
-        claude_auth::set_test_env(None, None);
+        self.restore();
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// The pin wins over the developer's shell: `TempClaudeEnv(.., None)` pins the account-directory
+/// variable to "unset" (not "whatever is exported"), and drop puts back exactly the previous pin.
+#[test]
+fn temp_claude_env_pins_the_ambient_variable_and_restores_on_drop() {
+    // Each case holds the lock for its whole body, so no other test's pin can be mistaken for ours.
+    let before = {
+        let guard = claude_auth::ENV_LOCK.blocking_lock();
+        let before = claude_auth::test_pin();
+        let mut env = TempClaudeEnv::pin(guard, None, None);
+        assert_eq!(claude_auth::test_pin().1, Some(String::new()), "pinned to unset, not left to the shell");
+        assert_eq!(claude_auth::config_dir().unwrap(), env.dir.join(".claude"));
+        env.restore();
+        assert_eq!(claude_auth::test_pin(), before, "restoring puts back the previous pin");
+        before
+    };
+    let guard = claude_auth::ENV_LOCK.blocking_lock();
+    let again = claude_auth::test_pin();
+    let mut env = TempClaudeEnv::pin(guard, None, Some("/pinned/elsewhere".into()));
+    assert_eq!(claude_auth::config_dir().unwrap(), PathBuf::from("/pinned/elsewhere"));
+    env.restore();
+    assert_eq!(claude_auth::test_pin(), again);
+    drop(env);
+    // Both cases saw an unpinned process (nothing else holds a pin outside the lock).
+    assert_eq!(before, (None, None));
+}
+
+/// With the pin in place the default account is the pinned temp dir's, whatever the shell exports.
+#[tokio::test]
+async fn pinned_default_account_is_the_temp_dirs() {
+    let _env = TempClaudeEnv::new(Some(("u-pin", "o-pin", "Pin")), None).await;
+    assert_eq!(crate::default_plan_account().0, "u-pin:o-pin");
+}
+
+/// A shell that exports `CLAUDE_CONFIG_DIR` (David's Teams panes do) must not change a pinned test:
+/// run the pinned tests in a child with a decoy exported (a directory holding ANOTHER account's
+/// profile) and they still pass. The child's output must show both tests actually ran.
+#[test]
+fn pinned_tests_ignore_an_exported_account_directory() {
+    let decoy = std::env::temp_dir().join(format!("pb-decoy-claude-{}", db::new_id()));
+    std::fs::create_dir_all(&decoy).unwrap();
+    let profile = serde_json::json!({ "oauthAccount": {
+        "accountUuid": "u-decoy", "organizationUuid": "o-decoy", "organizationName": "Decoy"
+    }});
+    std::fs::write(decoy.join(".claude.json"), profile.to_string()).unwrap();
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "mesh_app_tests::pinned_default_account_is_the_temp_dirs",
+            "mesh_app_tests::usage_limit_stops_claude_turns",
+            "--test-threads=1",
+        ])
+        .env("CLAUDE_CONFIG_DIR", &decoy)
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&decoy);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("2 passed"),
+        "the pin must beat the exported variable:\n{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// The usage guard: a Claude Code turn past the plan limit is cancelled once, with a notice, and
