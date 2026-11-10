@@ -14,8 +14,8 @@ const MAX_ATTACHMENTS = 10;
 /** How long fetched slash commands are reused, and how soon an empty answer is asked again. */
 const SLASH_TTL_MS = 60_000;
 const SLASH_EMPTY_RETRY_MS = 3_000;
-/** Inner width (px) the fullest footer needs: three chips at their minimum widths, the options and listen
- *  buttons, Stop and Send both showing. Below it the chips go behind the settings button. */
+/** Inner width (px) the fullest footer needs: three chips at their minimum widths, the options button and the
+ *  listen button squeezed to its icon (14), Stop and Send both showing. Below it the chips go behind settings. */
 const NARROW_COMPOSER_PX = 412;
 
 function fmtSize(n: number): string {
@@ -265,17 +265,24 @@ export function Composer({
 
   useEffect(() => {
     if (!optionsOpen) return;
-    const esc = (e: KeyboardEvent) => {
+    const onKey = (e: KeyboardEvent) => {
+      // A confirmation raised from the sheet draws above it and takes its own keys.
+      if (useStore.getState().confirm) return;
+      // The sheet covers the app, so the app's shortcuts must not act on what is behind it.
+      if (e.metaKey || e.ctrlKey || e.altKey) {
+        e.stopPropagation();
+        return;
+      }
       if (e.key !== "Escape") return;
       // The open chip list takes Escape. Closing the sheet too would unmount the chip first.
       if (document.querySelector("[data-chip-menu]")) return;
-      // Capture phase, so the Code view's global "Stop (Esc)" never sees it.
+      // Capture phase, so the app's Escape shortcut (which stops the turn) never sees it.
       e.preventDefault();
       e.stopPropagation();
       setOptionsOpen(false);
     };
-    window.addEventListener("keydown", esc, true);
-    return () => window.removeEventListener("keydown", esc, true);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [optionsOpen]);
 
   // "@query" right before the caret, when mentions are on.
