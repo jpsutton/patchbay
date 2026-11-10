@@ -54,23 +54,37 @@ static TEST_CONFIG_DIR: RwLock<Option<String>> = RwLock::new(None);
 
 #[cfg(test)]
 pub(crate) fn set_test_env(home: Option<PathBuf>, config_dir: Option<String>) {
-    *TEST_HOME.write().unwrap() = home;
-    *TEST_CONFIG_DIR.write().unwrap() = config_dir;
+    // A poisoned lock still holds a valid pin: restoring must not panic a second test.
+    *TEST_HOME.write().unwrap_or_else(|e| e.into_inner()) = home;
+    *TEST_CONFIG_DIR.write().unwrap_or_else(|e| e.into_inner()) = config_dir;
+}
+
+/// The current pin, so a guard can restore exactly what it replaced.
+#[cfg(test)]
+pub(crate) fn test_pin() -> (Option<PathBuf>, Option<String>) {
+    (
+        TEST_HOME.read().unwrap_or_else(|e| e.into_inner()).clone(),
+        TEST_CONFIG_DIR.read().unwrap_or_else(|e| e.into_inner()).clone(),
+    )
 }
 
 fn raw_config_dir_env() -> Option<String> {
     #[cfg(test)]
-    if let Some(dir) = TEST_CONFIG_DIR.read().unwrap().clone() {
+    if let Some(dir) = TEST_CONFIG_DIR.read().unwrap_or_else(|e| e.into_inner()).clone() {
         return Some(dir);
     }
     std::env::var("CLAUDE_CONFIG_DIR").ok()
 }
 
 pub(crate) fn home() -> Result<PathBuf> {
+    // A test sees its pin, else the shared scratch home: never the developer's real one.
     #[cfg(test)]
-    if let Some(h) = TEST_HOME.read().unwrap().clone() {
-        return Ok(h);
-    }
+    return Ok(TEST_HOME
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_else(crate::test_support::test_home));
+    #[cfg(not(test))]
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(PathBuf::from)
         .ok_or_else(|| anyhow!("cannot find home directory"))
@@ -1080,6 +1094,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Run by `test_support::tests::an_exported_home_is_ignored` with a decoy HOME exported: with no
+    /// pin, `home()` is the scratch home whatever `$HOME` says.
+    #[test]
+    fn unpinned_home_is_the_scratch_home() {
+        if crate::test_support::real_home_requested() {
+            return;
+        }
+        let _env = ENV_LOCK.blocking_lock();
+        assert_eq!(test_pin().0, None);
+        assert_eq!(home().unwrap(), crate::test_support::sandbox_home());
+    }
+
     #[test]
     fn account_comes_from_claude_json() {
         let _env = ENV_LOCK.blocking_lock();
@@ -1292,6 +1318,7 @@ mod tests {
     /// Live check against Anthropic with the machine's Claude Code login.
     /// `cargo test --lib live_claude_login -- --ignored --nocapture`
     #[tokio::test]
+    // Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
     #[ignore]
     async fn live_claude_login_models_and_chat() {
         let token = access_token(None).await.expect("Claude Code login");

@@ -428,6 +428,8 @@ fn probe_opencode_deny_rules(
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
     .env_remove("OPENCODE_CONFIG_CONTENT");
+    #[cfg(test)]
+    crate::test_support::isolate_std(&mut cmd);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -710,6 +712,10 @@ pub fn which(name: &str) -> Option<PathBuf> {
 }
 
 pub(crate) fn home_dir() -> Option<PathBuf> {
+    // Tests: the pinned home, else the scratch one. Callers write under it (`~/.gemini/...`).
+    #[cfg(test)]
+    return crate::claude_auth::home().ok();
+    #[cfg(not(test))]
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
 }
 
@@ -1012,14 +1018,15 @@ fn detect(kind: AgentKind, overrides: &AgentPaths) -> AgentInfo {
 
 fn version_of(program: &Path) -> Option<String> {
     use patchbay_agent::proc::NoWindow;
-    let mut child = std::process::Command::new(program)
-        .arg("--version")
+    let mut cmd = std::process::Command::new(program);
+    cmd.arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .no_window()
-        .spawn()
-        .ok()?;
+        .no_window();
+    #[cfg(test)]
+    crate::test_support::isolate_std(&mut cmd);
+    let mut child = cmd.spawn().ok()?;
     let t0 = std::time::Instant::now();
     while child.try_wait().ok()?.is_none() {
         if t0.elapsed() > std::time::Duration::from_secs(5) {
@@ -1992,6 +1999,7 @@ time.sleep(60)
     /// pb-20261107-32 item 5: #[ignore] live test calling the REAL probe (fresh serve child,
     /// session cwd/env). Requires `opencode` on PATH. Exercises the same source the fix uses.
     #[test]
+    // Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
     #[ignore]
     fn opencode_live_probe_reads_session_cwd_config_and_agent_denies() {
         let opencode = std::env::var("OPENCODE_BIN").unwrap_or_else(|_| "opencode".into());

@@ -96,6 +96,8 @@ impl TerminalManager {
             pixel_height: 0,
         })?;
         cmd.cwd(cwd);
+        #[cfg(test)]
+        crate::test_support::isolate_pty(&mut cmd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         let mut child = pty.slave.spawn_command(cmd)?;
