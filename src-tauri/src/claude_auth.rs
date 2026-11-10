@@ -1014,6 +1014,40 @@ mod tests {
         assert_eq!(keychain_tier_with(Some("/Users/u/.claudetvg"), None, home, &get), None);
     }
 
+    /// `default_plan_account` has its exact setting (none: the ambient variable), so with the variable
+    /// exported WITH a trailing slash its tier comes from the item that exact string names. The old
+    /// form (resolve the path, then guess the setting from it) read the normalized path's item, whose
+    /// tier here disagrees with the profile and would have left the account unidentified.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn default_plan_account_reads_the_item_the_ambient_variable_names() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = ENV_LOCK.lock().await;
+        let base = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
+        let dir = base.join(".claude");
+        std::fs::create_dir_all(&dir).unwrap();
+        // The default directory's profile sits beside it, in HOME.
+        let profile = serde_json::json!({ "oauthAccount": {
+            "accountUuid": "u", "organizationUuid": "o", "userRateLimitTier": "t1"
+        }});
+        std::fs::write(base.join(".claude.json"), profile.to_string()).unwrap();
+        let ambient = format!("{}/", dir.to_string_lossy());
+        set_test_env(Some(base.clone()), Some(ambient.clone()));
+        let creds = |tier: &str| format!(r#"{{"claudeAiOauth":{{"accessToken":"t","refreshToken":"r","expiresAt":1,"rateLimitTier":"{tier}"}}}}"#);
+        *FAKE_KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner()) = BTreeMap::from([
+            // What Claude Code reads for CLAUDE_CONFIG_DIR=<dir>/ : the profile's tier.
+            (keychain_service(Some(&ambient)), creds("t1")),
+            // What a guess from the normalized path would read: another tier (a different login).
+            (keychain_service(Some(&dir.to_string_lossy())), creds("t2")),
+            (keychain_service(None), creds("t2")),
+        ]);
+        let got = crate::default_plan_account();
+        FAKE_KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        set_test_env(None, None);
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(got.0, "u:o");
+    }
+
     #[test]
     fn tier_setting_guess_only_for_callers_with_a_bare_path() {
         let home = Path::new("/Users/u");
