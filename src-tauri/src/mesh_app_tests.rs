@@ -955,7 +955,12 @@ async fn usage_limit_stops_claude_turns() {
     assert!(usable.is_none());
 
     emit(&a, &claude.id, CodeEvent::PromptDone { stop_reason: json!("cancelled") });
-    let err = prompt(claude.id.clone()).await.unwrap_err();
+    // Bounded: a guard that lets the prompt through leaves it awaiting an agent reply that never
+    // comes (the test agent is a bare channel), so fail fast instead of hanging the binary.
+    let sent = tokio::time::timeout(std::time::Duration::from_secs(10), prompt(claude.id.clone()))
+        .await
+        .expect("code_prompt hung: the usage guard let the prompt reach the agent, which never replies");
+    let err = sent.unwrap_err();
     assert!(err.0.starts_with("Not sent. You have used 97%"), "{}", err.0);
 
     // Turning the guard off lets prompts through again.

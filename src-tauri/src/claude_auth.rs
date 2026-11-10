@@ -653,6 +653,28 @@ mod tests {
         );
     }
 
+    /// `canonical_dir` is bounded on symlink cycles and self-links (it follows links at most 8
+    /// deep); run on a thread so a regression fails here instead of hanging the test binary.
+    #[cfg(unix)]
+    #[test]
+    fn canonical_dir_terminates_on_symlink_cycles() {
+        let base = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let (a, b, me) = (base.join("a"), base.join("b"), base.join("me"));
+        std::os::unix::fs::symlink(&b, &a).unwrap();
+        std::os::unix::fs::symlink(&a, &b).unwrap();
+        std::os::unix::fs::symlink(&me, &me).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let paths = vec![a.join("x/y"), b.clone(), me.join("z")];
+        std::thread::spawn(move || {
+            let out: Vec<PathBuf> = paths.iter().map(|p| canonical_dir(p)).collect();
+            let _ = tx.send(out);
+        });
+        let out = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("canonical_dir looped on a symlink cycle");
+        assert_eq!(out.len(), 3);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn account_comes_from_claude_json() {
         let dir = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
