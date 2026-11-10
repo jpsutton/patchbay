@@ -12,6 +12,7 @@ pub mod native;
 pub mod opencode_state;
 pub mod antigravity_plan;
 pub mod cursor_plan;
+pub mod grok_plan;
 pub mod permissions;
 pub mod plan_limits;
 pub mod questions;
@@ -234,6 +235,7 @@ impl CodeManager {
             mcp: {
                 let db = db.clone();
                 let session_id = code_session_id.to_owned();
+                let host_agent = session.agent.clone();
                 Box::new(move |init| {
                     let (mut servers, skipped) = mcp::acp_servers(&db, mcp::McpSupport::from_init(init)).unwrap_or_else(|e| {
                         tracing::warn!("MCP servers: {e:#}");
@@ -245,7 +247,7 @@ impl CodeManager {
                     // Built after initialize so the tool list can match this agent's steering.
                     if let Some(bridge) = message_bridge {
                         let can_steer = init["_meta"]["steering"]["supported"] == true || interject;
-                        match bridge.server_definition(&session_id, can_steer) {
+                        match bridge.server_definition(&session_id, &host_agent, can_steer) {
                             Ok(server) => servers.insert(0, server),
                             Err(e) => tracing::warn!("agent-messaging MCP: {e:#}"),
                         }

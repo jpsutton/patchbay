@@ -6,7 +6,7 @@ import { isRemoteApp } from "./platform";
 import type { CodeLive } from "./sessionLive";
 
 export type ProviderKind = "openai_chat" | "openai_responses" | "anthropic" | "gemini";
-export type AuthMode = "api_key" | "claude_login";
+export type AuthMode = "api_key" | "claude_login" | "grok_login";
 
 export interface Provider {
   id: string;
@@ -17,6 +17,8 @@ export interface Provider {
   authMode: AuthMode;
   /** For Claude login: the Claude Code config directory whose login to use (null: ~/.claude). */
   claudeConfigDir?: string | null;
+  /** For Grok login: the Grok home directory whose login to use (null: $GROK_HOME, else ~/.grok). */
+  grokHome?: string | null;
 }
 
 /** USD per 1M tokens. */
@@ -114,7 +116,7 @@ export interface UsageView {
   cache?: CacheClock | null;
 }
 
-/** One Claude plan usage window: the fraction used (0 to 1) and when it resets (unix seconds). */
+/** One plan usage window (Claude, or a Grok seat's weekly pool): the fraction used (0 to 1) and when it resets (unix seconds). */
 export interface PlanWindow {
   utilization: number;
   resetsAt: number;
@@ -917,7 +919,7 @@ export interface Preferences {
   agentPaths: Partial<Record<AgentId, string>>;
   /** Agents set to run on Patchbay's providers: agent id -> Patchbay model ref. */
   agentProviders: Partial<Record<AgentId, string>>;
-  /** Stop turns on a Claude plan (Claude Code, or Patchbay's agent on a Claude login) at `percent`. */
+  /** Stop turns on a Claude or Grok plan (Claude Code, or Patchbay's agent on a Claude or Grok login) at `percent`. */
   usageLimit: { enabled: boolean; percent: number; autoResume: boolean };
   /** Stop Cursor CLI turns when Auto / API usage reaches `percent`. Off by default. */
   cursorUsageLimit: { enabled: boolean; percent: number; autoResume: boolean };
@@ -1057,6 +1059,7 @@ export const api = {
     apiKey?: string;
     authMode?: AuthMode;
     claudeConfigDir?: string;
+    grokHome?: string;
   }) => invoke<Provider>("save_provider", { input }),
   deleteProvider: (id: string) => invoke<void>("delete_provider", { id }),
   discoverModels: (providerId: string) => invoke<DiscoveredModel[]>("discover_models", { providerId }),

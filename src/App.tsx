@@ -489,10 +489,12 @@ function planKindForSession(
   if (session.agent === "cursor") return "cursor";
   if (session.agent === "antigravity") return "antigravity";
   if (session.agent === "claude-code" && !prefs.agentProviders["claude-code"]) return "claude";
-  if (session.agent === "patchbay" && session.modelRef) {
+  // Patchbay's agent and Grok Build both run on Patchbay's models, so both can be on a plan login.
+  if ((session.agent === "patchbay" || session.agent === "grok") && session.modelRef) {
     const model = models.find((m) => m.id === session.modelRef);
     const provider = model && providers.find((p) => p.id === model.providerId);
-    if (provider?.authMode === "claude_login") return "claude";
+    // A Grok seat's weekly pool shows in the same gauge as a Claude plan's windows.
+    if (provider?.authMode === "claude_login" || provider?.authMode === "grok_login") return "claude";
   }
   return null;
 }

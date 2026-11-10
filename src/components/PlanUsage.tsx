@@ -150,7 +150,7 @@ const busiest = (accounts: PlanAccount[], now: number) =>
 
 const barClass = (t: ReturnType<typeof tone>) => (t === "danger" ? "bg-danger" : t === "warn" ? "bg-warn" : "bg-ok");
 
-/** The sidebar footer's toggle for the Claude plan usage blade: one mini bar per window of the busiest account. */
+/** The sidebar footer's toggle for the plan usage blade (Claude and Grok seats): one mini bar per window of the busiest account. */
 export function PlanUsageButton() {
   const accounts = useStore((s) => s.planAccounts);
   const open = useStore((s) => s.planOpen);
@@ -171,10 +171,10 @@ export function PlanUsageButton() {
   const pace = worstPace(limits, now);
   const paceTone = pace == null ? null : tone(Math.round(pace * 100), limit);
   const title = rows.length
-    ? `Claude plan usage${accounts.length > 1 && shown ? ` (${shown.label})` : ""}: ${rows.map((r) => `${r.label === "5h" ? "5-hour" : "weekly"} ${r.pct}% used`).join(", ")}${
+    ? `Plan usage${accounts.length > 1 && shown ? ` (${shown.label})` : ""}: ${rows.map((r) => `${r.label === "5h" ? "5-hour" : "weekly"} ${r.pct}% used`).join(", ")}${
         pace == null ? "" : `. Burning at ${pace.toFixed(1)}x an even pace`
       }`
-    : "Claude plan usage";
+    : "Plan usage";
   return (
     <button
       className={`flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-2 text-[13px] hover:bg-panel-2 hover:text-fg ${
@@ -308,7 +308,7 @@ function AccountUsage({ a, named, first, now, limit }: { a: PlanAccount; named: 
 }
 
 /**
- * Claude plan usage from the last reports of Claude Code, or of Patchbay's agent on a Claude login, one section per
+ * Plan usage from the last reports of Claude Code, of Patchbay's agent on a Claude or Grok login, one section per
  * account. Full-width sidebar pane above the footer; stays open until its button is clicked again.
  */
 export function PlanUsageBlade({ className }: { className?: string }) {
@@ -338,16 +338,16 @@ export function PlanUsageBlade({ className }: { className?: string }) {
   return (
     <div
       role="dialog"
-      aria-label="Claude plan usage"
+      aria-label="Plan usage"
       className={`max-h-[40vh] w-full shrink-0 overflow-y-auto border-t border-line bg-panel py-1.5 text-[13px] ${className ?? ""}`}
     >
       <div className="flex items-baseline justify-between px-3 pb-1.5 pt-2">
-        <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-faint">Claude plan</span>
+        <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-faint">Plan usage</span>
         {single && <span className="text-[11px] text-faint">updated {fmtSpan(now - single.observedAt)} ago</span>}
       </div>
       {accounts.length === 0 ? (
         <p className="px-3 py-1.5 text-muted">
-          No usage reported yet. It shows up after a turn on a Claude plan: Claude Code signed in with one, or Patchbay's agent on a Claude login provider.
+          No usage reported yet. It shows up after a turn on a Claude or Grok plan: Claude Code signed in with one, or Patchbay's agent on a Claude or Grok login provider.
         </p>
       ) : (
         accounts.map((a, i) => <AccountUsage key={a.account} a={a} named={accounts.length > 1} first={i === 0} now={now} limit={limit} />)

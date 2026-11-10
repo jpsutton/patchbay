@@ -62,8 +62,10 @@ export type Mode = "chat" | "code";
 export type Entry =
   /** `promptId`: names the prompt in its `userPrompt` events, so each shows once. `pending`: steered
    *  into the running turn, and the agent has not taken a step since (see `readSteers`). `waitFor`:
-   *  the tool calls that were running when it came in; the agent reads it once they are done. */
-  | { kind: "user"; text: string; attachments?: Attachment[]; promptId?: string; at?: number; pending?: boolean; waitFor?: string[] }
+   *  the tool calls that were running when it came in; the agent reads it once they are done.
+   *  `origin`: `agent:<node>:<session>` for a prompt delivered by another agent in the mesh;
+   *  absent for a human prompt (backward compatible with older hosts/transcripts). */
+  | { kind: "user"; text: string; attachments?: Attachment[]; promptId?: string; origin?: string; at?: number; pending?: boolean; waitFor?: string[] }
   | { kind: "agent"; text: string; at?: number }
   /** An image the agent sent in its reply (an ACP image block). */
   | { kind: "image"; data: string; mimeType: string; from?: "user" }
@@ -952,7 +954,7 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
         next = {
           ...s,
           busy: true,
-          entries: [...s.entries, { kind: "user", text: e.text, attachments, ...(e.replay || s.status !== "ready" ? {} : { at: Date.now() }) }],
+          entries: [...s.entries, { kind: "user", text: e.text, attachments, ...(e.origin ? { origin: e.origin } : {}), ...(e.replay || s.status !== "ready" ? {} : { at: Date.now() }) }],
         };
         break;
       }
@@ -983,6 +985,7 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
                   text: e.text,
                   attachments,
                   promptId: pid,
+                  ...(e.origin ? { origin: e.origin } : {}),
                   ...(e.replay || s.status !== "ready" ? {} : { at: Date.now() }),
                   ...(e.delivery === "steered" && !e.replay
                     ? {
