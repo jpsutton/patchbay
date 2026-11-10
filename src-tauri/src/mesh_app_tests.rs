@@ -2646,3 +2646,43 @@ async fn remote_window_catches_up_and_saves_through_the_host() {
     save_code_transcript(&b.state, s.id.clone(), "{\"v\":1}".into()).await.unwrap();
     assert_eq!(a.state.db.code_transcript(&s.id).unwrap().as_deref(), Some("{\"v\":1}"));
 }
+
+/// An agent's message to a session whose Claude account is over the limit is refused naming the
+/// RECIPIENT and its account; a target on no plan account (opencode) is never stopped by it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_message_refusal_names_the_recipients_account() {
+    let _env = TempClaudeEnv::new(None, None).await;
+    use code::plan_limits::{PlanLimits, Window, now};
+    let a = node("alpha-recipient-limit");
+    let an = a.state.mesh.node_id().to_owned();
+    let cwd = a.dir.to_string_lossy().into_owned();
+    a.state.code.plan.record(
+        &crate::default_plan_account().0,
+        Some("dev@example.com Organization".into()),
+        PlanLimits { five_hour: Some(Window { utilization: 0.97, resets_at: now() + 3600 }), observed_at: now() - 60, ..Default::default() },
+    );
+    let src = a.state.db.create_code_session(&cwd, None, "opencode", "default").unwrap();
+    let claude = a.state.db.create_code_session(&cwd, None, "claude-code", "default").unwrap();
+    let oc = a.state.db.create_code_session(&cwd, None, "opencode", "default").unwrap();
+    let _claude_rx = a.state.code.attach_test_agent(&claude.id);
+    let mut oc_rx = a.state.code.attach_test_agent(&oc.id);
+
+    let err = send_agent_message(&a.state, &an, &src.id, &claude.id, "hi").await.unwrap_err().to_string();
+    assert!(err.starts_with("Not sent. "), "{err}");
+    assert!(err.contains(&claude.id) && err.contains(&format!("'{}'", claude.title)), "names the recipient: {err}");
+    assert!(err.contains("5-hour") && err.contains("97%") && err.contains("resets in"), "window, percent, reset: {err}");
+    assert!(!err.contains("example.com") && !err.contains("Organization"), "no account label (an email) leaks: {err}");
+    assert!(!err.contains("You have used"), "never says the sender used anything: {err}");
+
+    // An opencode recipient is exempt from the Claude guard (and so would an opencode sender be).
+    let (r, got) = tokio::join!(send_agent_message(&a.state, &an, &claude.id, &oc.id, "hi"), take_agent_message(&mut oc_rx));
+    assert_eq!(r.unwrap()["delivery"], "sent");
+    assert!(got.text.contains("hi"), "{}", got.text);
+
+    // A human's prompt to the same session keeps the existing first-person wording.
+    let chans: crate::api::ChanFactory = Arc::new(|_| None);
+    let err = crate::api::call(&a.state, "code_prompt", json!({ "id": claude.id, "text": "more", "attachmentIds": [] }), &chans)
+        .await
+        .unwrap_err();
+    assert!(err.0.starts_with("Not sent. You have used 97% of dev@example.com Organization's 5-hour limit"), "{}", err.0);
+}

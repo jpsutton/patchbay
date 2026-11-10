@@ -254,6 +254,14 @@ impl Hit {
             fmt_wait(self.resets_at - now)
         )
     }
+
+    /// The refusal an agent's message gets when the RECIPIENT's Cursor plan is used up.
+    pub fn recipient_message(&self, now: i64, target: &str) -> String {
+        format!(
+            "{target}'s Cursor plan (included usage, free-on-us bonus and free credits) is used up, so Patchbay stops its Cursor turns and won't start one for your message. This is the recipient's plan, not yours. The cycle resets in {}.",
+            fmt_wait(self.resets_at - now)
+        )
+    }
 }
 
 fn fmt_wait(secs: i64) -> String {
