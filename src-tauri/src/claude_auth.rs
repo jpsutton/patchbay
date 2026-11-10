@@ -197,6 +197,25 @@ pub fn is_path_account_key(key: &str) -> bool {
 /// profile catches up (the portable key returns, and `fold_plan_accounts` merges the history on
 /// the next load).
 pub fn account(dir: &Path) -> (String, Option<String>) {
+    let guess = home().ok().and_then(|h| tier_setting_guess(dir, raw_config_dir_env().as_deref(), &h));
+    account_with(dir, guess.as_deref())
+}
+
+/// `account` for a directory setting as given (`None`: the ambient one): the setting reaches the
+/// Keychain lookup untouched, so the tier is read from the item `access_token` would read.
+pub fn account_for(setting: Option<&str>) -> Result<(String, Option<String>)> {
+    Ok(account_with(&resolve_dir(setting)?, setting))
+}
+
+/// The setting a resolved path stands for, for callers that only have the path (a path-keyed
+/// plan report, the default directory): the path itself, except the default directory when no
+/// variable is set, which is `None`. Everything else that has the setting passes it (`account_for`).
+fn tier_setting_guess(dir: &Path, ambient: Option<&str>, home: &Path) -> Option<String> {
+    let unset = ambient.is_none_or(str::is_empty);
+    (!(unset && same_dir(dir, &home.join(".claude")))).then(|| dir.to_string_lossy().into_owned())
+}
+
+fn account_with(dir: &Path, setting: Option<&str>) -> (String, Option<String>) {
     #[derive(Clone)]
     struct Profile {
         key: String,
@@ -229,7 +248,7 @@ pub fn account(dir: &Path) -> (String, Option<String>) {
         Ok(h) if same_dir(dir, &h.join(".claude")) => canonical_dir(&h).join(".claude.json"),
         _ => canonical_dir(dir).join(".claude.json"),
     };
-    let tier = login_plan_tier(dir);
+    let tier = login_plan_tier(dir, setting);
     let resolve = |seen: &mut Seen| -> (String, Option<String>) {
         let Some(cur) = seen.current.clone() else {
             return fallback();
@@ -278,8 +297,8 @@ pub fn account(dir: &Path) -> (String, Option<String>) {
 /// Keychain. Cached for a minute: `account` asks on every plan report and prompt, and a
 /// Keychain read is not free (nor free of a one-time macOS authorization ask for a login this
 /// app has never read).
-fn login_plan_tier(dir: &Path) -> Option<String> {
-    static TIERS: std::sync::RwLock<BTreeMap<PathBuf, (std::time::Instant, Option<SystemTime>, Option<String>)>> =
+fn login_plan_tier(dir: &Path, setting: Option<&str>) -> Option<String> {
+    static TIERS: std::sync::RwLock<BTreeMap<(PathBuf, Option<String>), (std::time::Instant, Option<SystemTime>, Option<String>)>> =
         std::sync::RwLock::new(BTreeMap::new());
     const TTL: std::time::Duration = std::time::Duration::from_secs(60);
     let file = dir.join(".credentials.json");
@@ -287,20 +306,20 @@ fn login_plan_tier(dir: &Path) -> Option<String> {
     let mtime = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
     let now = std::time::Instant::now();
     if let Ok(g) = TIERS.read()
-        && let Some((at, fm, tier)) = g.get(dir)
+        && let Some((at, fm, tier)) = g.get(&(dir.to_owned(), setting.map(str::to_owned)))
         && *fm == mtime
         && now.duration_since(*at) < TTL
     {
         return tier.clone();
     }
-    let tier = read_login_tier(dir);
+    let tier = read_login_tier(dir, setting);
     if let Ok(mut g) = TIERS.write() {
-        g.insert(dir.to_owned(), (now, mtime, tier.clone()));
+        g.insert((dir.to_owned(), setting.map(str::to_owned)), (now, mtime, tier.clone()));
     }
     tier
 }
 
-fn read_login_tier(dir: &Path) -> Option<String> {
+fn read_login_tier(dir: &Path, setting: Option<&str>) -> Option<String> {
     let file = dir.join(".credentials.json");
     if let Ok(raw) = std::fs::read_to_string(&file)
         && let Ok(v) = serde_json::from_str::<Value>(&raw)
@@ -309,30 +328,33 @@ fn read_login_tier(dir: &Path) -> Option<String> {
         // The file holds this directory's login: its tier is the answer, present or not.
         return o.get("rateLimitTier").and_then(Value::as_str).map(str::to_owned);
     }
-    keychain_login_tier(dir)
+    keychain_login_tier(setting)
 }
 
 /// The login Claude Code keeps in the Keychain (macOS), where the default directory keeps its
-/// Claude login even when a credentials file exists holding only MCP logins.
-#[cfg(all(target_os = "macos", not(test)))]
-fn keychain_login_tier(dir: &Path) -> Option<String> {
-    // Only the resolved path reaches here, not the setting it came from (callers: `account`): guess
-    // the setting is the path itself, except for the default directory when no variable is set.
-    // The same resolver as `access_token` picks the item; a miss reads as "no login tier", so the
-    // profile's key stands.
-    let ambient_default = raw_config_dir_env().is_none_or(|e| e.trim().is_empty()) && same_dir(dir, &home().ok()?.join(".claude"));
-    let raw = (!ambient_default).then(|| dir.to_string_lossy().into_owned());
-    let (root, _) = Store::locate(dir, raw.as_deref()).ok()?.read().ok()?;
+/// Claude login even when a credentials file exists holding only MCP logins. The same setting
+/// and the same resolver as `access_token` (`Store::locate`), so both read one item; a miss reads
+/// as "no login tier" and the profile's key stands. Test builds read the in-memory fake.
+#[cfg(target_os = "macos")]
+fn keychain_login_tier(setting: Option<&str>) -> Option<String> {
+    let account = std::env::var("USER").ok()?;
+    keychain_tier_with(setting, raw_config_dir_env().as_deref(), &home().ok()?, &|svc| keychain_get(svc, &account).ok())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn keychain_login_tier(_setting: Option<&str>) -> Option<String> {
+    None
+}
+
+/// The tier stored in the item `chosen_service` picks.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn keychain_tier_with(setting: Option<&str>, ambient: Option<&str>, home: &Path, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let service = chosen_service(setting, ambient, home, get).ok()?;
+    let (root, _) = parse_oauth(&get(&service)?, &service).ok()?;
     root.get("claudeAiOauth")
         .and_then(|o| o.get("rateLimitTier"))
         .and_then(Value::as_str)
         .map(str::to_owned)
-}
-
-/// Tests must not touch the developer's Keychain; elsewhere than macOS there is none.
-#[cfg(not(all(target_os = "macos", not(test))))]
-fn keychain_login_tier(_dir: &Path) -> Option<String> {
-    None
 }
 
 /// Where a config directory's login lives.
@@ -363,8 +385,7 @@ impl Store {
         if !has_file_login(&file) {
             let account = std::env::var("USER").context("USER is not set")?;
             let ambient = raw_config_dir_env();
-            let candidates = keychain_candidates(setting, ambient.as_deref(), &home()?)?;
-            let service = pick_service(&candidates, &|svc| keychain_get(svc, &account).ok());
+            let service = chosen_service(setting, ambient.as_deref(), &home()?, &|svc| keychain_get(svc, &account).ok())?;
             return Ok(Store::Keychain { service, account });
         }
         Ok(Store::File(file))
@@ -407,7 +428,7 @@ fn keychain_put(service: &str, account: &str, secret: &str) -> Result<()> {
 }
 
 /// Test builds never reach the real Keychain: items live here, by service name.
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) static FAKE_KEYCHAIN: std::sync::Mutex<BTreeMap<String, String>> = std::sync::Mutex::new(BTreeMap::new());
 
 #[cfg(all(target_os = "macos", test))]
@@ -453,6 +474,12 @@ fn keychain_candidates(setting: Option<&str>, ambient: Option<&str>, home: &Path
     };
     let fallback = same_dir(Path::new(&env), &home.join(".claude")).then(|| keychain_service(None));
     Ok(Candidates { primary: keychain_service(Some(&env)), fallback })
+}
+
+/// The one place a service is chosen: both `Store::locate` (token) and `keychain_tier_with` (tier).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn chosen_service(setting: Option<&str>, ambient: Option<&str>, home: &Path, get: &dyn Fn(&str) -> Option<String>) -> Result<String> {
+    Ok(pick_service(&keychain_candidates(setting, ambient, home)?, get))
 }
 
 /// Claude Code's Keychain service name (claude-code 2.1.304 `uB`): plain when run with no
@@ -522,7 +549,15 @@ fn securestorage_warning(set: bool) -> Option<&'static str> {
     set.then_some(SECURESTORAGE_WARNING)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Times `warn_unmodelled_env` ran on this thread, so a test can prove startup calls it.
+    pub(crate) static STARTUP_ENV_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) fn warn_unmodelled_env() {
+    #[cfg(test)]
+    STARTUP_ENV_CHECKS.with(|c| c.set(c.get() + 1));
     if let Some(w) = securestorage_warning(std::env::var_os("CLAUDE_SECURESTORAGE_CONFIG_DIR").is_some()) {
         tracing::warn!("{w}");
     }
@@ -896,6 +931,78 @@ mod tests {
         set_test_env(None, None);
         clear_cache();
         assert_eq!(got, "tok-slash");
+    }
+
+    /// The tier lookup reads the item the token lookup reads, for every class where the two used to
+    /// disagree (a tier-side guess from the resolved path). Same raw setting in, same item out.
+    /// Fake store only.
+    #[test]
+    fn tier_and_token_lookups_pick_the_same_item() {
+        let home = Path::new("/Users/u");
+        let creds = |tier: &str| format!(r#"{{"claudeAiOauth":{{"accessToken":"t","refreshToken":"r","expiresAt":1,"rateLimitTier":"{tier}"}}}}"#);
+        // (setting, ambient, the service Claude Code uses, so the one holding "right")
+        let classes: [(Option<&str>, Option<&str>, String); 6] = [
+            (Some("~/.claudetvg/"), None, service_for(Some("/Users/u/.claudetvg/"), None)),
+            (Some("/Users/u/.claudetvg/"), None, "Claude Code-credentials-23e8fe31".into()),
+            (Some("~/.claude"), None, "Claude Code-credentials-ff2684fe".into()),
+            (Some("/Users/u/.claude/"), None, "Claude Code-credentials-e28f4e3b".into()),
+            (None, Some("/Users/u/.claudetvg "), "Claude Code-credentials-c73157f9".into()),
+            (None, Some("/Users/u/.claudetvg"), "Claude Code-credentials-facf62bf".into()),
+        ];
+        for (setting, ambient, right) in classes {
+            // The item Claude Code reads holds "right"; the normalized-path item holds "wrong".
+            let store: BTreeMap<String, String> = BTreeMap::from([
+                ("Claude Code-credentials-facf62bf".to_owned(), creds("wrong")),
+                ("Claude Code-credentials".to_owned(), creds("wrong")),
+            ])
+            .into_iter()
+            .chain([(right.clone(), creds("right"))])
+            .collect();
+            let get = |svc: &str| store.get(svc).cloned();
+            let chosen = chosen_service(setting, ambient, home, &get).unwrap();
+            assert_eq!(chosen, right, "token side: {setting:?} {ambient:?}");
+            assert_eq!(keychain_tier_with(setting, ambient, home, &get).as_deref(), Some("right"), "tier side: {setting:?} {ambient:?}");
+        }
+    }
+
+    /// `account_for` carries the setting to the tier lookup: with a trailing-slash setting the
+    /// profile's tier matches the item named for that exact string; reading the normalized path's
+    /// item or the plain one instead would contradict the profile and leave the account unidentified.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn account_for_reads_the_tier_from_the_item_the_setting_names() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        let _env = ENV_LOCK.lock().await;
+        let base = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
+        let dir = base.join(".claudetvg");
+        std::fs::create_dir_all(&dir).unwrap();
+        let profile = serde_json::json!({ "oauthAccount": {
+            "accountUuid": "u1", "organizationUuid": "o1", "userRateLimitTier": "tier-right"
+        }});
+        std::fs::write(dir.join(".claude.json"), profile.to_string()).unwrap();
+        set_test_env(Some(base.clone()), Some(String::new()));
+        let setting = format!("{}/", dir.to_string_lossy());
+        let creds = |tier: &str| format!(r#"{{"claudeAiOauth":{{"accessToken":"t","refreshToken":"r","expiresAt":1,"rateLimitTier":"{tier}"}}}}"#);
+        *FAKE_KEYCHAIN.lock().unwrap() = BTreeMap::from([
+            (keychain_service(Some(&setting)), creds("tier-right")),
+            (keychain_service(Some(&dir.to_string_lossy())), creds("tier-wrong")),
+            (keychain_service(None), creds("tier-wrong")),
+        ]);
+        let got = account_for(Some(&setting)).unwrap();
+        FAKE_KEYCHAIN.lock().unwrap().clear();
+        set_test_env(None, None);
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(got.0, "u1:o1");
+    }
+
+    #[test]
+    fn tier_setting_guess_only_for_callers_with_a_bare_path() {
+        let home = Path::new("/Users/u");
+        let g = |d: &str, a: Option<&str>| tier_setting_guess(Path::new(d), a, home);
+        assert_eq!(g("/Users/u/.claude", None), None);
+        assert_eq!(g("/Users/u/.claude", Some("")), None);
+        assert_eq!(g("/Users/u/.claude", Some("/Users/u/.claude")), Some("/Users/u/.claude".into()));
+        assert_eq!(g("/Users/u/.claudetvg", None), Some("/Users/u/.claudetvg".into()));
     }
 
     #[test]
