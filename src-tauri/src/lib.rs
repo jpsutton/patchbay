@@ -2504,7 +2504,7 @@ async fn code_prompt_local(
         let (limit, now) = (prefs.usage_limit.percent, code::plan_limits::now());
         // Another agent's message wakes THIS session: say the limit is the recipient's.
         if origin.starts_with("agent:") {
-            anyhow::bail!("Not sent. {}", hit.recipient_message(limit, now, &label, &recipient_name(state, &id)));
+            anyhow::bail!("Not sent. {}", hit.recipient_message(limit, now, &recipient_name(state, &id)));
         }
         anyhow::bail!("Not sent. {}", hit.message(limit, now, &label));
     }

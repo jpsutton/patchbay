@@ -2658,7 +2658,7 @@ async fn agent_message_refusal_names_the_recipients_account() {
     let cwd = a.dir.to_string_lossy().into_owned();
     a.state.code.plan.record(
         &crate::default_plan_account().0,
-        Some("Alpha".into()),
+        Some("dev@example.com Organization".into()),
         PlanLimits { five_hour: Some(Window { utilization: 0.97, resets_at: now() + 3600 }), observed_at: now() - 60, ..Default::default() },
     );
     let src = a.state.db.create_code_session(&cwd, None, "opencode", "default").unwrap();
@@ -2670,7 +2670,8 @@ async fn agent_message_refusal_names_the_recipients_account() {
     let err = send_agent_message(&a.state, &an, &src.id, &claude.id, "hi").await.unwrap_err().to_string();
     assert!(err.starts_with("Not sent. "), "{err}");
     assert!(err.contains(&claude.id) && err.contains(&format!("'{}'", claude.title)), "names the recipient: {err}");
-    assert!(err.contains("Alpha") && err.contains("recipient's account"), "names the recipient's account: {err}");
+    assert!(err.contains("5-hour") && err.contains("97%") && err.contains("resets in"), "window, percent, reset: {err}");
+    assert!(!err.contains("example.com") && !err.contains("Organization"), "no account label (an email) leaks: {err}");
     assert!(!err.contains("You have used"), "never says the sender used anything: {err}");
 
     // An opencode recipient is exempt from the Claude guard (and so would an opencode sender be).
@@ -2683,5 +2684,5 @@ async fn agent_message_refusal_names_the_recipients_account() {
     let err = crate::api::call(&a.state, "code_prompt", json!({ "id": claude.id, "text": "more", "attachmentIds": [] }), &chans)
         .await
         .unwrap_err();
-    assert!(err.0.starts_with("Not sent. You have used 97% of Alpha's 5-hour limit"), "{}", err.0);
+    assert!(err.0.starts_with("Not sent. You have used 97% of dev@example.com Organization's 5-hour limit"), "{}", err.0);
 }

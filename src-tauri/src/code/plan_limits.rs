@@ -144,14 +144,14 @@ impl Hit {
 
     /// The refusal an agent's message gets when the RECIPIENT's account is over: it names the
     /// recipient and its account, and never says the sender used anything.
-    pub fn recipient_message(&self, limit: u8, now: i64, account: &str, target: &str) -> String {
+    pub fn recipient_message(&self, limit: u8, now: i64, target: &str) -> String {
         let over = if self.what == "extra usage" {
             "is past its limits and using extra usage".to_owned()
         } else {
             format!("is at {}% of its {} limit", self.percent, self.what)
         };
         format!(
-            "{target}'s plan account ({account}) {over}, so Patchbay stops its turns at {limit}% and won't start one for your message. This is the recipient's account, not yours. The limit resets in {}. Change this under Settings › Coding agents.",
+            "{target}'s plan account {over}, so Patchbay stops its turns at {limit}% and won't start one for your message. This is the recipient's account, not yours. The limit resets in {}. Change this under Settings › Coding agents.",
             fmt_wait(self.resets_at - now)
         )
     }
