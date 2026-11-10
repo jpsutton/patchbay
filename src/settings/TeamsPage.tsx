@@ -165,7 +165,7 @@ function TeamsPanel() {
             <div className="flex flex-col gap-0.5">
               <input
                 className={input}
-                placeholder={`Export folder (default ~/.hub/desks/${draft.slug.trim() || "<slug>"})`}
+                placeholder="Export folder (optional, leave empty for none)"
                 value={draft.exportDir}
                 onChange={(e) => {
                   setDraft({ ...draft, exportDir: e.target.value });
@@ -208,7 +208,7 @@ function TeamsPanel() {
         )}
         {detail && sel !== "new" && (
           <div className="flex flex-col gap-3 text-xs">
-            <div className="text-muted">{detail.team.cwd} · {detail.template.name} · export to {detail.team.exportDir}</div>
+            <div className="text-muted">{detail.team.cwd} · {detail.template.name} · {detail.team.exportDir ? `export to ${detail.team.exportDir}` : "export: off"}</div>
             {detail.template.seats.map((seat) => {
               const here = detail.members.filter((m) => m.member.seat === seat.seat);
               const role = detail.roles.find((r) => r.id === seat.roleId)?.name ?? seat.roleId;

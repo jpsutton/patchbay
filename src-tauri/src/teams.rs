@@ -470,8 +470,8 @@ impl TeamsDb {
         }
         self.template(&input.template_id)?;
         let export_dir = match input.export_dir.filter(|d| !d.trim().is_empty()) {
-            Some(d) => d,
-            None => home_dir().context("HOME is not set")?.join(".hub/desks").join(&slug).to_string_lossy().into_owned(),
+            Some(d) => d.trim().to_owned(),
+            None => String::new(),
         };
         let id_prefix = input.id_prefix.filter(|p| !p.trim().is_empty()).unwrap_or_else(|| slug.clone());
         if !id_prefix.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
@@ -490,7 +490,9 @@ impl TeamsDb {
             }
             None => String::new(),
         };
-        check_export_dir(Path::new(&export_dir), &cwd, Path::new(&worktree_root))?;
+        if !export_dir.is_empty() {
+            check_export_dir(Path::new(&export_dir), &cwd, Path::new(&worktree_root))?;
+        }
         let id = new_id();
         self.0.execute(
             "INSERT INTO teams(id, slug, template_id, cwd, id_prefix, pr_base, worktree_root, project_rules, export_dir, created_at) \
@@ -863,6 +865,9 @@ fn export(tdb: &TeamsDb, db: &Db, team_id: &str, event: &str) {
 
 fn write_export(tdb: &TeamsDb, db: &Db, team_id: &str, event: &str) -> Result<()> {
     let team = tdb.team(&team_id)?;
+    if team.export_dir.trim().is_empty() {
+        return Ok(());
+    }
     let dir = PathBuf::from(&team.export_dir);
     check_export_dir(&dir, &resolve(Path::new(&team.cwd)), Path::new(&team.worktree_root))?;
     std::fs::create_dir_all(&dir)?;
@@ -1265,5 +1270,26 @@ mod tests {
         write_file(&plain, "a").unwrap();
         write_file(&plain, "b").unwrap();
         assert_eq!(std::fs::read_to_string(&plain).unwrap(), "b");
+    }
+
+    #[test]
+    fn team_with_no_export_folder_writes_no_files() {
+        let d = dir();
+        let t = TeamsDb::open(&d).unwrap();
+        let p = proj(&d);
+        let db = Db::open(&d.join("patchbay.sqlite")).unwrap();
+        let mut input = new_team("noexp", &p, &d.join("out"));
+        input.export_dir = None;
+        let team = t.create_team(input).unwrap();
+        assert_eq!(team.export_dir, "");
+        assert!(write_export(&t, &db, &team.id, "something happened").is_ok());
+        assert!(!d.join("out").exists());
+
+        let mut input_empty = new_team("emptyexp", &p, &d.join("out2"));
+        input_empty.export_dir = Some("   ".into());
+        let team_empty = t.create_team(input_empty).unwrap();
+        assert_eq!(team_empty.export_dir, "");
+        assert!(write_export(&t, &db, &team_empty.id, "another event").is_ok());
+        assert!(!d.join("out2").exists());
     }
 }

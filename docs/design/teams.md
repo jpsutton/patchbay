@@ -108,9 +108,9 @@ apply to workers: the folder or inside it) and adds:
 
 - `slug`, `id_prefix` (items are `<prefix>-YYYYMMDD-NN`), `pr_base`, `worktree_root`;
 - `project_rules`: markdown, e.g. "set `CARGO_TARGET_DIR`", "the mock LLM port 8765 is taken".
-- `export_dir`: default `~/.hub/desks/<slug>/`. Creating a team, and every export, refuses a
-  folder whose `LEDGER.md` or `ROSTER.md` lacks the generated header, so a team never overwrites
-  a hand-run Hub desk with the same slug.
+- `export_dir`: optional folder for markdown export (empty means export is off). When set, creating
+  a team, and every export, refuses a folder whose `LEDGER.md` or `ROSTER.md` lacks the generated
+  header, so a team never overwrites a hand-run Hub desk with the same slug.
 
 The template editor shows, for a seat whose agents can act without asking, what each does unasked
 (`ApprovalSetup.gaps`) beside an `allowUnasked` tick, and a line for agents whose team tools still
@@ -148,8 +148,9 @@ in-progress, awaiting-review, done, dropped. `item_events` is append-only.
 ### Markdown export
 
 After every change Patchbay rewrites `LEDGER.md` (index), `ROSTER.md` and appends to
-`CHANGELOG.md` in `export_dir`, so agents outside Patchbay can read the state. The files carry a
-header saying they are generated. Nothing reads them back.
+`CHANGELOG.md` in `export_dir`, so agents outside Patchbay can read the state. When `export_dir` is
+empty or absent, export is off and Patchbay writes no files. The files carry a header saying they are
+generated. Nothing reads them back.
 
 The export folder must be a real folder outside the team's folder and worktree root. Patchbay
 refuses it, or any of the three files, when it is a symlink, and strips control characters from
