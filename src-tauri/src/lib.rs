@@ -2993,6 +2993,7 @@ pub(crate) async fn create_agent_session(
         return Err(e);
     }
     let created = state.db.get_code_session(&session.id)?.unwrap_or(session);
+    (state.emit)("mesh://changed", serde_json::json!({ "tables": ["code_sessions"] }));
     Ok(serde_json::json!({
         "sessionId": created.id,
         "title": created.title,

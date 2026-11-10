@@ -490,6 +490,7 @@ pub async fn member_release(state: &AppState, desk: &str, args: &Value) -> Resul
     };
     // Archived, so no later message restarts it with a fresh token (code_start_local and message delivery refuse it).
     crate::archive_code_session(state, &worker, true).await?;
+    (state.emit)("mesh://changed", serde_json::json!({ "tables": ["code_sessions"] }));
     if let Some(bridge) = state.agent_message_bridge.get() {
         bridge.revoke(&worker);
     }

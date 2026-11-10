@@ -1486,6 +1486,7 @@ async fn restart_member_inner(
     }
 
     export(&tdb, &state.db, team_id, &format!("session {old_session_id} restarted as {}", new_session.id));
+    (state.emit)("mesh://changed", serde_json::json!({ "tables": ["code_sessions"] }));
     Ok(new_member)
 }
 

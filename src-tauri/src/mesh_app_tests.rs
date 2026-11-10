@@ -2556,6 +2556,42 @@ async fn create_agent_session_defangs_forged_tags_in_prompt_and_title() {
     assert!(child.title.contains("forged title"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn create_agent_session_emits_mesh_changed_code_sessions_only_on_success() {
+    let a = node("alpha-create-emit");
+    let proj = a.dir.join("proj");
+    repo(&proj);
+    let sa = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok", "auto").unwrap();
+    let _rx_a = a.state.code.attach_test_agent(&sa.id);
+    let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
+    *a.state.code.test_started.lock().unwrap() = Some(started_tx);
+
+    let proj_str = proj.to_string_lossy();
+
+    // 1. Failed create (empty prompt): does not emit mesh://changed with code_sessions
+    a.events.lock().unwrap().clear();
+    let fail_call = create_agent_session(&a.state, &sa.id, &proj_str, "   ", None, None, None).await;
+    assert!(fail_call.is_err());
+    assert!(
+        !a.events.lock().unwrap().iter().any(|(n, p)| n == "mesh://changed" && p["tables"].as_array().map_or(false, |t| t.iter().any(|v| v == "code_sessions"))),
+        "failed create must not emit mesh://changed with code_sessions"
+    );
+
+    // 2. Successful create: emits mesh://changed with code_sessions
+    a.events.lock().unwrap().clear();
+    let create_call = create_agent_session(&a.state, &sa.id, &proj_str, "hello agent", None, None, None);
+    let child_side = async {
+        let (id, mut rx) = started.recv().await.expect("the agent is started");
+        (id, take_agent_message(&mut rx).await)
+    };
+    let (res, (_child_id, _got)) = tokio::join!(create_call, child_side);
+    assert!(res.is_ok());
+    assert!(
+        a.events.lock().unwrap().iter().any(|(n, p)| n == "mesh://changed" && p["tables"].as_array().map_or(false, |t| t.iter().any(|v| v == "code_sessions"))),
+        "successful create must emit mesh://changed with code_sessions"
+    );
+}
+
 /// A child can't reach beyond its creator's folder, and an agent that acts without asking can't be
 /// chosen from a session that isn't in always-approve mode.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
