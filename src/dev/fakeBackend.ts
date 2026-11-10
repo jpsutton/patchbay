@@ -1817,6 +1817,7 @@ export function install() {
         }
         case "team_attach": fakeMembers.push({ teamId: a.teamId as string, sessionId: a.sessionId as string, seat: a.seat as string, roleId: fakeTemplate.seats.find((s) => s.seat === a.seat)!.roleId, status: "active", itemId: null }); return null;
         case "team_detach": fakeMembers = fakeMembers.filter((m) => !(m.teamId === a.teamId && m.sessionId === a.sessionId)); return null;
+        case "team_restart_member": return null;
         case "team_archive": fakeTeams = fakeTeams.filter((t) => t.id !== a.teamId); return null;
         case "team_detail": {
           const roles = fakeRoles;

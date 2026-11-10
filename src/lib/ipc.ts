@@ -1396,6 +1396,7 @@ export const api = {
     invoke<TeamDecision>("team_decision_answer", { teamId, decisionId, answer }),
   teamAttach: (teamId: string, sessionId: string, seat: string) => invoke<unknown>("team_attach", { teamId, sessionId, seat }),
   teamDetach: (teamId: string, sessionId: string) => invoke<void>("team_detach", { teamId, sessionId }),
+  teamRestartMember: (teamId: string, sessionId: string) => invoke<unknown>("team_restart_member", { teamId, sessionId }),
   teamArchive: (teamId: string) => invoke<void>("team_archive", { teamId }),
 
   listPrompts: () => invoke<Prompt[]>("list_prompts"),

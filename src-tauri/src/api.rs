@@ -227,6 +227,7 @@ commands! {
     create_team(input);
     team_attach(team_id, session_id, seat);
     team_detach(team_id, session_id);
+    team_restart_member(team_id, session_id);
     team_archive(team_id);
     team_detail(team_id);
     team_board(team_id);

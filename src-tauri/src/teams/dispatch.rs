@@ -176,7 +176,7 @@ impl TeamsDb {
     }
 
     /// Sessions `desk` dispatched.
-    fn dispatched_sessions(&self, desk: &str) -> Result<Vec<String>> {
+    pub fn dispatched_sessions(&self, desk: &str) -> Result<Vec<String>> {
         let mut st = self.0.prepare("SELECT DISTINCT session_id FROM dispatches WHERE desk_session = ?1 AND session_id IS NOT NULL")?;
         Ok(st.query_map([desk], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
     }
@@ -336,7 +336,7 @@ fn remove_worktree(team: &Team, path: &Path, branch: &str) {
 }
 
 #[cfg(not(test))]
-async fn start_agent(state: &AppState, id: &str) -> Result<()> {
+pub(crate) async fn start_agent(state: &AppState, id: &str) -> Result<()> {
     crate::code_start_local(state, id.to_owned()).await
 }
 
@@ -345,7 +345,7 @@ async fn start_agent(state: &AppState, id: &str) -> Result<()> {
 pub(crate) static FAKE_PROMPTS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
-async fn start_agent(state: &AppState, id: &str) -> Result<()> {
+pub(crate) async fn start_agent(state: &AppState, id: &str) -> Result<()> {
     let mut rx = state.code.attach_test_agent(id);
     let id = id.to_owned();
     tokio::spawn(async move {

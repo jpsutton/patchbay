@@ -53,7 +53,7 @@ use crate::db::{
     PermissionRule, Prompt, Provider, SearchHit, SidebarEntry, new_id,
 };
 use crate::mesh::Mesh;
-use crate::teams::{team_board, team_decision_answer, delete_role, delete_template, save_role, save_template, team_session_roles, create_team, list_roles, list_team_templates, list_teams, team_archive, team_attach, team_detach, team_detail};
+use crate::teams::{team_board, team_decision_answer, team_restart_member, delete_role, delete_template, save_role, save_template, team_session_roles, create_team, list_roles, list_team_templates, list_teams, team_archive, team_attach, team_detach, team_detail};
 use crate::terminal::{TermEvent, TerminalManager};
 
 /// Everything commands share. Cheap to clone (all handles), so the mesh's request handler and
@@ -839,7 +839,7 @@ async fn import_claude_sessions(state: &AppState, ids: Vec<String>, agent: Optio
 }
 
 /// A new Code session hosted here, in `cwd` on this computer.
-fn create_code_session_local(
+pub(crate) fn create_code_session_local(
     state: &AppState,
     cwd: &str,
     model_ref: Option<&str>,
@@ -926,7 +926,7 @@ async fn delete_code_session(state: &AppState, id: String) -> CmdResult<()> {
 
 /// Archive or restore a Code session. Archiving ends its agent first, wherever it runs; a host
 /// that's offline has nothing reachable to stop, and the archive still syncs to it.
-async fn archive_code_session(state: &AppState, id: &str, archived: bool) -> anyhow::Result<()> {
+pub(crate) async fn archive_code_session(state: &AppState, id: &str, archived: bool) -> anyhow::Result<()> {
     if archived {
         match remote_host(state, id).map_err(|e| anyhow::anyhow!(e.0))? {
             Some(host) if state.mesh.connected(&host) => {

@@ -42,6 +42,7 @@ const SERVER_ERROR_MAP: { match: string; field: string }[] = [
 
 function TeamsPanel() {
   const setToast = useStore((s) => s.setToast);
+  const askConfirm = useStore((s) => s.askConfirm);
   const sessions = useStore((s) => s.codeSessions);
   const [templates, setTemplates] = useState<TeamTemplate[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
@@ -226,14 +227,41 @@ function TeamsPanel() {
                     <span className="rounded bg-panel-2 px-1.5 py-0.5 font-medium">{role}</span>
                     <span className="text-muted">{seat.seat} · {here.length}/{seat.count} · suggested {seat.agent}{seat.model ? ` ${seat.model}` : ""}</span>
                   </div>
-                  {here.map((m) => (
-                    <div key={m.member.sessionId} className="flex items-center gap-2 py-0.5">
-                      <span className={`h-2 w-2 rounded-full ${DOT[m.activity ?? ""] ?? "bg-border"}`} />
-                      <span className="truncate">{m.title ?? "(session gone)"}</span>
-                      <span className="text-muted">{m.agent}{m.model ? ` · ${m.model}` : ""} · {m.activity ?? "other computer"}</span>
-                      <button className="ml-auto text-muted hover:text-fg" onClick={() => api.teamDetach(detail.team.id, m.member.sessionId).then(() => { changed(); return refresh(); }, fail)}>Remove</button>
-                    </div>
-                  ))}
+                  {here.map((m) => {
+                    const isBusy = m.activity === "running" || m.activity === "waiting" || m.activity === "stalled";
+                    return (
+                      <div key={m.member.sessionId} className="flex items-center gap-2 py-0.5">
+                        <span className={`h-2 w-2 rounded-full ${DOT[m.activity ?? ""] ?? "bg-border"}`} />
+                        <span className="truncate">{m.title ?? "(session gone)"}</span>
+                        <span className="text-muted">{m.agent}{m.model ? ` · ${m.model}` : ""} · {m.activity ?? "other computer"}</span>
+                        <div className="ml-auto flex items-center gap-2">
+                          <button
+                            className="text-muted hover:text-fg disabled:opacity-40"
+                            disabled={isBusy}
+                            title={isBusy ? "Session is mid-turn" : undefined}
+                            onClick={async () => {
+                              const { ok } = await askConfirm({
+                                title: "Restart with fresh context?",
+                                body: `Start a new session for ${role} with a fresh context window. Its current open items and pending decisions will be briefed into the new session, and this session will be archived.`,
+                                confirmLabel: "Restart",
+                              });
+                              if (!ok) return;
+                              try {
+                                await api.teamRestartMember(detail.team.id, m.member.sessionId);
+                                changed();
+                                await refresh();
+                              } catch (e) {
+                                fail(e);
+                              }
+                            }}
+                          >
+                            Restart with fresh context
+                          </button>
+                          <button className="text-muted hover:text-fg" onClick={() => api.teamDetach(detail.team.id, m.member.sessionId).then(() => { changed(); return refresh(); }, fail)}>Remove</button>
+                        </div>
+                      </div>
+                    );
+                  })}
                   {here.length < seat.count && (
                     <div className="mt-1 flex flex-wrap gap-2">
                       <button

@@ -3892,3 +3892,80 @@ async fn the_coordinator_fills_a_pool_and_releases_workers() {
     call(&coord.id, "dispatch_item", json!({ "itemId": ids[2] })).await.unwrap();
     let _ = s2;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn worker_refresh_moves_item_worktree_branch_and_leaves_dispatched_by_unchanged() {
+    let a = node("alpha-refresh");
+    let p = a.dir.join("proj");
+    repo(&p);
+    let cwd = p.to_string_lossy().into_owned();
+    let mk = |agent: &str| a.state.db.create_code_session(&cwd, None, agent, "default").unwrap();
+    let coord = mk("grok");
+
+    let tpl_raw = teams::list_team_templates(&a.state).await.unwrap().into_iter().find(|t| t.id == "builtin-triage-desk").unwrap();
+    let mut value = serde_json::to_value(&tpl_raw).unwrap();
+    for s in value["seats"].as_array_mut().unwrap() {
+        if s["seat"] == "workers" {
+            s["count"] = json!(1);
+            s["agent"] = json!("claude-code");
+            s["allowUnasked"] = json!(true);
+        }
+    }
+    value["id"] = json!(null);
+    value["name"] = json!("pool-refresh");
+    let tpl = teams::save_template(&a.state, serde_json::from_value(value).unwrap()).await.unwrap();
+    let team = teams::create_team(
+        &a.state,
+        serde_json::from_value(json!({
+            "templateId": tpl.id, "slug": "tr", "idPrefix": "TR", "cwd": cwd, "worktreeRoot": p.join("trees").to_string_lossy(),
+            "exportDir": a.dir.join("out").to_string_lossy(),
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    teams::team_attach(&a.state, team.id.clone(), coord.id.clone(), "coordinator".into()).await.unwrap();
+    let call = |s: &str, tool: &str, args: Value| {
+        let state = a.state.clone();
+        let (s, tool) = (s.to_owned(), tool.to_owned());
+        async move { teams::call_tool(&state, &s, &tool, &args).await }
+    };
+
+    let it = call(&coord.id, "item_add", json!({ "title": "do work", "plan": "work plan" })).await.unwrap();
+    let item_id = it["id"].as_str().unwrap().to_owned();
+
+    let w1 = call(&coord.id, "dispatch_item", json!({ "itemId": item_id })).await.unwrap();
+    let s1 = w1["sessionId"].as_str().unwrap().to_owned();
+    let worktree_str = w1["worktree"].as_str().unwrap().to_owned();
+    assert_eq!(teams::dispatched_by(&a.state, &coord.id), 1);
+
+    // Refused while mid-turn:
+    a.state.code.set_busy(&s1, true);
+    let err = teams::team_restart_member(&a.state, team.id.clone(), s1.clone()).await.unwrap_err();
+    assert!(err.0.contains("mid-turn"), "{err:?}");
+    a.state.code.set_busy(&s1, false);
+
+    // Restart worker:
+    let member = teams::team_restart_member(&a.state, team.id.clone(), s1.clone()).await.unwrap();
+    let s2 = member.session_id.clone();
+    assert_ne!(s1, s2);
+    assert_eq!(member.item_id.as_deref(), Some(item_id.as_str()));
+    assert_eq!(member.seat, "workers");
+
+    // Old session is archived
+    let old_sess = a.state.db.get_code_session(&s1).unwrap().unwrap();
+    assert!(old_sess.archived_at.is_some());
+
+    // New session has worktree folder, coordinator as created_by, and worktree remains on disk
+    let new_sess = a.state.db.get_code_session(&s2).unwrap().unwrap();
+    assert_eq!(new_sess.cwd, worktree_str);
+    assert_eq!(new_sess.created_by.as_deref(), Some(coord.id.as_str()));
+    assert!(Path::new(&worktree_str).exists());
+
+    // dispatched_by stays 1 (counts s2, not s1, and no extra dispatches row was added)
+    assert_eq!(teams::dispatched_by(&a.state, &coord.id), 1);
+    let tdb = teams::TeamsDb::open(&a.state.data_dir).unwrap();
+    let d_sessions = tdb.dispatched_sessions(&coord.id).unwrap();
+    assert_eq!(d_sessions, vec![s2.clone()]);
+}
+
