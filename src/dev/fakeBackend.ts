@@ -1868,7 +1868,7 @@ export function install() {
           if (new URLSearchParams(location.search).get("plan") === "grok")
             accounts.push({
               account: "grok:team-demo:user-demo",
-              label: "Grok (Acme)",
+              label: "Grok seat · Acme",
               latest: { fiveHour: null, sevenDay: { ...latest.sevenDay, utilization: 0.31 }, overageUntil: null, observedAt: latest.observedAt },
               history: [],
             });

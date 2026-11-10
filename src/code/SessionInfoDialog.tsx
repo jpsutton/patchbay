@@ -3,6 +3,7 @@ import { AGENT_LABELS, api, type AgentInfo, type HostInfo, type SessionPlanUsage
 import { memberName, remoteHost, useStore } from "../lib/store";
 import { sessionInfoSections, sessionInfoText } from "../lib/sessionInfo";
 import { CopyButton } from "../components/CopyButton";
+import { ErrorBoundary } from "../components/ErrorBoundary";
 import { CopyIcon, XIcon } from "../components/icons";
 import { installedAgents } from "./CodeView";
 
@@ -13,6 +14,50 @@ import { installedAgents } from "./CodeView";
  * the computer.
  */
 export function SessionInfoDialog() {
+  const id = useStore((s) => s.sessionInfoId);
+  // A row that can't be built (odd data from an agent or another computer) shows its error here
+  // instead of taking the whole window down.
+  return (
+    <ErrorBoundary resetKey={id} fallback={(e) => <SessionInfoError error={e} />}>
+      <SessionInfoContent />
+    </ErrorBoundary>
+  );
+}
+
+function SessionInfoError({ error }: { error: Error }) {
+  const close = () => useStore.getState().setSessionInfoId(null);
+  const text = `${error.name}: ${error.message}\n${error.stack ?? ""}`.trim();
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/55 p-4 backdrop-blur-[2px]" onClick={close}>
+      <div
+        role="alertdialog"
+        aria-modal="true"
+        className="flex max-h-[min(85vh,720px)] w-[min(560px,94vw)] flex-col rounded-2xl border border-border bg-raised p-4 shadow-float sm:p-5"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-2">
+          <div className="min-w-0 flex-1 text-sm font-semibold">Session info can't be shown</div>
+          <span className="px-1 text-xs text-muted">
+            <CopyButton label="Copy error" text={text} />
+          </span>
+          <button
+            className="flex h-7 w-7 items-center justify-center rounded-md text-muted hover:bg-panel-2 hover:text-fg"
+            onClick={close}
+            aria-label="Close"
+            title="Close"
+          >
+            <XIcon size={15} />
+          </button>
+        </div>
+        <pre className="mt-3 min-h-0 flex-1 select-text overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] text-muted">
+          {text}
+        </pre>
+      </div>
+    </div>
+  );
+}
+
+function SessionInfoContent() {
   const id = useStore((s) => s.sessionInfoId);
   const close = () => useStore.getState().setSessionInfoId(null);
   const session = useStore((s) => s.codeSessions.find((x) => x.id === s.sessionInfoId) ?? null);
@@ -35,7 +80,7 @@ export function SessionInfoDialog() {
   useEffect(() => {
     if (!id) return;
     let live = true;
-    installedAgents(host).then((list) => live && setAgents(list));
+    installedAgents(host).then((list) => live && setAgents(Array.isArray(list) ? list : []));
     // An older host doesn't know the request, an offline one can't answer: leave the row out.
     setHostInfo(null);
     api.hostInfo(host).then((info) => live && setHostInfo(info), () => {});

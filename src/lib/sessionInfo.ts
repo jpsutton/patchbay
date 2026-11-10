@@ -82,10 +82,13 @@ function patchbayBuild(h: HostInfo): string {
   return `${h.version} · ${OS_NAMES[h.os] ?? h.os} (${h.arch})`;
 }
 
-const iso = (ms: number) => new Date(ms).toISOString();
+/** An ISO time; a missing or out-of-range one reads "unknown" instead of throwing. */
+const iso = (ms: number) => (Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? new Date(ms).toISOString() : "unknown");
 
 function choiceName(options: AcpConfigChoice[], value: string): string | null {
-  for (const o of options) {
+  // The lists come from agents and other computers: skip what isn't the shape the types promise.
+  for (const o of Array.isArray(options) ? options : []) {
+    if (!o) continue;
     if ("group" in o) {
       const inner = choiceName(o.options, value);
       if (inner) return inner;
@@ -99,15 +102,15 @@ function named(name: string | null | undefined, id: string): string {
   return name && name !== id ? `${name} (${id})` : id;
 }
 
-function tokens(n: number): string {
-  return n.toLocaleString("en-US");
+function tokens(n: number | null | undefined): string {
+  return (n ?? 0).toLocaleString("en-US");
 }
 
 function modelRow(i: SessionInfoInput): string | null {
   const { session, state } = i;
   const current = state?.models?.currentModelId;
   if (current) {
-    const name = state?.models?.availableModels.find((m) => m.modelId === current)?.name;
+    const name = state?.models?.availableModels?.find((m) => m.modelId === current)?.name;
     return named(name, current);
   }
   return session.agentModel ?? session.modelRef;
@@ -159,7 +162,7 @@ export function sessionInfoSections(i: SessionInfoInput): InfoSection[] {
       ? {
           label: "Mode",
           value: named(
-            state.modes.availableModes.find((m) => m.id === state.modes!.currentModeId)?.name,
+            state.modes.availableModes?.find((m) => m.id === state.modes!.currentModeId)?.name,
             state.modes.currentModeId,
           ),
         }
@@ -196,9 +199,8 @@ export function sessionInfoSections(i: SessionInfoInput): InfoSection[] {
   const features = featureList(i);
   const agentRows: InfoRow[] = [];
   if (features.length > 0) agentRows.push({ label: "Supports", value: features.join(", ") });
-  if ((state?.approvalGaps.length ?? 0) > 0) {
-    agentRows.push({ label: "Runs without asking", value: state!.approvalGaps.join(" ") });
-  }
+  const gaps = state?.approvalGaps ?? [];
+  if (gaps.length > 0) agentRows.push({ label: "Runs without asking", value: gaps.join(" ") });
   if (agentRows.length > 0) sections.push({ title: "Agent", rows: agentRows });
 
   const usage = state?.usage;
@@ -213,10 +215,10 @@ export function sessionInfoSections(i: SessionInfoInput): InfoSection[] {
       });
     }
     const t = usage.totals;
-    if (t.input + t.output > 0) {
+    if (t && t.input + t.output > 0) {
       rows.push({ label: "Tokens", value: `${tokens(t.input)} in (${tokens(t.cachedRead)} cached), ${tokens(t.output)} out` });
     }
-    if (t.costUsd != null) rows.push({ label: "Cost", value: `$${t.costUsd.toFixed(4)}` });
+    if (t?.costUsd != null) rows.push({ label: "Cost", value: `$${t.costUsd.toFixed(4)}` });
     if (rows.length > 0) sections.push({ title: "Usage", rows });
   }
 
