@@ -1246,9 +1246,13 @@ async fn plan_limits_reach_every_member() {
     assert_eq!(five(&b), Some(0.7), "the control after the blank ones is filed");
     // A tagged report whose limits don't parse is not an old member: nothing filed, nothing logged
     // (and before this change such a payload was filed as an empty report under the default).
+    // A FRESH account key, so a parse guard that quietly files an empty report would show at once
+    // (an account already holding a newer report would hide it: adoption keeps the newer one).
     let held = b.state.code.plan.accounts();
-    let garbage = json!({ "account": me, "limits": "garbage" });
+    assert!(!held.contains_key("u8:o8"));
+    let garbage = json!({ "account": "u8:o8", "limits": "garbage" });
     mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &garbage);
+    assert!(!b.state.code.plan.accounts().contains_key("u8:o8"), "unparseable limits file nothing, not even an empty account");
     assert_eq!(b.state.code.plan.accounts(), held, "unparseable limits are not filed");
     assert_eq!(logged(), 2, "and the member is not blamed as an older Patchbay");
     // Another account's report is kept apart, under its own name.
@@ -1275,6 +1279,21 @@ async fn plan_limits_reach_every_member() {
     );
 }
 
+/// Senders never broadcast an unidentified account: empty/blank (read as "untagged" by receivers)
+/// and machine-local path keys stay local; portable ids are shared.
+#[test]
+fn senders_share_only_identified_plan_reports() {
+    let limits = code::plan_limits::PlanLimits::default();
+    let share = |a: &str| crate::shareable_plan_report(a, &Some("N".into()), &limits);
+    assert!(share("").is_none());
+    assert!(share("   ").is_none());
+    assert!(share("/home/molly/.claude").is_none());
+    assert!(share("~/foo/.claude").is_none());
+    let ok = share("u1:o1").expect("a portable account is shared");
+    assert_eq!(ok["account"], "u1:o1");
+    assert_eq!(ok["name"], "N");
+}
+
 /// Over a real link the receiver names the SENDING node (`handle` passes the session's peer id),
 /// not some other id; a tagged report with unreadable limits sent the same way is not logged.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1286,11 +1305,14 @@ async fn untagged_plan_usage_over_a_live_link_names_the_sender() {
     let logged = || UNTAGGED_PLAN_LOGS.lock().unwrap().iter().filter(|(m, l)| *m == an && *l == line).count();
     a.state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, json!({ "fiveHour": { "utilization": 0.99, "resetsAt": 1 }, "observedAt": 1 }));
     until("B logs A's node id", 10, || logged() == 1).await;
-    a.state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, json!({ "account": "u9:o9", "limits": "garbage" }));
+    a.state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, json!({ "account": "u8:o8", "limits": "garbage" }));
     // A later control (tagged, readable) is delivered, which also proves the garbage one was processed first.
     let ok = json!({ "account": "u9:o9", "limits": { "fiveHour": { "utilization": 0.3, "resetsAt": code::plan_limits::now() + 3600 }, "observedAt": code::plan_limits::now() } });
     a.state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, ok);
     until("B files the control", 10, || b.state.code.plan.account("u9:o9").latest.is_some()).await;
+    // Delivery is ordered, so the garbage report (sent first, for a key nothing else uses) was
+    // processed before the control became visible: it must have filed nothing.
+    assert!(!b.state.code.plan.accounts().contains_key("u8:o8"), "unparseable limits file nothing, not even an empty account");
     assert_eq!(logged(), 1, "the unreadable tagged report was not logged as untagged");
     assert!(b.state.code.plan.accounts().keys().all(|k| k == "u9:o9"), "nothing else was filed");
 }

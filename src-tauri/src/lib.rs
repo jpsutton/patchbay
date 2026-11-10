@@ -964,6 +964,16 @@ fn on_session_lost(state: &AppState, id: String, message: code::acp::UserMessage
     });
 }
 
+/// The mesh payload for a plan report, or `None` when the account is unidentified: empty or
+/// blank (receivers read that as an untagged report, from an older Patchbay) or a machine-local
+/// path key. Never broadcast either. Residual, by design: with HOME unresolvable a local session
+/// can still resolve to the empty account and be gated under it (`default_plan_account` falls back
+/// to `("", None)`; `Hit::message` already handles an empty name).
+fn shareable_plan_report<L: serde::Serialize>(account: &str, name: &Option<String>, limits: &L) -> Option<serde_json::Value> {
+    (!account.trim().is_empty() && !claude_auth::is_path_account_key(account))
+        .then(|| serde_json::json!({ "account": account, "name": name, "limits": limits }))
+}
+
 fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     use code::acp::CodeEvent;
     // A session on a Grok login has no response headers to read its usage from: ask the billing
@@ -979,13 +989,12 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
         let (account, name) = plan_account(state, &prefs::load(&state.db), &env.code_session_id).unwrap_or_else(default_plan_account);
         // Upgrade a local path fallback to the portable account id when `.claude.json` has it.
         let (account, name) = resolve_plan_account(&state.db, &account, name);
-        if !claude_auth::is_path_account_key(&account) {
+        if let Some(tagged) = shareable_plan_report(&account, &name, &limits) {
             if account == default_plan_account().0 {
                 note_default_plan_portable(state.mesh.node_id(), true);
             }
-            let tagged = serde_json::json!({ "account": account, "name": name, "limits": limits });
             state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, tagged);
-        } else if is_default_claude_dir_path(&account) {
+        } else if account.trim().is_empty() || is_default_claude_dir_path(&account) {
             note_default_plan_portable(state.mesh.node_id(), false);
         }
         adopt_plan_limits(state, &account, name, limits, true);
@@ -1775,8 +1784,9 @@ fn grok_logins(db: &Db) -> Vec<(Option<String>, String)> {
 
 /// A Grok seat's usage, seen here: tell the mesh, then count it like any plan report.
 fn report_grok_plan(state: &AppState, plan: code::grok_plan::GrokPlan) {
-    let tagged = serde_json::json!({ "account": plan.account, "name": plan.name, "limits": plan.limits });
-    state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, tagged);
+    if let Some(tagged) = shareable_plan_report(&plan.account, &plan.name, &plan.limits) {
+        state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, tagged);
+    }
     adopt_plan_limits(state, &plan.account, plan.name, plan.limits, true);
 }
 
