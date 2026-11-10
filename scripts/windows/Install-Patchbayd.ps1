@@ -12,6 +12,7 @@
 [CmdletBinding()]
 param(
   [string]$ManifestUrl = 'https://jpsutton.github.io/patchbay/winget/jpsutton.patchbayd.yaml',
+  [string]$ManifestPath,   # a manifest file on this computer: skips the download
   [switch]$StopRunning
 )
 $ErrorActionPreference = 'Stop'
@@ -25,8 +26,12 @@ if ($running) {
   $running | Stop-Process -Force
 }
 
-$manifest = Join-Path ([IO.Path]::GetTempPath()) "$id.yaml"
-Invoke-WebRequest -UseBasicParsing -Uri $ManifestUrl -OutFile $manifest
+if ($ManifestPath) {
+  $manifest = (Resolve-Path -LiteralPath $ManifestPath).Path
+} else {
+  $manifest = Join-Path ([IO.Path]::GetTempPath()) "$id.yaml"
+  Invoke-WebRequest -UseBasicParsing -Uri $ManifestUrl -OutFile $manifest
+}
 
 winget list --id $id --exact --accept-source-agreements *> $null
 $verb = if ($LASTEXITCODE -eq 0) { 'upgrade' } else { 'install' }
