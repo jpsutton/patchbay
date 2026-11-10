@@ -34,6 +34,24 @@ export function RolesEditor() {
     else if (sel === "new") setDraft((d) => (d.id ? blankRole : d));
   }, [current, sel]);
   const ro = !!current?.builtin;
+  const isDirty = !ro && (
+    current
+      ? draft.name !== current.name ||
+        draft.instructions !== current.instructions ||
+        draft.standing !== current.standing ||
+        draft.reportsTo !== current.reportsTo ||
+        draft.caps.writesItems !== current.caps.writesItems ||
+        draft.caps.dispatches !== current.caps.dispatches ||
+        draft.caps.decides !== current.caps.decides ||
+        draft.caps.merges !== current.caps.merges
+      : sel === "new" && (
+        draft.name !== "" ||
+        draft.instructions !== "" ||
+        draft.standing ||
+        draft.reportsTo !== null ||
+        Object.values(draft.caps).some(Boolean)
+      )
+  );
 
   return (
     <div className="flex gap-4">
@@ -50,7 +68,7 @@ export function RolesEditor() {
       </div>
       <div className="min-w-0 flex-1">
         {sel && (
-          <div className="flex flex-col gap-2 text-xs">
+          <div className="flex flex-col gap-2 text-xs" onKeyDown={(e) => { if (e.key === "Escape" && isDirty) e.stopPropagation(); }}>
             <input className={input} placeholder="Name, e.g. Careful worker" value={draft.name} readOnly={ro} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
             <textarea className={`${input} h-48 resize-y font-mono text-xs`} placeholder="What this role does and may not do" value={draft.instructions} readOnly={ro} onChange={(e) => setDraft({ ...draft, instructions: e.target.value })} />
             <label className="flex items-center gap-2">
@@ -118,6 +136,18 @@ export function TemplatesEditor() {
     if (current) setDraft({ id: current.id, name: current.name, seats: current.seats, routing: current.routing });
   }, [current]);
   const ro = !!current && current.id.startsWith("builtin-");
+  const isDirty = !ro && (
+    current
+      ? draft.name !== current.name || JSON.stringify(draft.seats) !== JSON.stringify(current.seats)
+      : sel === "new" && (
+        draft.name !== "" ||
+        draft.seats.length !== 1 ||
+        draft.seats[0]?.seat !== "" ||
+        draft.seats[0]?.agent !== "claude-code" ||
+        draft.seats[0]?.model !== null ||
+        (draft.seats[0]?.choices?.length ?? 0) > 0
+      )
+  );
   // Changing what the user acknowledged (agent, model, choices or mode) takes the tick back.
   const setSeat = (i: number, patch: Partial<TeamSeat>) =>
     setDraft({
@@ -140,7 +170,7 @@ export function TemplatesEditor() {
       </div>
       <div className="min-w-0 flex-1">
         {sel && (
-          <div className="flex flex-col gap-2 text-xs">
+          <div className="flex flex-col gap-2 text-xs" onKeyDown={(e) => { if (e.key === "Escape" && isDirty) e.stopPropagation(); }}>
             <input className={input} placeholder="Template name" value={draft.name} readOnly={ro} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
             {draft.seats.map((s, i) => {
               const role = roles.find((r) => r.id === s.roleId);
