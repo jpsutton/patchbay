@@ -116,16 +116,17 @@ impl TeamsDb {
         if since(24 * HOUR_MS)? >= MAX_PER_DAY {
             bail!("rate limit: at most {MAX_PER_DAY} dispatches per day per team");
         }
-        let held: Option<String> = self
-            .0
-            .query_row(
-                "SELECT d.session_id FROM dispatches d JOIN members m ON m.session_id = d.session_id \
-                 WHERE d.team_id = ?1 AND d.item_id = ?2 AND m.left_at IS NULL",
-                params![team.id, item],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if held.is_some() {
+        // Re-checked under the write lock: two dispatches of one item can't both pass.
+        let status = self.item(&team.id, item)?.status;
+        if !matches!(status.as_str(), "noticed" | "triaged" | "blocked") {
+            bail!("{item} is {status}; only noticed, triaged or blocked items can be dispatched");
+        }
+        let held: i64 = self.0.query_row(
+            "SELECT COUNT(*) FROM members WHERE team_id = ?1 AND item_id = ?2 AND left_at IS NULL",
+            params![team.id, item],
+            |r| r.get(0),
+        )?;
+        if held > 0 {
             bail!("{item} already has a worker; release it first");
         }
         let place = format!("reserved:{}", crate::db::new_id());
@@ -510,6 +511,17 @@ mod tests {
         (d, t, team)
     }
 
+    /// Items with the given ids, status triaged.
+    fn add_items(t: &TeamsDb, team: &Team, ids: &[&str]) {
+        for id in ids {
+            t.0.execute(
+                "INSERT INTO items(team_id, id, title, type, severity, status, plan, created_at, updated_at) VALUES (?1, ?2, ?2, 'bug', 'low', 'triaged', '', 0, 0)",
+                params![team.id, id],
+            )
+            .unwrap();
+        }
+    }
+
     #[test]
     fn a_pool_of_two_refuses_the_third_until_a_release() {
         let (_d, t, team) = setup();
@@ -517,6 +529,7 @@ mod tests {
         let seat = tpl.seats.iter_mut().find(|s| s.seat == "workers").unwrap();
         seat.count = 2;
         let seat = seat.clone();
+        add_items(&t, &team, &["i1", "i2", "i3", "i4"]);
         let (a, _) = t.reserve(&team, &seat, "i1", "desk").unwrap();
         let (b, bid) = t.reserve(&team, &seat, "i2", "desk").unwrap();
         let err = t.reserve(&team, &seat, "i3", "desk").unwrap_err().to_string();
@@ -540,6 +553,9 @@ mod tests {
         let (_d, t, team) = setup();
         let mut seat = t.template(&team.template_id).unwrap().seats.into_iter().find(|s| s.seat == "workers").unwrap();
         seat.count = 100;
+        add_items(&t, &team, &["i1", "late"]);
+        let names: Vec<String> = (0..MAX_PER_HOUR - 1).map(|n| format!("x{n}")).collect();
+        add_items(&t, &team, &names.iter().map(String::as_str).collect::<Vec<_>>());
         let (p, pid) = t.reserve(&team, &seat, "i1", "desk").unwrap();
         t.bind_reserved(&team.id, &p, "w1", pid).unwrap();
         assert!(t.reserve(&team, &seat, "i1", "desk").unwrap_err().to_string().contains("already has a worker"));
@@ -615,6 +631,7 @@ mod tests {
     #[test]
     fn failed_attempts_are_not_counted_as_workers() {
         let (_d, t, team) = setup();
+        add_items(&t, &team, &["i1"]);
         let seat = t.template(&team.template_id).unwrap().seats.into_iter().find(|s| s.seat == "workers").unwrap();
         for _ in 0..2 {
             let (place, _) = t.reserve(&team, &seat, "i1", "desk").unwrap();
@@ -624,5 +641,18 @@ mod tests {
         t.bind_reserved(&team.id, &place, "w1", id).unwrap();
         let bound: i64 = t.0.query_row("SELECT COUNT(*) FROM dispatches WHERE session_id IS NOT NULL", [], |r| r.get(0)).unwrap();
         assert_eq!((bound, t.dispatched_sessions("desk").unwrap()), (1, vec!["w1".to_owned()]));
+    }
+
+    #[test]
+    fn an_item_is_checked_again_under_the_reservation_lock() {
+        let (_d, t, team) = setup();
+        add_items(&t, &team, &["i1", "i2"]);
+        let seat = t.template(&team.template_id).unwrap().seats.into_iter().find(|s| s.seat == "workers").unwrap();
+        // A reserved (not yet started) worker already holds the item.
+        t.reserve(&team, &seat, "i1", "desk").unwrap();
+        assert!(t.reserve(&team, &seat, "i1", "desk").unwrap_err().to_string().contains("already has a worker"));
+        // An item that moved on since the caller read it is refused.
+        t.0.execute("UPDATE items SET status = 'done' WHERE id = 'i2'", []).unwrap();
+        assert!(t.reserve(&team, &seat, "i2", "desk").unwrap_err().to_string().contains("only noticed"));
     }
 }
