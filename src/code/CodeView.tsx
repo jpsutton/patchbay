@@ -1909,7 +1909,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
           {
             label: "Restart with fresh context",
             onSelect: () => {
-              restartTeamMember(session.id, teamRole).catch((e) => setToast(errorText(e)));
+              restartTeamMember(session.id, teamRole.role, teamRole.teamId).catch((e) => setToast(errorText(e)));
             },
           },
         ]

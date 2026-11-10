@@ -233,6 +233,16 @@ pub struct Member {
     pub left_at: Option<i64>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRole {
+    pub role: String,
+    pub team_id: String,
+    pub team_name: String,
+    pub seat_order: usize,
+    pub joined_at: i64,
+}
+
 pub struct TeamsDb(Connection);
 
 fn role_seed(id: &str, name: &str, standing: bool, caps: Caps, reports_to: Option<&str>, instructions: &str) -> Role {
@@ -777,13 +787,51 @@ impl TeamsDb {
         Ok(())
     }
 
-    /// Role name by session id, for the live members of teams that aren't archived.
-    pub fn session_roles(&self) -> Result<std::collections::HashMap<String, String>> {
+    /// Role and team info by session id, for the live members of teams that aren't archived.
+    pub fn session_roles(&self) -> Result<std::collections::HashMap<String, SessionRole>> {
         let mut st = self.0.prepare(
-            "SELECT m.session_id, r.name FROM members m JOIN teams t ON t.id = m.team_id \
-             JOIN roles r ON r.id = m.role_id WHERE m.left_at IS NULL AND t.archived_at IS NULL",
+            "SELECT m.session_id, r.name, t.id, t.slug, m.seat, tmpl.seats_json, m.joined_at \
+             FROM members m \
+             JOIN teams t ON t.id = m.team_id \
+             JOIN roles r ON r.id = m.role_id \
+             LEFT JOIN templates tmpl ON tmpl.id = t.template_id \
+             WHERE m.left_at IS NULL AND m.status != 'reserved' AND t.archived_at IS NULL",
         )?;
-        Ok(st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?)
+        let rows = st.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, i64>(6)?,
+            ))
+        })?;
+        let mut template_seats: std::collections::HashMap<String, Vec<Seat>> = std::collections::HashMap::new();
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (session_id, role, team_id, team_name, seat, seats_json, joined_at) = row?;
+            let seat_order = if let Some(json) = seats_json {
+                let seats = template_seats.entry(json.clone()).or_insert_with(|| {
+                    serde_json::from_str(&json).unwrap_or_default()
+                });
+                seats.iter().position(|s| s.seat == seat).unwrap_or(usize::MAX)
+            } else {
+                usize::MAX
+            };
+            out.insert(
+                session_id,
+                SessionRole {
+                    role,
+                    team_id,
+                    team_name,
+                    seat_order,
+                    joined_at,
+                },
+            );
+        }
+        Ok(out)
     }
 
     fn role(&self, id: &str) -> Result<Role> {
@@ -1088,8 +1136,8 @@ pub(crate) async fn delete_template(state: &AppState, id: String) -> CmdResult<(
     Ok(open(state)?.delete_template(&id)?)
 }
 
-/// Role name by session id, for the badge in the session list.
-pub(crate) async fn team_session_roles(state: &AppState) -> CmdResult<std::collections::HashMap<String, String>> {
+/// Role info by session id, for the badge and grouping in the session list.
+pub(crate) async fn team_session_roles(state: &AppState) -> CmdResult<std::collections::HashMap<String, SessionRole>> {
     Ok(open(state)?.session_roles()?)
 }
 
@@ -1661,12 +1709,76 @@ mod tests {
         let team = t.create_team(input).unwrap();
         assert!(t.delete_template(&mine_tpl.id).unwrap_err().to_string().contains("uses this template"));
         t.attach(&team.id, "s1", "workers").unwrap();
-        assert_eq!(t.session_roles().unwrap().get("s1").map(String::as_str), Some("Careful worker"));
+        assert_eq!(t.session_roles().unwrap().get("s1").map(|r| r.role.as_str()), Some("Careful worker"));
         t.archive(&team.id).unwrap();
         assert!(t.session_roles().unwrap().is_empty());
         // Archived teams still hold their template.
         assert!(t.delete_template(&mine_tpl.id).is_err());
         assert!(t.delete_template("builtin-triage-desk").is_err());
+    }
+
+    #[test]
+    fn session_roles_order_and_exclusions() {
+        let d = dir();
+        let t = TeamsDb::open(&d).unwrap();
+        let p = proj(&d);
+
+        let tpl = t.template("builtin-triage-desk").unwrap();
+        assert_eq!(tpl.seats[0].seat, "coordinator");
+        assert_eq!(tpl.seats[3].seat, "workers");
+
+        let team1 = t.create_team(new_team("alpha", &p, &d.join("out1"))).unwrap();
+        let team2 = t.create_team(new_team("beta", &p, &d.join("out2"))).unwrap();
+
+        t.attach(&team1.id, "coord1", "coordinator").unwrap();
+        t.attach(&team1.id, "worker1", "workers").unwrap();
+        t.attach(&team1.id, "worker2", "workers").unwrap();
+
+        t.0.execute("UPDATE members SET joined_at = 100 WHERE session_id = 'worker1'", []).unwrap();
+        t.0.execute("UPDATE members SET joined_at = 200 WHERE session_id = 'worker2'", []).unwrap();
+        t.0.execute("UPDATE members SET joined_at = 50 WHERE session_id = 'coord1'", []).unwrap();
+
+        t.0.execute(
+            "INSERT INTO members(team_id, session_id, seat, role_id, status, joined_at) VALUES (?1, 'reserved1', 'workers', 'builtin-worker', 'reserved', 150)",
+            [&team1.id],
+        ).unwrap();
+
+        t.attach(&team1.id, "left1", "workers").unwrap();
+        t.detach(&team1.id, "left1").unwrap();
+
+        t.attach(&team2.id, "archived_worker", "workers").unwrap();
+        t.archive(&team2.id).unwrap();
+
+        let roles = t.session_roles().unwrap();
+
+        assert!(!roles.contains_key("reserved1"));
+        assert!(!roles.contains_key("left1"));
+        assert!(!roles.contains_key("archived_worker"));
+
+        let c = roles.get("coord1").unwrap();
+        assert_eq!(c.role, "Coordinator");
+        assert_eq!(c.team_id, team1.id);
+        assert_eq!(c.team_name, "alpha");
+        assert_eq!(c.seat_order, 0);
+        assert_eq!(c.joined_at, 50);
+
+        let w1 = roles.get("worker1").unwrap();
+        assert_eq!(w1.role, "Worker");
+        assert_eq!(w1.team_id, team1.id);
+        assert_eq!(w1.team_name, "alpha");
+        assert_eq!(w1.seat_order, 3);
+        assert_eq!(w1.joined_at, 100);
+
+        let w2 = roles.get("worker2").unwrap();
+        assert_eq!(w2.role, "Worker");
+        assert_eq!(w2.team_id, team1.id);
+        assert_eq!(w2.team_name, "alpha");
+        assert_eq!(w2.seat_order, 3);
+        assert_eq!(w2.joined_at, 200);
+
+        let mut list = vec![w2, c, w1];
+        list.sort_by_key(|m| (m.seat_order, m.joined_at));
+        assert_eq!(list, vec![c, w1, w2]);
     }
 
     #[test]

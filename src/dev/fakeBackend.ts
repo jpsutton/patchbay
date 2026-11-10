@@ -28,6 +28,7 @@ import type {
   AgentId,
   AgentInfo,
   AuthChoice,
+  SessionRole,
   WireFrame,
   WireLogStatus,
 } from "../lib/ipc";
@@ -1806,7 +1807,25 @@ export function install() {
           return t;
         }
         case "delete_template": fakeTemplates = fakeTemplates.filter((t) => t.id !== a.id); return null;
-        case "team_session_roles": return Object.fromEntries(fakeMembers.map((m) => [m.sessionId, fakeRoles.find((r) => r.id === m.roleId)?.name]));
+        case "team_session_roles": {
+          const map: Record<string, SessionRole> = {};
+          for (const m of fakeMembers) {
+            if (m.status === "reserved") continue;
+            const team = fakeTeams.find((t) => t.id === m.teamId);
+            if (!team || team.archivedAt != null) continue;
+            const role = fakeRoles.find((r) => r.id === m.roleId)?.name ?? "member";
+            const template = fakeTemplates.find((t) => t.id === team.templateId) ?? fakeTemplate;
+            const seatIdx = template.seats.findIndex((s: { seat: string }) => s.seat === m.seat);
+            map[m.sessionId] = {
+              role,
+              teamId: team.id,
+              teamName: team.slug,
+              seatOrder: seatIdx >= 0 ? seatIdx : 999999,
+              joinedAt: now(),
+            };
+          }
+          return map;
+        }
         case "list_team_templates": return fakeTemplates;
         case "list_teams": return fakeTeams;
         case "create_team": {

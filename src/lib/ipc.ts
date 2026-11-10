@@ -399,6 +399,13 @@ export interface TeamDecision {
 }
 export interface TeamBoard { statuses: string[]; items: TeamItem[]; decisions: TeamDecision[]; events: TeamEvent[] }
 export interface TeamDetail { team: Team; template: TeamTemplate; roles: TeamRole[]; members: TeamMemberRow[] }
+export interface SessionRole {
+  role: string;
+  teamId: string;
+  teamName: string;
+  seatOrder: number;
+  joinedAt: number;
+}
 export interface NewTeam { templateId: string; slug: string; cwd: string; projectRules?: string; exportDir?: string }
 
 export interface Prompt {
@@ -1028,6 +1035,8 @@ export interface Preferences {
   titleBar: "system" | "app";
   /** Code sidebar: group sessions by project name, whichever computer hosts them. */
   groupByProject: boolean;
+  /** Code sidebar: group sessions by team at the top of the sidebar. */
+  groupByTeam: boolean;
   defaultSystemPrompt: string;
   expandReasoning: boolean;
   generateTitles: boolean;
@@ -1087,6 +1096,7 @@ export const defaultPreferences: Preferences = {
   quickEntryShortcut: "",
   titleBar: "system",
   groupByProject: false,
+  groupByTeam: false,
   defaultSystemPrompt: "",
   expandReasoning: false,
   generateTitles: true,
@@ -1388,8 +1398,8 @@ export const api = {
   deleteRole: (id: string) => invoke<void>("delete_role", { id }),
   saveTemplate: (input: TeamTemplateInput) => invoke<TeamTemplate>("save_template", { input }),
   deleteTemplate: (id: string) => invoke<void>("delete_template", { id }),
-  /** Role name by session id, for sessions on live teams. */
-  teamSessionRoles: () => invoke<Record<string, string>>("team_session_roles"),
+  /** Role and team information by session id, for sessions on live teams. */
+  teamSessionRoles: () => invoke<Record<string, SessionRole>>("team_session_roles"),
   listTeamTemplates: () => invoke<TeamTemplate[]>("list_team_templates"),
   listTeams: () => invoke<Team[]>("list_teams"),
   createTeam: (input: NewTeam) => invoke<Team>("create_team", { input }),

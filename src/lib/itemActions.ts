@@ -112,12 +112,14 @@ export function sessionActions(
     running,
     local,
     teamRole,
+    teamId,
   }: {
     rename: () => void;
     desktop: boolean;
     running: boolean;
     local: boolean;
     teamRole?: string;
+    teamId?: string;
   },
 ): ItemAction[] {
   const st = useStore.getState;
@@ -158,11 +160,11 @@ export function sessionActions(
       }),
     });
   }
-  if (teamRole && !archived && local) {
+  if (teamRole && teamId && !archived && local) {
     actions.push({
       label: "Restart with fresh context",
       onSelect: attempt(async () => {
-        await restartTeamMember(s.id, teamRole);
+        await restartTeamMember(s.id, teamRole, teamId);
       }),
     });
   }

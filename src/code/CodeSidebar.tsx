@@ -411,7 +411,7 @@ export function CodeSidebar() {
         key={s.id}
         icon={strongest(s.activity, live) ?? "chat"}
         agent={s.agent}
-        teamRole={teamRoles[s.id]}
+        teamRole={teamRoles[s.id]?.role}
         indent={!inPinned}
         title={s.title}
         subtitle={inPinned ? basename(s.cwd) : undefined}
@@ -456,7 +456,8 @@ export function CodeSidebar() {
             desktop: true,
             running: !!st && (st.status === "ready" || st.status === "starting"),
             local: !remoteHost(s, mesh),
-            teamRole: teamRoles[s.id],
+            teamRole: teamRoles[s.id]?.role,
+            teamId: teamRoles[s.id]?.teamId,
           })
         }
         onTogglePin={async () => {

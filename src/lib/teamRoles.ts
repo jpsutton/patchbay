@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { api } from "./ipc";
+import { api, type SessionRole } from "./ipc";
 import { useStore } from "./store";
 
-let cachedRoles: Record<string, string> = {};
-const subscribers = new Set<(roles: Record<string, string>) => void>();
+let cachedRoles: Record<string, SessionRole> = {};
+const subscribers = new Set<(roles: Record<string, SessionRole>) => void>();
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 const fetchRoles = () => {
@@ -37,9 +37,9 @@ function stopPolling() {
   window.removeEventListener("teams-changed", onTeamsChanged);
 }
 
-/** Role name by session id for sessions on live teams; refreshed on a timer and when the Teams page changes something. */
-export function useTeamRoles(): Record<string, string> {
-  const [roles, setRoles] = useState<Record<string, string>>(cachedRoles);
+/** Role info by session id for sessions on live teams; refreshed on a timer and when the Teams page changes something. */
+export function useTeamRoles(): Record<string, SessionRole> {
+  const [roles, setRoles] = useState<Record<string, SessionRole>>(cachedRoles);
   useEffect(() => {
     subscribers.add(setRoles);
     if (subscribers.size === 1) {
@@ -58,13 +58,13 @@ export function useTeamRoles(): Record<string, string> {
 }
 
 /**
- * Shared action: ask confirm, resolve teamId if needed, call api.teamRestartMember, and emit changes.
+ * Shared action: ask confirm, call api.teamRestartMember, swap panes, and emit changes.
  * Returns true if restarted, false if cancelled by the user. Throws backend errors unchanged.
  */
 export async function restartTeamMember(
   sessionId: string,
   role: string,
-  teamId?: string,
+  teamId: string,
 ): Promise<boolean> {
   const { ok } = await useStore.getState().askConfirm({
     title: "Restart with fresh context?",
@@ -73,24 +73,7 @@ export async function restartTeamMember(
   });
   if (!ok) return false;
 
-  let resolvedTeamId = teamId;
-  if (!resolvedTeamId) {
-    const teams = await api.listTeams();
-    for (const t of teams) {
-      if (t.archivedAt != null) continue;
-      const detail = await api.teamDetail(t.id);
-      const found = detail.members.some((m) => m.member.sessionId === sessionId);
-      if (found) {
-        resolvedTeamId = t.id;
-        break;
-      }
-    }
-  }
-  if (!resolvedTeamId) {
-    throw new Error(`Team not found for session ${sessionId}`);
-  }
-
-  const member = await api.teamRestartMember(resolvedTeamId, sessionId);
+  const member = await api.teamRestartMember(teamId, sessionId);
   if (member?.sessionId) {
     useStore.getState().swapPaneSession(sessionId, member.sessionId);
   }
