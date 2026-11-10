@@ -3962,10 +3962,127 @@ async fn worker_refresh_moves_item_worktree_branch_and_leaves_dispatched_by_unch
     assert_eq!(new_sess.created_by.as_deref(), Some(coord.id.as_str()));
     assert!(Path::new(&worktree_str).exists());
 
-    // dispatched_by stays 1 (counts s2, not s1, and no extra dispatches row was added)
-    assert_eq!(teams::dispatched_by(&a.state, &coord.id), 1);
+    // Dispatch accounting: both s1 and s2 stay recorded as dispatched, count_created_by - dispatched_by is unchanged
+    assert!(teams::is_dispatched(&a.state, &s1));
+    assert!(teams::is_dispatched(&a.state, &s2));
+    assert_eq!(a.state.db.count_created_by(&coord.id).unwrap() - teams::dispatched_by(&a.state, &coord.id), 0);
+    assert_eq!(teams::dispatched_by(&a.state, &coord.id), 2);
     let tdb = teams::TeamsDb::open(&a.state.data_dir).unwrap();
     let d_sessions = tdb.dispatched_sessions(&coord.id).unwrap();
-    assert_eq!(d_sessions, vec![s2.clone()]);
+    assert!(d_sessions.contains(&s1));
+    assert!(d_sessions.contains(&s2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restart_member_checks_refuse_coordinator_with_live_dispatched_workers_and_archived_team() {
+    let a = node("alpha-checks");
+    let p = a.dir.join("proj");
+    repo(&p);
+    let cwd = p.to_string_lossy().into_owned();
+    let mk = |agent: &str| a.state.db.create_code_session(&cwd, None, agent, "default").unwrap();
+    let coord = mk("grok");
+
+    let tpl_raw = teams::list_team_templates(&a.state).await.unwrap().into_iter().find(|t| t.id == "builtin-triage-desk").unwrap();
+    let mut value = serde_json::to_value(&tpl_raw).unwrap();
+    for s in value["seats"].as_array_mut().unwrap() {
+        if s["seat"] == "workers" {
+            s["count"] = json!(1);
+            s["agent"] = json!("claude-code");
+            s["allowUnasked"] = json!(true);
+        }
+    }
+    value["id"] = json!(null);
+    value["name"] = json!("checks-refresh");
+    let tpl = teams::save_template(&a.state, serde_json::from_value(value).unwrap()).await.unwrap();
+    let team = teams::create_team(
+        &a.state,
+        serde_json::from_value(json!({
+            "templateId": tpl.id, "slug": "chk", "idPrefix": "CHK", "cwd": cwd, "worktreeRoot": p.join("trees").to_string_lossy(),
+            "exportDir": a.dir.join("out").to_string_lossy(),
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    teams::team_attach(&a.state, team.id.clone(), coord.id.clone(), "coordinator".into()).await.unwrap();
+
+    let it = teams::call_tool(&a.state, &coord.id, "item_add", &json!({ "title": "chk item", "plan": "plan" })).await.unwrap();
+    let item_id = it["id"].as_str().unwrap().to_owned();
+    let w1 = teams::call_tool(&a.state, &coord.id, "dispatch_item", &json!({ "itemId": item_id })).await.unwrap();
+    let s1 = w1["sessionId"].as_str().unwrap().to_owned();
+
+    // 1. Refuse coordinator restart while it has live dispatched workers (M2b)
+    let err_coord = teams::team_restart_member(&a.state, team.id.clone(), coord.id.clone()).await.unwrap_err();
+    assert!(err_coord.0.contains("release them first"), "{err_coord:?}");
+
+    // Release worker
+    teams::call_tool(&a.state, &coord.id, "item_set", &json!({ "itemId": item_id, "status": "done" })).await.unwrap();
+    teams::call_tool(&a.state, &coord.id, "member_release", &json!({ "sessionId": s1 })).await.unwrap();
+
+    // 2. Refuse if team is archived (L2)
+    teams::team_archive(&a.state, team.id.clone()).await.unwrap();
+    let err_arch = teams::team_restart_member(&a.state, team.id.clone(), coord.id.clone()).await.unwrap_err();
+    assert!(err_arch.0.contains("archived"), "{err_arch:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restart_member_failure_rollback_leaves_one_live_session() {
+    let a = node("alpha-rollback");
+    let p = a.dir.join("proj");
+    repo(&p);
+    let cwd = p.to_string_lossy().into_owned();
+    let mk = |agent: &str| a.state.db.create_code_session(&cwd, None, agent, "default").unwrap();
+    let coord = mk("grok");
+
+    let tpl_raw = teams::list_team_templates(&a.state).await.unwrap().into_iter().find(|t| t.id == "builtin-triage-desk").unwrap();
+    let mut value = serde_json::to_value(&tpl_raw).unwrap();
+    for s in value["seats"].as_array_mut().unwrap() {
+        if s["seat"] == "workers" {
+            s["count"] = json!(1);
+            s["agent"] = json!("claude-code");
+            s["allowUnasked"] = json!(true);
+        }
+    }
+    value["id"] = json!(null);
+    value["name"] = json!("rollback-refresh");
+    let tpl = teams::save_template(&a.state, serde_json::from_value(value).unwrap()).await.unwrap();
+    let team = teams::create_team(
+        &a.state,
+        serde_json::from_value(json!({
+            "templateId": tpl.id, "slug": "rb", "idPrefix": "RB", "cwd": cwd, "worktreeRoot": p.join("trees").to_string_lossy(),
+            "exportDir": a.dir.join("out").to_string_lossy(),
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    teams::team_attach(&a.state, team.id.clone(), coord.id.clone(), "coordinator".into()).await.unwrap();
+
+    let it = teams::call_tool(&a.state, &coord.id, "item_add", &json!({ "title": "rb item", "plan": "plan" })).await.unwrap();
+    let item_id = it["id"].as_str().unwrap().to_owned();
+    let w1 = teams::call_tool(&a.state, &coord.id, "dispatch_item", &json!({ "itemId": item_id })).await.unwrap();
+    let s1 = w1["sessionId"].as_str().unwrap().to_owned();
+
+    // Trigger failure during start_agent in restart
+    crate::teams::FAIL_START_AGENT.store(true, std::sync::atomic::Ordering::SeqCst);
+    let err = teams::team_restart_member(&a.state, team.id.clone(), s1.clone()).await.unwrap_err();
+    crate::teams::FAIL_START_AGENT.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(err.0.contains("simulated start_agent failure"), "{err:?}");
+
+    // Rollback checks:
+    // Old session s1 is NOT archived
+    let s1_sess = a.state.db.get_code_session(&s1).unwrap().unwrap();
+    assert!(s1_sess.archived_at.is_none());
+
+    // s1 is still the active member on the team
+    let tdb = teams::TeamsDb::open(&a.state.data_dir).unwrap();
+    let members = tdb.members(&team.id).unwrap();
+    let m = members.iter().find(|m| m.session_id == s1).unwrap();
+    assert_eq!(m.status, "active");
+    assert_eq!(m.item_id.as_deref(), Some(item_id.as_str()));
+
+    // No orphan session exists
+    let all_sessions = a.state.db.list_code_sessions().unwrap();
+    assert_eq!(all_sessions.len(), 2, "only coord and s1 exist");
 }
 

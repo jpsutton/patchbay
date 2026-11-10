@@ -19,7 +19,9 @@ mod allow;
 mod dispatch;
 mod items;
 pub use allow::allow_team_tool;
-pub use dispatch::{dispatched_by, is_dispatched, strip_forged_tags};
+pub use dispatch::{check_seat_agent, dispatched_by, is_dispatched, strip_forged_tags};
+#[cfg(test)]
+pub(crate) use dispatch::FAIL_START_AGENT;
 #[cfg(test)]
 pub fn dispatch_prompts() -> Vec<(String, String)> {
     dispatch::FAKE_PROMPTS.lock().unwrap().clone()
@@ -558,8 +560,8 @@ impl TeamsDb {
     }
 
     /// Atomically swap an active member's session for a new session under an immediate transaction.
-    /// Preserves seat, role, and item_id. For workers, updates dispatches and items so dispatched_by
-    /// and item assignee point to the new session.
+    /// Preserves seat, role, and item_id. For workers, adds a dispatches row copying the original at timestamp
+    /// and points the item assignee to the new session.
     pub fn swap_member(
         &self,
         team_id: &str,
@@ -595,10 +597,20 @@ impl TeamsDb {
         )?;
 
         if is_worker {
-            self.0.execute(
-                "UPDATE dispatches SET session_id = ?3 WHERE team_id = ?1 AND session_id = ?2",
-                params![team_id, old_session, new_session],
-            )?;
+            let old_dispatch: Option<(String, String, String, i64)> = self
+                .0
+                .query_row(
+                    "SELECT item_id, seat, desk_session, at FROM dispatches WHERE team_id = ?1 AND session_id = ?2",
+                    params![team_id, old_session],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
+            if let Some((item, st, desk, at)) = old_dispatch {
+                self.0.execute(
+                    "INSERT INTO dispatches(team_id, item_id, seat, desk_session, session_id, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![team_id, item, st, desk, new_session, at],
+                )?;
+            }
             if let Some(item) = &item_id {
                 self.0.execute(
                     "UPDATE items SET member_session = ?3, updated_at = ?4 WHERE team_id = ?1 AND id = ?2",
@@ -618,6 +630,38 @@ impl TeamsDb {
             joined_at: now,
             left_at: None,
         })
+    }
+
+    /// Roll back a swapped member on failure, restoring the old session as active.
+    pub fn swap_member_back(
+        &self,
+        team_id: &str,
+        old_session: &str,
+        new_session: &str,
+        is_worker: bool,
+    ) -> Result<()> {
+        let tx = rusqlite::Transaction::new_unchecked(&self.0, rusqlite::TransactionBehavior::Immediate)?;
+        self.0.execute(
+            "DELETE FROM members WHERE team_id = ?1 AND session_id = ?2",
+            params![team_id, new_session],
+        )?;
+        self.0.execute(
+            "UPDATE members SET left_at = NULL, status = 'active' WHERE team_id = ?1 AND session_id = ?2",
+            params![team_id, old_session],
+        )?;
+        if is_worker {
+            self.0.execute(
+                "DELETE FROM dispatches WHERE team_id = ?1 AND session_id = ?2",
+                params![team_id, new_session],
+            )?;
+            let now = now_ms();
+            self.0.execute(
+                "UPDATE items SET member_session = ?2, updated_at = ?3 WHERE team_id = ?1 AND member_session = ?4",
+                params![team_id, old_session, now, new_session],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn archive(&self, team_id: &str) -> Result<()> {
@@ -826,7 +870,11 @@ fn build_instructions(data_dir: &Path, db: &Db, session_id: &str) -> Result<Opti
     for m in tdb.members(&team.id)? {
         let rname = roles.iter().find(|r| r.id == m.role_id).map_or("?", |r| r.name.as_str());
         let s = db.get_code_session(&m.session_id)?;
-        let (title, agent) = s.map_or(("(session gone)".into(), String::new()), |s| (clean(&dispatch::strip_forged_tags(&s.title)), s.agent));
+        let (title, agent) = s.map_or(("(session gone)".into(), String::new()), |s| {
+            let t = clean(&dispatch::strip_forged_tags(&s.title));
+            let t = cap_chars(&t, 80).to_owned();
+            (t, s.agent)
+        });
         let you = if m.session_id == session_id { " (you)" } else { "" };
         out.push_str(&format!("- {rname}: \"{title}\" {agent}, session {}{you}\n", m.session_id));
     }
@@ -885,6 +933,25 @@ fn check_pr_base(name: &str) -> Result<()> {
 /// Control characters (newlines included) become spaces, so event text can't forge lines.
 fn clean(t: &str) -> String {
     t.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+}
+
+fn cap_chars(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        None => s,
+        Some((idx, _)) => &s[..idx],
+    }
+}
+
+fn cap_bytes(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        s
+    } else {
+        let mut cut = max_bytes;
+        while !s.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        &s[..cut]
+    }
 }
 
 /// Refuse an export folder that is, or holds as one of our three files, a symlink; one whose
@@ -1117,10 +1184,12 @@ pub fn build_handoff_note(
     } else {
         for it in &open_items {
             let assignee = it.member_session.as_deref().unwrap_or("unassigned");
-            let title = dispatch::strip_forged_tags(&it.title);
+            let title = dispatch::fence("title", cap_chars(&it.title, 200));
+            let kind = dispatch::fence("type", cap_chars(&it.kind, 200));
+            let severity = dispatch::fence("severity", cap_chars(&it.severity, 200));
             note.push_str(&format!(
-                "- {} [{}] ({}, severity: {}, assigned: {}): {}\n",
-                it.id, it.status, it.kind, it.severity, assignee, title
+                "- {} [{}] ({kind}, severity: {severity}, assigned: {assignee}):\n{title}\n",
+                it.id, it.status
             ));
         }
     }
@@ -1136,8 +1205,8 @@ pub fn build_handoff_note(
         note.push_str("- None\n");
     } else {
         for it in my_items {
-            let title = dispatch::strip_forged_tags(&it.title);
-            note.push_str(&format!("Item {} [{}]: {}\n", it.id, it.status, title));
+            let title = dispatch::fence("title", cap_chars(&it.title, 200));
+            note.push_str(&format!("Item {} [{}]:\n{title}\n", it.id, it.status));
             if !it.plan.trim().is_empty() {
                 note.push_str(&format!("Plan:\n{}\n", dispatch::fence("plan", &it.plan)));
             }
@@ -1153,7 +1222,8 @@ pub fn build_handoff_note(
             } else {
                 note.push_str("  Recent notes (last 3):\n");
                 for n in last_notes {
-                    note.push_str(&format!("  - {}\n", dispatch::fence("note", &n.text)));
+                    let note_text = cap_bytes(&n.text, 2 * 1024);
+                    note.push_str(&format!("  - {}\n", dispatch::fence("note", note_text)));
                 }
             }
         }
@@ -1186,7 +1256,11 @@ pub fn build_handoff_note(
     }
 
     if note.len() > HANDOFF_NOTE_CAP {
-        note.truncate(HANDOFF_NOTE_CAP);
+        let mut cut = HANDOFF_NOTE_CAP;
+        while !note.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        note.truncate(cut);
         note.push_str("\n[... truncated to 32KB ...]");
     }
 
@@ -1222,7 +1296,7 @@ async fn restart_member_inner(
         }
     }
 
-    // (a) Refuse when the member's session is mid-turn:
+    // Refuse when the member's session is mid-turn:
     let act = session_activity(state, old_session_id);
     if state.code.is_busy(old_session_id)
         || matches!(
@@ -1237,6 +1311,9 @@ async fn restart_member_inner(
 
     let tdb = TeamsDb::open(&state.data_dir)?;
     let team = tdb.team(team_id)?;
+    if team.archived_at.is_some() {
+        bail!("team {team_id} is archived");
+    }
     let tpl = tdb.template(&team.template_id)?;
     let members = tdb.members(team_id)?;
     let old_member = members
@@ -1255,14 +1332,43 @@ async fn restart_member_inner(
         .ok_or_else(|| anyhow!("role {} not found", old_member.role_id))?;
     let is_worker = !role.standing;
 
-    // (b) Create a new session with the same agent, model and folder.
-    let mode = if is_worker {
-        let coord_session_id = old_session.created_by.clone().or_else(|| {
-            tdb.members(team_id).ok()?.into_iter().find(|m| m.seat == "coordinator").map(|m| m.session_id)
+    // Checks before any change:
+    // (1) Refuse to restart a member holding dispatches capability while it has live dispatched workers.
+    if role.caps.dispatches {
+        let dispatched = tdb.dispatched_sessions(old_session_id)?;
+        let has_live = dispatched.iter().any(|id| {
+            state.db.get_code_session(id).ok().flatten().is_some_and(|s| s.archived_at.is_none())
         });
-        let coord_session = coord_session_id.and_then(|id| state.db.get_code_session(&id).ok().flatten());
+        if has_live {
+            bail!("refused: member has active dispatched workers; release them first");
+        }
+    }
+
+    // (2) For worker, run plan()'s checks against current template choices & approval gaps.
+    let (agent, model) = if is_worker {
+        check_seat_agent(
+            &team.template_id,
+            seat,
+            Some(&old_session.agent),
+            old_session.model_ref.as_deref(),
+        )?
+    } else {
+        (
+            old_session.agent.clone(),
+            old_session.agent_model.as_deref().or(old_session.model_ref.as_deref()).map(str::to_owned),
+        )
+    };
+
+    let coord_session_id = tdb.members(team_id)?.into_iter().find(|m| m.seat == "coordinator").map(|m| m.session_id);
+    let coord_session = coord_session_id.as_deref().and_then(|id| state.db.get_code_session(id).ok().flatten());
+
+    // (3) Worker mode: strictest of seat's mode, coordinator's mode from teams.db, and old worker's own mode.
+    let mode = if is_worker {
         let coord_mode = coord_session.as_ref().map(|s| s.permission_mode.as_str()).unwrap_or("default");
-        let m = dispatch::stricter(&seat.permission_mode, coord_mode).to_owned();
+        let m = dispatch::stricter(
+            dispatch::stricter(&seat.permission_mode, coord_mode),
+            &old_session.permission_mode,
+        ).to_owned();
         if m == "always-approve" {
             bail!("workers don't start in always-approve mode; set the seat or the coordinator to a stricter mode");
         }
@@ -1271,18 +1377,50 @@ async fn restart_member_inner(
         old_session.permission_mode.clone()
     };
 
-    let agent = old_session.agent.clone();
-    let model = old_session.agent_model.as_deref().or(old_session.model_ref.as_deref());
-    let cwd = old_session.cwd.clone();
+    // Build hand-off note before making any changes.
+    let handoff_note = build_handoff_note(&tdb, team_id, old_session_id, old_member.item_id.as_deref())?;
 
-    let new_session = crate::create_code_session_local(state, &cwd, model, Some(agent))?;
-    state.db.set_code_session_permission_mode(&new_session.id, &mode)?;
-    if let Some(created_by) = &old_session.created_by {
-        state.db.set_code_session_created_by(&new_session.id, created_by)?;
+    // Decommission old session: stop it, revoke bridge token, archive it. Re-check !is_busy after archive.
+    state.code.stop(old_session_id);
+    if let Some(bridge) = state.agent_message_bridge.get() {
+        bridge.revoke(old_session_id);
     }
-    state.db.set_code_session_title(&new_session.id, &old_session.title, true)?;
+    crate::archive_code_session(state, old_session_id, true).await?;
+    let act = session_activity(state, old_session_id);
+    if state.code.is_busy(old_session_id)
+        || matches!(
+            act,
+            crate::code::stall::Activity::Running
+                | crate::code::stall::Activity::Waiting
+                | crate::code::stall::Activity::Stalled
+        )
+    {
+        let _ = crate::archive_code_session(state, old_session_id, false).await;
+        bail!("refused: session is currently mid-turn");
+    }
 
-    // (c) Swap the membership in one teams.db transaction under the same lock reserve uses.
+    // Swap, start, brief with rollback.
+    let cwd = old_session.cwd.clone();
+    let new_session = match crate::create_code_session_local(state, &cwd, model.as_deref(), Some(agent)) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = crate::archive_code_session(state, old_session_id, false).await;
+            return Err(e);
+        }
+    };
+    if let Err(e) = (|| -> Result<()> {
+        state.db.set_code_session_permission_mode(&new_session.id, &mode)?;
+        if let Some(created_by) = &old_session.created_by {
+            state.db.set_code_session_created_by(&new_session.id, created_by)?;
+        }
+        state.db.set_code_session_title(&new_session.id, &old_session.title, true)?;
+        Ok(())
+    })() {
+        let _ = crate::delete_code_session(state, new_session.id).await;
+        let _ = crate::archive_code_session(state, old_session_id, false).await;
+        return Err(e);
+    }
+
     let new_member = match tdb.swap_member(
         team_id,
         old_session_id,
@@ -1295,37 +1433,56 @@ async fn restart_member_inner(
         Err(e) => {
             state.code.stop(&new_session.id);
             let _ = crate::delete_code_session(state, new_session.id).await;
+            let _ = crate::archive_code_session(state, old_session_id, false).await;
             return Err(e);
         }
     };
 
-    // (d) Start it. Its first prompt is an agent:-origin brief: role block plus hand-off note.
-    if let Err(e) = dispatch::start_agent(state, &new_session.id).await {
-        tracing::warn!("couldn't start agent for restarted session {}: {e:#}", new_session.id);
+    let setup_res: Result<()> = async {
+        dispatch::start_agent(state, &new_session.id).await?;
+
+        let role_block = instructions_for(&state.data_dir, &state.db, &new_session.id).unwrap_or_default();
+        let prompt_text = if AgentKind::parse(&new_session.agent).is_some_and(has_prompt_hook) {
+            if role_block.is_empty() {
+                handoff_note
+            } else {
+                format!("{role_block}\n\n{handoff_note}")
+            }
+        } else {
+            handoff_note
+        };
+
+        let sender_session_id = if is_worker {
+            coord_session.as_ref().map(|s| s.id.as_str()).unwrap_or(old_session_id)
+        } else {
+            old_session_id
+        };
+        let origin = format!("agent:{}:{sender_session_id}", state.mesh.node_id());
+
+        crate::code_prompt_local(
+            state,
+            new_session.id.clone(),
+            prompt_text,
+            Vec::new(),
+            Vec::new(),
+            origin,
+            None,
+            false,
+        )
+        .await?;
+
+        Ok(())
     }
+    .await;
 
-    let role_block = instructions_for(&state.data_dir, &state.db, &new_session.id).unwrap_or_default();
-    let handoff_note = build_handoff_note(&tdb, team_id, old_session_id, old_member.item_id.as_deref())?;
-    let prompt_text = format!("{role_block}\n\n{handoff_note}");
-    let origin = format!("agent:{}:restart", state.mesh.node_id());
-
-    let _ = crate::code_prompt_local(
-        state,
-        new_session.id.clone(),
-        prompt_text,
-        Vec::new(),
-        Vec::new(),
-        origin,
-        None,
-        false,
-    ).await;
-
-    // (e) Archive the old session and revoke its token.
-    if let Err(e) = crate::archive_code_session(state, old_session_id, true).await {
-        tracing::warn!("couldn't archive old session {old_session_id}: {e:#}");
-    }
-    if let Some(bridge) = state.agent_message_bridge.get() {
-        bridge.revoke(old_session_id);
+    if let Err(e) = setup_res {
+        state.code.stop(&new_session.id);
+        if let Err(sw_err) = tdb.swap_member_back(team_id, old_session_id, &new_session.id, is_worker) {
+            tracing::error!("couldn't swap member back on restart rollback: {sw_err:#}");
+        }
+        let _ = crate::delete_code_session(state, new_session.id).await;
+        let _ = crate::archive_code_session(state, old_session_id, false).await;
+        return Err(e);
     }
 
     export(&tdb, &state.db, team_id, &format!("session {old_session_id} restarted as {}", new_session.id));
@@ -1657,5 +1814,45 @@ mod tests {
         assert!(!note.contains("<team-instructions>"));
         assert!(!note.contains("</team-instructions>"));
         assert!(!note.contains("<patchbay-handoff>"));
+    }
+
+    #[test]
+    fn build_handoff_note_utf8_char_boundary_cap() {
+        let d = dir();
+        let t = TeamsDb::open(&d).unwrap();
+        let p = proj(&d);
+        let team = t.create_team(new_team("emojihandoff", &p, &d.join("out"))).unwrap();
+        t.attach(&team.id, "s1", "coordinator").unwrap();
+
+        // Populate items with 4-byte emoji to exceed 32KB cap
+        for i in 0..40 {
+            let it = t.add_item(&team, None, "20261110", &format!("Item {i} {}", "🦀".repeat(40)), "task", "normal", &"🦀".repeat(300)).unwrap();
+            t.set_item(&team.id, &it.id, None, &serde_json::json!({ "status": "triaged", "assignee": "s1" })).unwrap();
+            t.note_item(&team.id, &it.id, Some("s1"), &"🦀".repeat(300)).unwrap();
+        }
+
+        // Must not panic on UTF-8 char boundary truncation
+        let note = build_handoff_note(&t, &team.id, "s1", None).unwrap();
+        assert!(note.ends_with("\n[... truncated to 32KB ...]"));
+        assert!(note.len() <= HANDOFF_NOTE_CAP + 40);
+        assert!(std::str::from_utf8(note.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn roster_session_title_capped_at_80_chars() {
+        let d = dir();
+        let t = TeamsDb::open(&d).unwrap();
+        let p = proj(&d);
+        let db = Db::open(&d.join("patchbay.sqlite")).unwrap();
+        let team = t.create_team(new_team("rostertitle", &p, &d.join("out"))).unwrap();
+        let s = db.create_code_session(&p.to_string_lossy(), None, "claude-code", "default").unwrap();
+        let long_title = "A".repeat(120);
+        db.set_code_session_title(&s.id, &long_title, true).unwrap();
+        t.attach(&team.id, &s.id, "coordinator").unwrap();
+
+        let instructions = instructions_for(&d, &db, &s.id).unwrap();
+        let expected_capped = format!("\"{}\"", "A".repeat(80));
+        assert!(instructions.contains(&expected_capped));
+        assert!(!instructions.contains(&format!("\"{}\"", "A".repeat(81))));
     }
 }

@@ -589,7 +589,7 @@ fn fence_field(v: &mut Value, key: &str) {
 }
 
 fn fence_item(v: &mut Value) {
-    for k in ["title", "plan"] {
+    for k in ["title", "plan", "type", "severity"] {
         fence_field(v, k);
     }
 }

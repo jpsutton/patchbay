@@ -208,6 +208,37 @@ pub fn dispatched_by(state: &AppState, desk: &str) -> i64 {
         .count() as i64
 }
 
+/// Validate that an agent and model choice matches the seat's configured agent or one of its choices,
+/// and that approval gaps are acknowledged if needed.
+pub fn check_seat_agent(
+    template_id: &str,
+    seat: &Seat,
+    want_agent: Option<&str>,
+    want_model: Option<&str>,
+) -> Result<(String, Option<String>)> {
+    let options: Vec<(&str, Option<&str>)> =
+        std::iter::once((seat.agent.as_str(), seat.model.as_deref()))
+            .chain(seat.choices.iter().map(|c| (c.agent.as_str(), c.model.as_deref())))
+            .collect();
+    let pick = match want_agent {
+        None => options.first().copied(),
+        Some(a) => options.iter().copied().find(|(oa, om)| *oa == a && (want_model.is_none() || *om == want_model)),
+    };
+    let (a, m) = pick.ok_or_else(|| {
+        let list: Vec<String> = options.iter().map(|(a, m)| format!("{a}{}", m.map(|m| format!(" {m}")).unwrap_or_default())).collect();
+        anyhow!("agent must be one of this seat's: {}", list.join(", "))
+    })?;
+    let kind = AgentKind::parse(a).ok_or_else(|| anyhow!("unknown coding agent {a}"))?;
+    let gaps = ApprovalSetup::for_agent(kind).gaps;
+    if !gaps.is_empty() && !(seat.allow_unasked && seat.acknowledged() && !template_id.starts_with("builtin-")) {
+        bail!(
+            "{a} can act without asking whatever the approval mode, and this seat has no acknowledgement for that. The user can allow it in Settings > Teams > the template's seat ({})",
+            gaps.join("; ")
+        );
+    }
+    Ok((a.to_owned(), m.map(str::to_owned)))
+}
+
 /// Validate a dispatch and reserve its place. Nothing outside teams.db changes.
 fn plan(state: &AppState, desk: &str, args: &Value) -> Result<Plan> {
     let tdb = TeamsDb::open(&state.data_dir)?;
@@ -243,28 +274,7 @@ fn plan(state: &AppState, desk: &str, args: &Value) -> Result<Plan> {
         bail!("seat {} is a standing seat; dispatch fills worker seats only", seat.seat);
     }
     // Only the seat's own agent or one of its listed choices, never what the item text suggests.
-    let (agent, model) = {
-        let (want_agent, want_model) = (s("agent"), s("model"));
-        let options: Vec<(&str, Option<&str>)> =
-            std::iter::once((seat.agent.as_str(), seat.model.as_deref())).chain(seat.choices.iter().map(|c| (c.agent.as_str(), c.model.as_deref()))).collect();
-        let pick = match want_agent {
-            None => options.first().copied(),
-            Some(a) => options.iter().copied().find(|(oa, om)| *oa == a && (want_model.is_none() || *om == want_model)),
-        };
-        let (a, m) = pick.ok_or_else(|| {
-            let list: Vec<String> = options.iter().map(|(a, m)| format!("{a}{}", m.map(|m| format!(" {m}")).unwrap_or_default())).collect();
-            anyhow!("agent must be one of this seat's: {}", list.join(", "))
-        })?;
-        (a.to_owned(), m.map(str::to_owned))
-    };
-    let kind = AgentKind::parse(&agent).ok_or_else(|| anyhow!("unknown coding agent {agent}"))?;
-    let gaps = ApprovalSetup::for_agent(kind).gaps;
-    if !gaps.is_empty() && !(seat.allow_unasked && seat.acknowledged() && !c.team.template_id.starts_with("builtin-")) {
-        bail!(
-            "{agent} can act without asking whatever the approval mode, and this seat has no acknowledgement for that. The user can allow it in Settings > Teams > the template's seat ({})",
-            gaps.join("; ")
-        );
-    }
+    let (agent, model) = check_seat_agent(&c.team.template_id, seat, s("agent"), s("model"))?;
     let mode = stricter(&seat.permission_mode, &desk_row.permission_mode).to_owned();
     if mode == "always-approve" {
         bail!("workers don't start in always-approve mode; set the seat or the coordinator to a stricter mode");
@@ -345,7 +355,13 @@ pub(crate) async fn start_agent(state: &AppState, id: &str) -> Result<()> {
 pub(crate) static FAKE_PROMPTS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
+pub(crate) static FAIL_START_AGENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
 pub(crate) async fn start_agent(state: &AppState, id: &str) -> Result<()> {
+    if FAIL_START_AGENT.load(std::sync::atomic::Ordering::SeqCst) {
+        bail!("simulated start_agent failure");
+    }
     let mut rx = state.code.attach_test_agent(id);
     let id = id.to_owned();
     tokio::spawn(async move {
