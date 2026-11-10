@@ -18,17 +18,22 @@ function SeatModelPicker({
   const providers = useStore((s) => s.providers);
   const code = useStore((s) => s.code);
   const codeSessions = useStore((s) => s.codeSessions);
+  const agentLabel = (AGENT_LABELS as Record<string, string>)[agent] ?? agent;
 
   if (usesPatchbayModels(agent)) {
     if (models.length === 0) {
       return (
-        <input
-          className={input}
-          placeholder="Model (optional)"
-          value={value ?? ""}
-          readOnly={readOnly}
-          onChange={(e) => onChange(e.target.value || null)}
-        />
+        <div className="flex flex-col gap-0.5">
+          <input
+            className={input}
+            value={value || "Agent default"}
+            readOnly
+            aria-label="Model"
+          />
+          <span className="text-[10px] leading-tight text-muted">
+            Run a {agentLabel} session once to choose a model.
+          </span>
+        </div>
       );
     }
     return (
@@ -39,7 +44,7 @@ function SeatModelPicker({
         aria-label="Model"
         onChange={(e) => onChange(e.target.value || null)}
       >
-        <option value="">Default model</option>
+        <option value="">Agent default</option>
         {value && !models.some((m) => m.id === value) && (
           <option value={value}>{value}</option>
         )}
@@ -87,7 +92,7 @@ function SeatModelPicker({
         aria-label="Model"
         onChange={(e) => onChange(e.target.value || null)}
       >
-        <option value="">Default model</option>
+        <option value="">Agent default</option>
         {value && !cachedModels.some((m) => m.modelId === value) && (
           <option value={value}>{value}</option>
         )}
@@ -101,19 +106,16 @@ function SeatModelPicker({
   }
 
   return (
-    <div className="flex flex-col">
+    <div className="flex flex-col gap-0.5">
       <input
         className={input}
-        placeholder="Model (optional)"
-        value={value ?? ""}
-        readOnly={readOnly}
-        onChange={(e) => onChange(e.target.value || null)}
+        value={value || "Agent default"}
+        readOnly
+        aria-label="Model"
       />
-      {!readOnly && (
-        <span className="text-[10px] leading-tight text-muted">
-          models load after the agent's first session
-        </span>
-      )}
+      <span className="text-[10px] leading-tight text-muted">
+        Run a {agentLabel} session once to choose a model.
+      </span>
     </div>
   );
 }
