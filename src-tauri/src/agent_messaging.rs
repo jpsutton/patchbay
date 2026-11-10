@@ -355,6 +355,12 @@ impl AgentMessagingBridge {
         }
     }
 
+    /// Drop a session's token: its MCP server can't call the bridge again until the agent restarts.
+    pub fn revoke(&self, session_id: &str) {
+        self.tokens.lock().unwrap().remove(session_id);
+    }
+    }
+
     pub fn serve(&self, listener: StdTcpListener, state: AppState) {
         let tokens = self.tokens.clone();
         api::spawn(async move {

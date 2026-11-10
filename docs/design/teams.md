@@ -184,6 +184,25 @@ Members report progress with `item_note`; the coordinator keeps sole ownership o
   allowed without a prompt (a standing allow for those tools only, for live team members);
   every other tool still asks according to the seat's permission mode. Phase 4's design gets a
   security review before it is built.
+- **Tool-call titles (verified 2026-11-10 from transcripts in the main Patchbay database; no new
+  live run).** The allow rule (`teams/allow.rs`) matches the title each agent gives a call to a
+  tool on `patchbay-agent-messaging`, exactly, per tool name:
+
+  | Agent | Title | Kind |
+  |---|---|---|
+  | Claude Code | `mcp__patchbay-agent-messaging__send_agent_message` | other |
+  | Codex | `mcp.patchbay-agent-messaging.send_agent_message` | execute (MCP shape: `rawInput.arguments`) |
+  | Cursor | `patchbay-agent-messaging: send_agent_message`, or `patchbay-agent-messaging-send_agent_message: send_agent_message` | other |
+  | Antigravity | `patchbay-agent-messaging_send_agent_message` | other |
+  | Patchbay | `send_agent_message (patchbay-agent-messaging)` | other |
+
+  The team tools were not in those transcripts (they pre-date the team tools); the forms are the
+  same with the tool name swapped, which is an inference. **OpenCode has no rule.** It reaches MCP
+  tools only through an `execute` tool that runs JavaScript (`tools["patchbay-agent-messaging"].send_agent_message(...)`),
+  so allowing it would allow arbitrary code. An OpenCode member still waits on a prompt for every
+  team tool call; the built-in coordinator seat is OpenCode, so an unattended coordinator needs a
+  different agent or a person at the prompt. The user-chosen server name `patchbay-agent-messaging`
+  is reserved in `mcp::acp_servers`.
 - `dispatch_item` starts workers. It is exempt from `MAX_CREATED_SESSIONS` (5) and
   `MAX_CREATE_DEPTH` (2) in `lib.rs`; instead it refuses when the seat's `pool` is full.
   Released members stop counting.

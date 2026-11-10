@@ -253,7 +253,12 @@ impl CodeManager {
             auto_approve: {
                 let db = db.clone();
                 let cwd = session.cwd.clone();
+                let data_dir = data_dir.to_path_buf();
                 Arc::new(move |tool_call, options| {
+                    // A live team member's call to a team tool needs no prompt (teams/allow.rs).
+                    if let Some(hit) = crate::teams::allow_team_tool(&data_dir, &csid, tool_call, options) {
+                        return Some(hit);
+                    }
                     // Read fresh each time so rules and the session's Ask/Auto/Always apply at once.
                     let rules = db.list_permission_rules().ok()?;
                     let mode = db

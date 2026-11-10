@@ -391,21 +391,21 @@ impl TeamsDb {
 
 // ---------------- the caller, checked against its role ----------------
 
-struct Caller {
-    team: Team,
-    me: Member,
-    role: Role,
+pub(super) struct Caller {
+    pub(super) team: Team,
+    pub(super) me: Member,
+    pub(super) role: Role,
 }
 
 impl Caller {
-    fn of(tdb: &TeamsDb, session: &str) -> Result<Self> {
+    pub(super) fn of(tdb: &TeamsDb, session: &str) -> Result<Self> {
         let (team, me) = tdb.membership(session)?.ok_or_else(|| anyhow!("this session is not on a live team"))?;
         let role = tdb.role(&me.role_id)?;
         Ok(Self { team, me, role })
     }
 
     /// Refuse unless the role holds capability `cap` (named as in the role editor).
-    fn need(&self, cap: &str, allowed: bool, to: &str) -> Result<()> {
+    pub(super) fn need(&self, cap: &str, allowed: bool, to: &str) -> Result<()> {
         if !allowed {
             bail!("refused: the {} role has no `{cap}` capability, which is needed to {to}", self.role.name);
         }
@@ -420,6 +420,7 @@ pub fn is_member(state: &AppState, session: &str) -> bool {
 
 pub const TOOLS: &[&str] = &[
     "team_roster", "team_send", "item_add", "item_set", "item_note", "item_list", "item_get", "decision_open", "decision_answer",
+    "dispatch_item", "member_release",
 ];
 
 pub fn is_tool(name: &str) -> bool {
@@ -441,11 +442,13 @@ pub fn tool_defs() -> Vec<Value> {
         tool("team_send", "Message a teammate by role name (e.g. \"Advisor\") or session id. Same delivery rules as send_agent_message.", json!({ "to": text("A role name or a session id from team_roster."), "message": text("The message.") }), &["to", "message"]),
         tool("item_add", "Add an item to the team's board (status noticed). Needs the writes_items capability.", json!({ "title": text("What the item is."), "type": text("bug, feature, polish, chore... Default task."), "severity": text("Default normal."), "plan": text("Optional plan or notes.") }), &["title"]),
         tool("item_set", "Change named fields of an item: title, type, severity, status (noticed, triaged, blocked, dispatched, in-progress, awaiting-review, done, dropped), assignee (a member's session id, or null), plan, prUrl. Needs the writes_items capability.", json!({ "itemId": text("The item id."), "title": text("New title."), "type": text("New type."), "severity": text("New severity."), "status": text("New status."), "assignee": text("A member's session id; empty to clear."), "plan": text("New plan text."), "prUrl": text("Pull request URL.") }), &["itemId"]),
-        tool("item_note", "Append a note to an item's history. Needs the writes_items capability.", json!({ "itemId": text("The item id."), "text": text("The note.") }), &["itemId", "text"]),
+        tool("item_note", "Append a note to an item's history. Needs the writes_items capability, or the item must be assigned to you (a dispatched worker notes its own item only).", json!({ "itemId": text("The item id."), "text": text("The note.") }), &["itemId", "text"]),
         tool("item_list", "List the team's items, optionally only those in one status.", json!({ "status": text("Optional status filter.") }), &[]),
         tool("item_get", "Read one item with its history and decisions.", json!({ "itemId": text("The item id.") }), &["itemId"]),
         tool("decision_open", "Open a decision. Class advisor_first goes to the advisor (CLEAR or HUMAN), human goes to the user, coordinator needs no gate. Needs the writes_items capability. State your recommendation.", json!({ "question": text("The question."), "options": { "type": "array", "items": { "type": "string" }, "description": "The choices." }, "recommendation": text("Which option you recommend, and why."), "class": text("human, advisor_first (default) or coordinator."), "itemId": text("Optional item the decision is about.") }), &["question"]),
         tool("decision_answer", "Answer an advisor_first decision as the advisor: verdict CLEAR (you decide; name the choice) or HUMAN (the user must decide). Needs the decides capability. The user answers from Patchbay, not here.", json!({ "decisionId": text("The decision id."), "verdict": text("CLEAR or HUMAN."), "choice": text("For CLEAR: the option you decide on."), "text": text("Your reason, short.") }), &["decisionId", "verdict"]),
+        tool("dispatch_item", "Start a worker on an item: makes a git worktree from the team's base branch, starts an agent from the worker seat, sends it the brief, and marks the item dispatched. Needs the dispatches capability. Refused when the seat's pool is full.", json!({ "itemId": text("A noticed, triaged or blocked item."), "seat": text("The worker seat; optional when the template has one."), "agent": text("One of the seat's agents; default the seat's own."), "model": text("The model of that agent's entry, when it has several.") }), &["itemId"]),
+        tool("member_release", "Release a dispatched worker once its item is done, dropped or awaiting-review: stops its agent and frees its place. Needs the dispatches capability.", json!({ "sessionId": text("The worker's session id.") }), &["sessionId"]),
     ]
 }
 
@@ -461,14 +464,19 @@ struct Outcome {
 
 /// Run a team tool for `session`. The role check happens here, on the host.
 pub async fn call_tool(state: &AppState, session: &str, name: &str, args: &Value) -> Result<Value> {
+    match name {
+        "dispatch_item" => return super::dispatch::dispatch_item(state, session, args).await,
+        "member_release" => return super::dispatch::member_release(state, session, args).await,
+        _ => {}
+    }
     let out = run_tool(state, session, name, args)?;
     for (from, to, text) in out.tells {
-        tell(state, Some(&from), &to, &text).await;
+        tell(state, Some(&from), &to, &super::dispatch::strip_forged_tags(&text)).await;
     }
     if let Some((from, to, message)) = out.send {
         crate::agent_messaging::check_send_limits(&from, &to)?;
         let node = state.mesh.node_id().to_owned();
-        return crate::send_agent_message(state, &node, &from, &to, &message).await;
+        return crate::send_agent_message(state, &node, &from, &to, &super::dispatch::strip_forged_tags(&message)).await;
     }
     Ok(out.value)
 }
@@ -508,8 +516,11 @@ fn run_tool(state: &AppState, session: &str, name: &str, args: &Value) -> Result
             json!(item)
         }
         "item_note" => {
-            c.need("writes_items", c.role.caps.writes_items, "add notes to items")?;
             let id = need_s("itemId")?;
+            // The authority is the item's assignee (`items.member_session`), set by dispatch or the coordinator.
+            if !c.role.caps.writes_items && tdb.item(&c.team.id, id)?.member_session.as_deref() != Some(session) {
+                bail!("refused: the {} role may note only the item assigned to it", c.role.name);
+            }
             tdb.note_item(&c.team.id, id, Some(session), need_s("text")?)?;
             changed(state, &tdb, &c.team.id, &format!("{id} noted by {}", c.role.name));
             json!({ "ok": true })
@@ -591,7 +602,7 @@ async fn tell(state: &AppState, from: Option<&str>, to: &str, text: &str) {
     }
 }
 
-fn changed(state: &AppState, tdb: &TeamsDb, team_id: &str, event: &str) {
+pub(super) fn changed(state: &AppState, tdb: &TeamsDb, team_id: &str, event: &str) {
     export(tdb, &state.db, team_id, event);
     // The Teams page refreshes by polling; nothing else to tell.
 }

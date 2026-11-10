@@ -180,6 +180,11 @@ pub fn acp_servers(db: &Db, support: McpSupport) -> Result<(Vec<Value>, Vec<Stri
                 .collect()
         };
         let acp_name = acp_server_name(&s.name);
+        // The auto-approve rule for team tools trusts this name (teams/allow.rs); only Patchbay's own server may use it.
+        if acp_name == "patchbay-agent-messaging" {
+            skipped.push(format!("{} (name reserved)", s.name));
+            continue;
+        }
         match cfg.transport.as_str() {
             "stdio" => out.push(json!({
                 "name": acp_name,

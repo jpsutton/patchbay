@@ -2911,6 +2911,9 @@ pub(crate) async fn create_agent_session(
     if creator.host_node.as_deref() != Some(state.mesh.node_id()) || creator.archived_at.is_some() {
         anyhow::bail!("only a session running on this computer can create sessions");
     }
+    if teams::is_dispatched(state, creator_id) {
+        anyhow::bail!("a worker started by a team can't create sessions");
+    }
     // Auto mode trusts edits inside a session's own folder, so a child may not reach beyond its creator's.
     let root = std::fs::canonicalize(&creator.cwd)
         .map_err(|e| anyhow::anyhow!("the creating session's folder {} is not usable: {e}", creator.cwd))?;
@@ -2941,7 +2944,8 @@ pub(crate) async fn create_agent_session(
         }
         up = state.db.get_code_session(&id)?.and_then(|s| s.created_by);
     }
-    if state.db.count_created_by(creator_id)? >= MAX_CREATED_SESSIONS {
+    // Workers a team dispatched are that team's pool, counted there (teams/dispatch.rs).
+    if state.db.count_created_by(creator_id)? - teams::dispatched_by(state, creator_id) >= MAX_CREATED_SESSIONS {
         anyhow::bail!("a session may create at most {MAX_CREATED_SESSIONS} sessions");
     }
     let agent = agent.map(str::to_owned).unwrap_or_else(|| creator.agent.clone());
