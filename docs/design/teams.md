@@ -307,6 +307,7 @@ Routing: the three classes in the table above, with the reference desk's example
    - `team_detach` and `team_archive` don't stop the agent or revoke its bridge token; only
      `member_release` does.
    - The bridge token sits in the MCP server's environment, readable by the agent's own shell.
+   - The messaging bridge token reaches Claude Code inside `--mcp-config {...PATCHBAY_MESSAGE_TOKEN...}` on its command line, so plain `ps` shows it, and on macOS any local user can read process arguments (pre-existing in agent messaging).
    Not verified: a real agent started by `dispatch_item` (tests use a stand-in agent); the allow
    rule against the team tools' real titles (inferred from `send_agent_message`); a sandbox live
    run; the editor tick in a browser; container isolation for unattended dispatch.
