@@ -38,7 +38,7 @@ pub const MIN_GAP_SECS: i64 = 15;
 pub struct GrokPlan {
     /// `grok_auth::account`: the key the guard and the mesh know the seat by.
     pub account: String,
-    /// The team's name, else the plan's.
+    /// Names the seat, not the team: each seat has its own weekly pool. `Grok seat · <team>`, else `Grok seat · <tier>`.
     pub name: Option<String>,
     pub limits: PlanLimits,
 }
@@ -126,7 +126,11 @@ pub async fn fetch(home: Option<&str>, base_url: &str) -> Result<GrokPlan> {
     let body: Value = resp.json().await.context("parse Grok billing")?;
     let limits = parse_billing(&body, plan_limits::now()).ok_or_else(|| anyhow!("Grok billing reported no weekly usage"))?;
     let tier = body.get("subscription_tier").and_then(Value::as_str).filter(|t| !t.is_empty()).map(str::to_owned);
-    Ok(GrokPlan { account, name: team.or(tier), limits })
+    let name = match team.or(tier) {
+        Some(n) => format!("Grok seat · {n}"),
+        None => "Grok seat".to_owned(),
+    };
+    Ok(GrokPlan { account, name: Some(name), limits })
 }
 
 #[cfg(test)]
