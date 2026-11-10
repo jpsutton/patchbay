@@ -1139,9 +1139,10 @@ fn note_untagged_plan_member(member: &str, untagged: bool) {
     if !untagged {
         set.remove(member);
     } else if set.insert(member.to_owned()) {
-        tracing::info!("{UNTAGGED_PLAN_LOG} from {member}");
+        let line = format!("{UNTAGGED_PLAN_LOG} from {member}");
+        tracing::info!("{line}");
         #[cfg(test)]
-        UNTAGGED_PLAN_LOGS.lock().unwrap().push((member.to_owned(), UNTAGGED_PLAN_LOG.to_owned()));
+        UNTAGGED_PLAN_LOGS.lock().unwrap().push((member.to_owned(), line));
     }
 }
 
@@ -3507,11 +3508,15 @@ impl mesh::RpcHandler for MeshRpc {
         }
         if name == MESH_PLAN_LIMITS_EVENT {
             use code::plan_limits::PlanLimits;
-            let tagged = payload["account"].as_str().zip(serde_json::from_value::<PlanLimits>(payload["limits"].clone()).ok());
-            note_untagged_plan_member(from, tagged.is_none());
-            // Untagged, from a member before accounts were told apart: which account it describes is
-            // unknown, so it is filed under none (a missing report never gates, so nothing is blocked).
-            let Some((account, l)) = tagged else { return };
+            // An absent, null, empty or blank `account` is untagged: one branch, so the forms cannot
+            // drift. Untagged, from a member before accounts were told apart: which account it
+            // describes is unknown, so it is filed under none (a missing report never gates, so
+            // nothing is blocked). Only a payload with no usable tag blames the sender's age: a
+            // tagged one whose limits don't parse comes from a newer peer and is dropped silently.
+            let account = payload["account"].as_str().map(str::trim).filter(|a| !a.is_empty());
+            note_untagged_plan_member(from, account.is_none());
+            let Some(account) = account else { return };
+            let Ok(l) = serde_json::from_value::<PlanLimits>(payload["limits"].clone()) else { return };
             let (account, name, mut l) = (account.to_owned(), payload["name"].as_str().map(str::to_owned), l);
             // Their clock may run ahead of ours; a later report seen here must still win.
             l.observed_at = l.observed_at.min(code::plan_limits::now());
