@@ -86,13 +86,14 @@ struct Plan {
     item: super::items::Item,
     /// Placeholder session id of the reserved place.
     place: String,
+    dispatch_id: i64,
     desk: String,
     role_name: String,
 }
 
 impl TeamsDb {
     /// Take a place in `seat` and one dispatch from the rate budget, in one write transaction.
-    fn reserve(&self, team: &Team, seat: &Seat, item: &str, desk: &str) -> Result<String> {
+    fn reserve(&self, team: &Team, seat: &Seat, item: &str, desk: &str) -> Result<(String, i64)> {
         let tx = rusqlite::Transaction::new_unchecked(&self.0, rusqlite::TransactionBehavior::Immediate)?;
         let taken = self.seat_load(&team.id, &seat.seat)?;
         if taken >= seat.count as i64 {
@@ -130,12 +131,13 @@ impl TeamsDb {
             "INSERT INTO dispatches(team_id, item_id, seat, desk_session, at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![team.id, item, seat.seat, desk, now],
         )?;
+        let dispatch_id = self.0.last_insert_rowid();
         tx.commit()?;
-        Ok(place)
+        Ok((place, dispatch_id))
     }
 
     /// Give a reserved place its session.
-    fn bind_reserved(&self, team_id: &str, place: &str, session: &str, item: &str, desk: &str) -> Result<()> {
+    fn bind_reserved(&self, team_id: &str, place: &str, session: &str, dispatch_id: i64) -> Result<()> {
         let tx = self.0.unchecked_transaction()?;
         let n = self.0.execute(
             "UPDATE members SET session_id = ?3, status = 'active' WHERE team_id = ?1 AND session_id = ?2 AND status = 'reserved'",
@@ -145,8 +147,8 @@ impl TeamsDb {
             bail!("the reserved place is gone");
         }
         self.0.execute(
-            "UPDATE dispatches SET session_id = ?3 WHERE team_id = ?1 AND item_id = ?2 AND desk_session = ?4 AND session_id IS NULL",
-            params![team_id, item, session, desk],
+            "UPDATE dispatches SET session_id = ?3 WHERE team_id = ?1 AND id = ?2",
+            params![team_id, dispatch_id, session],
         )?;
         tx.commit()?;
         Ok(())
@@ -167,7 +169,7 @@ impl TeamsDb {
 
     /// Sessions `desk` dispatched.
     fn dispatched_sessions(&self, desk: &str) -> Result<Vec<String>> {
-        let mut st = self.0.prepare("SELECT session_id FROM dispatches WHERE desk_session = ?1 AND session_id IS NOT NULL")?;
+        let mut st = self.0.prepare("SELECT DISTINCT session_id FROM dispatches WHERE desk_session = ?1 AND session_id IS NOT NULL")?;
         Ok(st.query_map([desk], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -259,7 +261,7 @@ fn plan(state: &AppState, desk: &str, args: &Value) -> Result<Plan> {
     if c.team.worktree_root.trim().is_empty() {
         bail!("the team has no worktree folder; set one when creating the team");
     }
-    let place = tdb.reserve(&c.team, seat, &item.id, desk)?;
+    let (place, dispatch_id) = tdb.reserve(&c.team, seat, &item.id, desk)?;
     Ok(Plan {
         team: c.team,
         agent,
@@ -267,6 +269,7 @@ fn plan(state: &AppState, desk: &str, args: &Value) -> Result<Plan> {
         mode,
         item,
         place,
+        dispatch_id,
         desk: desk.to_owned(),
         role_name: roles.iter().find(|r| r.id == seat.role_id).map(|r| r.name.clone()).unwrap_or_default(),
     })
@@ -392,7 +395,7 @@ async fn start(state: &AppState, p: &Plan) -> Result<Value> {
         state.db.set_code_session_created_by(&session.id, &p.desk)?;
         state.db.set_code_session_title(&session.id, &format!("{} {}", p.item.id, super::clean(&p.item.title)), true)?;
         // Member before start: the launch reads the role from teams.db.
-        TeamsDb::open(&state.data_dir)?.bind_reserved(&p.team.id, &p.place, &session.id, &p.item.id, &p.desk)?;
+        TeamsDb::open(&state.data_dir)?.bind_reserved(&p.team.id, &p.place, &session.id, p.dispatch_id)?;
         start_agent(state, &session.id).await?;
         let node = state.mesh.node_id().to_owned();
         crate::code_prompt_local(state, session.id.clone(), brief(p, &path, &branch), Vec::new(), Vec::new(), format!("agent:{node}:{}", p.desk), None, false).await?;
@@ -505,16 +508,16 @@ mod tests {
         let seat = tpl.seats.iter_mut().find(|s| s.seat == "workers").unwrap();
         seat.count = 2;
         let seat = seat.clone();
-        let a = t.reserve(&team, &seat, "i1", "desk").unwrap();
-        let b = t.reserve(&team, &seat, "i2", "desk").unwrap();
+        let (a, _) = t.reserve(&team, &seat, "i1", "desk").unwrap();
+        let (b, bid) = t.reserve(&team, &seat, "i2", "desk").unwrap();
         let err = t.reserve(&team, &seat, "i3", "desk").unwrap_err().to_string();
         assert!(err.contains("full"), "{err}");
         // Reserved places are not members yet, and a failed start gives the place back.
         assert!(t.members(&team.id).unwrap().is_empty());
         t.cancel_reserved(&team.id, &a);
-        let c = t.reserve(&team, &seat, "i3", "desk").unwrap();
+        let (c, _) = t.reserve(&team, &seat, "i3", "desk").unwrap();
         // Binding makes a real member; releasing frees the place.
-        t.bind_reserved(&team.id, &b, "w-b", "i2", "desk").unwrap();
+        t.bind_reserved(&team.id, &b, "w-b", bid).unwrap();
         assert_eq!(t.members(&team.id).unwrap().len(), 1);
         assert!(t.dispatched("w-b").unwrap() && !t.dispatched("w-x").unwrap());
         assert!(t.reserve(&team, &seat, "i4", "desk").is_err());
@@ -528,8 +531,8 @@ mod tests {
         let (_d, t, team) = setup();
         let mut seat = t.template(&team.template_id).unwrap().seats.into_iter().find(|s| s.seat == "workers").unwrap();
         seat.count = 100;
-        let p = t.reserve(&team, &seat, "i1", "desk").unwrap();
-        t.bind_reserved(&team.id, &p, "w1", "i1", "desk").unwrap();
+        let (p, pid) = t.reserve(&team, &seat, "i1", "desk").unwrap();
+        t.bind_reserved(&team.id, &p, "w1", pid).unwrap();
         assert!(t.reserve(&team, &seat, "i1", "desk").unwrap_err().to_string().contains("already has a worker"));
         for n in 0..(MAX_PER_HOUR - 1) {
             t.reserve(&team, &seat, &format!("x{n}"), "desk").unwrap();
@@ -598,5 +601,19 @@ mod tests {
         std::fs::remove_file(&marker).unwrap();
         let (path, _) = make_worktree(&team, "DM-20261109-01").unwrap();
         assert!(path.exists() && !marker.exists(), "dispatch must not run repo hooks");
+    }
+
+    #[test]
+    fn failed_attempts_are_not_counted_as_workers() {
+        let (_d, t, team) = setup();
+        let seat = t.template(&team.template_id).unwrap().seats.into_iter().find(|s| s.seat == "workers").unwrap();
+        for _ in 0..2 {
+            let (place, _) = t.reserve(&team, &seat, "i1", "desk").unwrap();
+            t.cancel_reserved(&team.id, &place);
+        }
+        let (place, id) = t.reserve(&team, &seat, "i1", "desk").unwrap();
+        t.bind_reserved(&team.id, &place, "w1", id).unwrap();
+        let bound: i64 = t.0.query_row("SELECT COUNT(*) FROM dispatches WHERE session_id IS NOT NULL", [], |r| r.get(0)).unwrap();
+        assert_eq!((bound, t.dispatched_sessions("desk").unwrap()), (1, vec!["w1".to_owned()]));
     }
 }
