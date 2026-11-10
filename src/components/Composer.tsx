@@ -14,6 +14,9 @@ const MAX_ATTACHMENTS = 10;
 /** How long fetched slash commands are reused, and how soon an empty answer is asked again. */
 const SLASH_TTL_MS = 60_000;
 const SLASH_EMPTY_RETRY_MS = 3_000;
+/** Inner width (px) the fullest footer needs: three chips at their minimum widths, the options button and the
+ *  listen button squeezed to its icon (14), Stop and Send both showing. Below it the chips go behind settings. */
+const NARROW_COMPOSER_PX = 412;
 
 function fmtSize(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -239,9 +242,48 @@ export function Composer({
   const [files, setFiles] = useState<string[] | null>(null);
   const filesAt = useRef(0);
   const menuRef = useRef<HTMLDivElement>(null);
-  // The phone keeps the footer's chips in a sheet behind one button; a row of them doesn't fit.
-  const sheetFooter = isRemoteApp() && !!footer;
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [narrow, setNarrow] = useState(false);
+  // The phone, and a desktop composer in a narrow pane, keep the footer's chips in a sheet behind
+  // one button; a row of them doesn't fit.
+  const sheetFooter = (isRemoteApp() || narrow) && !!footer;
   const [optionsOpen, setOptionsOpen] = useState(false);
+
+  useLayoutEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    setNarrow(el.clientWidth < NARROW_COMPOSER_PX);
+    const ro = new ResizeObserver(([e]) => setNarrow(e.contentRect.width < NARROW_COMPOSER_PX));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // The sheet unmounts when the composer widens; don't let it reopen by itself on the next narrowing.
+  useEffect(() => {
+    if (!sheetFooter) setOptionsOpen(false);
+  }, [sheetFooter]);
+
+  useEffect(() => {
+    if (!optionsOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      // A confirmation raised from the sheet draws above it and takes its own keys.
+      if (useStore.getState().confirm) return;
+      // The sheet covers the app, so the app's shortcuts must not act on what is behind it.
+      if (e.metaKey || e.ctrlKey || e.altKey) {
+        e.stopPropagation();
+        return;
+      }
+      if (e.key !== "Escape") return;
+      // The open chip list takes Escape. Closing the sheet too would unmount the chip first.
+      if (document.querySelector("[data-chip-menu]")) return;
+      // Capture phase, so the app's Escape shortcut (which stops the turn) never sees it.
+      e.preventDefault();
+      e.stopPropagation();
+      setOptionsOpen(false);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [optionsOpen]);
 
   // "@query" right before the caret, when mentions are on.
   const mention = useMemo(() => {
@@ -586,6 +628,7 @@ export function Composer({
 
   return (
     <div
+      ref={rootRef}
       className={`relative rounded-2xl border bg-raised shadow-raised transition-colors focus-within:border-fg/20 ${
         dragging ? "border-accent" : "border-border"
       }`}
@@ -723,7 +766,8 @@ export function Composer({
           );
         }}
       />
-      <div className="flex items-center gap-1.5 px-2.5 pb-2.5">
+      {/* In the narrowest desktop panes Stop and Send don't fit beside the other buttons; wrap, or Send lands in the next pane. */}
+      <div className={`flex items-center gap-1.5 px-2.5 pb-2.5${narrow && !isRemoteApp() ? " flex-wrap justify-end" : ""}`}>
         <button
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] border border-border text-muted hover:bg-panel-2/60 hover:text-fg disabled:opacity-40"
           onClick={pick}
