@@ -316,9 +316,10 @@ fn read_login_tier(dir: &Path) -> Option<String> {
 /// Claude login even when a credentials file exists holding only MCP logins.
 #[cfg(all(target_os = "macos", not(test)))]
 fn keychain_login_tier(dir: &Path) -> Option<String> {
-    // Only the resolved path reaches here, not the setting it came from: guess the setting is the
-    // path itself, except for the default directory when no variable is set. A miss reads as "no
-    // login tier", so the profile's key stands.
+    // Only the resolved path reaches here, not the setting it came from (callers: `account`): guess
+    // the setting is the path itself, except for the default directory when no variable is set.
+    // The same resolver as `access_token` picks the item; a miss reads as "no login tier", so the
+    // profile's key stands.
     let ambient_default = raw_config_dir_env().is_none_or(|e| e.trim().is_empty()) && same_dir(dir, &home().ok()?.join(".claude"));
     let raw = (!ambient_default).then(|| dir.to_string_lossy().into_owned());
     let (root, _) = Store::locate(dir, raw.as_deref()).ok()?.read().ok()?;
@@ -352,14 +353,19 @@ fn has_file_login(file: &Path) -> bool {
 
 impl Store {
     /// The credentials file when it holds a Claude login; on macOS, otherwise Claude Code's Keychain
-    /// item. `raw` is the directory setting as given (see `keychain_hash_input`); `None` means the
-    /// ambient `CLAUDE_CONFIG_DIR`.
-    fn locate(dir: &Path, raw: Option<&str>) -> Result<Store> {
+    /// item, found by `pick_service`. `setting` is the directory setting as given, `None` for the
+    /// ambient `CLAUDE_CONFIG_DIR`. The one place a Keychain service is chosen: `access_token` and
+    /// `keychain_login_tier` both come through here.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+    fn locate(dir: &Path, setting: Option<&str>) -> Result<Store> {
         let file = dir.join(".credentials.json");
         #[cfg(target_os = "macos")]
         if !has_file_login(&file) {
             let account = std::env::var("USER").context("USER is not set")?;
-            return Ok(Store::Keychain { service: keychain_service(keychain_hash_input(raw)?.as_deref()), account });
+            let ambient = raw_config_dir_env();
+            let candidates = keychain_candidates(setting, ambient.as_deref(), &home()?)?;
+            let service = pick_service(&candidates, &|svc| keychain_get(svc, &account).ok());
+            return Ok(Store::Keychain { service, account });
         }
         Ok(Store::File(file))
     }
@@ -369,7 +375,7 @@ impl Store {
             Store::File(path) => read_oauth(path),
             #[cfg(target_os = "macos")]
             Store::Keychain { service, account } => {
-                let raw = keyring::Entry::new(service, account)?.get_password().with_context(|| {
+                let raw = keychain_get(service, account).with_context(|| {
                     format!("Claude Code login not found in the Keychain ({service}) — run `claude` and sign in")
                 })?;
                 parse_oauth(&raw, &format!("Keychain item {service}"))
@@ -383,32 +389,70 @@ impl Store {
             #[cfg(target_os = "macos")]
             Store::Keychain { service, account } => {
                 let root = set_oauth(root, access_token, refresh_token, expires_at_ms)?;
-                keyring::Entry::new(service, account)?
-                    .set_password(&serde_json::to_string(&root)?)
+                keychain_put(service, account, &serde_json::to_string(&root)?)
                     .with_context(|| format!("update Keychain item {service}"))
             }
         }
     }
 }
 
-/// The string Claude Code hashes into its Keychain service name: the `CLAUDE_CONFIG_DIR` it is
-/// run with, untouched. `raw` is the provider's directory setting (`~/` expanded, as a shell
-/// would before Claude Code sees it); with none, the one Patchbay's own environment passes down.
-/// `None` when Claude Code runs with no such variable, which is the only time it uses the plain
-/// name. Deliberately not normalized: `/x/y/` and `/x/y` are two Keychain items to Claude Code.
-fn keychain_hash_input(raw: Option<&str>) -> Result<Option<String>> {
-    let raw = raw.map(str::trim).filter(|d| !d.is_empty());
-    let env = raw_config_dir_env();
-    let Some(d) = raw.or_else(|| env.as_deref().map(str::trim).filter(|d| !d.is_empty())) else {
-        return Ok(None);
-    };
-    Ok(Some(match d {
-        "~" => home()?.to_string_lossy().into_owned(),
-        _ => match d.strip_prefix("~/") {
-            Some(rest) => home()?.join(rest).to_string_lossy().into_owned(),
+#[cfg(all(target_os = "macos", not(test)))]
+fn keychain_get(service: &str, account: &str) -> Result<String> {
+    Ok(keyring::Entry::new(service, account)?.get_password()?)
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn keychain_put(service: &str, account: &str, secret: &str) -> Result<()> {
+    Ok(keyring::Entry::new(service, account)?.set_password(secret)?)
+}
+
+/// Test builds never reach the real Keychain: items live here, by service name.
+#[cfg(test)]
+pub(crate) static FAKE_KEYCHAIN: std::sync::Mutex<BTreeMap<String, String>> = std::sync::Mutex::new(BTreeMap::new());
+
+#[cfg(all(target_os = "macos", test))]
+fn keychain_get(service: &str, _account: &str) -> Result<String> {
+    FAKE_KEYCHAIN.lock().unwrap().get(service).cloned().ok_or_else(|| anyhow!("no such item"))
+}
+
+#[cfg(all(target_os = "macos", test))]
+fn keychain_put(service: &str, _account: &str, secret: &str) -> Result<()> {
+    FAKE_KEYCHAIN.lock().unwrap().insert(service.to_owned(), secret.to_owned());
+    Ok(())
+}
+
+/// The Keychain items Claude Code could be using for one config-directory setting.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug, PartialEq)]
+struct Candidates {
+    primary: String,
+    fallback: Option<String>,
+}
+
+/// The `CLAUDE_CONFIG_DIR` Claude Code would run with, and so the items it would read. `setting` is
+/// the provider's directory (trimmed and `~/` expanded, as a shell would before Claude Code sees
+/// it; trimming is deliberate, it is typed into a form); with none, `ambient` is Patchbay's own
+/// environment value, which Claude Code inherits untouched, so only an EMPTY one counts as unset
+/// (whitespace is truthy and hashed as-is). No variable: the plain item, and nothing else is a
+/// candidate. A variable: the item named for exactly that string, and, only when it names the
+/// default directory, the plain item as a fallback (a login made without the variable lives
+/// there). Never a fallback for any other directory: the plain item is another account's.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn keychain_candidates(setting: Option<&str>, ambient: Option<&str>, home: &Path) -> Result<Candidates> {
+    let setting = setting.map(str::trim).filter(|d| !d.is_empty());
+    let effective = match setting {
+        Some("~") => Some(home.to_string_lossy().into_owned()),
+        Some(d) => Some(match d.strip_prefix("~/") {
+            Some(rest) => home.join(rest).to_string_lossy().into_owned(),
             None => d.to_owned(),
-        },
-    }))
+        }),
+        None => ambient.filter(|e| !e.is_empty()).map(str::to_owned),
+    };
+    let Some(env) = effective else {
+        return Ok(Candidates { primary: keychain_service(None), fallback: None });
+    };
+    let fallback = same_dir(Path::new(&env), &home.join(".claude")).then(|| keychain_service(None));
+    Ok(Candidates { primary: keychain_service(Some(&env)), fallback })
 }
 
 /// Claude Code's Keychain service name (claude-code 2.1.304 `uB`): plain when run with no
@@ -425,6 +469,63 @@ fn keychain_service(hash_input: Option<&str>) -> String {
     let nfc: String = input.nfc().collect();
     let hash = hex::encode(Sha256::digest(nfc.as_bytes()));
     format!("Claude Code-credentials-{}", &hash[..8])
+}
+
+#[cfg(test)]
+pub(crate) static KEYCHAIN_CHOICE_LOGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Log once per distinct outcome which item was used, so a fallback or a conflict is visible
+/// without a line per lookup. Never logs item contents.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn note_keychain_choice(service: &str, outcome: &str) {
+    static SEEN: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let line = format!("claude keychain: using {service} ({outcome})");
+    if SEEN.lock().unwrap().insert(line.clone()) {
+        tracing::info!("{line}");
+        #[cfg(test)]
+        KEYCHAIN_CHOICE_LOGS.lock().unwrap().push(line);
+    }
+}
+
+/// The item to read: the primary when it exists (also when the fallback exists too and holds
+/// something else: that conflict is logged, the primary still wins). The fallback only when the
+/// primary is ABSENT, never when it is present with a different account's login. `get` returns an
+/// item's contents, `None` when it is absent.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn pick_service(c: &Candidates, get: &dyn Fn(&str) -> Option<String>) -> String {
+    let primary = get(&c.primary);
+    let fallback = c.fallback.as_deref().map(|f| (f, get(f)));
+    match (primary, fallback) {
+        (Some(p), Some((f, Some(other)))) if p != other => {
+            note_keychain_choice(&c.primary, &format!("primary; conflict: {f} holds a different login"));
+            c.primary.clone()
+        }
+        (Some(_), _) => {
+            note_keychain_choice(&c.primary, "primary");
+            c.primary.clone()
+        }
+        (None, Some((f, Some(_)))) => {
+            note_keychain_choice(f, "fallback; primary absent");
+            f.to_owned()
+        }
+        (None, _) => c.primary.clone(),
+    }
+}
+
+/// Claude Code also honours `CLAUDE_SECURESTORAGE_CONFIG_DIR` (its Keychain name hashes that
+/// instead). Not modelled here; say so rather than miss silently.
+pub(crate) const SECURESTORAGE_WARNING: &str =
+    "CLAUDE_SECURESTORAGE_CONFIG_DIR set; unmodelled — Keychain lookups may miss";
+
+fn securestorage_warning(set: bool) -> Option<&'static str> {
+    set.then_some(SECURESTORAGE_WARNING)
+}
+
+pub(crate) fn warn_unmodelled_env() {
+    if let Some(w) = securestorage_warning(std::env::var_os("CLAUDE_SECURESTORAGE_CONFIG_DIR").is_some()) {
+        tracing::warn!("{w}");
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -596,7 +697,12 @@ pub async fn access_token(dir: Option<&str>) -> Result<String> {
     if let Some(t) = cache_get(&dir) {
         return Ok(t);
     }
-    token_from(&dir, &Store::locate(&dir, dir_setting)?).await
+    token_from(&dir, &store_for(&dir, dir_setting)?).await
+}
+
+/// The store holding the login for config directory `dir`, given the setting it came from.
+fn store_for(dir: &Path, dir_setting: Option<&str>) -> Result<Store> {
+    Store::locate(dir, dir_setting)
 }
 
 async fn token_from(dir: &Path, store: &Store) -> Result<String> {
@@ -679,11 +785,7 @@ mod tests {
     /// untouched, and is plain only when the variable is unset or empty. Expected hex is
     /// `sha256(NFC(value))[:8]`, computed outside this code (python hashlib).
     fn service_for(setting: Option<&str>, ambient: Option<&str>) -> String {
-        let _env = ENV_LOCK.blocking_lock();
-        set_test_env(Some(PathBuf::from("/Users/u")), Some(ambient.unwrap_or("").to_owned()));
-        let svc = keychain_service(keychain_hash_input(setting).unwrap().as_deref());
-        set_test_env(None, None);
-        svc
+        keychain_candidates(setting, ambient, Path::new("/Users/u")).unwrap().primary
     }
 
     #[test]
@@ -705,6 +807,95 @@ mod tests {
         assert_eq!(service_for(None, Some("/Users/u/.claudetvg/")), "Claude Code-credentials-23e8fe31");
         // NFC: a decomposed name hashes as its composed form (`caf\u{e9}`).
         assert_eq!(service_for(Some("/Users/u/cafe\u{301}"), None), "Claude Code-credentials-27bcdf80");
+    }
+
+    /// The ambient variable is never trimmed: only an empty one counts as unset (Claude Code's falsy
+    /// test), whitespace is truthy and hashed as-is. The provider setting IS trimmed (typed into a
+    /// form): a deliberate difference.
+    #[test]
+    fn ambient_variable_is_never_trimmed_but_the_setting_is() {
+        assert_eq!(service_for(None, Some("")), "Claude Code-credentials");
+        // sha256(" ")[:8], and not the plain item a trim would produce.
+        assert_eq!(service_for(None, Some(" ")), "Claude Code-credentials-36a9e7f1");
+        assert_eq!(service_for(None, Some("/Users/u/.claudetvg ")), "Claude Code-credentials-c73157f9");
+        assert_ne!(service_for(None, Some("/Users/u/.claudetvg ")), service_for(None, Some("/Users/u/.claudetvg")));
+        assert_eq!(service_for(Some("  /Users/u/.claudetvg  "), None), "Claude Code-credentials-facf62bf");
+    }
+
+    /// Only the default directory has a second candidate: the plain item. Another directory's
+    /// fallback would be a different account's login.
+    #[test]
+    fn only_the_default_directory_has_a_fallback() {
+        let home = Path::new("/Users/u");
+        let c = |s: Option<&str>, a: Option<&str>| keychain_candidates(s, a, home).unwrap();
+        assert_eq!(c(Some("~/.claude"), None).fallback.as_deref(), Some("Claude Code-credentials"));
+        assert_eq!(c(None, Some("/Users/u/.claude/")).fallback.as_deref(), Some("Claude Code-credentials"));
+        assert_eq!(c(Some("/Users/u/.claudetvg"), None).fallback, None);
+        assert_eq!(c(None, None).fallback, None);
+    }
+
+    /// The resolver, against a fake store (never the real Keychain): variable set => its hashed item;
+    /// unset => plain; primary absent => the fallback; both present => the primary, conflict logged.
+    #[test]
+    fn keychain_resolver_matrix() {
+        let home = Path::new("/Users/u");
+        let items = |pairs: &[(&str, &str)]| {
+            let m: BTreeMap<String, String> = pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+            move |svc: &str| m.get(svc).cloned()
+        };
+        let plain = "Claude Code-credentials";
+        let hashed_default = "Claude Code-credentials-ff2684fe"; // sha256("/Users/u/.claude")
+        let tvg = "Claude Code-credentials-facf62bf";
+        // env set: its hashed item, even though the plain one exists too (another account's).
+        let c = keychain_candidates(Some("/Users/u/.claudetvg"), None, home).unwrap();
+        assert_eq!(pick_service(&c, &items(&[(tvg, "tvg"), (plain, "default")])), tvg);
+        // env unset: plain.
+        let c = keychain_candidates(None, Some(""), home).unwrap();
+        assert_eq!(pick_service(&c, &items(&[(plain, "default"), (hashed_default, "x")])), plain);
+        // A non-default directory whose item is absent does NOT borrow the plain item.
+        let c = keychain_candidates(Some("/Users/u/.claudetvg"), None, home).unwrap();
+        assert_eq!(pick_service(&c, &items(&[(plain, "default")])), tvg);
+        // Default directory named by the variable, primary absent => fallback to plain, logged.
+        let c = keychain_candidates(Some("~/.claude"), None, home).unwrap();
+        assert_eq!(pick_service(&c, &items(&[(plain, "default")])), plain);
+        assert!(KEYCHAIN_CHOICE_LOGS.lock().unwrap().iter().any(|l| l == &format!("claude keychain: using {plain} (fallback; primary absent)")));
+        // Both present and different: the primary wins and the conflict is logged.
+        assert_eq!(pick_service(&c, &items(&[(plain, "default"), (hashed_default, "other")])), hashed_default);
+        let logs = KEYCHAIN_CHOICE_LOGS.lock().unwrap().clone();
+        assert!(logs.iter().any(|l| l.starts_with(&format!("claude keychain: using {hashed_default} (primary; conflict"))), "{logs:?}");
+        // Logged once, not per lookup.
+        let n = logs.len();
+        pick_service(&c, &items(&[(plain, "default"), (hashed_default, "other")]));
+        assert_eq!(KEYCHAIN_CHOICE_LOGS.lock().unwrap().len(), n);
+        // Both present and the same: just the primary.
+        assert_eq!(pick_service(&c, &items(&[(plain, "same"), (hashed_default, "same")])), hashed_default);
+    }
+
+    #[test]
+    fn securestorage_variable_is_warned_about() {
+        assert_eq!(securestorage_warning(true), Some("CLAUDE_SECURESTORAGE_CONFIG_DIR set; unmodelled — Keychain lookups may miss"));
+        assert_eq!(securestorage_warning(false), None);
+    }
+
+    /// `access_token` threads the directory setting to the item lookup: a trailing-slash setting
+    /// reads the `…-23e8fe31` item, not the one for the normalized path. Fake Keychain only.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn access_token_reads_the_item_named_by_the_setting() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        clear_cache();
+        let _env = ENV_LOCK.lock().await;
+        set_test_env(Some(PathBuf::from("/Users/u")), Some(String::new()));
+        let creds = |t: &str| format!(r#"{{"claudeAiOauth":{{"accessToken":"{t}","refreshToken":"r","expiresAt":{}}}}}"#, now_ms() + 3_600_000);
+        *FAKE_KEYCHAIN.lock().unwrap() = BTreeMap::from([
+            ("Claude Code-credentials-23e8fe31".to_owned(), creds("tok-slash")),
+            ("Claude Code-credentials-facf62bf".to_owned(), creds("tok-normalized")),
+        ]);
+        let got = access_token(Some("/Users/u/.claudetvg/")).await.unwrap();
+        FAKE_KEYCHAIN.lock().unwrap().clear();
+        set_test_env(None, None);
+        clear_cache();
+        assert_eq!(got, "tok-slash");
     }
 
     #[test]

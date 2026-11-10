@@ -91,6 +91,7 @@ impl AppState {
         mesh: Mesh,
         emit: mesh::node::UiSink,
     ) -> Self {
+        claude_auth::warn_unmodelled_env();
         // The public base URL for share links is a per-node setting (default loopback). Phase 2
         // can point it at the gateway proxy without changing the share mechanism.
         let base_url = db
