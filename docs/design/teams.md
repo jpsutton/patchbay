@@ -207,14 +207,32 @@ Members report progress with `item_note`; the coordinator keeps sole ownership o
   team tool call; the built-in coordinator seat is OpenCode, so an unattended coordinator needs a
   different agent or a person at the prompt. The user-chosen server name `patchbay-agent-messaging`
   is reserved in `mcp::acp_servers`.
-- `dispatch_item` starts workers. It is exempt from `MAX_CREATED_SESSIONS` (5) and
-  `MAX_CREATE_DEPTH` (2) in `lib.rs`; instead it refuses when the seat's `pool` is full.
-  Released members stop counting.
-- The approval-gap rule (a non-always-approve creator may not start Cursor, Claude Code, Codex)
-  does not apply to seats the user configured in the template: choosing the agent in the template
-  is the approval (decided 2026-11-09). The worker still gets the seat's permission mode, never
-  looser than the team's. This loosens an existing safety check, so phase 4 gets a security
-  review before it is used.
+- `dispatch_item` (coordinator only, `dispatches` capability) starts workers from a worker seat
+  (a seat whose role isn't standing), on this computer only. As built:
+  - **Agent.** The seat's own agent or one of its `choices`, never anything from item text. Agents
+    that can act without asking whatever the mode (`ApprovalSetup.gaps`: Patchbay, Claude Code,
+    Codex, Antigravity, Cursor) also need the seat's `allowUnasked` tick, set by the user in the
+    template editor after it shows the gaps text. The tick stores the seat's agent, model, choices
+    and mode and lapses if any changes; built-in templates never carry one.
+  - **Mode.** The stricter of the seat's mode and the coordinator's current mode; always-approve is
+    refused. Workers have `created_by` = the coordinator, so lowering the coordinator's mode lowers theirs.
+  - **Pool.** The seat's `count` workers at once, enforced with the rate limits (10 dispatches per
+    hour and 40 per day per team) in one `BEGIN IMMEDIATE` transaction that reserves the place
+    before the worktree or session exists; a failed start gives the place back, though the
+    attempt still counts toward the rate. Released members stop counting. Manual `attach` takes
+    the same lock.
+  - **Cap.** Dispatched workers are exempt from `MAX_CREATED_SESSIONS` (the coordinator's count
+    subtracts them) and a dispatched worker's own `create_agent_session` is refused.
+  - **Worktree.** `git worktree add -b <item id lowercased> -- <worktree_root>/<item id> <pr_base>`,
+    from the local or `origin` branch; removed again if the start fails.
+  - **Brief.** The item's title and plan go inside an `untrusted-item-content` fence, with forged
+    `team-instructions`, fence and handoff tags defanged. The same defanging applies to `team_send`
+    text and to decision notifications.
+  - `member_release` stops the agent, revokes its bridge token and frees the place, and is allowed
+    only when the item is done, dropped or awaiting-review.
+  - **Limit.** `teams.db` is a file in the data folder. An agent with an unrestricted shell as the
+    same user can edit it (including the tick), so the tick and the role check bind agents that
+    use their tools, not ones that are free to run any command.
 - Same-computer only, as today.
 
 ## UI
@@ -275,11 +293,15 @@ Routing: the three classes in the table above, with the reference desk's example
      answers it.
    Not verified: a real advisor HUMAN verdict and the disagreement flag in a live turn (tests
    only), and the board and queue in a browser.
-4. **Dispatch.** `dispatch_item`, pool limits, worktree creation, `member_release`, and
-   `item_note` for any member on the item assigned to it (today only `writes_items` roles may
-   note, so workers can report only through `team_send`). Done when: a coordinator fills a 2-worker
-   pool from mixed agents, a third dispatch is refused until one is released, the 5-per-creator
-   cap no longer blocks it, and a worker notes its own item but not another's.
+4. **Dispatch.** Built 2026-11-10 (`2de3c364`, `2b882c1c`): `dispatch_item`, pool and rate
+   limits, worktree creation, `member_release`, `item_note` for the item's assignee
+   (`items.member_session` is the only authority), the allow rule for team tools (above, "Tool-call
+   titles"), the editor tick, prompt fencing. Tests: `the_coordinator_fills_a_pool_and_releases_workers`
+   fills a 2-worker pool from claude-code and cursor, refuses the third until a release, shows the
+   5-per-creator cap isn't consumed, and a worker notes its own item but not another's.
+   Not verified: a real agent started by `dispatch_item` (tests use a stand-in agent); the allow
+   rule against the team tools' real titles (inferred from `send_agent_message`); a sandbox live
+   run; the editor tick in a browser; container isolation for unattended dispatch.
 
 The Teams sidebar page is deferred until after phase 4; it touches `CodeSidebar.tsx` and
 `App.tsx`, which change daily upstream.
