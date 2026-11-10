@@ -91,6 +91,7 @@ impl AppState {
         mesh: Mesh,
         emit: mesh::node::UiSink,
     ) -> Self {
+        claude_auth::warn_unmodelled_env();
         // The public base URL for share links is a per-node setting (default loopback). Phase 2
         // can point it at the gateway proxy without changing the share mechanism.
         let base_url = db
@@ -1336,7 +1337,9 @@ fn fold_plan_accounts(
 
 /// The account Claude Code itself signs in with, and its organization's name.
 fn default_plan_account() -> (String, Option<String>) {
-    claude_auth::resolve_dir(None).map(|d| claude_auth::account(&d)).unwrap_or_default()
+    // The setting IS known here (none: the ambient one), so the tier is read from the item
+    // `access_token` reads, not from a guess about a resolved path.
+    claude_auth::account_for(None).unwrap_or_default()
 }
 
 /// One Claude account's usage, named for the panel.
@@ -1806,7 +1809,7 @@ async fn poll_grok_plan(state: &AppState, home: Option<String>, base_url: String
 /// The plan account a subscription-login provider runs on: a Claude or a Grok seat.
 fn provider_plan_account(p: &Provider) -> Option<String> {
     match p.auth_mode {
-        db::AuthMode::ClaudeLogin => claude_auth::resolve_dir(p.claude_config_dir.as_deref()).ok().map(|d| claude_auth::account(&d).0),
+        db::AuthMode::ClaudeLogin => claude_auth::account_for(p.claude_config_dir.as_deref()).ok().map(|a| a.0),
         db::AuthMode::GrokLogin => grok_auth::resolve_dir(p.grok_home.as_deref()).ok().map(|d| grok_auth::account(&d).0),
         db::AuthMode::ApiKey => None,
     }
@@ -1857,9 +1860,9 @@ fn plan_account(state: &AppState, prefs: &prefs::Preferences, id: &str) -> Optio
     match AgentKind::parse(&session.agent) {
         Some(AgentKind::ClaudeCode) if !prefs.agent_providers.contains_key(AgentKind::ClaudeCode.id()) => {
             if let Some(dir) = state.db.get_setting(&code::import_claude::config_dir_key(id)).ok().flatten()
-                && let Ok(d) = claude_auth::resolve_dir(Some(&dir))
+                && let Ok(a) = claude_auth::account_for(Some(&dir))
             {
-                return Some(claude_auth::account(&d));
+                return Some(a);
             }
             Some(default_plan_account())
         }
@@ -1868,7 +1871,7 @@ fn plan_account(state: &AppState, prefs: &prefs::Preferences, id: &str) -> Optio
             .and_then(|r| state.db.get_model(&r).ok().flatten())
             .and_then(|m| state.db.get_provider(&m.provider_id).ok().flatten())
             .and_then(|(p, _)| match p.auth_mode {
-                db::AuthMode::ClaudeLogin => claude_auth::resolve_dir(p.claude_config_dir.as_deref()).ok().map(|d| claude_auth::account(&d)),
+                db::AuthMode::ClaudeLogin => claude_auth::account_for(p.claude_config_dir.as_deref()).ok(),
                 db::AuthMode::GrokLogin => grok_auth::resolve_dir(p.grok_home.as_deref()).ok().map(|d| grok_auth::account(&d)),
                 db::AuthMode::ApiKey => None,
             }),

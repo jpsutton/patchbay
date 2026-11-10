@@ -32,6 +32,14 @@ fn node(name: &str) -> Node {
     Node { state: AppState::new(db, dir.clone(), mesh, emit), dir, events }
 }
 
+/// Startup runs the CLAUDE_SECURESTORAGE_CONFIG_DIR check (`AppState::new` -> `warn_unmodelled_env`).
+#[test]
+fn app_state_new_checks_the_securestorage_variable() {
+    let before = claude_auth::STARTUP_ENV_CHECKS.with(|c| c.get());
+    let _n = node("startup-env-check");
+    assert_eq!(claude_auth::STARTUP_ENV_CHECKS.with(|c| c.get()), before + 1);
+}
+
 async fn until(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
     let t0 = std::time::Instant::now();
     while !f() {
