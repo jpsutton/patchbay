@@ -759,7 +759,8 @@ export function Composer({
           );
         }}
       />
-      <div className="flex items-center gap-1.5 px-2.5 pb-2.5">
+      {/* In the narrowest desktop panes Stop and Send don't fit beside the other buttons; wrap, or Send lands in the next pane. */}
+      <div className={`flex items-center gap-1.5 px-2.5 pb-2.5${narrow && !isRemoteApp() ? " flex-wrap justify-end" : ""}`}>
         <button
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] border border-border text-muted hover:bg-panel-2/60 hover:text-fg disabled:opacity-40"
           onClick={pick}
