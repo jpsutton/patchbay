@@ -1098,6 +1098,7 @@ mod tests {
     // ---- supervisor-side log of the MCP children Patchbay hosts itself (pb-20261110-12) ----
     // Everything below runs on a throwaway node in a temp dir with a stub MCP server: never a real app.
 
+    #[cfg(unix)]
     const STUB_MCP: &str = r#"
 import json, os, sys
 open(os.environ["STUB_PID_FILE"], "w").write(str(os.getpid()))
@@ -1126,6 +1127,7 @@ time.sleep(3600)
 
     /// A stub stdio MCP server hosted the way Patchbay hosts its own: through `McpSet`, observed by
     /// the bridge. The env carries a token so the tests can prove it never reaches the log.
+    #[cfg(unix)]
     async fn host_stub(dir: &Path, bridge: &AgentMessagingBridge, session: &str) -> (patchbay_agent::McpSet, i32) {
         let python = String::from_utf8(std::process::Command::new("python3").args(["-c", "import sys;print(sys.executable)"]).output().unwrap().stdout)
             .unwrap()
@@ -1151,6 +1153,7 @@ time.sleep(3600)
         (set, pid)
     }
 
+    #[cfg(unix)]
     async fn wait_log(path: &Path, want: &[&str]) -> String {
         for _ in 0..200 {
             let text = fs::read_to_string(path).unwrap_or_default();
@@ -1172,6 +1175,7 @@ time.sleep(3600)
         let log = dir.join("logs").join("agent-messaging-mcp.log");
         let (bridge, _listener) = AgentMessagingBridge::bind(Some(log.clone())).unwrap();
         let (set, pid) = host_stub(&dir, &bridge, "sess-kill").await;
+        let _guard = StubGuard(pid);
         unsafe { libc::kill(pid, libc::SIGKILL) };
         let text = wait_log(&log, &["event=child_exit", "event=transport_closed"]).await;
         eprintln!("{text}");
@@ -1201,6 +1205,7 @@ time.sleep(3600)
     /// (b) An app quit (`AppState::shutdown`, what the window's exit and the daemon's signal run)
     /// writes the shutdown marker first, and every supervisor line after it says `phase=shutdown`:
     /// no line reads as a mid-session death.
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_app_quit_marks_shutdown_and_logs_no_mid_session_death() {
         let dir = temp("quit");
@@ -1211,7 +1216,8 @@ time.sleep(3600)
         let state = AppState::new(db, dir.clone(), mesh, Arc::new(|_: &str, _: Value| {}));
         let _ = state.agent_message_bridge.set(bridge.clone());
         bridge.log_app_start();
-        let (set, _pid) = host_stub(&dir, &bridge, "sess-quit").await;
+        let (set, pid) = host_stub(&dir, &bridge, "sess-quit").await;
+        let _guard = StubGuard(pid);
         state.shutdown();
         drop(set); // the app tearing its agent (and so its MCP connection) down
         let text = wait_log(&log, &["event=app_shutdown", "event=child_exit", "event=transport_closed"]).await;
@@ -1241,6 +1247,38 @@ time.sleep(3600)
         unsafe { libc::kill(pid, 0) == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) }
     }
 
+    /// The process is not running: gone, or dead but not yet reaped (state `Z`). After a RUNTIME is
+    /// dropped nothing polls tokio's orphan reaper, so a child killed by `kill_on_drop` can stay a
+    /// zombie until some later child exits or the process ends; that is unchanged from before the
+    /// supervisor existed. Only while the runtime is alive does the reaper task reap it (ESRCH).
+    #[cfg(unix)]
+    fn process_not_running(pid: i32) -> bool {
+        if process_gone(pid) {
+            return true;
+        }
+        std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().starts_with('Z'))
+            .unwrap_or(false)
+    }
+
+    /// Kills a stub that is still running when a test ends (e.g. a failed assertion), so a regression
+    /// cannot leave a process that sleeps for an hour. Checks the command line first: never signals a
+    /// pid that has since been reused by something else.
+    #[cfg(unix)]
+    struct StubGuard(i32);
+
+    #[cfg(unix)]
+    impl Drop for StubGuard {
+        fn drop(&mut self) {
+            let cmd = std::process::Command::new("ps").args(["-o", "command=", "-p", &self.0.to_string()]).output();
+            if cmd.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("stub_mcp.py")) {
+                unsafe { libc::kill(self.0, libc::SIGKILL) };
+            }
+        }
+    }
+
     #[cfg(unix)]
     async fn wait_gone(pid: i32) -> bool {
         for _ in 0..100 {
@@ -1261,6 +1299,7 @@ time.sleep(3600)
         let log = dir.join("logs").join("agent-messaging-mcp.log");
         let (bridge, _listener) = AgentMessagingBridge::bind(Some(log.clone())).unwrap();
         let (set, pid) = host_stub(&dir, &bridge, "sess-drop").await;
+        let _guard = StubGuard(pid);
         assert!(!process_gone(pid), "the stub should be running");
         drop(set);
         assert!(wait_gone(pid).await, "pid {pid} outlived its dropped connection");
@@ -1270,7 +1309,8 @@ time.sleep(3600)
     }
 
     /// (e) And when the runtime that hosts the connection goes away (the session's agent thread ends)
-    /// the child dies with it, as `kill_on_drop` made it die before.
+    /// the child is killed with it, as `kill_on_drop` killed it before. Asserts "not running", not
+    /// "reaped": with the runtime gone nothing reaps it, exactly as before this change.
     #[cfg(unix)]
     #[test]
     fn shutting_down_the_runtime_still_kills_the_child() {
@@ -1279,13 +1319,16 @@ time.sleep(3600)
         let (bridge, _listener) = AgentMessagingBridge::bind(Some(log)).unwrap();
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
         let (set, pid) = rt.block_on(host_stub(&dir, &bridge, "sess-rt"));
-        assert!(!process_gone(pid));
+        let _guard = StubGuard(pid);
+        assert!(!process_not_running(pid), "the stub should be running");
         drop(rt);
+        // Not running: killed by `kill_on_drop`. It may stay a zombie (see `process_not_running`), so
+        // this does NOT claim it was reaped; the drop-connection test above proves reaping.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !process_gone(pid) && std::time::Instant::now() < deadline {
+        while !process_not_running(pid) && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
         }
-        assert!(process_gone(pid), "pid {pid} outlived the runtime that hosted it");
+        assert!(process_not_running(pid), "pid {pid} is still running after the runtime that hosted it was dropped");
         drop(set);
         let _ = fs::remove_dir_all(&dir);
     }
