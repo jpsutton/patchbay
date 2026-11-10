@@ -25,8 +25,8 @@ finding (export symlinks) was re-checked by hand. Line numbers are from that com
    (`teams.rs:399`). Canonicalize `worktree_root` and require it inside the team cwd; restrict
    `id_prefix` to `[A-Za-z0-9_-]`; check `pr_base` with `git check-ref-format`, refuse a leading
    `-`, and pass `--` to git.
-4. **Desk picks the decision class** (Medium). A `writes_items` role can open a question as class
-   `desk`, which resolves with no gate (`items.rs:319`). Acceptable for now; record it in the
+4. **Coordinator picks the decision class** (Medium). A `writes_items` role can open a question as class
+   `coordinator` (then `desk`), which resolves with no gate (`items.rs:319`). Acceptable for now; record it in the
    doc. Do not gate dispatch on decisions without a host-side check.
 
 ## Phase 4 requirements
@@ -39,14 +39,14 @@ finding (export symlinks) was re-checked by hand. Line numbers are from that com
 - A seat needs an explicit `allowUnasked` acknowledgement, set by the user in the template
   editor after it shows the agent's `ApprovalSetup.gaps` text. Built-in templates never carry
   it. The acknowledgement stores the seat's agent, choices and mode and lapses if any changes.
-- Worker permission mode = the stricter of the seat's mode and the desk's current mode.
-- Workers get `created_by = desk`, so the existing mode ceiling cascades.
+- Worker permission mode = the stricter of the seat's mode and the coordinator's current mode.
+- Workers get `created_by = coordinator`, so the existing mode ceiling cascades.
 - The doc states the limit: `teams.db` is a file in the data folder; an agent with unrestricted
   shell as the same user can edit it. Refuse, or loudly warn on, always-approve seats.
 
 ### Pool exemption (High)
 
-- Workers keep `created_by = desk`; the 5-per-creator check skips team-dispatched sessions (a
+- Workers keep `created_by = coordinator`; the 5-per-creator check skips team-dispatched sessions (a
   marker, or a teams.db lookup). A worker's own `create_agent_session` is refused.
 - Seat reservation under a per-team lock, count + insert in one `BEGIN IMMEDIATE` transaction,
   reserved before the session is created and rolled back if the start fails (today `attach`

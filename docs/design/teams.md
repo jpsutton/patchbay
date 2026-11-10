@@ -2,7 +2,7 @@
 
 Status: draft, local branch `feat/teams` (not proposed upstream yet).
 
-A team is a set of Code sessions that work together on one project, each in a named role: a desk
+A team is a set of Code sessions that work together on one project, each in a named role: a coordinator
 that takes notices and dispatches work, an advisor it consults, a lead that reviews and merges,
 and a pool of workers. The roster, the work items and the decisions live in Patchbay and show in
 its UI. The user picks the agents, models, counts and role wording.
@@ -46,19 +46,21 @@ its state in `~/.hub/desks/<slug>/` markdown files and its sessions wired togeth
 
 ## Roles
 
+(The built-in Coordinator role was called Desk until 2026-11-10. Its id is still `builtin-desk`; seeding updates the built-in rows in place and a migration renames the `desk` seat and decision class on teams of the built-in template.)
+
 A role has:
 
-- `name`, and a `standing` flag. Standing seats (desk, advisor, lead) stay until the user retires
+- `name`, and a `standing` flag. Standing seats (coordinator, advisor, lead) stay until the user retires
   them. Task seats (workers) are released when their item closes.
 - `instructions`: markdown. The role's job, what it may and may not do, how it reports.
 - Capabilities, checked by the team tools (not by trusting the instructions):
-  - `writes_items`: may create and change items. Default: desk only.
-  - `dispatches`: may start worker sessions and assign items. Default: desk only.
+  - `writes_items`: may create and change items. Default: coordinator only.
+  - `dispatches`: may start worker sessions and assign items. Default: coordinator only.
   - `decides`: may answer advisor-routed decisions (CLEAR or HUMAN). Default: advisor.
   - `merges`: may record a merge on an item. Default: lead.
 - `reports_to`: the role its members reply to by default.
 
-Built-in roles, copyable but not editable in place: Desk, Advisor, Ship Lead, Worker, Verifier.
+Built-in roles, copyable but not editable in place: Coordinator, Advisor, Ship Lead, Worker, Verifier.
 Their default instructions come from the reference desk's protocol and DESK.md rules, without the
 patchbay-specific parts (those are project rules). A role cannot be deleted while a template uses
 it, another role reports to it, or any member (even a released one) has held it; a template
@@ -86,7 +88,7 @@ A seat has a role, an agent, an optional model, a permission mode, and:
 
 - standing seats: `count` (usually 1);
 - worker seats: `pool`, the most workers of this seat alive at once, and an optional list of
-  agent/model choices the desk picks from (e.g. Claude Code Sonnet, Cursor Auto, Antigravity
+  agent/model choices the coordinator picks from (e.g. Claude Code Sonnet, Cursor Auto, Antigravity
   Gemini).
 
 The template also holds the decision routing:
@@ -95,7 +97,7 @@ The template also holds the decision routing:
 |---|---|---|
 | `human` | The user, always | permissions, releases, app builds, rule changes |
 | `advisor_first` | Advisor, which answers CLEAR or HUMAN | scope, priority, whether a proof gap blocks |
-| `desk` | No gate | dispatch, merge verdicts on reviewed PRs, item mechanics |
+| `coordinator` | No gate | dispatch, merge verdicts on reviewed PRs, item mechanics |
 
 The class list and the examples are editable text; Patchbay only routes by class.
 
@@ -149,7 +151,7 @@ The export folder must be a real folder outside the team's folder and worktree r
 refuses it, or any of the three files, when it is a symlink, and strips control characters from
 event, title and question text before writing.
 
-Known limit: `decision_open` lets a `writes_items` role choose the class. Class `desk` resolves with
+Known limit: `decision_open` lets a `writes_items` role choose the class. Class `coordinator` resolves with
 no gate, so a role that can write items can pre-resolve its own question. That is acceptable while
 nothing acts on a decision; dispatch must not wait on a decision without a host-side check of who
 opened it and what class it took.
@@ -170,7 +172,7 @@ team members, and checked against the caller's role capabilities on the host:
 | `decision_answer` | `decides`, or the user | Advisor CLEAR/HUMAN, or the user's answer |
 | `member_release` | `dispatches` | Release a task worker after its cleanup report |
 
-Members report progress with `item_note`; the desk keeps sole ownership of status by default
+Members report progress with `item_note`; the coordinator keeps sole ownership of status by default
 (single writer, as in the reference desk), though a template may grant `writes_items` wider.
 
 ## Starting sessions
@@ -208,7 +210,7 @@ From the reference desk:
 
 | Seat | Role | Agent / model (default, editable) | Count |
 |---|---|---|---|
-| desk | Desk | OpenCode | 1 |
+| coordinator | Coordinator | OpenCode | 1 |
 | advisor | Advisor | Claude Code, Opus | 1 |
 | lead | Ship Lead | Claude Code, Sonnet | 1 |
 | workers | Worker | Claude Code Sonnet, Cursor Auto, Antigravity Gemini, OpenCode | pool 4 |
@@ -240,19 +242,19 @@ Routing: the three classes in the table above, with the reference desk's example
    live members only (listed when the agent's MCP starts, checked against teams.db on every
    call, after the bridge's token and host checks), items with append-only events (enforced by
    triggers), IDs from a per-day counter (UTC date, never reused), decisions, the board and the
-   decision queue under Settings > Teams. Live: real Claude Code desk, advisor (CLEAR) and worker
+   decision queue under Settings > Teams. Live: real Claude Code coordinator, advisor (CLEAR) and worker
    (`item_set` refused). Decision rules as built:
    - Status: `awaiting_advisor`, `awaiting_user`, `cleared` (advisor decided), `resolved` (user
-     answered, or class `desk`). The user may answer a decision still awaiting the advisor.
+     answered, or class `coordinator`). The user may answer a decision still awaiting the advisor.
    - CLEAR needs a `choice` (one of the options when there are options). The advisor disagrees
-     when its choice differs from the desk's recommendation; HUMAN is never a disagreement.
+     when its choice differs from the coordinator's recommendation; HUMAN is never a disagreement.
    - With no `decides` member, `decision_open` records the decision with a warning and the user
      answers it.
    Not verified: a real advisor HUMAN verdict and the disagreement flag in a live turn (tests
    only), and the board and queue in a browser.
 4. **Dispatch.** `dispatch_item`, pool limits, worktree creation, `member_release`, and
    `item_note` for any member on the item assigned to it (today only `writes_items` roles may
-   note, so workers can report only through `team_send`). Done when: a desk fills a 2-worker
+   note, so workers can report only through `team_send`). Done when: a coordinator fills a 2-worker
    pool from mixed agents, a third dispatch is refused until one is released, the 5-per-creator
    cap no longer blocks it, and a worker notes its own item but not another's.
 

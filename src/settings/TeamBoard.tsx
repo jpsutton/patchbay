@@ -41,10 +41,10 @@ export function TeamBoard({ teamId }: { teamId: string }) {
         {waiting.map((d) => (
           <div key={d.id} className={`mb-2 rounded-md border p-2 ${d.disagrees ? "border-yellow-500" : "border-border"}`}>
             <div className="font-medium">{d.id}{d.itemId ? ` · ${d.itemId}` : ""}: {d.question}</div>
-            {d.disagrees && <div className="my-1 rounded bg-yellow-500/20 px-1.5 py-0.5 font-medium">The advisor disagrees with the desk.</div>}
+            {d.disagrees && <div className="my-1 rounded bg-yellow-500/20 px-1.5 py-0.5 font-medium">The advisor disagrees with the coordinator.</div>}
             <div className="mt-1 grid grid-cols-2 gap-2">
               <div className="rounded bg-panel-2 p-1.5">
-                <div className="text-muted">Desk recommends</div>
+                <div className="text-muted">Coordinator recommends</div>
                 <div>{d.recommendation ?? "(nothing given)"}</div>
               </div>
               <div className="rounded bg-panel-2 p-1.5">
@@ -70,7 +70,7 @@ export function TeamBoard({ teamId }: { teamId: string }) {
                 {d.id}: {d.question} — {STATUS_LABEL[d.status]}
                 {d.advisorVerdict ? `; advisor ${d.advisorVerdict}${d.advisorChoice ? ` (${d.advisorChoice})` : ""}` : ""}
                 {d.userAnswer ? `; you: ${d.userAnswer}` : ""}
-                {d.disagrees ? "; advisor disagreed with the desk" : ""}
+                {d.disagrees ? "; advisor disagreed with the coordinator" : ""}
               </div>
             ))}
           </details>
@@ -78,7 +78,7 @@ export function TeamBoard({ teamId }: { teamId: string }) {
       </div>
       <div>
         <div className="mb-1 font-medium">Board · {board.items.length} items</div>
-        {board.items.length === 0 && <div className="text-muted">No items yet. The desk adds them with item_add.</div>}
+        {board.items.length === 0 && <div className="text-muted">No items yet. The coordinator adds them with item_add.</div>}
         <div className="grid grid-cols-2 gap-2">
           {board.statuses.filter((st) => board.items.some((i) => i.status === st)).map((st) => (
             <div key={st} className="rounded-md border border-border p-2">

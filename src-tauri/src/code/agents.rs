@@ -2374,9 +2374,9 @@ time.sleep(60)
             tdb.attach(&team.id, &s.id, seat).unwrap();
             prepare(&db, &dir, &s).unwrap()
         };
-        let desk = "You are the desk";
+        let desk = "You are the coordinator";
 
-        let l = launch("claude-code", "desk");
+        let l = launch("claude-code", "coordinator");
         let append = l.session_meta["systemPrompt"]["append"].as_str().unwrap().to_owned();
         assert!(append.starts_with("be terse") && append.contains(desk), "{append}");
         let l = launch("antigravity", "advisor");

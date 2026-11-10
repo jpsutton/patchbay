@@ -3504,7 +3504,7 @@ async fn team_preamble_goes_to_agents_without_a_prompt_hook() {
     )
     .await
     .unwrap();
-    teams::team_attach(&a.state, team.id.clone(), desk.id.clone(), "desk".into()).await.unwrap();
+    teams::team_attach(&a.state, team.id.clone(), desk.id.clone(), "coordinator".into()).await.unwrap();
     teams::team_attach(&a.state, team.id.clone(), advisor.id.clone(), "advisor".into()).await.unwrap();
     let _rx_sender = a.state.code.attach_test_agent(&sender.id);
     let mut rx_desk = a.state.code.attach_test_agent(&desk.id);
@@ -3514,7 +3514,7 @@ async fn team_preamble_goes_to_agents_without_a_prompt_hook() {
     r.unwrap();
     let texts: Vec<&str> = got.blocks.iter().filter_map(|b| b["text"].as_str()).collect();
     assert_eq!(texts.len(), 2, "{texts:?}");
-    assert!(texts[0].starts_with("<team-instructions>") && texts[0].contains("You are the desk"), "{}", texts[0]);
+    assert!(texts[0].starts_with("<team-instructions>") && texts[0].contains("You are the coordinator"), "{}", texts[0]);
     assert!(texts[1].contains("hello"));
 
     let (r, got) = tokio::join!(send_agent_message(&a.state, &an, &sender.id, &advisor.id, "hello"), take_agent_message(&mut rx_advisor));
@@ -3711,7 +3711,7 @@ async fn team_tools_check_the_callers_role() {
     )
     .await
     .unwrap();
-    for (s, seat) in [(&desk, "desk"), (&advisor, "advisor"), (&worker, "workers")] {
+    for (s, seat) in [(&desk, "coordinator"), (&advisor, "advisor"), (&worker, "workers")] {
         teams::team_attach(&a.state, team.id.clone(), s.id.clone(), seat.into()).await.unwrap();
     }
     let mut rx_desk = a.state.code.attach_test_agent(&desk.id);
@@ -3752,7 +3752,7 @@ async fn team_tools_check_the_callers_role() {
         take_agent_message(&mut rx_advisor)
     );
     let did = opened.unwrap()["decision"]["id"].as_str().unwrap().to_owned();
-    assert!(msg.text.contains(&did) && msg.text.contains("Desk recommends: A"), "{}", msg.text);
+    assert!(msg.text.contains(&did) && msg.text.contains("Coordinator recommends: A"), "{}", msg.text);
     // advisor says HUMAN: the desk is told, and it lands in the user's queue.
     let (answered, told) = tokio::join!(call(&advisor.id, "decision_answer", json!({ "decisionId": did, "verdict": "HUMAN", "text": "your call" })), take_agent_message(&mut rx_desk));
     assert_eq!(answered.unwrap()["status"], "awaiting_user");

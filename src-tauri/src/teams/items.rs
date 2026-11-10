@@ -109,7 +109,7 @@ pub struct Decision {
     pub user_answer: Option<String>,
     /// awaiting_advisor, awaiting_user, cleared (the advisor decided) or resolved.
     pub status: String,
-    /// The advisor chose something other than what the desk recommended.
+    /// The advisor chose something other than what the coordinator recommended.
     pub disagrees: bool,
     pub created_at: i64,
     pub resolved_at: Option<i64>,
@@ -304,7 +304,7 @@ impl TeamsDb {
     }
 
     /// Open a decision. Routing by class: `human` waits for the user, `advisor_first` for the
-    /// advisor, `desk` needs no gate and is recorded as resolved.
+    /// advisor, `coordinator` needs no gate and is recorded as resolved.
     pub fn open_decision(&self, team: &Team, actor: Option<&str>, item: Option<&str>, question: &str, options: &[String], recommendation: Option<&str>, class: &str) -> Result<Decision> {
         if question.trim().is_empty() {
             bail!("a decision needs a question");
@@ -444,7 +444,7 @@ pub fn tool_defs() -> Vec<Value> {
         tool("item_note", "Append a note to an item's history. Needs the writes_items capability.", json!({ "itemId": text("The item id."), "text": text("The note.") }), &["itemId", "text"]),
         tool("item_list", "List the team's items, optionally only those in one status.", json!({ "status": text("Optional status filter.") }), &[]),
         tool("item_get", "Read one item with its history and decisions.", json!({ "itemId": text("The item id.") }), &["itemId"]),
-        tool("decision_open", "Open a decision. Class advisor_first goes to the advisor (CLEAR or HUMAN), human goes to the user, desk needs no gate. Needs the writes_items capability. State your recommendation.", json!({ "question": text("The question."), "options": { "type": "array", "items": { "type": "string" }, "description": "The choices." }, "recommendation": text("Which option you recommend, and why."), "class": text("human, advisor_first (default) or desk."), "itemId": text("Optional item the decision is about.") }), &["question"]),
+        tool("decision_open", "Open a decision. Class advisor_first goes to the advisor (CLEAR or HUMAN), human goes to the user, coordinator needs no gate. Needs the writes_items capability. State your recommendation.", json!({ "question": text("The question."), "options": { "type": "array", "items": { "type": "string" }, "description": "The choices." }, "recommendation": text("Which option you recommend, and why."), "class": text("human, advisor_first (default) or coordinator."), "itemId": text("Optional item the decision is about.") }), &["question"]),
         tool("decision_answer", "Answer an advisor_first decision as the advisor: verdict CLEAR (you decide; name the choice) or HUMAN (the user must decide). Needs the decides capability. The user answers from Patchbay, not here.", json!({ "decisionId": text("The decision id."), "verdict": text("CLEAR or HUMAN."), "choice": text("For CLEAR: the option you decide on."), "text": text("Your reason, short.") }), &["decisionId", "verdict"]),
     ]
 }
@@ -526,7 +526,7 @@ fn run_tool(state: &AppState, session: &str, name: &str, args: &Value) -> Result
                     warning = Some("no member of this team has the `decides` capability, so nobody can give the advisor verdict; the user can answer it in Patchbay");
                 }
                 let text = format!(
-                    "Decision {} needs your verdict.\nQuestion: {}\nOptions: {}\nDesk recommends: {}\n\nAnswer with the decision_answer tool: verdict CLEAR (name your choice) or HUMAN (the user must decide), and a short reason.",
+                    "Decision {} needs your verdict.\nQuestion: {}\nOptions: {}\nCoordinator recommends: {}\n\nAnswer with the decision_answer tool: verdict CLEAR (name your choice) or HUMAN (the user must decide), and a short reason.",
                     d.id, d.question, if d.options.is_empty() { "(open)".into() } else { d.options.join(" | ") }, d.recommendation.as_deref().unwrap_or("(none given)")
                 );
                 for a in advisors {
@@ -730,7 +730,7 @@ mod tests {
         let (_d, t, team) = setup();
         let human = t.open_decision(&team, Some("desk1"), None, "Ship it?", &[], None, "human").unwrap();
         assert_eq!(human.status, "awaiting_user");
-        assert_eq!(t.open_decision(&team, None, None, "mechanics", &[], None, "desk").unwrap().status, "resolved");
+        assert_eq!(t.open_decision(&team, None, None, "mechanics", &[], None, "coordinator").unwrap().status, "resolved");
         assert!(t.open_decision(&team, None, None, "q", &[], None, "bogus").is_err());
 
         let opts = vec!["A".to_owned(), "B".to_owned()];
