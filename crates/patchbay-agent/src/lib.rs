@@ -12,6 +12,7 @@ mod extract;
 mod history;
 mod host;
 mod mcp;
+pub use mcp::{McpChildEvent, McpChildInfo, McpObserver, McpSet, set_observer};
 mod prompt;
 mod prompts;
 mod reqlog;

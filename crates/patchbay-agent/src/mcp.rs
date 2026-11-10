@@ -1,7 +1,7 @@
 //! A small MCP client (stdio and streamable HTTP), enough to list and call tools.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use patchbay_llm::{Part, ToolSpec};
@@ -16,8 +16,57 @@ const PROTOCOL: &str = "2025-06-18";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const CALL_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Which session and host agent a stdio server was started for, from the server's own env entries
+/// (Patchbay's agent-messaging server carries both). Only these two names are ever read from the env.
+const ENV_SESSION: &str = "PATCHBAY_MESSAGE_SESSION";
+const ENV_HOST_AGENT: &str = "PATCHBAY_MCP_HOST_AGENT";
+
+/// What a supervisor knows about a stdio MCP child it started. No env, argv or tokens.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpChildInfo {
+    pub server: String,
+    pub pid: u32,
+    pub session: Option<String>,
+    pub host_agent: Option<String>,
+}
+
+/// What the supervisor side hears about a child (the child logs its own start and exit separately).
+#[derive(Debug, Clone, PartialEq)]
+pub enum McpChildEvent {
+    /// The child was reaped. Exactly one of `code` / `signal` is set on unix. `by_supervisor`: the
+    /// connection was dropped and we killed it, so the exit is not a surprise.
+    Exited { info: McpChildInfo, uptime_ms: u64, code: Option<i32>, signal: Option<i32>, by_supervisor: bool },
+    /// The connection to the child closed (its stdout ended). `reason` is a fixed word, never a
+    /// message body.
+    TransportClosed { info: McpChildInfo, reason: &'static str },
+}
+
+pub type McpObserver = Arc<dyn Fn(McpChildEvent) + Send + Sync>;
+
+static OBSERVER: OnceLock<McpObserver> = OnceLock::new();
+
+/// Register the process-wide observer used by [`McpSet::connect`]. First one wins; `false` if one
+/// was already set.
+pub fn set_observer(observer: McpObserver) -> bool {
+    OBSERVER.set(observer).is_ok()
+}
+
+fn status_parts(status: &std::io::Result<std::process::ExitStatus>) -> (Option<i32>, Option<i32>) {
+    let Ok(status) = status else { return (None, None) };
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        (status.code(), status.signal())
+    }
+    #[cfg(not(unix))]
+    {
+        (status.code(), None)
+    }
+}
+
 enum Conn {
-    Stdio { peer: Peer, _child: tokio::process::Child },
+    /// `_kill`: dropping the server drops this sender, which tells the reaper task to kill the child.
+    Stdio { peer: Peer, _kill: tokio::sync::oneshot::Sender<()> },
     Http { http: reqwest::Client, url: String, headers: Vec<(String, String)>, session: Mutex<Option<String>> },
 }
 
@@ -154,7 +203,7 @@ async fn http_request(
     }
 }
 
-async fn connect_one(cfg: &Value) -> Result<McpServer, String> {
+async fn connect_one(cfg: &Value, observer: Option<McpObserver>) -> Result<McpServer, String> {
     let name = cfg["name"].as_str().ok_or("a server has no name")?.to_owned();
     let kind = cfg["type"].as_str().unwrap_or("stdio");
     let conn = match kind {
@@ -189,16 +238,53 @@ async fn connect_one(cfg: &Value) -> Result<McpServer, String> {
             }
             let mut child = cmd.spawn().map_err(|e| format!("cannot start {program}: {e}"))?;
             let (stdin, stdout) = (child.stdin.take().ok_or("no stdin")?, child.stdout.take().ok_or("no stdout")?);
+            let env = pairs(&cfg["env"]);
+            let env_of = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+            let info = McpChildInfo {
+                server: name.clone(),
+                pid: child.id().unwrap_or(0),
+                session: env_of(ENV_SESSION),
+                host_agent: env_of(ENV_HOST_AGENT),
+            };
             let (peer, mut incoming) = rpc::connect(stdout, stdin);
-            // Answer what the server asks of a client: nothing we support.
+            // Answer what the server asks of a client: nothing we support. When the stream ends the
+            // server's stdout is closed: that is the moment its tools vanish for this client.
+            let closed = observer.clone().map(|o| (o, info.clone()));
             tokio::spawn(async move {
                 while let Some(m) = incoming.recv().await {
                     if let rpc::Incoming::Request { method, reply, .. } = m {
                         reply.send(if method == "ping" { Ok(json!({})) } else { Err(RpcError::new(-32601, "method not found")) });
                     }
                 }
+                if let Some((observer, info)) = closed {
+                    observer(McpChildEvent::TransportClosed { info, reason: "stdout_eof" });
+                }
             });
-            Conn::Stdio { peer, _child: child }
+            // Reap the child so its wait status is known (a bare `Child` that is only held never is).
+            // Dropping the server drops `kill_tx`, which asks this task to kill the child as before
+            // (`kill_on_drop` still covers the task itself being dropped).
+            let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
+            let started = Instant::now();
+            tokio::spawn(async move {
+                let (status, by_supervisor) = tokio::select! {
+                    status = child.wait() => (status, false),
+                    _ = kill_rx => {
+                        let _ = child.start_kill();
+                        (child.wait().await, true)
+                    }
+                };
+                if let Some(observer) = observer {
+                    let (code, signal) = status_parts(&status);
+                    observer(McpChildEvent::Exited {
+                        info,
+                        uptime_ms: started.elapsed().as_millis() as u64,
+                        code,
+                        signal,
+                        by_supervisor,
+                    });
+                }
+            });
+            Conn::Stdio { peer, _kill: kill_tx }
         }
     };
     let server = McpServer { name, conn };
@@ -209,16 +295,24 @@ async fn connect_one(cfg: &Value) -> Result<McpServer, String> {
 impl McpSet {
     /// Connect to every server in an ACP `mcpServers` list; failures go to `problems`.
     pub async fn connect(servers: &Value) -> McpSet {
+        Self::connect_observed(servers, OBSERVER.get().cloned()).await
+    }
+
+    /// [`connect`](Self::connect) with an explicit observer of the stdio children it starts.
+    pub async fn connect_observed(servers: &Value, observer: Option<McpObserver>) -> McpSet {
         let mut set = McpSet::default();
-        let attempts = futures::future::join_all(servers.as_array().into_iter().flatten().map(|cfg| async move {
+        let attempts = futures::future::join_all(servers.as_array().into_iter().flatten().map(|cfg| {
+            let observer = observer.clone();
+            async move {
             let name = cfg["name"].as_str().unwrap_or("?").to_owned();
             let r = async {
-                let s = connect_one(cfg).await?;
+                let s = connect_one(cfg, observer).await?;
                 let tools = tokio::time::timeout(CONNECT_TIMEOUT, s.list_tools()).await.map_err(|_| "timed out".to_owned())??;
                 Ok::<_, String>((s, tools))
             }
             .await;
             (name, r)
+            }
         }))
         .await;
         for (name, r) in attempts {
@@ -327,6 +421,15 @@ impl Tool for McpTool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn status_parts_tells_an_exit_code_from_a_signal() {
+        let run = |script: &str| std::process::Command::new("sh").args(["-c", script]).status();
+        assert_eq!(super::status_parts(&run("exit 3")), (Some(3), None));
+        assert_eq!(super::status_parts(&run("kill -9 $$")), (None, Some(9)));
+        assert_eq!(super::status_parts(&run("kill -15 $$")), (None, Some(15)));
+    }
+
     use super::*;
 
     #[test]
