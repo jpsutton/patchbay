@@ -965,14 +965,79 @@ fn on_session_lost(state: &AppState, id: String, message: code::acp::UserMessage
     });
 }
 
-/// The mesh payload for a plan report, or `None` when the account is unidentified: empty or
-/// blank (receivers read that as an untagged report, from an older Patchbay) or a machine-local
-/// path key. Never broadcast either. Residual, by design: with HOME unresolvable a local session
-/// can still resolve to the empty account and be gated under it (`default_plan_account` falls back
-/// to `("", None)`; `Hit::message` already handles an empty name).
+/// True when `key` has the shape of a portable plan-account id, the only keys that may leave this
+/// machine: Claude Code's `<accountUuid>:<organizationUuid>` or Grok's `grok:<team id or
+/// "personal">:<user id>`. An ALLOWLIST on purpose: empty or blank keys, home paths (`/x`, `~/x`,
+/// `C:\x`, UNC `\\host\share`, `~\x`) and any shape nobody has thought of fail it, where a list of
+/// bad shapes keeps missing one (and a UNC path would leak a host name). Segments are ASCII
+/// letters, digits and `. _ - @ + = |`; a lone letter before the colon is a Windows drive. The
+/// charset is wide because Grok's ids are opaque strings from its `auth.json`.
+fn is_portable_plan_account(key: &str) -> bool {
+    let seg = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-@+=|".contains(&b));
+    match key.split(':').collect::<Vec<_>>().as_slice() {
+        [user, org] => *user != "grok" && seg(user) && seg(org) && user.len() > 1,
+        ["grok", team, user] => seg(team) && seg(user),
+        _ => false,
+    }
+}
+
+/// The mesh payload for a plan report, or `None` when the account is not a portable id (see
+/// [`is_portable_plan_account`]). The one gate every outbound plan-usage path goes through (the
+/// live report, a Grok seat's report and `greeting()`). Residual, by design: with HOME
+/// unresolvable a local session can still resolve to the empty account and be gated under it
+/// (`default_plan_account` falls back to `("", None)`; `Hit::message` handles an empty name).
 fn shareable_plan_report<L: serde::Serialize>(account: &str, name: &Option<String>, limits: &L) -> Option<serde_json::Value> {
-    (!account.trim().is_empty() && !claude_auth::is_path_account_key(account))
-        .then(|| serde_json::json!({ "account": account, "name": name, "limits": limits }))
+    is_portable_plan_account(account).then(|| serde_json::json!({ "account": account, "name": name, "limits": limits }))
+}
+
+/// True when `id` may leave this machine as a Cursor / Antigravity account id: what those producers
+/// emit is Cursor's `userId` (a number or string), a JWT `sub`, an email address, or the last-resort
+/// `token:<fingerprint>` (`cursor_plan::identity`, `antigravity_plan`'s auth). Same allowlist
+/// charset as [`is_portable_plan_account`]; no path separators, `~`, spaces or empty/dots-only ids.
+fn is_portable_provider_account_id(id: &str) -> bool {
+    let body = id.strip_prefix("token:").unwrap_or(id);
+    !body.is_empty()
+        && body.len() <= 512
+        && !body.bytes().all(|b| b == b'.')
+        && body.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-@+=|".contains(&b))
+}
+
+/// The mesh payload for a Cursor / Antigravity report, or `None` when its account id is not
+/// portable. `limits` also carries the account id (and a display email, which is not a key).
+fn shareable_provider_report<L: serde::Serialize>(account_id: &str, limits: &L) -> Option<serde_json::Value> {
+    is_portable_provider_account_id(account_id).then(|| serde_json::json!({ "accountId": account_id, "limits": limits }))
+}
+
+#[cfg(test)]
+pub(crate) static WITHHELD_PLAN_LOGS: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+/// Log a withheld key once (its length only, never the key, which may be a path) so a legitimate
+/// account that fails an allowlist is not a silent stop.
+fn note_withheld_account(account: &str) {
+    static SEEN: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+    if SEEN.lock().unwrap_or_else(|e| e.into_inner()).insert(account.to_owned()) {
+        tracing::info!("plan usage for an account key of {} characters is not shared: not a portable account id", account.len());
+        #[cfg(test)]
+        WITHHELD_PLAN_LOGS.lock().unwrap_or_else(|e| e.into_inner()).push(account.len());
+    }
+}
+
+/// [`shareable_plan_report`] for a real send, logging what it withholds.
+fn outbound_plan_report<L: serde::Serialize>(account: &str, name: &Option<String>, limits: &L) -> Option<serde_json::Value> {
+    let report = shareable_plan_report(account, name, limits);
+    if report.is_none() {
+        note_withheld_account(account);
+    }
+    report
+}
+
+/// [`shareable_provider_report`] for a real send, logging what it withholds.
+fn outbound_provider_report<L: serde::Serialize>(account_id: &str, limits: &L) -> Option<serde_json::Value> {
+    let report = shareable_provider_report(account_id, limits);
+    if report.is_none() {
+        note_withheld_account(account_id);
+    }
+    report
 }
 
 fn on_code_event(state: &AppState, env: code::acp::Envelope) {
@@ -990,12 +1055,12 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
         let (account, name) = plan_account(state, &prefs::load(&state.db), &env.code_session_id).unwrap_or_else(default_plan_account);
         // Upgrade a local path fallback to the portable account id when `.claude.json` has it.
         let (account, name) = resolve_plan_account(&state.db, &account, name);
-        if let Some(tagged) = shareable_plan_report(&account, &name, &limits) {
+        if let Some(tagged) = outbound_plan_report(&account, &name, &limits) {
             if account == default_plan_account().0 {
                 note_default_plan_portable(state.mesh.node_id(), true);
             }
             state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, tagged);
-        } else if account.trim().is_empty() || is_default_claude_dir_path(&account) {
+        } else if account == default_plan_account().0 || is_default_claude_dir_path(&account) {
             note_default_plan_portable(state.mesh.node_id(), false);
         }
         adopt_plan_limits(state, &account, name, limits, true);
@@ -1438,8 +1503,7 @@ fn adopt_cursor_plan(state: &AppState, mut limits: code::cursor_plan::CursorPlan
     }
     save_cursor_plan(state);
     (state.emit)(CURSOR_PLAN_EVENT, serde_json::to_value(&limits).unwrap_or_default());
-    if seen_here {
-        let tagged = serde_json::json!({ "accountId": limits.account_id, "limits": limits });
+    if seen_here && let Some(tagged) = outbound_provider_report(&limits.account_id, &limits) {
         state.mesh.broadcast_event(MESH_CURSOR_PLAN_EVENT, tagged);
     }
     enforce_cursor_plan_limit(state);
@@ -1581,8 +1645,7 @@ fn adopt_antigravity_plan(
     }
     save_antigravity_plan(state);
     (state.emit)(ANTIGRAVITY_PLAN_EVENT, serde_json::to_value(&limits).unwrap_or_default());
-    if seen_here {
-        let tagged = serde_json::json!({ "accountId": limits.account_id, "limits": limits });
+    if seen_here && let Some(tagged) = outbound_provider_report(&limits.account_id, &limits) {
         state.mesh.broadcast_event(MESH_ANTIGRAVITY_PLAN_EVENT, tagged);
     }
 }
@@ -1787,7 +1850,7 @@ fn grok_logins(db: &Db) -> Vec<(Option<String>, String)> {
 
 /// A Grok seat's usage, seen here: tell the mesh, then count it like any plan report.
 fn report_grok_plan(state: &AppState, plan: code::grok_plan::GrokPlan) {
-    if let Some(tagged) = shareable_plan_report(&plan.account, &plan.name, &plan.limits) {
+    if let Some(tagged) = outbound_plan_report(&plan.account, &plan.name, &plan.limits) {
         state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, tagged);
     }
     adopt_plan_limits(state, &plan.account, plan.name, plan.limits, true);
@@ -3571,30 +3634,28 @@ impl mesh::RpcHandler for MeshRpc {
             .accounts()
             .into_iter()
             .filter_map(|(account, a)| {
-                if claude_auth::is_path_account_key(&account) {
-                    if is_default_claude_dir_path(&account) {
+                let limits = a.latest?;
+                let Some(payload) = outbound_plan_report(&account, &a.name, &limits) else {
+                    if account == default_plan_account().0 || is_default_claude_dir_path(&account) {
                         note_default_plan_portable(self.state.mesh.node_id(), false);
                     }
                     return None;
-                }
+                };
                 if account == default_plan_account().0 {
                     note_default_plan_portable(self.state.mesh.node_id(), true);
                 }
-                let payload = serde_json::json!({ "account": account, "name": a.name, "limits": a.latest? });
                 Some((MESH_PLAN_LIMITS_EVENT.to_owned(), payload))
             })
             .collect();
-        if let Some(l) = self.state.code.cursor_plan.latest() {
-            out.push((
-                MESH_CURSOR_PLAN_EVENT.to_owned(),
-                serde_json::json!({ "accountId": l.account_id, "limits": l }),
-            ));
+        if let Some(l) = self.state.code.cursor_plan.latest()
+            && let Some(payload) = outbound_provider_report(&l.account_id, &l)
+        {
+            out.push((MESH_CURSOR_PLAN_EVENT.to_owned(), payload));
         }
-        if let Some(l) = self.state.code.antigravity_plan.latest() {
-            out.push((
-                MESH_ANTIGRAVITY_PLAN_EVENT.to_owned(),
-                serde_json::json!({ "accountId": l.account_id, "limits": l }),
-            ));
+        if let Some(l) = self.state.code.antigravity_plan.latest()
+            && let Some(payload) = outbound_provider_report(&l.account_id, &l)
+        {
+            out.push((MESH_ANTIGRAVITY_PLAN_EVENT.to_owned(), payload));
         }
         out
     }
