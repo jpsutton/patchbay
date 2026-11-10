@@ -844,6 +844,7 @@ mod tests {
 
     /// Against the real config directories: `cargo test --lib real_sessions -- --ignored --nocapture`.
     #[test]
+    // Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
     #[ignore]
     fn real_sessions() {
         let t = std::time::Instant::now();

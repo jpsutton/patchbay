@@ -4135,6 +4135,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tray-icon",
+ "unicode-normalization",
  "urlencoding",
  "uuid",
  "zip 9.1.2",

@@ -1478,6 +1478,8 @@ async fn run(
                 .kill_on_drop(true)
                 // Else Windows opens a console window for the agent that stays as long as it runs.
                 .no_window();
+            #[cfg(test)]
+            crate::test_support::isolate_tokio(&mut cmd);
             for k in &env_remove {
                 cmd.env_remove(k);
             }
