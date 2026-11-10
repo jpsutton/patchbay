@@ -158,7 +158,7 @@ export function sessionActions(
       }),
     });
   }
-  if (teamRole && !archived) {
+  if (teamRole && !archived && local) {
     actions.push({
       label: "Restart with fresh context",
       onSelect: attempt(async () => {

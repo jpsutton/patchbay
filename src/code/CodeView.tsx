@@ -1904,7 +1904,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     ...(canForkSession ? [{ label: "Fork session", onSelect: () => void forkSession(null) }] : []),
     { label: "Session info…", onSelect: () => useStore.getState().setSessionInfoId(session.id) },
     { label: "Restart the agent", onSelect: () => start(session.id) },
-    ...(teamRole && session && session.archivedAt == null
+    ...(teamRole && session && session.archivedAt == null && !remoteHost(session, mesh)
       ? [
           {
             label: "Restart with fresh context",
