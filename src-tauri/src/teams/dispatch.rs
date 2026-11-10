@@ -212,6 +212,9 @@ pub fn dispatched_by(state: &AppState, desk: &str) -> i64 {
 fn plan(state: &AppState, desk: &str, args: &Value) -> Result<Plan> {
     let tdb = TeamsDb::open(&state.data_dir)?;
     let c = Caller::of(&tdb, desk)?;
+    if tdb.dispatched(desk)? {
+        bail!("refused: a dispatched worker can't dispatch");
+    }
     c.need("dispatches", c.role.caps.dispatches, "dispatch workers")?;
     let s = |k: &str| args[k].as_str().map(str::trim).filter(|v| !v.is_empty());
     let desk_row = state.db.get_code_session(desk)?.ok_or_else(|| anyhow!("the coordinator session was not found"))?;
@@ -446,6 +449,9 @@ pub async fn member_release(state: &AppState, desk: &str, args: &Value) -> Resul
     let worker = {
         let tdb = TeamsDb::open(&state.data_dir)?;
         let c = Caller::of(&tdb, desk)?;
+        if tdb.dispatched(desk)? {
+            bail!("refused: a dispatched worker can't release workers");
+        }
         c.need("dispatches", c.role.caps.dispatches, "release workers")?;
         let worker = args["sessionId"].as_str().map(str::trim).filter(|v| !v.is_empty()).ok_or_else(|| anyhow!("sessionId is required"))?.to_owned();
         let m = tdb.members(&c.team.id)?.into_iter().find(|m| m.session_id == worker).ok_or_else(|| anyhow!("{worker} is not a member of this team"))?;

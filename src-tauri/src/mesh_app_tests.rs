@@ -3850,6 +3850,11 @@ async fn the_coordinator_fills_a_pool_and_releases_workers() {
     let err = create_agent_session(&a.state, &s1, &cwd, "x", None, None, None).await.unwrap_err().to_string();
     assert!(err.contains("started by a team"), "{err}");
 
+    // Even if its role were widened, a dispatched worker can neither dispatch nor release.
+    for (tool, args) in [("dispatch_item", json!({ "itemId": ids[2] })), ("member_release", json!({ "sessionId": s2 }))] {
+        let err = call(&s1, tool, args).await.unwrap_err().to_string();
+        assert!(err.contains("a dispatched worker can't"), "{err}");
+    }
     // A worker notes its own item, not another's.
     call(&s1, "item_note", json!({ "itemId": ids[0], "text": "progress" })).await.unwrap();
     let err = call(&s1, "item_note", json!({ "itemId": ids[1], "text": "mine now" })).await.unwrap_err().to_string();
