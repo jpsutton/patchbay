@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { AGENT_LABELS, api, errorText, type AgentId, type Team, type TeamDetail, type TeamTemplate } from "../lib/ipc";
 import { useStore } from "../lib/store";
+import { restartTeamMember } from "../lib/teamRoles";
 import { Field, input } from "./ProviderPage";
 import { RolesEditor, TemplatesEditor } from "./TeamEditors";
 import { TeamBoard } from "./TeamBoard";
@@ -45,7 +46,6 @@ const SERVER_ERROR_MAP: { match: string; field: string }[] = [
 
 function TeamsPanel() {
   const setToast = useStore((s) => s.setToast);
-  const askConfirm = useStore((s) => s.askConfirm);
   const sessions = useStore((s) => s.codeSessions);
   const [templates, setTemplates] = useState<TeamTemplate[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
@@ -243,16 +243,9 @@ function TeamsPanel() {
                             disabled={isBusy}
                             title={isBusy ? "Session is mid-turn" : undefined}
                             onClick={async () => {
-                              const { ok } = await askConfirm({
-                                title: "Restart with fresh context?",
-                                body: `Start a new session for ${role} with a fresh context window. Its current open items and pending decisions will be briefed into the new session, and this session will be archived.`,
-                                confirmLabel: "Restart",
-                              });
-                              if (!ok) return;
                               try {
-                                await api.teamRestartMember(detail.team.id, m.member.sessionId);
-                                changed();
-                                await refresh();
+                                const ran = await restartTeamMember(detail.team.id, m.member.sessionId, role);
+                                if (ran) await refresh();
                               } catch (e) {
                                 fail(e);
                               }

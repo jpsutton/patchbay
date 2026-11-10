@@ -5,6 +5,7 @@ import type { ItemAction } from "../components/ItemMenu";
 import { isWeb } from "./platform";
 import { copyText } from "../components/CopyButton";
 import { api, errorText, type CodeSession, type Conversation } from "./ipc";
+import { restartTeamMember } from "./teamRoles";
 import { useStore } from "./store";
 
 /** Run an action, turning a failure into a toast. */
@@ -105,7 +106,19 @@ export function archiveSessions(list: CodeSession[]): void {
 
 export function sessionActions(
   s: CodeSession,
-  { rename, desktop, running, local }: { rename: () => void; desktop: boolean; running: boolean; local: boolean },
+  {
+    rename,
+    desktop,
+    running,
+    local,
+    teamRole,
+  }: {
+    rename: () => void;
+    desktop: boolean;
+    running: boolean;
+    local: boolean;
+    teamRole?: string;
+  },
 ): ItemAction[] {
   const st = useStore.getState;
   const archived = s.archivedAt != null;
@@ -142,6 +155,14 @@ export function sessionActions(
       onSelect: attempt(async () => {
         await api.codeStop(s.id);
         st().setToast("Agent stopped. It starts again when you send a message.");
+      }),
+    });
+  }
+  if (teamRole && !archived) {
+    actions.push({
+      label: "Restart with fresh context",
+      onSelect: attempt(async () => {
+        await restartTeamMember(s.id, teamRole);
       }),
     });
   }

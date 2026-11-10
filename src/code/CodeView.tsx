@@ -59,6 +59,7 @@ import { ContextMenu, type ItemAction } from "../components/ItemMenu";
 import { PaneContext, useViewAction, ViewActive } from "../lib/shortcuts";
 import { usePaneSession } from "../lib/pane";
 import { useRememberedOpen } from "../lib/rowMemory";
+import { restartTeamMember, useTeamRoles } from "../lib/teamRoles";
 import { enqueueSpeech, speakingNow, stopSpeech } from "../lib/speech";
 import { liveCursorNow, takeLiveProse, takeLiveQuestions, type LiveCursor, type LiveQuestionCursor } from "../lib/spokenText";
 import { HeaderButton } from "../components/HeaderButton";
@@ -1032,6 +1033,8 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   const insertViewActive = useContext(ViewActive);
   const insertPaneFocused = useContext(PaneContext)?.focused ?? true;
   const session = sessions.find((s) => s.id === activeId) ?? null;
+  const teamRoles = useTeamRoles();
+  const teamRole = session ? teamRoles[session.id] : undefined;
 
   const [showTerm, setShowTerm] = useState(false);
   const [blade, setBlade] = useState<"activity" | "changes" | "files" | null>(null);
@@ -1901,6 +1904,16 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     ...(canForkSession ? [{ label: "Fork session", onSelect: () => void forkSession(null) }] : []),
     { label: "Session info…", onSelect: () => useStore.getState().setSessionInfoId(session.id) },
     { label: "Restart the agent", onSelect: () => start(session.id) },
+    ...(teamRole && session && session.archivedAt == null
+      ? [
+          {
+            label: "Restart with fresh context",
+            onSelect: () => {
+              restartTeamMember(session.id, teamRole).catch((e) => setToast(errorText(e)));
+            },
+          },
+        ]
+      : []),
   ];
 
   return (
