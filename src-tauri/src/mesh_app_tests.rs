@@ -3862,6 +3862,11 @@ async fn the_coordinator_fills_a_pool_and_releases_workers() {
     call(&coord.id, "item_set", json!({ "itemId": ids[0], "status": "awaiting-review" })).await.unwrap();
     call(&coord.id, "member_release", json!({ "sessionId": s1 })).await.unwrap();
     assert!(!a.state.code.is_running(&s1));
+    // A released worker stays stopped: a message to it is refused rather than restarting it.
+    let an = a.state.mesh.node_id().to_owned();
+    let err = send_agent_message(&a.state, &an, &coord.id, &s1, "come back").await.unwrap_err().to_string();
+    assert!(err.contains("archived") && !a.state.code.is_running(&s1), "{err}");
+    assert!(code_start_local(&a.state, s1.clone()).await.unwrap_err().to_string().contains("archived"));
     assert!(call(&s1, "item_list", json!({})).await.unwrap_err().to_string().contains("not on a live team"));
     call(&coord.id, "dispatch_item", json!({ "itemId": ids[2] })).await.unwrap();
     let _ = s2;

@@ -2298,6 +2298,9 @@ async fn code_auto_title(state: &AppState, id: String) -> CmdResult<String> {
 
 async fn code_start_local(state: &AppState, id: String) -> anyhow::Result<()> {
     ensure_local_host(state, &id)?;
+    if state.db.get_code_session(&id)?.is_some_and(|s| s.archived_at.is_some()) {
+        anyhow::bail!("this session is archived; restore it first");
+    }
     if state.code.is_moving(&id) {
         anyhow::bail!("this session is being moved to another computer");
     }
