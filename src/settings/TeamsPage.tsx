@@ -28,6 +28,18 @@ export function TeamsPage() {
   );
 }
 
+const SERVER_ERROR_MAP: { match: string; field: string }[] = [
+  { match: "export folder", field: "exportDir" },
+  { match: "export_dir", field: "exportDir" },
+  { match: "worktree", field: "worktree" },
+  { match: "pr_base", field: "pr_base" },
+  { match: "branch", field: "pr_base" },
+  { match: "id prefix", field: "id_prefix" },
+  { match: "id_prefix", field: "id_prefix" },
+  { match: "slug", field: "slug" },
+  { match: "folder", field: "cwd" },
+];
+
 function TeamsPanel() {
   const setToast = useStore((s) => s.setToast);
   const sessions = useStore((s) => s.codeSessions);
@@ -36,8 +48,24 @@ function TeamsPanel() {
   const [sel, setSel] = useState<string | "new" | null>(null);
   const [detail, setDetail] = useState<TeamDetail | null>(null);
   const [draft, setDraft] = useState({ templateId: "", slug: "", cwd: "", projectRules: "", exportDir: "" });
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [genericError, setGenericError] = useState<string | null>(null);
+  const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [pick, setPick] = useState<Record<string, string>>({});
   const fail = (e: unknown) => setToast(errorText(e));
+
+  const slugTrim = draft.slug.trim();
+  const slugErr = slugTrim
+    ? (!/^[a-zA-Z0-9_-]+$/.test(slugTrim) ? "the slug may use letters, digits, - and _ only" : null)
+    : (touched.slug ? "Team name is required" : null);
+  const cwdErr = touched.cwd && !draft.cwd.trim() ? "Project folder is required" : null;
+  const isFormValid =
+    slugTrim.length > 0 &&
+    /^[a-zA-Z0-9_-]+$/.test(slugTrim) &&
+    draft.cwd.trim().length > 0 &&
+    draft.templateId.length > 0 &&
+    !slugErr &&
+    !cwdErr;
 
   const reload = async () => {
     const [ts, tm] = await Promise.all([api.listTeamTemplates(), api.listTeams()]);
@@ -77,33 +105,100 @@ function TeamsPanel() {
           </button>
         ))}
         {teams.length === 0 && <div className="px-2 py-1.5 text-xs text-muted">No teams</div>}
-        <button className="mt-2 rounded-md border border-dashed border-border px-2 py-1.5 text-left text-xs text-muted hover:border-accent hover:text-fg" onClick={() => setSel("new")}>
+        <button
+          className="mt-2 rounded-md border border-dashed border-border px-2 py-1.5 text-left text-xs text-muted hover:border-accent hover:text-fg"
+          onClick={() => {
+            setSel("new");
+            setFieldErrors({});
+            setGenericError(null);
+            setTouched({});
+          }}
+        >
           + New team
         </button>
       </div>
       <div className="min-w-0 flex-1">
         {sel === "new" && (
           <div className="flex flex-col gap-2">
+            {genericError && (
+              <div className="rounded border border-danger/40 bg-danger/10 p-2 text-xs text-danger" role="alert">
+                {genericError}
+              </div>
+            )}
             <select className={input} value={draft.templateId} onChange={(e) => setDraft({ ...draft, templateId: e.target.value })}>
               {templates.map((t) => (
                 <option key={t.id} value={t.id}>{t.name}</option>
               ))}
             </select>
-            <input className={input} placeholder="Name (letters, digits, - _)" value={draft.slug} onChange={(e) => setDraft({ ...draft, slug: e.target.value })} />
-            <input className={input} placeholder="Project folder, e.g. /home/me/project" value={draft.cwd} onChange={(e) => setDraft({ ...draft, cwd: e.target.value })} />
-            <input className={input} placeholder={`Export folder (default ~/.hub/desks/${draft.slug.trim() || "<slug>"})`} value={draft.exportDir} onChange={(e) => setDraft({ ...draft, exportDir: e.target.value })} />
+            <div className="flex flex-col gap-0.5">
+              <input
+                className={input}
+                placeholder="Name (letters, digits, - _)"
+                value={draft.slug}
+                onChange={(e) => {
+                  setDraft({ ...draft, slug: e.target.value });
+                  setTouched((t) => ({ ...t, slug: true }));
+                  setFieldErrors((f) => ({ ...f, slug: "" }));
+                  setGenericError(null);
+                }}
+              />
+              {(fieldErrors.slug || slugErr) && (
+                <span className="text-[11px] text-danger">{fieldErrors.slug || slugErr}</span>
+              )}
+            </div>
+            <div className="flex flex-col gap-0.5">
+              <input
+                className={input}
+                placeholder="Project folder, e.g. /home/me/project"
+                value={draft.cwd}
+                onChange={(e) => {
+                  setDraft({ ...draft, cwd: e.target.value });
+                  setTouched((t) => ({ ...t, cwd: true }));
+                  setFieldErrors((f) => ({ ...f, cwd: "" }));
+                  setGenericError(null);
+                }}
+              />
+              {(fieldErrors.cwd || cwdErr) && (
+                <span className="text-[11px] text-danger">{fieldErrors.cwd || cwdErr}</span>
+              )}
+            </div>
+            <div className="flex flex-col gap-0.5">
+              <input
+                className={input}
+                placeholder={`Export folder (default ~/.hub/desks/${draft.slug.trim() || "<slug>"})`}
+                value={draft.exportDir}
+                onChange={(e) => {
+                  setDraft({ ...draft, exportDir: e.target.value });
+                  setFieldErrors((f) => ({ ...f, exportDir: "" }));
+                  setGenericError(null);
+                }}
+              />
+              {fieldErrors.exportDir && (
+                <span className="text-[11px] text-danger">{fieldErrors.exportDir}</span>
+              )}
+            </div>
             <textarea className={`${input} h-28 resize-y font-mono text-xs`} placeholder="Project rules, given to every member" value={draft.projectRules} onChange={(e) => setDraft({ ...draft, projectRules: e.target.value })} />
             <button
               className="self-start rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg disabled:opacity-40"
-              disabled={!draft.slug.trim() || !draft.cwd.trim() || !draft.templateId}
+              disabled={!isFormValid}
               onClick={async () => {
                 try {
+                  setFieldErrors({});
+                  setGenericError(null);
                   const exportDir = draft.exportDir.trim() || undefined;
-                  const t = await api.createTeam({ ...draft, slug: draft.slug.trim(), cwd: draft.cwd.trim(), exportDir });
+                  const t = await api.createTeam({ ...draft, slug: slugTrim, cwd: draft.cwd.trim(), exportDir });
                   await reload();
                   setSel(t.id);
                 } catch (e) {
-                  fail(e);
+                  const msg = errorText(e);
+                  const lower = msg.toLowerCase();
+                  const entry = SERVER_ERROR_MAP.find((m) => lower.includes(m.match));
+                  if (entry && (entry.field === "slug" || entry.field === "cwd" || entry.field === "exportDir")) {
+                    setFieldErrors({ [entry.field]: msg });
+                  } else {
+                    setGenericError(msg);
+                    fail(e);
+                  }
                 }
               }}
             >

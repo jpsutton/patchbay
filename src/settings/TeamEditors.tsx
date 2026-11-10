@@ -305,9 +305,19 @@ export function TemplatesEditor() {
             {draft.seats.map((s, i) => {
               const role = roles.find((r) => r.id === s.roleId);
               const isWorker = role && !role.standing;
+              const seatTrim = s.seat.trim();
+              const seatErr = !seatTrim
+                ? "Seat name required"
+                : draft.seats.some((o, j) => j !== i && o.seat.trim() === seatTrim)
+                  ? "Seat name must be unique"
+                  : null;
+              const countErr = s.count < 1 ? "Count ≥ 1" : null;
               return (
               <div key={i} className="grid grid-cols-[1fr_1fr_1fr_1fr_auto_auto] items-center gap-1">
-                <input className={input} placeholder="Seat" value={s.seat} readOnly={ro} onChange={(e) => setSeat(i, { seat: e.target.value })} />
+                <div className="flex flex-col gap-0.5">
+                  <input className={input} placeholder="Seat" value={s.seat} readOnly={ro} onChange={(e) => setSeat(i, { seat: e.target.value })} />
+                  {!ro && seatErr && <span className="text-[10px] text-danger">{seatErr}</span>}
+                </div>
                 <select className={input} value={s.roleId} disabled={ro} onChange={(e) => setSeat(i, { roleId: e.target.value })}>
                   {roles.map((r) => (
                     <option key={r.id} value={r.id}>{r.name}</option>
@@ -321,15 +331,18 @@ export function TemplatesEditor() {
                 <SeatModelPicker agent={s.agent} value={s.model ?? null} readOnly={ro} onChange={(m) => setSeat(i, { model: m })} />
                 <label className="flex items-center gap-1 whitespace-nowrap text-muted">
                   <span>{isWorker ? "Max workers" : "Sessions"}</span>
-                  <input
-                    className={`${input} w-14`}
-                    type="number"
-                    min={1}
-                    value={s.count}
-                    readOnly={ro}
-                    aria-label={isWorker ? "Max workers" : "Sessions"}
-                    onChange={(e) => setSeat(i, { count: Math.max(1, Number(e.target.value) || 1) })}
-                  />
+                  <div className="flex flex-col gap-0.5">
+                    <input
+                      className={`${input} w-14`}
+                      type="number"
+                      min={1}
+                      value={s.count}
+                      readOnly={ro}
+                      aria-label={isWorker ? "Max workers" : "Sessions"}
+                      onChange={(e) => setSeat(i, { count: Math.floor(Number(e.target.value)) })}
+                    />
+                    {!ro && countErr && <span className="text-[10px] text-danger">{countErr}</span>}
+                  </div>
                 </label>
                 <select className={input} value={s.permissionMode} disabled={ro} onChange={(e) => setSeat(i, { permissionMode: e.target.value })}>
                   {MODES.map((m) => (
@@ -415,7 +428,20 @@ export function TemplatesEditor() {
               {ro ? (
                 <button className={primary} onClick={() => { setDraft({ ...draft, id: undefined, name: `Copy of ${draft.name}` }); setSel("new"); }}>Copy to edit</button>
               ) : (
-                <button className={primary} disabled={!draft.name.trim() || draft.seats.length === 0} onClick={() => api.saveTemplate(draft).then((t) => { setSel(t.id); return reload(); }, fail)}>Save</button>
+                <button
+                  className={primary}
+                  disabled={
+                    !draft.name.trim() ||
+                    draft.seats.length === 0 ||
+                    draft.seats.some((s, i) => {
+                      const seatTrim = s.seat.trim();
+                      return !seatTrim || draft.seats.some((o, j) => j !== i && o.seat.trim() === seatTrim) || s.count < 1;
+                    })
+                  }
+                  onClick={() => api.saveTemplate(draft).then((t) => { setSel(t.id); return reload(); }, fail)}
+                >
+                  Save
+                </button>
               )}
               {current && !ro && (
                 <button className={btn} onClick={() => api.deleteTemplate(current.id).then(() => { setSel(null); return reload(); }, fail)}>Delete</button>
