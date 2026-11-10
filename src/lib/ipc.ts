@@ -952,6 +952,8 @@ export interface Preferences {
   readAloudServerVoice: string;
   /** An OpenAI-compatible provider whose key and URL to use. */
   readAloudServerProviderId: string;
+  /** Samples per second of the raw PCM the speech server sends. Must match the server. */
+  readAloudServerSampleRate: number;
   /** Model ref that rewrites a reply for the ear before it is spoken. Empty means off. */
   readAloudRewriteModel: string;
 }
@@ -1005,12 +1007,13 @@ export const defaultPreferences: Preferences = {
   readAloudServerModel: "",
   readAloudServerVoice: "",
   readAloudServerProviderId: "",
+  readAloudServerSampleRate: 24000,
   readAloudRewriteModel: "",
 };
 
 /**
  * What a speech request sends back, in order (speech.rs, `SpeechEvent`): one `start`, any number
- * of `chunk`s, then `end`. `pcm`: the chunks are raw 24 kHz mono s16le samples. Otherwise they
+ * of `chunk`s, then `end`. `pcm`: the chunks are raw mono s16le samples. Otherwise they
  * are pieces of one audio file of type `mime`. `data` is base64.
  */
 export type SpeechEvent =

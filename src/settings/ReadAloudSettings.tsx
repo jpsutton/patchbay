@@ -7,6 +7,9 @@ import { primeAudio, speakText, systemVoices, type SpeechVoice } from "../lib/sp
 import { isAndroidApp, isRemoteApp } from "../lib/platform";
 import { useStore } from "../lib/store";
 
+/** Rates a speech server commonly streams PCM at. The backend accepts 8000 to 96000. */
+const SAMPLE_RATES = [16000, 22050, 24000, 32000, 44100, 48000];
+
 /**
  * Reading voice for this device. The phone has no provider keys, so it does not offer a
  * speech server. A browser on patchbayd does: the daemon holds the key and sends audio back.
@@ -184,6 +187,23 @@ export function ReadAloudSettings() {
               width="w-40"
               onCommit={(v) => update({ readAloudServerVoice: v.trim() })}
             />
+          </Row>
+          <Row
+            label="Sample rate"
+            hint="Speed of the raw audio the server streams. It must match the server: a wrong value plays too fast or too slow. OpenAI and most servers send 24000."
+          >
+            <select
+              className={`${input} w-28`}
+              aria-label="Speech server sample rate"
+              value={prefs.readAloudServerSampleRate}
+              onChange={(e) => void set("readAloudServerSampleRate", Number(e.target.value))}
+            >
+              {SAMPLE_RATES.map((hz) => (
+                <option key={hz} value={hz}>
+                  {hz} Hz
+                </option>
+              ))}
+            </select>
           </Row>
         </>
       )}

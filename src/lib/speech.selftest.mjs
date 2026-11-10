@@ -9,7 +9,7 @@ let listError = null;
 let complete;
 const streams = [];
 const cancelled = [];
-const prefs = { readAloudEngine: "auto", readAloudVoice: "pixel", readAloudRate: "normal" };
+const prefs = { readAloudEngine: "auto", readAloudVoice: "pixel", readAloudRate: "normal", readAloudServerSampleRate: 24000 };
 globalThis.__speechTest = {
   prefs,
   api: {
@@ -69,12 +69,13 @@ try {
 
   // Explicit Built-in remains usable even with a broken Android engine.
   const sources = [];
+  const rates = [];
   let autoEnd = true;
   globalThis.AudioContext = class {
     state = "running";
     currentTime = 0;
     destination = {};
-    createBuffer(_channels, count, rate) { return { duration: count / rate, getChannelData: () => new Float32Array(count) }; }
+    createBuffer(_channels, count, rate) { rates.push(rate); return { duration: count / rate, getChannelData: () => new Float32Array(count) }; }
     createBufferSource() {
       const src = {
         connect() {},
@@ -105,6 +106,7 @@ try {
   streams[0].onAudio({ type: "chunk", data: pcm(2400) });
   await turn();
   assert.ok(sources[1].at >= sources[0].at + 0.1 - 1e-9, "pieces play back to back");
+  assert.equal(rates.at(-1), 24000, "plays at the configured sample rate");
   speech.stopSpeech(); await served;
   assert.deepEqual(cancelled, [streams[0].input.streamId], "Stop drops the request");
   assert.ok(sources.every((src) => src.stopped), "Stop silences what is scheduled");

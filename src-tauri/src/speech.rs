@@ -8,8 +8,8 @@
 //!   the server.
 //! - A speech server (`POST {base}/audio/speech`), because the API key lives in this process.
 //!   The audio streams back to whichever screen asked while the server is still making it, and
-//!   that screen plays it. Raw PCM (signed 16-bit little-endian, 24 kHz, mono) is what the page
-//!   plays as it arrives.
+//!   that screen plays it. Raw PCM (signed 16-bit little-endian, mono, at the sample rate set
+//!   in Settings, 24 kHz by default) is what the page plays as it arrives.
 
 use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
@@ -50,7 +50,7 @@ pub struct NativeVoice {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum SpeechEvent {
-    /// `pcm`: the chunks are raw 24 kHz mono s16le samples to play as they arrive. Otherwise
+    /// `pcm`: the chunks are raw mono s16le samples to play as they arrive. Otherwise
     /// they are pieces of a whole audio file of type `mime`.
     Start { mime: String, pcm: bool },
     /// The next piece of audio, base64.

@@ -326,8 +326,6 @@ function speakWeb(text: string, prefs: Preferences): Promise<void> {
   });
 }
 
-/** Samples per second of a speech server's raw PCM (s16le, mono). */
-const SERVER_SAMPLE_RATE = 24000;
 /** Playback waits for this much audio before it schedules a piece, so a trickle is not a swarm of tiny nodes. */
 const PCM_MIN_BYTES = 2400;
 /** How far ahead of now a piece is scheduled when nothing is playing. */
@@ -426,7 +424,7 @@ class SpeechStream {
   }
 }
 
-/** Plays raw s16le PCM as it arrives, one piece right after the other with no gap. */
+/** Plays raw s16le mono PCM as it arrives, one piece right after the other with no gap. */
 class PcmPlayer {
   private ctx = context();
   private carry = new Uint8Array(0);
@@ -435,6 +433,9 @@ class PcmPlayer {
   private sources = new Set<AudioBufferSourceNode>();
   private idle: Array<() => void> = [];
   private stopped = false;
+
+  /** `sampleRate`: samples per second of the PCM, which the speech server decides. */
+  constructor(private readonly sampleRate: number) {}
 
   push(bytes: Uint8Array) {
     if (this.stopped) return;
@@ -457,7 +458,7 @@ class PcmPlayer {
   private schedule(byteCount: number) {
     const view = new DataView(this.carry.buffer, this.carry.byteOffset, byteCount);
     const count = byteCount / 2;
-    const buffer = this.ctx.createBuffer(1, count, SERVER_SAMPLE_RATE);
+    const buffer = this.ctx.createBuffer(1, count, this.sampleRate);
     const samples = buffer.getChannelData(0);
     for (let i = 0; i < count; i++) samples[i] = view.getInt16(i * 2, true) / 32768;
     this.carry = this.carry.slice(byteCount);
@@ -507,7 +508,7 @@ class PcmPlayer {
 async function speakServer(feed: Feed, prefs: Preferences, token: number) {
   if (isRemoteApp()) throw new Error("the phone speaks with its own voice. A speech server is configured on a computer.");
   primeAudio();
-  const player = new PcmPlayer();
+  const player = new PcmPlayer(prefs.readAloudServerSampleRate);
   pcmPlayer = player;
   const it = feed[Symbol.asyncIterator]();
   // The next piece's request, or null at the end.
