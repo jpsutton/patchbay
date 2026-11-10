@@ -476,7 +476,7 @@ function AppMenu() {
 }
 
 /** Which plan meter belongs with the session the user is looking at. */
-type PlanKind = "claude" | "cursor" | "antigravity";
+type PlanKind = "claude" | "grok" | "cursor" | "antigravity";
 
 function planKindForSession(
   mode: Mode,
@@ -493,8 +493,8 @@ function planKindForSession(
   if ((session.agent === "patchbay" || session.agent === "grok") && session.modelRef) {
     const model = models.find((m) => m.id === session.modelRef);
     const provider = model && providers.find((p) => p.id === model.providerId);
-    // A Grok seat's weekly pool shows in the same gauge as a Claude plan's windows.
-    if (provider?.authMode === "claude_login" || provider?.authMode === "grok_login") return "claude";
+    if (provider?.authMode === "claude_login") return "claude";
+    if (provider?.authMode === "grok_login") return "grok";
   }
   return null;
 }
@@ -529,7 +529,7 @@ function SessionPlanUsageButton() {
   const setSessionUsageOpen = useStore((s) => s.setSessionUsageOpen);
 
   useEffect(() => {
-    if (kind !== "claude" && planOpen) setPlanOpen(false);
+    if (kind !== "claude" && kind !== "grok" && planOpen) setPlanOpen(false);
     if (kind !== "cursor" && cursorPlanOpen) setCursorPlanOpen(false);
     if (kind !== "antigravity" && antigravityPlanOpen) setAntigravityPlanOpen(false);
     // The usage pane belongs to a plan-less Code session with something to show; a plan kind, or
@@ -552,7 +552,7 @@ function SessionPlanUsageButton() {
     setSessionUsageOpen,
   ]);
 
-  if (kind === "claude") return <PlanUsageButton />;
+  if (kind === "claude" || kind === "grok") return <PlanUsageButton family={kind} />;
   if (kind === "cursor") return <CursorPlanUsageButton />;
   if (kind === "antigravity") return <AntigravityPlanUsageButton />;
   return <SessionUsageButton />;
@@ -563,7 +563,7 @@ function SidebarStatusPane() {
   const kind = useSessionPlanKind();
   return (
     <>
-      {kind === "claude" && <PlanUsageBlade />}
+      {(kind === "claude" || kind === "grok") && <PlanUsageBlade family={kind} />}
       {kind === "cursor" && <CursorPlanUsageBlade />}
       {kind === "antigravity" && <AntigravityPlanUsageBlade />}
       {kind === null && <SessionUsageBlade />}

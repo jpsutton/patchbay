@@ -144,15 +144,24 @@ function BurnGauge({ pace, className }: { pace: number; className?: string }) {
   );
 }
 
+export type PlanFamily = "claude" | "grok";
+
+/** Grok seats are keyed `grok:<team>:<user>`; Claude accounts by their config directory. */
+const familyOf = (a: PlanAccount): PlanFamily => (a.account.startsWith("grok:") ? "grok" : "claude");
+
+/** The accounts of one backend: a session on Claude shows Claude's plan, one on Grok shows Grok's. */
+const ofFamily = (accounts: PlanAccount[], family: PlanFamily) => accounts.filter((a) => familyOf(a) === family);
+
 /** The account nearest its limit: the one the sidebar button shows. */
 const busiest = (accounts: PlanAccount[], now: number) =>
   accounts.reduce<PlanAccount | null>((best, a) => (best && (peak(best.latest, now) ?? -1) >= (peak(a.latest, now) ?? -1) ? best : a), null);
 
 const barClass = (t: ReturnType<typeof tone>) => (t === "danger" ? "bg-danger" : t === "warn" ? "bg-warn" : "bg-ok");
 
-/** The sidebar footer's toggle for the plan usage blade (Claude and Grok seats): one mini bar per window of the busiest account. */
-export function PlanUsageButton() {
-  const accounts = useStore((s) => s.planAccounts);
+/** The sidebar footer's toggle for the plan usage blade (one backend's seats, Claude or Grok): one mini bar per window of its busiest account. */
+export function PlanUsageButton({ family }: { family: PlanFamily }) {
+  const all = useStore((s) => s.planAccounts);
+  const accounts = ofFamily(all, family);
   const open = useStore((s) => s.planOpen);
   const setOpen = useStore((s) => s.setPlanOpen);
   const guard = useStore((s) => s.prefs.usageLimit);
@@ -311,8 +320,9 @@ function AccountUsage({ a, named, first, now, limit }: { a: PlanAccount; named: 
  * Plan usage from the last reports of Claude Code, of Patchbay's agent on a Claude or Grok login, one section per
  * account. Full-width sidebar pane above the footer; stays open until its button is clicked again.
  */
-export function PlanUsageBlade({ className }: { className?: string }) {
-  const all = useStore((s) => s.planAccounts);
+export function PlanUsageBlade({ family, className }: { family: PlanFamily; className?: string }) {
+  const every = useStore((s) => s.planAccounts);
+  const all = ofFamily(every, family);
   const open = useStore((s) => s.planOpen);
   const setOpen = useStore((s) => s.setPlanOpen);
   const guard = useStore((s) => s.prefs.usageLimit);
@@ -347,14 +357,16 @@ export function PlanUsageBlade({ className }: { className?: string }) {
       </div>
       {accounts.length === 0 ? (
         <p className="px-3 py-1.5 text-muted">
-          No usage reported yet. It shows up after a turn on a Claude or Grok plan: Claude Code signed in with one, or Patchbay's agent on a Claude or Grok login provider.
+          No usage reported yet. {family === "grok"
+            ? "It shows up after a turn on a Grok plan: Grok Build or Patchbay's agent on a Grok login provider."
+            : "It shows up after a turn on a Claude plan: Claude Code signed in with one, or Patchbay's agent on a Claude login provider."}
         </p>
       ) : (
         accounts.map((a, i) => <AccountUsage key={a.account} a={a} named={accounts.length > 1} first={i === 0} now={now} limit={limit} />)
       )}
       <div className="mt-1 flex items-baseline justify-between border-t border-line px-3 pb-1 pt-2 text-[12px] text-muted">
         <span>{limit != null ? `Turns stop at ${limit}%` : "Usage limit off"}</span>
-        <button className="text-accent-ink hover:underline" onClick={() => openSettingsAt(defaultAgent === "patchbay" ? "agent:patchbay" : "agent:claude-code")}>
+        <button className="text-accent-ink hover:underline" onClick={() => openSettingsAt(family === "grok" ? "agent:grok" : defaultAgent === "patchbay" ? "agent:patchbay" : "agent:claude-code")}>
           Change
         </button>
       </div>
