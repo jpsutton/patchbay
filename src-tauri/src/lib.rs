@@ -2477,6 +2477,12 @@ async fn code_stop(state: &AppState, id: String) -> CmdResult<()> {
     Ok(())
 }
 
+/// How a refusal to an agent's message names the session that would have run it.
+fn recipient_name(state: &AppState, id: &str) -> String {
+    let title = state.db.get_code_session(id).ok().flatten().map(|s| s.title).unwrap_or_default();
+    format!("'{title}' ({id})")
+}
+
 async fn code_prompt_local(
     state: &AppState,
     id: String,
@@ -2495,15 +2501,21 @@ async fn code_prompt_local(
         && let Some(hit) = state.code.plan.hit(&account, &prefs.usage_limit, code::plan_limits::now())
     {
         let label = plan_account_label(state, &account);
-        anyhow::bail!(
-            "Not sent. {}",
-            hit.message(prefs.usage_limit.percent, code::plan_limits::now(), &label)
-        );
+        let (limit, now) = (prefs.usage_limit.percent, code::plan_limits::now());
+        // Another agent's message wakes THIS session: say the limit is the recipient's.
+        if origin.starts_with("agent:") {
+            anyhow::bail!("Not sent. {}", hit.recipient_message(limit, now, &label, &recipient_name(state, &id)));
+        }
+        anyhow::bail!("Not sent. {}", hit.message(limit, now, &label));
     }
     if on_cursor_session(state, &id)
         && let Some(hit) = state.code.cursor_plan.hit(&prefs.cursor_usage_limit, code::cursor_plan::now())
     {
-        anyhow::bail!("Not sent. {}", hit.message(code::cursor_plan::now()));
+        let now = code::cursor_plan::now();
+        if origin.starts_with("agent:") {
+            anyhow::bail!("Not sent. {}", hit.recipient_message(now, &recipient_name(state, &id)));
+        }
+        anyhow::bail!("Not sent. {}", hit.message(now));
     }
     let mut blocks = Vec::new();
     // @-mentioned project files go as standard ACP resource links; the agent reads them itself.
