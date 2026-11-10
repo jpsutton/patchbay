@@ -118,11 +118,11 @@ export function TemplatesEditor() {
     if (current) setDraft({ id: current.id, name: current.name, seats: current.seats, routing: current.routing });
   }, [current]);
   const ro = !!current && current.id.startsWith("builtin-");
-  // Changing what the user acknowledged (agent, model or mode) takes the tick back.
+  // Changing what the user acknowledged (agent, model, choices or mode) takes the tick back.
   const setSeat = (i: number, patch: Partial<TeamSeat>) =>
     setDraft({
       ...draft,
-      seats: draft.seats.map((s, j) => (j === i ? { ...s, ...("agent" in patch || "model" in patch || "permissionMode" in patch ? { allowUnasked: false } : {}), ...patch } : s)),
+      seats: draft.seats.map((s, j) => (j === i ? { ...s, ...("agent" in patch || "model" in patch || "permissionMode" in patch || "choices" in patch ? { allowUnasked: false } : {}), ...patch } : s)),
     });
 
   return (
@@ -142,7 +142,10 @@ export function TemplatesEditor() {
         {sel && (
           <div className="flex flex-col gap-2 text-xs">
             <input className={input} placeholder="Template name" value={draft.name} readOnly={ro} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
-            {draft.seats.map((s, i) => (
+            {draft.seats.map((s, i) => {
+              const role = roles.find((r) => r.id === s.roleId);
+              const isWorker = role && !role.standing;
+              return (
               <div key={i} className="grid grid-cols-[1fr_1fr_1fr_1fr_4rem_auto] gap-1">
                 <input className={input} placeholder="Seat" value={s.seat} readOnly={ro} onChange={(e) => setSeat(i, { seat: e.target.value })} />
                 <select className={input} value={s.roleId} disabled={ro} onChange={(e) => setSeat(i, { roleId: e.target.value })}>
@@ -162,6 +165,60 @@ export function TemplatesEditor() {
                     <option key={m} value={m}>{m}</option>
                   ))}
                 </select>
+                {isWorker && (
+                  <div className="col-span-6 flex flex-col gap-1 rounded border border-border/60 p-2">
+                    <div className="text-muted">Agent and model choices the coordinator may pick from:</div>
+                    {(s.choices ?? []).map((c, ci) => (
+                      <div key={ci} className="flex items-center gap-1">
+                        <select
+                          className={input}
+                          value={c.agent}
+                          disabled={ro}
+                          onChange={(e) => {
+                            const cur = s.choices ?? [];
+                            setSeat(i, { choices: cur.map((x, cj) => (cj === ci ? { ...x, agent: e.target.value } : x)) });
+                          }}
+                        >
+                          {Object.entries(AGENT_LABELS).map(([id, label]) => (
+                            <option key={id} value={id}>{label}</option>
+                          ))}
+                        </select>
+                        <input
+                          className={input}
+                          placeholder="Model (optional)"
+                          value={c.model ?? ""}
+                          readOnly={ro}
+                          onChange={(e) => {
+                            const cur = s.choices ?? [];
+                            setSeat(i, { choices: cur.map((x, cj) => (cj === ci ? { ...x, model: e.target.value || null } : x)) });
+                          }}
+                        />
+                        {!ro && (
+                          <button
+                            className="px-1 text-muted hover:text-fg"
+                            onClick={() => {
+                              const cur = s.choices ?? [];
+                              setSeat(i, { choices: cur.filter((_, cj) => cj !== ci) });
+                            }}
+                          >
+                            Remove
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                    {!ro && (
+                      <button
+                        className={`${btn} self-start`}
+                        onClick={() => {
+                          const cur = s.choices ?? [];
+                          setSeat(i, { choices: [...cur, { agent: "claude-code", model: null }] });
+                        }}
+                      >
+                        + Add choice
+                      </button>
+                    )}
+                  </div>
+                )}
                 {(s.gaps?.length ?? 0) > 0 && (
                   <label className="col-span-6 flex items-start gap-1.5 rounded border border-border p-1.5">
                     <input type="checkbox" className="mt-0.5" checked={!!s.allowUnasked} disabled={ro} onChange={(e) => setSeat(i, { allowUnasked: e.target.checked })} />
@@ -180,7 +237,8 @@ export function TemplatesEditor() {
                 )}
                 {!ro && <button className="col-span-6 justify-self-end text-muted hover:text-fg" onClick={() => setDraft({ ...draft, seats: draft.seats.filter((_, j) => j !== i) })}>Remove seat</button>}
               </div>
-            ))}
+            );
+            })}
             {!ro && <button className={`${btn} self-start`} onClick={() => setDraft({ ...draft, seats: [...draft.seats, blankSeat(roles[0]?.id ?? "")] })}>+ Add seat</button>}
             <div className="text-muted">Seat count: members of a standing seat, or the most workers alive at once.</div>
             <div className="flex gap-2">
