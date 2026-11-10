@@ -256,7 +256,9 @@ impl CodeManager {
                 let data_dir = data_dir.to_path_buf();
                 Arc::new(move |tool_call, options| {
                     // A live team member's call to a team tool needs no prompt (teams/allow.rs).
-                    if let Some(hit) = crate::teams::allow_team_tool(&data_dir, &csid, tool_call, options) {
+                    if let Some(agent) = db.get_code_session(&csid).ok().flatten().map(|s| s.agent)
+                        && let Some(hit) = crate::teams::allow_team_tool(&data_dir, &csid, &agent, tool_call, options)
+                    {
                         return Some(hit);
                     }
                     // Read fresh each time so rules and the session's Ask/Auto/Always apply at once.

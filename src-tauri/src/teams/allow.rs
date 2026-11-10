@@ -29,16 +29,16 @@ fn allowed_tools() -> impl Iterator<Item = &'static str> {
     std::iter::once("send_agent_message").chain(super::items::TOOLS.iter().copied())
 }
 
-/// The titles each agent gives a call of `tool` on our server.
-fn titles(tool: &str) -> [String; 6] {
-    [
-        format!("mcp__{SERVER}__{tool}"),   // Claude Code
-        format!("mcp.{SERVER}.{tool}"),     // Codex (kind execute)
-        format!("{SERVER}_{tool}"),         // Antigravity
-        format!("{SERVER}-{tool}: {tool}"), // Cursor
-        format!("{SERVER}: {tool}"),        // Cursor, other build
-        format!("{tool} ({SERVER})"),       // Patchbay's agent
-    ]
+/// The titles `agent` gives a call of `tool` on our server; none for an agent without a known form.
+fn titles(agent: &str, tool: &str) -> Vec<String> {
+    match agent {
+        "claude-code" => vec![format!("mcp__{SERVER}__{tool}")],
+        "codex" => vec![format!("mcp.{SERVER}.{tool}")],
+        "antigravity" => vec![format!("{SERVER}_{tool}")],
+        "cursor" => vec![format!("{SERVER}-{tool}: {tool}"), format!("{SERVER}: {tool}")],
+        "patchbay" => vec![format!("{tool} ({SERVER})")],
+        _ => vec![],
+    }
 }
 
 /// Keys that would make a call more than a message: a path or a command to run.
@@ -53,7 +53,7 @@ fn carries_path_or_command(raw: &Value) -> bool {
 }
 
 /// The tool a call is, when it is one of ours that a member may make unasked.
-fn matched_tool(tool_call: &Value) -> Option<&'static str> {
+fn matched_tool(agent: &str, tool_call: &Value) -> Option<&'static str> {
     let title = tool_call["title"].as_str()?;
     let kind = tool_call["kind"].as_str().unwrap_or("");
     let raw = &tool_call["rawInput"];
@@ -61,7 +61,7 @@ fn matched_tool(tool_call: &Value) -> Option<&'static str> {
         return None;
     }
     allowed_tools().find(|t| {
-        titles(t).iter().any(|x| x == title)
+        titles(agent, t).iter().any(|x| x == title)
             && match kind {
                 "other" => true,
                 // Codex files its MCP calls under execute; require the MCP shape, not a shell command.
@@ -72,9 +72,9 @@ fn matched_tool(tool_call: &Value) -> Option<&'static str> {
 }
 
 /// The option to pick and what to tell the UI, when `tool_call` is a team member's call to one of
-/// our tools. `session` must fill a seat on a live team.
-pub fn allow_team_tool(data_dir: &Path, session: &str, tool_call: &Value, options: &Value) -> Option<(String, String)> {
-    let tool = matched_tool(tool_call)?;
+/// our tools, in the form `agent` (the session's own) uses. `session` must fill a seat on a live team.
+pub fn allow_team_tool(data_dir: &Path, session: &str, agent: &str, tool_call: &Value, options: &Value) -> Option<(String, String)> {
+    let tool = matched_tool(agent, tool_call)?;
     // No teams.db means no teams; don't create one just to look.
     if !data_dir.join("teams.db").is_file() {
         return None;
@@ -95,17 +95,23 @@ mod tests {
     #[test]
     fn each_agents_title_form_matches_and_nothing_else_does() {
         // Titles as the agents sent them (main Patchbay DB, 2026-11-09).
-        for (title, kind, raw) in [
-            ("mcp__patchbay-agent-messaging__send_agent_message", "other", json!({ "message": "hi" })),
-            ("mcp.patchbay-agent-messaging.send_agent_message", "execute", json!({ "arguments": { "message": "hi" } })),
-            ("patchbay-agent-messaging_item_set", "other", json!({ "arguments": { "itemId": "x" } })),
-            ("patchbay-agent-messaging-send_agent_message: send_agent_message", "other", Value::Null),
-            ("patchbay-agent-messaging: dispatch_item", "other", Value::Null),
-            ("send_agent_message (patchbay-agent-messaging)", "other", json!({})),
-            ("mcp__patchbay-agent-messaging__member_release", "other", json!({})),
+        for (agent, title, kind, raw) in [
+            ("claude-code", "mcp__patchbay-agent-messaging__send_agent_message", "other", json!({ "message": "hi" })),
+            ("codex", "mcp.patchbay-agent-messaging.send_agent_message", "execute", json!({ "arguments": { "message": "hi" } })),
+            ("antigravity", "patchbay-agent-messaging_item_set", "other", json!({ "arguments": { "itemId": "x" } })),
+            ("cursor", "patchbay-agent-messaging-send_agent_message: send_agent_message", "other", Value::Null),
+            ("cursor", "patchbay-agent-messaging: dispatch_item", "other", Value::Null),
+            ("patchbay", "send_agent_message (patchbay-agent-messaging)", "other", json!({})),
+            ("claude-code", "mcp__patchbay-agent-messaging__member_release", "other", json!({})),
         ] {
-            assert!(matched_tool(&call(title, kind, raw)).is_some(), "{title}");
+            assert!(matched_tool(agent, &call(title, kind, raw)).is_some(), "{title}");
         }
+        // Another agent's form doesn't match, and an agent with no known form matches nothing.
+        let claude = call("mcp__patchbay-agent-messaging__send_agent_message", "other", json!({}));
+        for other in ["codex", "cursor", "antigravity", "patchbay", "opencode", "grok", "kilo"] {
+            assert!(matched_tool(other, &claude).is_none(), "{other}");
+        }
+        assert!(matched_tool("claude-code", &call("patchbay-agent-messaging: send_agent_message", "other", json!({}))).is_none());
         for (title, kind, raw) in [
             ("mcp__patchbay-agent-messaging__create_agent_session", "other", json!({})),
             ("mcp__patchbay-agent-messaging__share_artifact", "other", json!({})),
@@ -118,7 +124,7 @@ mod tests {
             ("mcp__patchbay-agent-messaging__item_set", "other", json!({ "arguments": { "path": "/etc" } })),
             ("cargo test", "execute", json!({ "command": "cargo test" })),
         ] {
-            assert!(matched_tool(&call(title, kind, raw)).is_none(), "{title}");
+            assert!(matched_tool("claude-code", &call(title, kind, raw)).is_none(), "{title}");
         }
     }
 
@@ -128,7 +134,7 @@ mod tests {
         std::fs::create_dir_all(d.join("proj")).unwrap();
         let tc = call("mcp__patchbay-agent-messaging__team_roster", "other", json!({}));
         let options = json!([{ "kind": "allow_always", "optionId": "always" }, { "kind": "allow_once", "optionId": "once" }]);
-        assert!(allow_team_tool(&d, "s1", &tc, &options).is_none(), "no teams.db yet");
+        assert!(allow_team_tool(&d, "s1", "claude-code", &tc, &options).is_none(), "no teams.db yet");
         let t = TeamsDb::open(&d).unwrap();
         let team = t
             .create_team(super::super::NewTeam {
@@ -142,11 +148,12 @@ mod tests {
                 export_dir: Some(d.join("out").to_string_lossy().into_owned()),
             })
             .unwrap();
-        assert!(allow_team_tool(&d, "s1", &tc, &options).is_none(), "not a member");
+        assert!(allow_team_tool(&d, "s1", "claude-code", &tc, &options).is_none(), "not a member");
         t.attach(&team.id, "s1", "coordinator").unwrap();
-        assert_eq!(allow_team_tool(&d, "s1", &tc, &options).unwrap().0, "once");
-        assert!(allow_team_tool(&d, "s1", &tc, &json!([{ "kind": "allow_always", "optionId": "a" }])).is_none(), "allow-once only");
+        assert_eq!(allow_team_tool(&d, "s1", "claude-code", &tc, &options).unwrap().0, "once");
+        assert!(allow_team_tool(&d, "s1", "claude-code", &tc, &json!([{ "kind": "allow_always", "optionId": "a" }])).is_none(), "allow-once only");
+        assert!(allow_team_tool(&d, "s1", "cursor", &tc, &options).is_none(), "wrong agent's form");
         t.detach(&team.id, "s1").unwrap();
-        assert!(allow_team_tool(&d, "s1", &tc, &options).is_none(), "released");
+        assert!(allow_team_tool(&d, "s1", "claude-code", &tc, &options).is_none(), "released");
     }
 }
