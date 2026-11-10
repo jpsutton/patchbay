@@ -470,7 +470,22 @@ export function Composer({
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 280)}px`;
-  }, [text]);
+  }, [text, placeholder]);
+
+  // Wrapping changes with the pane's width; compare width only so writing the height cannot loop.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let w = el.clientWidth;
+    const ro = new ResizeObserver(() => {
+      if (el.clientWidth === w) return;
+      w = el.clientWidth;
+      el.style.height = "auto";
+      el.style.height = `${Math.min(el.scrollHeight, 280)}px`;
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // In a browser, dropped files arrive as HTML5 drops carrying their contents, not local paths.
   const webDrops = () => {

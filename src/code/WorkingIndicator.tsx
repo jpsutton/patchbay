@@ -57,8 +57,8 @@ export function WorkingIndicator({ s, onStop }: { s: Source; onStop: () => void 
       data-working-kind={w.kind}
     >
       <Dot size={6} className={stalled ? "text-warn" : "signal-pulse text-live"} />
-      <span className="min-w-0 truncate">{label(w)}</span>
-      {meta.length > 0 && <span className="shrink-0 font-mono text-[11px] tabular-nums text-faint">{meta.join(" · ")}</span>}
+      <span className="min-w-[4ch] truncate">{label(w)}</span>
+      {meta.length > 0 && <span className="min-w-0 truncate font-mono text-[11px] tabular-nums text-faint">{meta.join(" · ")}</span>}
       {stalled && (
         <button className="shrink-0 text-accent-ink underline underline-offset-2" onClick={onStop}>
           Stop

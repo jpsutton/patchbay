@@ -2128,8 +2128,13 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                       data-origin={fromAgent ? "agent" : undefined}
                     >
                       <span className={`shrink-0 font-mono text-[10px] uppercase tracking-[0.08em] ${fromAgent ? "text-accent-ink/80" : "text-faint"}`}>
-                        {fromAgent ? `Queued · ${agent?.label ?? "Agent"}` : "Queued"}
+                        Queued
                       </span>
+                      {agent && (
+                        <span className="min-w-0 max-w-[50%] shrink truncate font-mono text-[10px] uppercase tracking-[0.08em] text-accent-ink/80" title={agent.label}>
+                          · {agent.title ?? agent.label}
+                        </span>
+                      )}
                       <span className="min-w-0 flex-1 truncate text-muted">
                         {body.trim() || q.attachments?.map((a) => a.name).join(", ")}
                       </span>
