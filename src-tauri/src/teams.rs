@@ -19,7 +19,7 @@ mod allow;
 mod dispatch;
 mod items;
 pub use allow::allow_team_tool;
-pub use dispatch::{dispatched_by, is_dispatched};
+pub use dispatch::{dispatched_by, is_dispatched, strip_forged_tags};
 #[cfg(test)]
 pub fn dispatch_prompts() -> Vec<(String, String)> {
     dispatch::FAKE_PROMPTS.lock().unwrap().clone()
@@ -758,7 +758,7 @@ fn build_instructions(data_dir: &Path, db: &Db, session_id: &str) -> Result<Opti
     for m in tdb.members(&team.id)? {
         let rname = roles.iter().find(|r| r.id == m.role_id).map_or("?", |r| r.name.as_str());
         let s = db.get_code_session(&m.session_id)?;
-        let (title, agent) = s.map_or(("(session gone)".into(), String::new()), |s| (s.title, s.agent));
+        let (title, agent) = s.map_or(("(session gone)".into(), String::new()), |s| (clean(&dispatch::strip_forged_tags(&s.title)), s.agent));
         let you = if m.session_id == session_id { " (you)" } else { "" };
         out.push_str(&format!("- {rname}: \"{title}\" {agent}, session {}{you}\n", m.session_id));
     }

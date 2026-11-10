@@ -493,12 +493,26 @@ fn run_tool(state: &AppState, session: &str, name: &str, args: &Value) -> Result
             let target = resolve_target(&tdb, &c, need_s("to")?)?;
             return Ok(Outcome { value: Value::Null, tells, send: Some((session.to_owned(), target, need_s("message")?.to_owned())) });
         }
-        "item_list" => json!(tdb.items(&c.team.id, s("status"))?),
+        "item_list" => {
+            let mut v = json!(tdb.items(&c.team.id, s("status"))?);
+            v.as_array_mut().into_iter().flatten().for_each(fence_item);
+            v
+        }
         "item_get" => {
             let item = tdb.item(&c.team.id, need_s("itemId")?)?;
             let events = tdb.item_events(&c.team.id, Some(&item.id), 200)?;
             let decisions: Vec<_> = tdb.decisions(&c.team.id)?.into_iter().filter(|d| d.item_id.as_deref() == Some(&item.id)).collect();
-            json!({ "item": item, "events": events, "decisions": decisions })
+            let mut v = json!({ "item": item, "events": events, "decisions": decisions });
+            fence_item(&mut v["item"]);
+            for e in v["events"].as_array_mut().into_iter().flatten() {
+                fence_field(e, "text");
+            }
+            for d in v["decisions"].as_array_mut().into_iter().flatten() {
+                for k in ["question", "recommendation", "advisorText", "userAnswer"] {
+                    fence_field(d, k);
+                }
+            }
+            v
         }
         "item_add" => {
             c.need("writes_items", c.role.caps.writes_items, "create items")?;
@@ -565,6 +579,19 @@ fn run_tool(state: &AppState, session: &str, name: &str, args: &Value) -> Result
         _ => bail!("unknown team tool {name}"),
     };
     Ok(Outcome { value: result, tells, send: None })
+}
+
+/// Free text in tool output was written by other agents or people; fence it as data.
+fn fence_field(v: &mut Value, key: &str) {
+    if let Some(t) = v[key].as_str().map(str::to_owned) {
+        v[key] = json!(super::dispatch::fence(key, &t));
+    }
+}
+
+fn fence_item(v: &mut Value) {
+    for k in ["title", "plan"] {
+        fence_field(v, k);
+    }
 }
 
 fn deciders(tdb: &TeamsDb, team_id: &str) -> Result<Vec<String>> {

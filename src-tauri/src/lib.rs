@@ -2760,6 +2760,8 @@ pub(crate) async fn send_agent_message(
     if source.host_node.as_deref() != Some(from_node) || source.archived_at.is_some() {
         anyhow::bail!("source session is not hosted by the sending mesh member");
     }
+    // Whoever sends it, the text can't pose as Patchbay's own tags (teams/dispatch.rs).
+    let message = &teams::strip_forged_tags(message);
     let target = state
         .db
         .get_code_session(target_session_id)?
@@ -2841,7 +2843,7 @@ async fn deliver_agent_message_local(
     let source_node = state.mesh.member_name(from_node);
     let text = format!(
         "Patchbay agent message from Code session '{}' ({}) on {} ({}):\n\n{}\n\nTo reply, use the Patchbay send_agent_message tool and target session {}. Do not resend just because a prior delivery was queued or steered — that means it was accepted. Only message them when you have new information.",
-        source.title, source_session_id, source_node, from_node, message, source_session_id
+        teams::strip_forged_tags(&source.title), source_session_id, source_node, from_node, message, source_session_id
     );
     let prompt_id = new_id();
     let delivery = code_prompt_local(
