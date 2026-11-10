@@ -7,7 +7,10 @@ import { TeamBoard } from "./TeamBoard";
 
 const DOT: Record<string, string> = { running: "bg-accent", waiting: "bg-yellow-500", stalled: "bg-red-500", idle: "bg-muted", stopped: "bg-border" };
 
-const changed = () => window.dispatchEvent(new Event("teams-changed"));
+const changed = () => {
+  window.dispatchEvent(new Event("teams-changed"));
+  void useStore.getState().refreshCodeSessions().catch(() => {});
+};
 
 /** Teams: Code sessions in named roles on one project (docs/design/teams.md), with the role and template editors. */
 export function TeamsPage() {
