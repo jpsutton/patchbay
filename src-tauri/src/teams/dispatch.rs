@@ -273,7 +273,15 @@ fn plan(state: &AppState, desk: &str, args: &Value) -> Result<Plan> {
 }
 
 fn git(cwd: &Path, args: &[&str]) -> Result<String> {
-    let out = std::process::Command::new("git").arg("-C").arg(cwd).args(args).output().context("running git")?;
+    // No hooks (a tracked core.hooksPath folder like .husky could hold one the coordinator wrote),
+    // no fsmonitor, no system config: this git runs as the host, not under an approval mode.
+    let out = std::process::Command::new("git")
+        .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C"])
+        .arg(cwd)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .context("running git")?;
     if !out.status.success() {
         bail!("git {} failed: {}", args.first().copied().unwrap_or(""), String::from_utf8_lossy(&out.stderr).trim());
     }
@@ -566,5 +574,29 @@ mod tests {
         let mut bad = team.clone();
         bad.pr_base = "nope".into();
         assert!(make_worktree(&bad, "DM-20261109-02").unwrap_err().to_string().contains("not found"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_hooks_in_the_repo_do_not_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let (d, _t, team) = setup();
+        let cwd = d.join("proj");
+        let run = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&cwd).args(args).output().unwrap().status.success(), "{args:?}");
+        run(&["init", "-q", "-b", "main"]);
+        let marker = d.join("marker");
+        std::fs::create_dir_all(cwd.join(".husky")).unwrap();
+        let hook = cwd.join(".husky/post-checkout");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        run(&["config", "core.hooksPath", ".husky"]);
+        run(&["add", "."]);
+        run(&["-c", "core.hooksPath=/dev/null", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base"]);
+        // The hook does run for a plain git, so the test means something.
+        run(&["worktree", "add", "-q", "-b", "control", "--", d.join("control").to_str().unwrap(), "main"]);
+        assert!(marker.exists(), "control: the hook should run under plain git");
+        std::fs::remove_file(&marker).unwrap();
+        let (path, _) = make_worktree(&team, "DM-20261109-01").unwrap();
+        assert!(path.exists() && !marker.exists(), "dispatch must not run repo hooks");
     }
 }
