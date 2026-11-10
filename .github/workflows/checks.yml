@@ -185,18 +185,20 @@ jobs:
           grep -q 'real_child_sigterm_logs_signal_term_and_exits_by_signal' "$log"
           grep -q 'real_child_fifo_log_path_exits_promptly_with_stdin_eof' "$log"
           grep -q 'real_child_logs_start_and_stdin_eof_exit' "$log"
-      # pb-20261107-34: MCP-child teardown fd return-to-baseline check (unix only; #[cfg(unix)]).
+      # pb-20261107-34/pb-20261109-08: MCP-child teardown fd check + #356 guard plant proofs (unix only).
       # Scope: MCP child teardown path only (not app session-lifecycle states). Accepted/parked.
-      # Guard: fail if zero tests ran (#356 class / PR #387 pattern).
+      # Guard: fail if zero tests ran (#356 class / PR #387 pattern); expects run-measuring guard plants.
       - name: MCP-child teardown fd baseline check
         working-directory: src-tauri
         run: |
           set -euo pipefail
           log="$(mktemp)"
           cargo test --test fd_lifecycle_stress --locked 2>&1 | tee "$log"
-          grep -q 'running 1 test' "$log"
-          grep -q 'test result: ok. 1 passed; 0 failed' "$log"
+          grep -q 'running 3 tests' "$log"
+          grep -q 'test result: ok. 3 passed; 0 failed' "$log"
           grep -q 'mcp_child_teardown_returns_fds_to_baseline' "$log"
+          grep -q 'pb_20261109_08_plant_n0_guard_is_red' "$log"
+          grep -q 'pb_20261109_08_plant_dead_recorded_pid_guard_is_red' "$log"
       # The mock model speaks all four wire formats, so these exercise the client and the agent
       # end to end (and the app's Code smoke tests, which start the agent in process).
       - name: End-to-end tests against the mock model
