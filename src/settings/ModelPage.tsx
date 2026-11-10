@@ -10,7 +10,7 @@ import {
   type ReasoningSummary,
 } from "../lib/ipc";
 import { useStore } from "../lib/store";
-import { input } from "./ProviderPage";
+import { Field, input } from "./ProviderPage";
 
 const EFFORTS: ReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 const SUMMARIES: ReasoningSummary[] = ["none", "auto", "concise", "detailed"];
@@ -107,26 +107,6 @@ function Section({ title, hint, children }: { title: string; hint?: string; chil
       </div>
       <div className="grid grid-cols-2 gap-x-4 gap-y-3">{children}</div>
     </section>
-  );
-}
-
-function Field({
-  label,
-  hint,
-  wide,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  wide?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <label className={`flex flex-col gap-1 text-xs text-muted ${wide ? "col-span-2" : ""}`}>
-      {label}
-      {children}
-      {hint && <span className="text-[12px] text-muted/80">{hint}</span>}
-    </label>
   );
 }
 

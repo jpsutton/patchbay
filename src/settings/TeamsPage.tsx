@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { AGENT_LABELS, api, errorText, type AgentId, type Team, type TeamDetail, type TeamTemplate } from "../lib/ipc";
 import { useStore } from "../lib/store";
-import { input } from "./ProviderPage";
+import { Field, input } from "./ProviderPage";
 import { RolesEditor, TemplatesEditor } from "./TeamEditors";
 import { TeamBoard } from "./TeamBoard";
 
@@ -125,15 +125,17 @@ function TeamsPanel() {
                 {genericError}
               </div>
             )}
-            <select className={input} value={draft.templateId} onChange={(e) => setDraft({ ...draft, templateId: e.target.value })}>
-              {templates.map((t) => (
-                <option key={t.id} value={t.id}>{t.name}</option>
-              ))}
-            </select>
-            <div className="flex flex-col gap-0.5">
+            <Field label="Template">
+              <select className={input} value={draft.templateId} onChange={(e) => setDraft({ ...draft, templateId: e.target.value })}>
+                {templates.map((t) => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Team name">
               <input
                 className={input}
-                placeholder="Name (letters, digits, - _)"
+                placeholder="letters, digits, - _"
                 value={draft.slug}
                 onChange={(e) => {
                   setDraft({ ...draft, slug: e.target.value });
@@ -145,11 +147,11 @@ function TeamsPanel() {
               {(fieldErrors.slug || slugErr) && (
                 <span className="text-[11px] text-danger">{fieldErrors.slug || slugErr}</span>
               )}
-            </div>
-            <div className="flex flex-col gap-0.5">
+            </Field>
+            <Field label="Project folder">
               <input
                 className={input}
-                placeholder="Project folder, e.g. /home/me/project"
+                placeholder="e.g. /home/me/project"
                 value={draft.cwd}
                 onChange={(e) => {
                   setDraft({ ...draft, cwd: e.target.value });
@@ -161,11 +163,11 @@ function TeamsPanel() {
               {(fieldErrors.cwd || cwdErr) && (
                 <span className="text-[11px] text-danger">{fieldErrors.cwd || cwdErr}</span>
               )}
-            </div>
-            <div className="flex flex-col gap-0.5">
+            </Field>
+            <Field label="Export folder (optional)" hint="leave empty for none">
               <input
                 className={input}
-                placeholder="Export folder (optional, leave empty for none)"
+                placeholder="leave empty for none"
                 value={draft.exportDir}
                 onChange={(e) => {
                   setDraft({ ...draft, exportDir: e.target.value });
@@ -176,8 +178,10 @@ function TeamsPanel() {
               {fieldErrors.exportDir && (
                 <span className="text-[11px] text-danger">{fieldErrors.exportDir}</span>
               )}
-            </div>
-            <textarea className={`${input} h-28 resize-y font-mono text-xs`} placeholder="Project rules, given to every member" value={draft.projectRules} onChange={(e) => setDraft({ ...draft, projectRules: e.target.value })} />
+            </Field>
+            <Field label="Project rules" hint="Given to every member">
+              <textarea className={`${input} h-28 resize-y font-mono text-xs`} placeholder="e.g. set CARGO_TARGET_DIR" value={draft.projectRules} onChange={(e) => setDraft({ ...draft, projectRules: e.target.value })} />
+            </Field>
             <button
               className="self-start rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg disabled:opacity-40"
               disabled={!isFormValid}

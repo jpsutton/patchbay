@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { AGENT_LABELS, api, errorText, usesPatchbayModels, type TeamCaps, type TeamRole, type TeamSeat, type TeamTemplate } from "../lib/ipc";
 import { useStore } from "../lib/store";
-import { input } from "./ProviderPage";
+import { Field, input } from "./ProviderPage";
 
 function SeatModelPicker({
   agent,
@@ -193,8 +193,12 @@ export function RolesEditor() {
       <div className="min-w-0 flex-1">
         {sel && (
           <div className="flex flex-col gap-2 text-xs">
-            <input className={input} placeholder="Name, e.g. Careful worker" value={draft.name} readOnly={ro} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
-            <textarea className={`${input} h-48 resize-y font-mono text-xs`} placeholder="What this role does and may not do" value={draft.instructions} readOnly={ro} onChange={(e) => setDraft({ ...draft, instructions: e.target.value })} />
+            <Field label="Role name">
+              <input className={input} placeholder="e.g. Careful worker" value={draft.name} readOnly={ro} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+            </Field>
+            <Field label="Instructions">
+              <textarea className={`${input} h-48 resize-y font-mono text-xs`} placeholder="What this role does and may not do" value={draft.instructions} readOnly={ro} onChange={(e) => setDraft({ ...draft, instructions: e.target.value })} />
+            </Field>
             <label className="flex items-center gap-2">
               <input type="checkbox" checked={draft.standing} disabled={ro} onChange={(e) => setDraft({ ...draft, standing: e.target.checked })} />
               Standing seat (stays until retired; otherwise released when its item closes)
@@ -206,15 +210,14 @@ export function RolesEditor() {
               </label>
             ))}
             <div className="text-muted">Capability changes apply at once to sessions already in this role, on their next tool call.</div>
-            <label className="flex items-center gap-2">
-              Reports to
+            <Field label="Reports to">
               <select className={input} value={draft.reportsTo ?? ""} disabled={ro} onChange={(e) => setDraft({ ...draft, reportsTo: e.target.value || null })}>
                 <option value="">Nobody</option>
                 {roles.filter((r) => r.id !== draft.id).map((r) => (
                   <option key={r.id} value={r.id}>{r.name}</option>
                 ))}
               </select>
-            </label>
+            </Field>
             <div className="flex gap-2">
               {ro ? (
                 <button className={primary} onClick={() => { setDraft({ ...draft, id: undefined, name: `Copy of ${draft.name}` }); setSel("new"); }}>Copy to edit</button>
@@ -303,7 +306,9 @@ export function TemplatesEditor() {
       <div className="min-w-0 flex-1">
         {sel && (
           <div className="flex flex-col gap-2 text-xs">
-            <input className={input} placeholder="Template name" value={draft.name} readOnly={ro} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+            <Field label="Template name">
+              <input className={input} placeholder="Template name" value={draft.name} readOnly={ro} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+            </Field>
             {draft.seats.map((s, i) => {
               const role = roles.find((r) => r.id === s.roleId);
               const isWorker = role && !role.standing;
@@ -316,78 +321,90 @@ export function TemplatesEditor() {
               const countErr = s.count < 1 ? "Count ≥ 1" : null;
               return (
               <div key={i} className="grid grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] items-start gap-1">
-                <div className="flex flex-col gap-0.5">
+                <Field label="Seat">
                   <input className={input} placeholder="Seat" value={s.seat} readOnly={ro} onChange={(e) => setSeat(i, { seat: e.target.value })} />
                   {!ro && seatErr && <span className="text-[10px] text-danger">{seatErr}</span>}
-                </div>
-                <select className={input} value={s.roleId} disabled={ro} onChange={(e) => setSeat(i, { roleId: e.target.value })}>
-                  {roles.map((r) => (
-                    <option key={r.id} value={r.id}>{r.name}</option>
-                  ))}
-                </select>
-                <select className={input} value={s.agent} disabled={ro} onChange={(e) => setSeat(i, { agent: e.target.value })}>
-                  {Object.entries(AGENT_LABELS).map(([id, label]) => (
-                    <option key={id} value={id}>{label}</option>
-                  ))}
-                </select>
-                <SeatModelPicker agent={s.agent} value={s.model ?? null} readOnly={ro} onChange={(m) => setSeat(i, { model: m })} />
-                <label className="flex items-center gap-1 whitespace-nowrap text-muted">
-                  <span>{isWorker ? "Max workers" : "Sessions"}</span>
-                  <div className="flex flex-col gap-0.5">
-                    <input
-                      className={`${input} w-14`}
-                      type="number"
-                      min={1}
-                      value={s.count}
-                      readOnly={ro}
-                      aria-label={isWorker ? "Max workers" : "Sessions"}
-                      onChange={(e) => setSeat(i, { count: Math.floor(Number(e.target.value)) })}
-                    />
-                    {!ro && countErr && <span className="text-[10px] text-danger">{countErr}</span>}
-                  </div>
-                </label>
-                <select className={input} value={s.permissionMode} disabled={ro} onChange={(e) => setSeat(i, { permissionMode: e.target.value })}>
-                  {MODES.map((m) => (
-                    <option key={m} value={m}>{m}</option>
-                  ))}
-                </select>
+                </Field>
+                <Field label="Role">
+                  <select className={input} value={s.roleId} disabled={ro} onChange={(e) => setSeat(i, { roleId: e.target.value })}>
+                    {roles.map((r) => (
+                      <option key={r.id} value={r.id}>{r.name}</option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Agent">
+                  <select className={input} value={s.agent} disabled={ro} onChange={(e) => setSeat(i, { agent: e.target.value })}>
+                    {Object.entries(AGENT_LABELS).map(([id, label]) => (
+                      <option key={id} value={id}>{label}</option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Model">
+                  <SeatModelPicker agent={s.agent} value={s.model ?? null} readOnly={ro} onChange={(m) => setSeat(i, { model: m })} />
+                </Field>
+                <Field label={isWorker ? "Max workers" : "Sessions"}>
+                  <input
+                    className={input}
+                    type="number"
+                    min={1}
+                    value={s.count}
+                    readOnly={ro}
+                    aria-label={isWorker ? "Max workers" : "Sessions"}
+                    onChange={(e) => setSeat(i, { count: Math.floor(Number(e.target.value)) })}
+                  />
+                  {!ro && countErr && <span className="text-[10px] text-danger">{countErr}</span>}
+                </Field>
+                <Field label="Permission mode">
+                  <select className={input} value={s.permissionMode} disabled={ro} onChange={(e) => setSeat(i, { permissionMode: e.target.value })}>
+                    {MODES.map((m) => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                </Field>
                 {isWorker && (
                   <div className="col-span-full flex flex-col gap-1 rounded border border-border/60 p-2">
                     <div className="text-muted">Agent and model choices the coordinator may pick from:</div>
                     {(s.choices ?? []).map((c, ci) => (
-                      <div key={ci} className="flex items-center gap-1">
-                        <select
-                          className={input}
-                          value={c.agent}
-                          disabled={ro}
-                          onChange={(e) => {
-                            const cur = s.choices ?? [];
-                            setSeat(i, { choices: cur.map((x, cj) => (cj === ci ? { ...x, agent: e.target.value } : x)) });
-                          }}
-                        >
-                          {Object.entries(AGENT_LABELS).map(([id, label]) => (
-                            <option key={id} value={id}>{label}</option>
-                          ))}
-                        </select>
-                        <SeatModelPicker
-                          agent={c.agent}
-                          value={c.model ?? null}
-                          readOnly={ro}
-                          onChange={(m) => {
-                            const cur = s.choices ?? [];
-                            setSeat(i, { choices: cur.map((x, cj) => (cj === ci ? { ...x, model: m } : x)) });
-                          }}
-                        />
-                        {!ro && (
-                          <button
-                            className="px-1 text-muted hover:text-fg"
-                            onClick={() => {
+                      <div key={ci} className="grid grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] items-end gap-1">
+                        <Field label="Agent">
+                          <select
+                            className={input}
+                            value={c.agent}
+                            disabled={ro}
+                            onChange={(e) => {
                               const cur = s.choices ?? [];
-                              setSeat(i, { choices: cur.filter((_, cj) => cj !== ci) });
+                              setSeat(i, { choices: cur.map((x, cj) => (cj === ci ? { ...x, agent: e.target.value } : x)) });
                             }}
                           >
-                            Remove
-                          </button>
+                            {Object.entries(AGENT_LABELS).map(([id, label]) => (
+                              <option key={id} value={id}>{label}</option>
+                            ))}
+                          </select>
+                        </Field>
+                        <Field label="Model">
+                          <SeatModelPicker
+                            agent={c.agent}
+                            value={c.model ?? null}
+                            readOnly={ro}
+                            onChange={(m) => {
+                              const cur = s.choices ?? [];
+                              setSeat(i, { choices: cur.map((x, cj) => (cj === ci ? { ...x, model: m } : x)) });
+                            }}
+                          />
+                        </Field>
+                        {!ro && (
+                          <div className="flex flex-col gap-1 text-xs">
+                            <span className="invisible select-none">Remove</span>
+                            <button
+                              className="self-start py-1.5 text-muted hover:text-fg"
+                              onClick={() => {
+                                const cur = s.choices ?? [];
+                                setSeat(i, { choices: cur.filter((_, cj) => cj !== ci) });
+                              }}
+                            >
+                              Remove
+                            </button>
+                          </div>
                         )}
                       </div>
                     ))}

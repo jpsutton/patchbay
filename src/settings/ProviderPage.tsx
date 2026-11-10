@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api, errorText, type AuthMode, type DiscoveredModel, type Provider, type ProviderKind } from "../lib/ipc";
 import { canSaveExtras, extraEntries, type ExtraRow, type ExtrasLoad } from "../lib/providerExtras";
 import { useStore } from "../lib/store";
@@ -31,6 +31,28 @@ const KIND_LABEL: Record<ProviderKind, string> = {
 
 export const input =
   "w-full rounded-md border border-border bg-bg px-2 py-1.5 text-sm outline-none focus:border-accent";
+
+export function Field({
+  label,
+  hint,
+  wide,
+  className,
+  children,
+}: {
+  label: string;
+  hint?: ReactNode;
+  wide?: boolean;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <label className={`flex flex-col gap-1 text-xs text-muted ${wide ? "col-span-2" : ""} ${className ?? ""}`}>
+      {label}
+      {children}
+      {hint && <span className="text-[12px] text-muted/80">{hint}</span>}
+    </label>
+  );
+}
 
 function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSaved: (p: Provider) => void }) {
   const [name, setName] = useState(provider?.name ?? "");
