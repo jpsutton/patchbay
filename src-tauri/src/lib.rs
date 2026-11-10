@@ -4154,6 +4154,9 @@ pub fn open_locked_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow:
     let (agent_messaging, message_listener) =
         agent_messaging::AgentMessagingBridge::bind(Some(mcp_log_path))?;
     let _ = state.agent_message_bridge.set(agent_messaging.clone());
+    // First one wins in a process (tests open many states); the app and daemon open exactly one.
+    let _ = patchbay_agent::set_observer(agent_messaging.supervisor_observer());
+    agent_messaging.log_app_start();
     agent_messaging.serve(message_listener, state.clone());
     if mesh.is_member() {
         api::spawn(async move { mesh.start() });
@@ -4218,6 +4221,10 @@ pub fn open_locked_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow:
 impl AppState {
     /// Stop everything this node runs: agents, terminals and the mesh.
     pub fn shutdown(&self) {
+        // First, so the children that die with the app are told apart from mid-session deaths.
+        if let Some(bridge) = self.agent_message_bridge.get() {
+            bridge.begin_shutdown();
+        }
         self.code.stop_all();
         self.terminals.close_all();
         self.mesh.stop();

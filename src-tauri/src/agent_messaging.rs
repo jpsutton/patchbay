@@ -5,7 +5,10 @@ use std::io::Write as _;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use patchbay_agent::{McpChildEvent, McpChildInfo, McpObserver};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -20,6 +23,8 @@ use std::time::Duration;
 
 use crate::{AppState, api};
 
+/// The MCP server name Patchbay registers with every agent it hosts.
+const SERVER_NAME: &str = "patchbay-agent-messaging";
 const TOOL_SEND: &str = "send_agent_message";
 const TOOL_LIST_SESSIONS: &str = "list_agent_sessions";
 const TOOL_LIST_QUEUED: &str = "list_queued_agent_messages";
@@ -220,6 +225,9 @@ pub struct AgentMessagingBridge {
     tokens: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
     /// Optional child lifecycle log path passed to spawned MCP children (pb-20261109-03).
     mcp_log_path: Option<PathBuf>,
+    /// Set when the app begins to quit: lines logged after it carry `phase=shutdown`, so a child
+    /// that dies because the app is going down is not mistaken for a mid-session death.
+    shutting_down: Arc<AtomicBool>,
 }
 
 impl AgentMessagingBridge {
@@ -236,6 +244,7 @@ impl AgentMessagingBridge {
                 addr,
                 tokens: Arc::default(),
                 mcp_log_path,
+                shutting_down: Arc::default(),
             },
             listener,
         ))
@@ -266,7 +275,7 @@ impl AgentMessagingBridge {
             env.push(json!({ "name": ENV_LOG_PATH, "value": path.to_string_lossy().into_owned() }));
         }
         Ok(json!({
-            "name": "patchbay-agent-messaging",
+            "name": SERVER_NAME,
             "command": command,
             "args": ["--agent-messaging-mcp"],
             "env": env
@@ -992,9 +1001,341 @@ pub(crate) async fn call_tool(
     Ok(json!({ "content": [{ "type": "text", "text": text }], "isError": false }))
 }
 
+/// This app process, for the log: `<pid>.<start ms>`. A log reader tells one app run from the next
+/// by it (the pid alone is reused), and a run with no `app_shutdown` line ended without one.
+pub(crate) fn app_instance() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| format!("{}.{}", std::process::id(), now_ms()))
+}
+
+/// One value for a log line: no whitespace (it separates fields), bounded.
+fn tidy(v: &str) -> String {
+    v.chars().map(|c| if c.is_whitespace() || c.is_control() { '_' } else { c }).take(64).collect()
+}
+
+/// The log event name and fields for something that happened to an agent-messaging MCP child that
+/// THIS app started, or `None` for any other server (user-configured servers are not logged).
+/// Fields are pid, session and host agent: never env, argv, tokens or message bodies.
+fn supervisor_fields(event: &McpChildEvent, phase: &'static str) -> Option<(&'static str, Vec<(&'static str, String)>)> {
+    let (info, name, extra): (&McpChildInfo, &'static str, Vec<(&'static str, String)>) = match event {
+        McpChildEvent::Exited { info, uptime_ms, code, signal, by_supervisor } => {
+            let mut extra = vec![("uptime_ms", uptime_ms.to_string())];
+            if let Some(s) = signal {
+                extra.push(("signal", s.to_string()));
+            }
+            if let Some(c) = code {
+                extra.push(("exit_code", c.to_string()));
+            }
+            extra.push(("by", if *by_supervisor { "supervisor" } else { "other" }.to_owned()));
+            (info, "child_exit", extra)
+        }
+        McpChildEvent::TransportClosed { info, reason } => (info, "transport_closed", vec![("reason", (*reason).to_owned())]),
+    };
+    if info.server != SERVER_NAME {
+        return None;
+    }
+    let mut fields = vec![
+        ("src", "supervisor".to_owned()),
+        ("host_agent", tidy(info.host_agent.as_deref().unwrap_or("unknown"))),
+        ("session", tidy(info.session.as_deref().unwrap_or("unknown"))),
+        ("pid", info.pid.to_string()),
+        ("ppid", std::process::id().to_string()),
+        ("app", app_instance().to_owned()),
+        ("phase", phase.to_owned()),
+    ];
+    fields.extend(extra);
+    Some((name, fields))
+}
+
+impl AgentMessagingBridge {
+    /// Logs what happens to the MCP children this app hosts itself (Patchbay's own agent): the wait
+    /// status, uptime and, when the connection closes, a `transport_closed` line. CLI hosts start
+    /// their own child and it logs its own start and exit. Same file, size cap and 0600 mode as the
+    /// child's lines (`mcp_log_event`).
+    pub fn supervisor_observer(&self) -> McpObserver {
+        let path = self.mcp_log_path.clone();
+        let shutting_down = self.shutting_down.clone();
+        Arc::new(move |event| {
+            let phase = if shutting_down.load(Ordering::Relaxed) { "shutdown" } else { "running" };
+            if let Some((name, fields)) = supervisor_fields(&event, phase) {
+                mcp_log_event(path.as_deref(), name, &fields);
+            }
+        })
+    }
+
+    /// `app_start`: written once when the app opens its data folder.
+    pub fn log_app_start(&self) {
+        mcp_log_event(
+            self.mcp_log_path.as_deref(),
+            "app_start",
+            &[
+                ("src", "supervisor".to_owned()),
+                ("app", app_instance().to_owned()),
+                ("pid", std::process::id().to_string()),
+                ("ppid", parent_pid()),
+                ("version", env!("CARGO_PKG_VERSION").to_owned()),
+            ],
+        );
+    }
+
+    /// `app_shutdown`: written once when the app begins to quit, before it tears its agents down.
+    /// Everything logged after it is `phase=shutdown`.
+    pub fn begin_shutdown(&self) {
+        if !self.shutting_down.swap(true, Ordering::Relaxed) {
+            mcp_log_event(
+                self.mcp_log_path.as_deref(),
+                "app_shutdown",
+                &[("src", "supervisor".to_owned()), ("app", app_instance().to_owned()), ("pid", std::process::id().to_string())],
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- supervisor-side log of the MCP children Patchbay hosts itself (pb-20261110-12) ----
+    // Everything below runs on a throwaway node in a temp dir with a stub MCP server: never a real app.
+
+    const STUB_MCP: &str = r#"
+import json, os, sys
+open(os.environ["STUB_PID_FILE"], "w").write(str(os.getpid()))
+for line in sys.stdin:
+    try:
+        m = json.loads(line)
+    except ValueError:
+        continue
+    if "id" in m and "method" in m:
+        result = {}
+        if m["method"] == "initialize":
+            result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "stub", "version": "0"}}
+        elif m["method"] == "tools/list":
+            result = {"tools": []}
+        print(json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": result}), flush=True)
+# stdin closed: keep running, so only a kill (not the closed pipe) can end this process
+import time
+time.sleep(3600)
+"#;
+
+    fn temp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("pb-supervisor-{tag}-{}", crate::db::new_id()));
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A stub stdio MCP server hosted the way Patchbay hosts its own: through `McpSet`, observed by
+    /// the bridge. The env carries a token so the tests can prove it never reaches the log.
+    async fn host_stub(dir: &Path, bridge: &AgentMessagingBridge, session: &str) -> (patchbay_agent::McpSet, i32) {
+        let python = String::from_utf8(std::process::Command::new("python3").args(["-c", "import sys;print(sys.executable)"]).output().unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        let script = dir.join("stub_mcp.py");
+        fs::write(&script, STUB_MCP).unwrap();
+        let pid_file = dir.join("stub.pid");
+        let cfg = json!([{
+            "name": SERVER_NAME,
+            "command": python,
+            "args": [script.to_string_lossy()],
+            "env": [
+                { "name": "STUB_PID_FILE", "value": pid_file.to_string_lossy() },
+                { "name": "PATCHBAY_MESSAGE_SESSION", "value": session },
+                { "name": ENV_HOST_AGENT, "value": "patchbay" },
+                { "name": "PATCHBAY_MESSAGE_TOKEN", "value": "SECRET-TOKEN-0123456789" },
+            ],
+        }]);
+        let set = patchbay_agent::McpSet::connect_observed(&cfg, Some(bridge.supervisor_observer())).await;
+        assert!(set.problems.is_empty(), "{:?}", set.problems);
+        let pid: i32 = fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+        (set, pid)
+    }
+
+    async fn wait_log(path: &Path, want: &[&str]) -> String {
+        for _ in 0..200 {
+            let text = fs::read_to_string(path).unwrap_or_default();
+            if want.iter().all(|w| text.contains(w)) {
+                return text;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("log never held {want:?}:\n{}", fs::read_to_string(path).unwrap_or_default());
+    }
+
+    /// (a) A planted SIGKILL of a hosted child gives an exit line with signal 9 AND the
+    /// transport-closed line, keyed by host agent and session, while the app keeps running.
+    /// (c) Neither line carries the token or the env. (d) The file is 0600.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_killed_hosted_child_is_logged_with_its_signal_and_the_transport_close() {
+        let dir = temp("kill");
+        let log = dir.join("logs").join("agent-messaging-mcp.log");
+        let (bridge, _listener) = AgentMessagingBridge::bind(Some(log.clone())).unwrap();
+        let (set, pid) = host_stub(&dir, &bridge, "sess-kill").await;
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let text = wait_log(&log, &["event=child_exit", "event=transport_closed"]).await;
+        eprintln!("{text}");
+        let exit = text.lines().find(|l| l.contains("event=child_exit")).unwrap();
+        for want in ["src=supervisor", "host_agent=patchbay", "session=sess-kill", "signal=9", "by=other", "phase=running", "uptime_ms="] {
+            assert!(exit.contains(want), "{want} missing from {exit}");
+        }
+        assert!(exit.contains(&format!("pid={pid} ")), "{exit}");
+        assert!(exit.contains(&format!("app={}", app_instance())), "{exit}");
+        assert!(!exit.contains("exit_code="), "a signal death has no exit code: {exit}");
+        let closed = text.lines().find(|l| l.contains("event=transport_closed")).unwrap();
+        for want in ["src=supervisor", "host_agent=patchbay", "session=sess-kill", "reason=stdout_eof", "phase=running"] {
+            assert!(closed.contains(want), "{want} missing from {closed}");
+        }
+        assert!(closed.contains(&format!("pid={pid} ")), "{closed}");
+        // (c) no secrets, no env, no argv
+        for secret in ["SECRET-TOKEN", "STUB_PID_FILE", "PATCHBAY_MESSAGE_TOKEN", "stub_mcp.py", "python"] {
+            assert!(!text.contains(secret), "{secret} leaked into the log:\n{text}");
+        }
+        // (d) same mode as the child's own lines
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(fs::metadata(&log).unwrap().permissions().mode() & 0o777, 0o600);
+        drop(set);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// (b) An app quit (`AppState::shutdown`, what the window's exit and the daemon's signal run)
+    /// writes the shutdown marker first, and every supervisor line after it says `phase=shutdown`:
+    /// no line reads as a mid-session death.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_app_quit_marks_shutdown_and_logs_no_mid_session_death() {
+        let dir = temp("quit");
+        let log = dir.join("logs").join("agent-messaging-mcp.log");
+        let (bridge, _listener) = AgentMessagingBridge::bind(Some(log.clone())).unwrap();
+        let db = Arc::new(crate::db::Db::open(&dir.join("db.sqlite")).unwrap());
+        let mesh = crate::mesh::Mesh::new(db.clone(), dir.clone(), Arc::new(crate::mesh::keys::MemKeyStore::default())).unwrap();
+        let state = AppState::new(db, dir.clone(), mesh, Arc::new(|_: &str, _: Value| {}));
+        let _ = state.agent_message_bridge.set(bridge.clone());
+        bridge.log_app_start();
+        let (set, _pid) = host_stub(&dir, &bridge, "sess-quit").await;
+        state.shutdown();
+        drop(set); // the app tearing its agent (and so its MCP connection) down
+        let text = wait_log(&log, &["event=app_shutdown", "event=child_exit", "event=transport_closed"]).await;
+        eprintln!("{text}");
+        let lines: Vec<&str> = text.lines().collect();
+        let marker = lines.iter().position(|l| l.contains("event=app_shutdown")).unwrap();
+        assert!(lines[0].contains("event=app_start") && lines[0].contains(&format!("app={}", app_instance())), "{}", lines[0]);
+        let after: Vec<&&str> = lines[marker + 1..].iter().filter(|l| l.contains("src=supervisor")).collect();
+        assert!(after.len() >= 2, "{text}");
+        for l in &after {
+            assert!(l.contains("phase=shutdown"), "a line after the shutdown marker is not marked: {l}");
+        }
+        assert!(!text.contains("phase=running"), "a line reads as a mid-session death:\n{text}");
+        let exit = lines.iter().find(|l| l.contains("event=child_exit")).unwrap();
+        assert!(exit.contains("by=supervisor"), "{exit}");
+        assert_eq!(lines.iter().filter(|l| l.contains("event=app_shutdown")).count(), 1);
+        state.shutdown(); // a second quit signal writes no second marker
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(fs::read_to_string(&log).unwrap().matches("event=app_shutdown").count(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// True once the process is gone for good: `kill(pid, 0)` still succeeds on a zombie, so this also
+    /// proves the child was reaped, not merely dead.
+    #[cfg(unix)]
+    fn process_gone(pid: i32) -> bool {
+        unsafe { libc::kill(pid, 0) == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) }
+    }
+
+    #[cfg(unix)]
+    async fn wait_gone(pid: i32) -> bool {
+        for _ in 0..100 {
+            if process_gone(pid) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    /// (e) Making the child observable does not change its lifecycle: dropping the connection still
+    /// terminates it (and reaps it), exactly as when the `Child` was held by the connection itself.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_the_hosted_connection_still_kills_and_reaps_the_child() {
+        let dir = temp("drop");
+        let log = dir.join("logs").join("agent-messaging-mcp.log");
+        let (bridge, _listener) = AgentMessagingBridge::bind(Some(log.clone())).unwrap();
+        let (set, pid) = host_stub(&dir, &bridge, "sess-drop").await;
+        assert!(!process_gone(pid), "the stub should be running");
+        drop(set);
+        assert!(wait_gone(pid).await, "pid {pid} outlived its dropped connection");
+        let text = wait_log(&log, &["event=child_exit"]).await;
+        assert!(text.contains("by=supervisor"), "{text}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// (e) And when the runtime that hosts the connection goes away (the session's agent thread ends)
+    /// the child dies with it, as `kill_on_drop` made it die before.
+    #[cfg(unix)]
+    #[test]
+    fn shutting_down_the_runtime_still_kills_the_child() {
+        let dir = temp("rt");
+        let log = dir.join("logs").join("agent-messaging-mcp.log");
+        let (bridge, _listener) = AgentMessagingBridge::bind(Some(log)).unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        let (set, pid) = rt.block_on(host_stub(&dir, &bridge, "sess-rt"));
+        assert!(!process_gone(pid));
+        drop(rt);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !process_gone(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(process_gone(pid), "pid {pid} outlived the runtime that hosted it");
+        drop(set);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn sample_exit(server: &str) -> McpChildEvent {
+        McpChildEvent::Exited {
+            info: McpChildInfo { server: server.to_owned(), pid: 7, session: Some("s".to_owned()), host_agent: Some("patchbay".to_owned()) },
+            uptime_ms: 1,
+            code: Some(0),
+            signal: None,
+            by_supervisor: false,
+        }
+    }
+
+    /// (d) The supervisor lines go through the same capped, rotating, 0600 writer as the child's.
+    #[test]
+    fn supervisor_lines_share_the_size_cap_and_mode() {
+        let dir = temp("cap");
+        let log = dir.join("agent-messaging-mcp.log");
+        let (bridge, _listener) = AgentMessagingBridge::bind(Some(log.clone())).unwrap();
+        fs::write(&log, vec![b'x'; MCP_LOG_MAX_BYTES as usize]).unwrap();
+        (bridge.supervisor_observer())(sample_exit(SERVER_NAME));
+        let mut rotated = log.as_os_str().to_owned();
+        rotated.push(".1");
+        assert!(PathBuf::from(&rotated).exists(), "the full file was not rotated");
+        let fresh = fs::read_to_string(&log).unwrap();
+        assert!(fresh.contains("event=child_exit") && fresh.len() < 1024, "{fresh}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&log).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Only the agent-messaging server is logged; values are one token each.
+    #[test]
+    fn supervisor_lines_cover_only_our_server_and_stay_one_token_per_field() {
+        assert!(supervisor_fields(&sample_exit("a-user-configured-server"), "running").is_none());
+        let event = McpChildEvent::TransportClosed {
+            info: McpChildInfo { server: SERVER_NAME.to_owned(), pid: 9, session: Some("a b\nc".to_owned()), host_agent: Some("x".repeat(200)) },
+            reason: "stdout_eof",
+        };
+        let (name, fields) = supervisor_fields(&event, "running").unwrap();
+        assert_eq!(name, "transport_closed");
+        let get = |k: &str| fields.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone()).unwrap();
+        assert_eq!(get("session"), "a_b_c");
+        assert_eq!(get("host_agent").len(), 64);
+        assert!(fields.iter().all(|(_, v)| !v.contains(char::is_whitespace)));
+    }
 
     #[test]
     fn server_definition_name_matches_acp_pattern() {
