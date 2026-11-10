@@ -7,22 +7,36 @@
 //!   speech-dispatcher on Linux). A browser on `patchbayd` must not call this: it would talk on
 //!   the server.
 //! - A speech server (`POST {base}/audio/speech`), because the API key lives in this process.
-//!   The bytes go back to whichever screen asked, and that screen plays them.
+//!   The audio streams back to whichever screen asked while the server is still making it, and
+//!   that screen plays it. Raw PCM (signed 16-bit little-endian, 24 kHz, mono) is what the page
+//!   plays as it arrives.
 
+use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
+use futures::StreamExt;
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 
 use crate::db::{Db, ProviderKind};
 use crate::providers;
 
 const SPEECH_CHAR_CAP: usize = 4096;
 const REWRITE_CHAR_CAP: usize = 12_000;
+/// A passage sent to a speech server. Audio streams back, so this only guards against a runaway
+/// request, not against a reply too big to buffer.
+const SERVER_CHAR_CAP: usize = 20_000;
+/// Audio from a speech server that is not raw PCM (a whole file the page must decode at the end).
+const BUFFERED_AUDIO_CAP: usize = 8 * 1024 * 1024;
+/// Raw PCM from one request: about 22 minutes at 24 kHz. Nothing is held in memory here.
+const STREAMED_AUDIO_CAP: usize = 64 * 1024 * 1024;
+/// How long a speech server may stay silent, before its reply or between two pieces of audio.
+const SERVER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,11 +45,35 @@ pub struct NativeVoice {
     pub name: String,
 }
 
+/// What a speech request sends to the screen that asked, in order: one `Start`, any number of
+/// `Chunk`s, then `End`. A failure is the command's error instead of an `End`.
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SpeechAudio {
-    pub mime: String,
-    pub audio_base64: String,
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum SpeechEvent {
+    /// `pcm`: the chunks are raw 24 kHz mono s16le samples to play as they arrive. Otherwise
+    /// they are pieces of a whole audio file of type `mime`.
+    Start { mime: String, pcm: bool },
+    /// The next piece of audio, base64.
+    Chunk { data: String },
+    End,
+}
+
+/// Requests still running, by the id their caller chose, so `cancel_stream` can drop one.
+static STREAMS: LazyLock<Mutex<HashMap<String, CancellationToken>>> = LazyLock::new(Default::default);
+
+/// Removes a request from `STREAMS` when it ends, however it ends.
+struct StreamGuard(String);
+
+impl Drop for StreamGuard {
+    fn drop(&mut self) {
+        STREAMS.lock().expect("speech streams lock").remove(&self.0);
+    }
+}
+
+/// Stop the request `id`: its connection to the speech server is dropped, and the server stops
+/// making audio. A cancel that arrives before the request registers still takes effect.
+pub fn cancel_stream(id: &str) {
+    STREAMS.lock().expect("speech streams lock").entry(id.to_owned()).or_default().cancel();
 }
 
 static SPEAKING: Mutex<Option<Child>> = Mutex::new(None);
@@ -267,20 +305,29 @@ fn which(bin: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Fetch one clip from an OpenAI-compatible speech endpoint. The caller plays it.
-pub async fn synthesize(
+/// Ask an OpenAI-compatible speech endpoint for raw PCM and pass the audio on piece by piece, as
+/// the server makes it. Ends early, without an error, when `cancel_stream(stream_id)` is called
+/// or when `emit` returns false (the screen is gone). Either way the connection is dropped.
+#[allow(clippy::too_many_arguments)]
+pub async fn synthesize_stream(
     db: &Db,
     provider_id: &str,
     base_url: &str,
     model: &str,
     voice: &str,
     text: &str,
-) -> Result<SpeechAudio> {
+    stream_id: &str,
+    mut emit: impl FnMut(SpeechEvent) -> bool,
+) -> Result<()> {
+    // Register first, so a cancel sent right behind the request is not lost, and so every exit
+    // below removes the entry.
+    let cancel = STREAMS.lock().expect("speech streams lock").entry(stream_id.to_owned()).or_default().clone();
+    let _guard = StreamGuard(stream_id.to_owned());
     let text = text.trim();
     if text.is_empty() {
         return Err(anyhow!("nothing to speak"));
     }
-    if text.chars().count() > SPEECH_CHAR_CAP {
+    if text.chars().count() > SERVER_CHAR_CAP {
         return Err(anyhow!("that passage is too long to send to a speech server"));
     }
     let (url_base, key) = resolve_server(db, provider_id, base_url)?;
@@ -291,23 +338,31 @@ pub async fn synthesize(
         "model": model,
         "input": text,
         "voice": voice,
-        "response_format": "mp3",
+        "response_format": "pcm",
     });
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(60)).build()?;
+    // No total timeout: a long passage streams for as long as it takes. A silent server is cut
+    // off by `SERVER_IDLE_TIMEOUT` below.
+    let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(15)).build()?;
     let mut req = client.post(&url).json(&body);
     if let Some(k) = &key {
         req = req.bearer_auth(k);
     }
-    let resp = req.send().await.with_context(|| format!("POST {url}"))?;
+    let sent = tokio::select! {
+        _ = cancel.cancelled() => return Ok(()),
+        r = tokio::time::timeout(SERVER_IDLE_TIMEOUT, req.send()) => r,
+    };
+    let resp = sent
+        .map_err(|_| anyhow!("the speech server did not answer"))?
+        .with_context(|| format!("POST {url}"))?;
     let status = resp.status();
     let mime = resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("audio/mpeg")
+        .unwrap_or("audio/pcm")
         .split(';')
         .next()
-        .unwrap_or("audio/mpeg")
+        .unwrap_or("audio/pcm")
         .trim()
         .to_owned();
     if !status.is_success() {
@@ -315,17 +370,48 @@ pub async fn synthesize(
         let err_body = truncate(&err_body, 300);
         return Err(anyhow!("the speech server returned {status}: {err_body}"));
     }
-    let bytes = resp.bytes().await.context("read speech audio")?;
-    if bytes.is_empty() {
+    // A server that ignores `response_format` sends a whole file. The page cannot play that as
+    // it arrives, so it gets the file at the end, under the old size limit.
+    let pcm = is_raw_pcm(&mime);
+    let cap = if pcm { STREAMED_AUDIO_CAP } else { BUFFERED_AUDIO_CAP };
+    if !emit(SpeechEvent::Start { mime, pcm }) {
+        return Ok(());
+    }
+    let mut stream = Box::pin(resp.bytes_stream());
+    let mut total = 0usize;
+    loop {
+        let next = tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            n = tokio::time::timeout(SERVER_IDLE_TIMEOUT, stream.next()) => n,
+        };
+        let Some(piece) = next.map_err(|_| anyhow!("the speech server stopped sending audio"))? else {
+            break;
+        };
+        let bytes = piece.context("read speech audio")?;
+        if bytes.is_empty() {
+            continue;
+        }
+        total += bytes.len();
+        if total > cap {
+            return Err(anyhow!("the speech server returned more audio than Patchbay will play"));
+        }
+        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        if !emit(SpeechEvent::Chunk { data }) {
+            return Ok(());
+        }
+    }
+    if total == 0 {
         return Err(anyhow!("the speech server returned no audio"));
     }
-    if bytes.len() > 8 * 1024 * 1024 {
-        return Err(anyhow!("the speech server returned more audio than Patchbay will play"));
-    }
-    Ok(SpeechAudio {
-        mime,
-        audio_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-    })
+    emit(SpeechEvent::End);
+    Ok(())
+}
+
+/// True when a speech server's content type means bare samples with no file header. A server
+/// that sends no type or a generic one is taken at its word that it sent the PCM we asked for.
+fn is_raw_pcm(mime: &str) -> bool {
+    let m = mime.to_ascii_lowercase();
+    m.is_empty() || m.contains("pcm") || m.contains("l16") || m == "application/octet-stream"
 }
 
 fn resolve_server(db: &Db, provider_id: &str, base_url: &str) -> Result<(String, Option<String>)> {
@@ -393,7 +479,16 @@ pub async fn rewrite_for_speech(db: &Db, model_ref: &str, text: &str) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::parse_say_voices;
+    use super::{is_raw_pcm, parse_say_voices};
+
+    #[test]
+    fn only_headerless_audio_streams_as_pcm() {
+        assert!(is_raw_pcm("audio/pcm"));
+        assert!(is_raw_pcm("audio/L16"));
+        assert!(is_raw_pcm("application/octet-stream"));
+        assert!(!is_raw_pcm("audio/mpeg"));
+        assert!(!is_raw_pcm("audio/wav"));
+    }
 
     #[test]
     fn say_voice_list_keeps_the_name_and_language() {

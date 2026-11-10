@@ -1008,10 +1008,15 @@ export const defaultPreferences: Preferences = {
   readAloudRewriteModel: "",
 };
 
-export interface SpeechAudio {
-  mime: string;
-  audioBase64: string;
-}
+/**
+ * What a speech request sends back, in order (speech.rs, `SpeechEvent`): one `start`, any number
+ * of `chunk`s, then `end`. `pcm`: the chunks are raw 24 kHz mono s16le samples. Otherwise they
+ * are pieces of one audio file of type `mime`. `data` is base64.
+ */
+export type SpeechEvent =
+  | { type: "start"; mime: string; pcm: boolean }
+  | { type: "chunk"; data: string }
+  | { type: "end" };
 
 export interface NativeVoice {
   id: string;
@@ -1084,13 +1089,27 @@ export const api = {
   listNativeVoices: () => invoke<NativeVoice[]>("list_native_voices"),
   speakNative: (text: string, voice: string, rate: string) => invoke<void>("speak_native", { text, voice, rate }),
   stopNative: () => invoke<void>("stop_native"),
-  synthesizeSpeech: (input: {
-    providerId: string;
-    baseUrl: string;
-    model: string;
-    voice: string;
-    text: string;
-  }) => invoke<SpeechAudio>("synthesize_speech", input),
+  /**
+   * Speech from a speech server, streamed to `onAudio` as the server makes it. Resolves once it
+   * has all been sent, or after `cancelSpeech(streamId)`. `streamId` names this request.
+   */
+  synthesizeSpeech: (
+    input: {
+      providerId: string;
+      baseUrl: string;
+      model: string;
+      voice: string;
+      text: string;
+      streamId: string;
+    },
+    onAudio: (e: SpeechEvent) => void,
+  ) => {
+    const ch = new Channel<SpeechEvent>();
+    ch.onmessage = onAudio;
+    return invoke<void>("synthesize_speech", { ...input, onAudio: ch });
+  },
+  /** Drop a `synthesizeSpeech` request's connection to the speech server. */
+  cancelSpeech: (streamId: string) => invoke<void>("cancel_speech", { streamId }),
   rewriteForSpeech: (modelRef: string, text: string) => invoke<string>("rewrite_for_speech", { modelRef, text }),
   getSetting: (key: string) => invoke<string | null>("get_setting", { key }),
   setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),

@@ -4,11 +4,11 @@
  * Automatic picks a voice that exists here: the Mac's `say`, Android’s native TTS, the browser’s
  * `speechSynthesis` when it lists voices, and the built-in voice on Linux (Ubuntu's
  * WebKit build has speech synthesis turned off) and anywhere else with no system voice.
- * A speech server is explicit. Its clip is fetched where the API key lives and played
- * on this screen.
+ * A speech server is explicit. Its audio is fetched where the API key lives, streams back as the
+ * server makes it, and plays on this screen while it arrives.
  */
 
-import { api, type Preferences, type SpeechAudio } from "./ipc";
+import { api, type Preferences, type SpeechEvent } from "./ipc";
 import { isAndroidApp, isDesktopApp, isRemoteApp } from "./platform";
 import { isMac } from "./shortcuts";
 import { useStore } from "./store";
@@ -31,6 +31,7 @@ const listeners = new Set<Listener>();
 let audioCtx: AudioContext | null = null;
 let htmlAudio: HTMLAudioElement | null = null;
 let audioUrl: string | null = null;
+let pcmPlayer: PcmPlayer | null = null;
 let nativeVoices: SpeechVoice[] | null = null;
 
 export function speakingNow(): string | null {
@@ -129,6 +130,10 @@ export function stopSpeech() {
     URL.revokeObjectURL(audioUrl);
     audioUrl = null;
   }
+  // Drop the connection of every speech-server request, so the server stops making audio.
+  for (const stream of [...liveStreams]) stream.cancel();
+  pcmPlayer?.stop();
+  pcmPlayer = null;
   if (isDesktopApp() || isAndroidApp()) void api.stopNative().catch(() => {});
 }
 
@@ -321,38 +326,253 @@ function speakWeb(text: string, prefs: Preferences): Promise<void> {
   });
 }
 
-async function speakServer(feed: Feed, prefs: Preferences, token: number) {
-  if (isRemoteApp()) throw new Error("the phone speaks with its own voice. A speech server is configured on a computer.");
-  const fetchClip = (chunk: string) =>
-    api.synthesizeSpeech({
-      providerId: prefs.readAloudServerProviderId,
-      baseUrl: prefs.readAloudServerUrl,
-      model: prefs.readAloudServerModel,
-      voice: prefs.readAloudServerVoice,
-      text: chunk,
-    });
-  const it = feed[Symbol.asyncIterator]();
-  // The next piece's clip, or null at the end. Called as soon as the current clip arrives.
-  const fetchNext = async (): Promise<SpeechAudio | null> => {
-    const next = await it.next();
-    return next.done ? null : fetchClip(next.value);
-  };
-  let pending: Promise<SpeechAudio | null> = fetchNext();
-  for (;;) {
-    if (token !== generation) return;
-    const clip = await pending;
-    if (token !== generation || !clip) return;
-    if (!clip.audioBase64) throw new Error("the speech server returned no audio");
-    // Ask for the next piece now, so it is made while this one plays.
-    pending = fetchNext();
-    pending.catch(() => {});
-    await playClip(clip.audioBase64, clip.mime || "audio/mpeg", token);
+/** Samples per second of a speech server's raw PCM (s16le, mono). */
+const SERVER_SAMPLE_RATE = 24000;
+/** Playback waits for this much audio before it schedules a piece, so a trickle is not a swarm of tiny nodes. */
+const PCM_MIN_BYTES = 2400;
+/** How far ahead of now a piece is scheduled when nothing is playing. */
+const PCM_LEAD_SECONDS = 0.05;
+
+/** Speech-server requests still running, so Stop can cancel them. */
+const liveStreams = new Set<SpeechStream>();
+let streamSeq = 0;
+
+function fromBase64(data: string): Uint8Array {
+  return Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+}
+
+/**
+ * One request to the speech server. Its events queue up in order as they arrive, so a request
+ * opened early (the next piece of a reply) holds its audio until playback gets to it.
+ */
+class SpeechStream {
+  readonly id = `speech-${++streamSeq}`;
+  private events: SpeechEvent[] = [];
+  private finished = false;
+  private settled = false;
+  private cancelled = false;
+  private failure: Error | null = null;
+  private wake: (() => void) | null = null;
+
+  constructor(prefs: Preferences, text: string) {
+    liveStreams.add(this);
+    api
+      .synthesizeSpeech(
+        {
+          providerId: prefs.readAloudServerProviderId,
+          baseUrl: prefs.readAloudServerUrl,
+          model: prefs.readAloudServerModel,
+          voice: prefs.readAloudServerVoice,
+          text,
+          streamId: this.id,
+        },
+        (ev) => {
+          if (this.finished) return;
+          if (ev.type === "end") this.finish();
+          else this.push(ev);
+        },
+      )
+      .then(() => {
+        // The backend sends `end` before it returns. If it never arrived, stop waiting for it soon.
+        window.setTimeout(() => this.finish(), 2000);
+      })
+      .catch((e) => {
+        this.failure = e instanceof Error ? e : new Error(String(e));
+        this.finish();
+      })
+      .finally(() => {
+        this.settled = true;
+        liveStreams.delete(this);
+      });
+  }
+
+  private push(ev: SpeechEvent) {
+    this.events.push(ev);
+    this.notify();
+  }
+
+  private finish() {
+    this.finished = true;
+    this.notify();
+  }
+
+  private notify() {
+    const wake = this.wake;
+    this.wake = null;
+    wake?.();
+  }
+
+  /** The next event, or null once the audio has all arrived. Throws the request's error after the audio sent before it. */
+  async next(): Promise<SpeechEvent | null> {
+    for (;;) {
+      const ev = this.events.shift();
+      if (ev) return ev;
+      if (this.failure) throw this.failure;
+      if (this.finished) return null;
+      await new Promise<void>((resolve) => {
+        this.wake = resolve;
+      });
+    }
+  }
+
+  /** Drop the request's connection to the speech server. */
+  cancel() {
+    if (this.cancelled) return;
+    this.cancelled = true;
+    this.events = [];
+    this.failure = null;
+    this.finish();
+    if (!this.settled) void api.cancelSpeech(this.id).catch(() => {});
   }
 }
 
-function playClip(audioBase64: string, mime: string, token: number): Promise<void> {
-  const bytes = Uint8Array.from(atob(audioBase64), (c) => c.charCodeAt(0));
-  const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+/** Plays raw s16le PCM as it arrives, one piece right after the other with no gap. */
+class PcmPlayer {
+  private ctx = context();
+  private carry = new Uint8Array(0);
+  /** When the next piece starts, in the audio context's time. */
+  private head = 0;
+  private sources = new Set<AudioBufferSourceNode>();
+  private idle: Array<() => void> = [];
+  private stopped = false;
+
+  push(bytes: Uint8Array) {
+    if (this.stopped) return;
+    const joined = new Uint8Array(this.carry.length + bytes.length);
+    joined.set(this.carry);
+    joined.set(bytes, this.carry.length);
+    this.carry = joined;
+    // A sample is two bytes and a network piece can end in the middle of one.
+    const whole = this.carry.length - (this.carry.length % 2);
+    if (whole >= PCM_MIN_BYTES) this.schedule(whole);
+  }
+
+  /** Play what is held back. Call when no more audio is coming for now. */
+  flush() {
+    if (this.stopped) return;
+    const whole = this.carry.length - (this.carry.length % 2);
+    if (whole > 0) this.schedule(whole);
+  }
+
+  private schedule(byteCount: number) {
+    const view = new DataView(this.carry.buffer, this.carry.byteOffset, byteCount);
+    const count = byteCount / 2;
+    const buffer = this.ctx.createBuffer(1, count, SERVER_SAMPLE_RATE);
+    const samples = buffer.getChannelData(0);
+    for (let i = 0; i < count; i++) samples[i] = view.getInt16(i * 2, true) / 32768;
+    this.carry = this.carry.slice(byteCount);
+    const src = this.ctx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(this.ctx.destination);
+    const at = Math.max(this.head, this.ctx.currentTime + PCM_LEAD_SECONDS);
+    this.head = at + buffer.duration;
+    this.sources.add(src);
+    src.onended = () => {
+      this.sources.delete(src);
+      this.release();
+    };
+    src.start(at);
+  }
+
+  private release() {
+    if (this.sources.size > 0) return;
+    const waiting = this.idle;
+    this.idle = [];
+    waiting.forEach((resolve) => resolve());
+  }
+
+  /** Resolves when everything scheduled has played, or at once after `stop`. */
+  drain(): Promise<void> {
+    if (this.sources.size === 0) return Promise.resolve();
+    return new Promise((resolve) => this.idle.push(resolve));
+  }
+
+  /** Silence what is playing and what is scheduled. */
+  stop() {
+    this.stopped = true;
+    this.carry = new Uint8Array(0);
+    for (const src of this.sources) {
+      src.onended = null;
+      try {
+        src.stop();
+      } catch {
+        /* already ended */
+      }
+    }
+    this.sources.clear();
+    this.release();
+  }
+}
+
+async function speakServer(feed: Feed, prefs: Preferences, token: number) {
+  if (isRemoteApp()) throw new Error("the phone speaks with its own voice. A speech server is configured on a computer.");
+  primeAudio();
+  const player = new PcmPlayer();
+  pcmPlayer = player;
+  const it = feed[Symbol.asyncIterator]();
+  // The next piece's request, or null at the end.
+  const open = async (): Promise<SpeechStream | null> => {
+    const next = await it.next();
+    return next.done ? null : new SpeechStream(prefs, next.value);
+  };
+  let pending: Promise<SpeechStream | null> = open();
+  let current: SpeechStream | null = null;
+  try {
+    for (;;) {
+      if (token !== generation) return;
+      current = await pending;
+      if (token !== generation) return;
+      if (!current) {
+        // Every piece is requested and handed to the player. The reply ends when the last sound does.
+        await player.drain();
+        return;
+      }
+      await playStream(current, player, token, () => {
+        // All of this piece's audio is here. Ask for the next piece now, so it is made while this one plays.
+        pending = open();
+        pending.catch(() => {});
+      });
+    }
+  } finally {
+    // An error or a Stop leaves no request running behind it.
+    current?.cancel();
+    void pending.then((s) => s?.cancel(), () => {});
+    if (pcmPlayer === player) pcmPlayer = null;
+  }
+}
+
+/**
+ * Play one request's audio as it arrives. `received` is called once all of it has arrived,
+ * which for PCM is while the end of it is still playing.
+ */
+async function playStream(stream: SpeechStream, player: PcmPlayer, token: number, received: () => void) {
+  let pcm = true;
+  let mime = "audio/mpeg";
+  const parts: Uint8Array[] = [];
+  for (let ev = await stream.next(); ev; ev = await stream.next()) {
+    if (token !== generation) return;
+    if (ev.type === "start") {
+      pcm = ev.pcm;
+      mime = ev.mime;
+    } else if (ev.type === "chunk") {
+      const bytes = fromBase64(ev.data);
+      if (pcm) player.push(bytes);
+      else parts.push(bytes);
+    }
+  }
+  if (token !== generation) return;
+  player.flush();
+  received();
+  // PCM is already scheduled. It plays out while the next request runs.
+  if (pcm) return;
+  // A server that ignored the PCM request sent a whole file. Play it once it is all here.
+  if (parts.length === 0) throw new Error("the speech server returned no audio");
+  await player.drain();
+  await playFile(parts, mime, token);
+}
+
+function playFile(parts: Uint8Array[], mime: string, token: number): Promise<void> {
+  const url = URL.createObjectURL(new Blob(parts as BlobPart[], { type: mime }));
   audioUrl = url;
   const audio = new Audio(url);
   htmlAudio = audio;

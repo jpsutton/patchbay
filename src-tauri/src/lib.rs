@@ -381,7 +381,10 @@ async fn get_preferences(state: &AppState) -> CmdResult<prefs::Preferences> {
     Ok(prefs::load(&state.db))
 }
 
-/// One clip from a speech server. The window or browser plays the bytes; this process holds the key.
+/// Speech from a speech server, streamed to the screen that asked as the server makes it (see
+/// `speech::SpeechEvent`). The screen plays it; this process holds the key. Returns when the
+/// audio has all been sent or `cancel_speech(stream_id)` ended it.
+#[allow(clippy::too_many_arguments)]
 async fn synthesize_speech(
     state: &AppState,
     provider_id: String,
@@ -389,8 +392,19 @@ async fn synthesize_speech(
     model: String,
     voice: String,
     text: String,
-) -> CmdResult<speech::SpeechAudio> {
-    Ok(speech::synthesize(&state.db, &provider_id, &base_url, &model, &voice, &text).await?)
+    stream_id: String,
+    on_audio: Chan<speech::SpeechEvent>,
+) -> CmdResult<()> {
+    Ok(speech::synthesize_stream(&state.db, &provider_id, &base_url, &model, &voice, &text, &stream_id, |ev| {
+        on_audio.send(ev)
+    })
+    .await?)
+}
+
+/// Stop a `synthesize_speech` request: its connection to the speech server is dropped.
+async fn cancel_speech(_state: &AppState, stream_id: String) -> CmdResult<()> {
+    speech::cancel_stream(&stream_id);
+    Ok(())
 }
 
 /// Part of a reply, rewritten by the user's chosen model so it reads well aloud.
