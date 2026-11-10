@@ -1235,7 +1235,7 @@ dependencies = [
 
 [[package]]
 name = "darling"
-version = "0.23.0"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "25ae13da2f202d56bd7f91c25fba009e7717a1e4a1cc98a76d844b65ae912e9d"
 dependencies = [
@@ -1245,7 +1245,7 @@ dependencies = [
 
 [[package]]
 name = "darling_core"
-version = "0.23.0"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9865a50f7c335f53564bb694ef660825eb8610e0a53d3e11bf1b0d3df31e03b0"
 dependencies = [
@@ -1258,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "darling_macro"
-version = "0.23.0"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac3984ec7bd6cfa798e62b4a642426a5be0e68f9401cfc2a01e3fa9ea2fcdb8d"
 dependencies = [
@@ -1867,7 +1867,7 @@ dependencies = [
 
 [[package]]
 name = "fontdb"
-version = "0.23.0"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "457e789b3d1202543297a350643cf459f836cade38934e7a4cf6a39e7cde2905"
 dependencies = [
@@ -4083,7 +4083,7 @@ checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "patchbay"
-version = "0.23.0"
+version = "0.23.1"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4142,7 +4142,7 @@ dependencies = [
 
 [[package]]
 name = "patchbay-agent"
-version = "0.23.0"
+version = "0.23.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4166,7 +4166,7 @@ dependencies = [
 
 [[package]]
 name = "patchbay-llm"
-version = "0.23.0"
+version = "0.23.1"
 dependencies = [
  "futures",
  "reqwest 0.12.24",
@@ -4180,7 +4180,7 @@ dependencies = [
 
 [[package]]
 name = "patchbay-mesh"
-version = "0.23.0"
+version = "0.23.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
