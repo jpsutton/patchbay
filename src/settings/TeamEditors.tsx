@@ -110,7 +110,7 @@ function SeatModelPicker({
         onChange={(e) => onChange(e.target.value || null)}
       />
       {!readOnly && (
-        <span className="truncate text-[10px] text-muted">
+        <span className="text-[10px] leading-tight text-muted">
           models load after the agent's first session
         </span>
       )}
@@ -313,7 +313,7 @@ export function TemplatesEditor() {
                   : null;
               const countErr = s.count < 1 ? "Count ≥ 1" : null;
               return (
-              <div key={i} className="grid grid-cols-[1fr_1fr_1fr_1fr_auto_auto] items-center gap-1">
+              <div key={i} className="grid grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] items-start gap-1">
                 <div className="flex flex-col gap-0.5">
                   <input className={input} placeholder="Seat" value={s.seat} readOnly={ro} onChange={(e) => setSeat(i, { seat: e.target.value })} />
                   {!ro && seatErr && <span className="text-[10px] text-danger">{seatErr}</span>}
@@ -350,7 +350,7 @@ export function TemplatesEditor() {
                   ))}
                 </select>
                 {isWorker && (
-                  <div className="col-span-6 flex flex-col gap-1 rounded border border-border/60 p-2">
+                  <div className="col-span-full flex flex-col gap-1 rounded border border-border/60 p-2">
                     <div className="text-muted">Agent and model choices the coordinator may pick from:</div>
                     {(s.choices ?? []).map((c, ci) => (
                       <div key={ci} className="flex items-center gap-1">
@@ -403,7 +403,7 @@ export function TemplatesEditor() {
                   </div>
                 )}
                 {(s.gaps?.length ?? 0) > 0 && (
-                  <label className="col-span-6 flex items-start gap-1.5 rounded border border-border p-1.5">
+                  <label className="col-span-full flex items-start gap-1.5 rounded border border-border p-1.5">
                     <input type="checkbox" className="mt-0.5" checked={!!s.allowUnasked} disabled={ro} onChange={(e) => setSeat(i, { allowUnasked: e.target.checked })} />
                     <span>
                       Let dispatched workers use agents that can act without asking. Without this tick the coordinator can't start them. It covers this seat's agent, model, choices and mode as they are now.
@@ -414,11 +414,11 @@ export function TemplatesEditor() {
                   </label>
                 )}
                 {(s.prompts?.length ?? 0) > 0 && (
-                  <div className="col-span-6 text-muted">
+                  <div className="col-span-full text-muted">
                     {s.prompts!.map((a) => (AGENT_LABELS as Record<string, string>)[a] ?? a).join(", ")}: team tools still wait for your approval on every call (no automatic allow for this agent), so it can't run unattended.
                   </div>
                 )}
-                {!ro && <button className="col-span-6 justify-self-end text-muted hover:text-fg" onClick={() => setDraft({ ...draft, seats: draft.seats.filter((_, j) => j !== i) })}>Remove seat</button>}
+                {!ro && <button className="col-span-full justify-self-end text-muted hover:text-fg" onClick={() => setDraft({ ...draft, seats: draft.seats.filter((_, j) => j !== i) })}>Remove seat</button>}
               </div>
             );
             })}
