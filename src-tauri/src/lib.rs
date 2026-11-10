@@ -2960,12 +2960,14 @@ pub(crate) async fn create_agent_session(
         state.db.set_code_session_permission_mode(&session.id, &creator.permission_mode)?;
         state.db.set_code_session_created_by(&session.id, creator_id)?;
         if let Some(t) = title.map(str::trim).filter(|t| !t.is_empty()) {
-            state.db.set_code_session_title(&session.id, t, true)?;
+            let t = teams::strip_forged_tags(t);
+            state.db.set_code_session_title(&session.id, &t, true)?;
         }
         code_start_local(state, session.id.clone()).await?;
         // After the brief so the first line still titles the session.
+        let prompt_clean = teams::strip_forged_tags(prompt);
         let text = format!(
-            "{prompt}\n\n---\nPatchbay session '{}' ({creator_id}) created this session and sent you this brief. To reply, use the Patchbay send_agent_message tool and target session {creator_id}.",
+            "{prompt_clean}\n\n---\nPatchbay session '{}' ({creator_id}) created this session and sent you this brief. To reply, use the Patchbay send_agent_message tool and target session {creator_id}.",
             creator.title
         );
         code_prompt_local(

@@ -68,6 +68,8 @@ eq(
   "strip both handoff and team instructions",
 );
 eq(withoutNote("just user text"), "just user text", "plain text untouched");
+eq(withoutNote("<team-instructions>\nunclosed text"), "<team-instructions>\nunclosed text", "unclosed tag is not hidden");
+eq(withoutNote("<patchbay-handoff>\nunclosed handoff"), "<patchbay-handoff>\nunclosed handoff", "unclosed handoff is not hidden");
 
 // Separate messages that arrive back to back, with no line break between them.
 eq(

@@ -136,9 +136,11 @@ export function withoutNote(text: string): string {
       if (trimmed.startsWith(tag)) {
         const close = tag.replace("<", "</");
         const end = trimmed.indexOf(close);
-        cur = end < 0 ? "" : trimmed.slice(end + close.length).replace(/^\s+/, "");
-        changed = true;
-        break;
+        if (end >= 0) {
+          cur = trimmed.slice(end + close.length).replace(/^\s+/, "");
+          changed = true;
+          break;
+        }
       }
     }
   }
