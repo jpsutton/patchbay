@@ -454,6 +454,7 @@ async fn start(state: &AppState, p: &Plan) -> Result<Value> {
     let tdb = TeamsDb::open(&state.data_dir)?;
     tdb.set_item(&p.team.id, &p.item.id, Some(&p.desk), &json!({ "status": "dispatched", "assignee": worker }))?;
     changed(state, &tdb, &p.team.id, &format!("{} dispatched to {} ({} {})", p.item.id, p.role_name, p.agent, p.model.as_deref().unwrap_or("")));
+    (state.emit)("mesh://changed", serde_json::json!({ "tables": ["code_sessions"] }));
     Ok(json!({
         "sessionId": worker,
         "agent": p.agent,
