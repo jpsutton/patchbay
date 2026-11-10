@@ -5,6 +5,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
+use crate::diag;
 use crate::sse::Sse;
 use crate::types::*;
 use crate::wire;
@@ -210,7 +211,7 @@ impl Client {
                     cancelled: false,
                 }),
                 Ok(r) => r.map_err(|e| Error {
-                    message: format!("request failed: {e}"),
+                    message: format!("request failed: {}", diag::chain(&e)),
                     status: None,
                     retryable: e.is_connect() || e.is_timeout() || e.is_request(),
                     cancelled: false,
@@ -240,6 +241,7 @@ impl Client {
         let plan = PlanUsage::from_headers(|name| resp.headers().get(name).and_then(|v| v.to_str().ok()));
         let mut parser = wire::parser(cfg);
         let mut sse = Sse::default();
+        let mut watch = diag::Stream::new(url, &resp);
         let mut stream = resp.bytes_stream();
         let mut events = Vec::new();
         loop {
@@ -247,7 +249,7 @@ impl Client {
                 _ = cancel.cancelled() => return Err(Error::cancelled()),
                 c = tokio::time::timeout(cfg.idle_timeout, stream.next()) => match c {
                     Err(_) => return Err(Error {
-                        message: format!("no data for {}s", cfg.idle_timeout.as_secs()),
+                        message: watch.failure(&format!("no data for {}s", cfg.idle_timeout.as_secs()), &sse.pending()),
                         status: None,
                         retryable: true,
                         cancelled: false,
@@ -256,10 +258,13 @@ impl Client {
                 },
             };
             let (sse_events, ended) = match chunk {
-                Some(Ok(bytes)) => (sse.push(&bytes), false),
+                Some(Ok(bytes)) => {
+                    watch.chunk(&bytes);
+                    (sse.push(&bytes), false)
+                }
                 Some(Err(e)) => {
                     return Err(Error {
-                        message: format!("stream error: {e}"),
+                        message: watch.failure(&format!("stream error: {}", diag::chain(&e)), &sse.pending()),
                         status: None,
                         retryable: true,
                         cancelled: false,
@@ -271,7 +276,10 @@ impl Client {
                 if ev.data.trim() == "[DONE]" {
                     continue;
                 }
-                parser.event(ev.name.as_deref(), &ev.data, &mut events)?;
+                if let Err(e) = parser.event(ev.name.as_deref(), &ev.data, &mut events) {
+                    watch.keep(&e.message);
+                    return Err(e);
+                }
                 for e in events.drain(..) {
                     *emitted = true;
                     on_event(e);
@@ -281,7 +289,13 @@ impl Client {
                 break;
             }
         }
-        let mut response = parser.finish()?;
+        let mut response = match parser.finish() {
+            Ok(r) => r,
+            Err(e) => {
+                watch.keep(&e.message);
+                return Err(e);
+            }
+        };
         response.plan = plan;
         for part in &response.message.parts {
             if let Part::ToolCall(c) = part {

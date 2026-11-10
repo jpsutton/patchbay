@@ -73,6 +73,12 @@ To try the UI alone in a browser, run `pnpm dev` and open http://localhost:1420.
 
 The mesh's end-to-end tests run real nodes over WebSocket on localhost: `cargo test --lib mesh`.
 
+## Debugging a reply stream that breaks
+
+When a provider's stream ends in an error (for example `stream error: error decoding response body`), the error message now carries the whole cause chain, the HTTP version, the `content-encoding` and `transfer-encoding` headers, how many chunks and bytes arrived and how long that took, and the start of the event it was in the middle of. The same text goes to the log at `warn` level, so it shows up in the session's `.jsonl` (`error` field) and on stderr.
+
+To see the raw bytes too, start Patchbay with `PATCHBAY_LLM_DEBUG=1`. Every reply that fails (a broken stream, an idle timeout, a reply the parser rejects) keeps its response headers and raw body in `<temp dir>/patchbay-llm-debug/` (`/tmp/patchbay-llm-debug/` on Linux), and the error message names the file. Set the variable to a folder path to use that folder instead. A reply that succeeds or is cancelled leaves no file. The files contain the model's output and are readable by their owner only, so delete them when you are done. `0`, `false`, `off` or an empty value turn the capture off.
+
 ## Layout
 
 ```
