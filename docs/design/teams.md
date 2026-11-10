@@ -112,6 +112,10 @@ apply to workers: the folder or inside it) and adds:
   folder whose `LEDGER.md` or `ROSTER.md` lacks the generated header, so a team never overwrites
   a hand-run Hub desk with the same slug.
 
+The template editor shows, for a seat whose agents can act without asking, what each does unasked
+(`ApprovalSetup.gaps`) beside an `allowUnasked` tick, and a line for agents whose team tools still
+prompt (OpenCode). Capability edits to a role apply to live members on their next tool call.
+
 A session fills at most one seat across all teams. Seat counts (standing `count`, worker `pool`)
 are enforced on every attach, by hand or by dispatch.
 

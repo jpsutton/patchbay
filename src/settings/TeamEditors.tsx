@@ -63,6 +63,7 @@ export function RolesEditor() {
                 {c.label}
               </label>
             ))}
+            <div className="text-muted">Capability changes apply at once to sessions already in this role, on their next tool call.</div>
             <label className="flex items-center gap-2">
               Reports to
               <select className={input} value={draft.reportsTo ?? ""} disabled={ro} onChange={(e) => setDraft({ ...draft, reportsTo: e.target.value || null })}>
@@ -117,7 +118,12 @@ export function TemplatesEditor() {
     if (current) setDraft({ id: current.id, name: current.name, seats: current.seats, routing: current.routing });
   }, [current]);
   const ro = !!current && current.id.startsWith("builtin-");
-  const setSeat = (i: number, patch: Partial<TeamSeat>) => setDraft({ ...draft, seats: draft.seats.map((s, j) => (j === i ? { ...s, ...patch } : s)) });
+  // Changing what the user acknowledged (agent, model or mode) takes the tick back.
+  const setSeat = (i: number, patch: Partial<TeamSeat>) =>
+    setDraft({
+      ...draft,
+      seats: draft.seats.map((s, j) => (j === i ? { ...s, ...("agent" in patch || "model" in patch || "permissionMode" in patch ? { allowUnasked: false } : {}), ...patch } : s)),
+    });
 
   return (
     <div className="flex gap-4">
@@ -156,6 +162,22 @@ export function TemplatesEditor() {
                     <option key={m} value={m}>{m}</option>
                   ))}
                 </select>
+                {(s.gaps?.length ?? 0) > 0 && (
+                  <label className="col-span-6 flex items-start gap-1.5 rounded border border-border p-1.5">
+                    <input type="checkbox" className="mt-0.5" checked={!!s.allowUnasked} disabled={ro} onChange={(e) => setSeat(i, { allowUnasked: e.target.checked })} />
+                    <span>
+                      Let dispatched workers use agents that can act without asking. Without this tick the coordinator can't start them. It covers this seat's agent, model, choices and mode as they are now.
+                      {s.gaps!.map((g) => (
+                        <span key={g.agent} className="block text-muted">{(AGENT_LABELS as Record<string, string>)[g.agent] ?? g.agent}: {g.gaps.join(" ")}</span>
+                      ))}
+                    </span>
+                  </label>
+                )}
+                {(s.prompts?.length ?? 0) > 0 && (
+                  <div className="col-span-6 text-muted">
+                    {s.prompts!.map((a) => (AGENT_LABELS as Record<string, string>)[a] ?? a).join(", ")}: team tools still wait for your approval on every call (no automatic allow for this agent), so it can't run unattended.
+                  </div>
+                )}
                 {!ro && <button className="col-span-6 justify-self-end text-muted hover:text-fg" onClick={() => setDraft({ ...draft, seats: draft.seats.filter((_, j) => j !== i) })}>Remove seat</button>}
               </div>
             ))}

@@ -363,6 +363,12 @@ export interface TeamRole { id: string; name: string; standing: boolean; instruc
 export interface TeamSeat {
   seat: string; roleId: string; agent: string; model: string | null; permissionMode: string; count: number;
   choices?: { agent: string; model: string | null }[];
+  /** The user's acknowledgement that workers may run agents that act without asking; lapses when the seat's agent, model, choices or mode change. */
+  allowUnasked?: boolean;
+  /** Read-only, from the backend: what each agent in the seat does without asking. */
+  gaps?: { agent: string; gaps: string[] }[];
+  /** Read-only, from the backend: agents in the seat whose team-tool calls still wait on a prompt. */
+  prompts?: string[];
 }
 export interface TeamTemplate { id: string; name: string; seats: TeamSeat[]; routing: { class: string; goesTo: string; examples: string }[] }
 export interface Team {

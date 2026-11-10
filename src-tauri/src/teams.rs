@@ -11,7 +11,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-use crate::code::agents::AgentKind;
+use crate::code::agents::{AgentKind, ApprovalSetup};
 use crate::db::{Db, new_id, now_ms};
 use crate::{AppState, CmdError, CmdResult, session_activity};
 
@@ -129,6 +129,18 @@ pub struct Seat {
     pub allow_unasked: bool,
     #[serde(default)]
     pub unasked_ack: Option<Ack>,
+    /// For the editor, filled on read: what each agent in the seat does without asking.
+    #[serde(default, skip_deserializing)]
+    pub gaps: Vec<AgentGaps>,
+    /// For the editor, filled on read: agents in the seat whose team-tool calls still wait on a prompt.
+    #[serde(default, skip_deserializing)]
+    pub prompts: Vec<String>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct AgentGaps {
+    pub agent: String,
+    pub gaps: Vec<String>,
 }
 
 /// What the user saw when they acknowledged a seat; any change to it lapses the acknowledgement.
@@ -144,6 +156,23 @@ pub struct Ack {
 impl Seat {
     fn snapshot(&self) -> Ack {
         Ack { agent: self.agent.clone(), model: self.model.clone(), choices: self.choices.clone(), permission_mode: self.permission_mode.clone() }
+    }
+
+    fn agents(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.agent.as_str()).chain(self.choices.iter().map(|c| c.agent.as_str()))
+    }
+
+    fn fill_editor_notes(&mut self) {
+        let mut seen = std::collections::HashSet::new();
+        let agents: Vec<String> = self.agents().filter(|a| seen.insert(a.to_string())).map(str::to_owned).collect();
+        self.gaps = agents
+            .iter()
+            .filter_map(|a| {
+                let gaps = ApprovalSetup::for_agent(AgentKind::parse(a)?).gaps;
+                (!gaps.is_empty()).then(|| AgentGaps { agent: a.clone(), gaps: gaps.iter().map(|g| g.to_string()).collect() })
+            })
+            .collect();
+        self.prompts = agents.into_iter().filter(|a| !allow::has_rule(a)).collect();
     }
 
     /// Whether the stored acknowledgement still covers this seat.
@@ -251,6 +280,8 @@ fn triage_template() -> Template {
         choices,
         allow_unasked: false,
         unasked_ack: None,
+        gaps: vec![],
+        prompts: vec![],
     };
     let choice = |agent: &str, model: Option<&str>| Choice { agent: agent.into(), model: model.map(Into::into) };
     let route = |class: &str, to: &str, ex: &str| Route { class: class.into(), goes_to: to.into(), examples: ex.into() };
@@ -346,6 +377,7 @@ impl TeamsDb {
             for s in &mut seats {
                 // Built-ins never carry an acknowledgement, whatever the file says.
                 s.allow_unasked = !id.starts_with("builtin-") && s.acknowledged();
+                s.fill_editor_notes();
             }
             Ok(Template { id, name, seats, routing: serde_json::from_str(&routing)?, updated_at })
         })
@@ -1125,7 +1157,7 @@ mod tests {
     }
 
     fn worker_seat(role: &str, agent: &str) -> Seat {
-        Seat { seat: "workers".into(), role_id: role.into(), agent: agent.into(), model: None, permission_mode: "default".into(), count: 2, choices: vec![], allow_unasked: false, unasked_ack: None }
+        Seat { seat: "workers".into(), role_id: role.into(), agent: agent.into(), model: None, permission_mode: "default".into(), count: 2, choices: vec![], allow_unasked: false, unasked_ack: None, gaps: vec![], prompts: vec![] }
     }
 
     #[test]

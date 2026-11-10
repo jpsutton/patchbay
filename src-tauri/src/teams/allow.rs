@@ -19,6 +19,11 @@ use crate::code::permissions::allow_option;
 
 const SERVER: &str = "patchbay-agent-messaging";
 
+/// Agents whose title form is known (see the module note); the others still prompt.
+pub fn has_rule(agent: &str) -> bool {
+    matches!(agent, "claude-code" | "codex" | "cursor" | "antigravity" | "patchbay")
+}
+
 /// Tools a member may call without asking. Never `create_agent_session` or `share_artifact`.
 fn allowed_tools() -> impl Iterator<Item = &'static str> {
     std::iter::once("send_agent_message").chain(super::items::TOOLS.iter().copied())
