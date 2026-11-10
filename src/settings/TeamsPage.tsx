@@ -244,7 +244,7 @@ function TeamsPanel() {
                             title={isBusy ? "Session is mid-turn" : undefined}
                             onClick={async () => {
                               try {
-                                const ran = await restartTeamMember(detail.team.id, m.member.sessionId, role);
+                                const ran = await restartTeamMember(m.member.sessionId, role, detail.team.id);
                                 if (ran) await refresh();
                               } catch (e) {
                                 fail(e);

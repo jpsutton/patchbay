@@ -668,17 +668,6 @@ export function CodeSidebar() {
 
   /** What the right-click menu on a folder or group header offers. */
   const menuActions = (key: string): ItemAction[] => {
-    const session = sessions.find((s) => s.id === key);
-    if (session) {
-      const st = code[session.id];
-      return sessionActions(session, {
-        rename: () => {},
-        desktop: true,
-        running: !!st && (st.status === "ready" || st.status === "starting"),
-        local: !remoteHost(session, mesh),
-        teamRole: teamRoles[session.id],
-      });
-    }
     const fold: ItemAction[] = [
       { label: "Collapse all", onSelect: () => setAllCollapsed(true) },
       { label: "Expand all", onSelect: () => setAllCollapsed(false) },
