@@ -609,6 +609,11 @@ mod tests {
         assert_eq!(account_key(&l), "grok:personal:user-1");
         assert!(!is_path_account_key("grok:team-1:user-1"));
         assert!(is_path_account_key("/home/x/.grok"));
+        // Both seat forms pass the mesh sender gate; a home-path fallback does not.
+        assert!(crate::is_portable_plan_account("grok:team-1:user-1"));
+        assert!(crate::is_portable_plan_account(&account_key(&parse_login(&login_root(entry("a", "r", 3_600_000)), "t").unwrap())));
+        assert!(crate::is_portable_plan_account("grok:personal:user-1"));
+        assert!(!crate::is_portable_plan_account("/home/x/.grok"));
     }
 
     #[test]

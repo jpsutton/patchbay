@@ -599,6 +599,27 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Every account-id form `identity` can produce without running `cursor-agent` passes the sender gate
+    /// (the `userId` form comes from `cursor-agent status` and is covered by the id table in the mesh
+    /// tests): JWT `sub`, JWT email, the email hint, and the last-resort token fingerprint.
+    #[test]
+    fn every_identity_form_passes_the_sender_gate() {
+        use base64::Engine as _;
+        let gone = Path::new("/nonexistent/cursor-agent");
+        let jwt = |claims: &str| format!("h.{}.s", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims));
+        let forms = [
+            identity(Some(gone), &jwt(r#"{"sub":"user_01HXYZ","email":"a@b.c"}"#), None).0,
+            identity(Some(gone), &jwt(r#"{"email":"me@example.com"}"#), None).0,
+            identity(Some(gone), "opaque", Some("hint@example.com".into())).0,
+            identity(Some(gone), "crsr_0123456789abcdefghij", None).0,
+        ];
+        assert_eq!(forms[0], "user_01HXYZ");
+        assert_eq!(forms[3], "token:crsr_0123456789a", "a truncated 16-character prefix");
+        for id in forms {
+            assert!(crate::is_portable_provider_account_id(&id), "{id:?} must pass the gate");
+        }
+    }
+
     fn sample(auto: f64, api: f64, total: f64, resets: i64) -> CursorPlanLimits {
         CursorPlanLimits {
             account_id: "42".into(),

@@ -675,6 +675,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// The key `account` produces from a real Claude Code profile (UUIDs) passes the sender gate.
+    #[test]
+    fn a_real_claude_account_key_passes_the_sender_gate() {
+        let _env = ENV_LOCK.blocking_lock();
+        let dir = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let profile = serde_json::json!({ "oauthAccount": {
+            "accountUuid": "d6f72690-3451-4e35-afa6-d653c2ce62ad",
+            "organizationUuid": "25c4ff7e-72e8-4c05-b845-c761306a53cc"
+        }});
+        std::fs::write(dir.join(".claude.json"), profile.to_string()).unwrap();
+        let key = account(&dir).0;
+        assert_eq!(key, "d6f72690-3451-4e35-afa6-d653c2ce62ad:25c4ff7e-72e8-4c05-b845-c761306a53cc");
+        assert!(crate::is_portable_plan_account(&key));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn account_comes_from_claude_json() {
         let _env = ENV_LOCK.blocking_lock();

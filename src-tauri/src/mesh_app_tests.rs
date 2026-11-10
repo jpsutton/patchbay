@@ -1286,19 +1286,280 @@ async fn plan_limits_reach_every_member() {
     );
 }
 
-/// Senders never broadcast an unidentified account: empty/blank (read as "untagged" by receivers)
-/// and machine-local path keys stay local; portable ids are shared.
+/// Account keys that may leave this machine: Claude's `<accountUuid>:<organizationUuid>` and Grok's
+/// `grok:<team or personal>:<user>`.
+const PORTABLE_PLAN_KEYS: [&str; 8] = [
+    "u1:o1",
+    "u2:o2",
+    "u-mesh-def:o-mesh-def",
+    "d6f72690-3451-4e35-afa6-d653c2ce62ad:25c4ff7e-72e8-4c05-b845-c761306a53cc",
+    "grok:team-1:user-1",
+    "grok:personal:user-1",
+    "grok:personal:auth0|abc",
+    "grok:team_9:u.s@x+y=z",
+];
+
+/// Everything else stays on this machine: blank keys, home paths in every spelling (a UNC path
+/// would leak a host name) and shapes that are merely not ids.
+const NON_PORTABLE_PLAN_KEYS: [&str; 41] = [
+    "",
+    " ",
+    "   ",
+    "\t",
+    "\n",
+    "/home/molly/.claude",
+    "/Users/u/.claude/",
+    "~/foo/.claude",
+    "~",
+    r"~\.claude",
+    r"C:\Users\u\.claude",
+    "C:/Users/u/.claude",
+    "C:",
+    r"c:\x",
+    r"\\HOST\share\.claude",
+    r"\\?\C:\x",
+    "//host/share",
+    ".claude",
+    "./x",
+    "default",
+    "sk-ant-api03-abc",
+    "user@example.com",
+    "u1",
+    "u1:o1:x",
+    "grok",
+    "grok:",
+    "grok:team",
+    "grok::user",
+    "grok:team:",
+    ":o1",
+    "u1:",
+    "u1:o1 ",
+    " u1:o1",
+    "u1:o1\n",
+    "u1:o 1",
+    "ü:o1",
+    "u1:o/1",
+    "u1:o1/",
+    "a/b:c",
+    "grok:team:user:extra",
+    "grok:te/am:user",
+];
+
+/// Only portable identities pass the sender gate; every other shape is withheld. Permanent table.
 #[test]
-fn senders_share_only_identified_plan_reports() {
+fn only_portable_plan_accounts_pass_the_sender_gate() {
     let limits = code::plan_limits::PlanLimits::default();
     let share = |a: &str| crate::shareable_plan_report(a, &Some("N".into()), &limits);
-    assert!(share("").is_none());
-    assert!(share("   ").is_none());
-    assert!(share("/home/molly/.claude").is_none());
-    assert!(share("~/foo/.claude").is_none());
-    let ok = share("u1:o1").expect("a portable account is shared");
-    assert_eq!(ok["account"], "u1:o1");
-    assert_eq!(ok["name"], "N");
+    for key in PORTABLE_PLAN_KEYS {
+        let ok = share(key).unwrap_or_else(|| panic!("{key:?} must be shared"));
+        assert_eq!(ok["account"], key);
+        assert_eq!(ok["name"], "N");
+    }
+    for key in NON_PORTABLE_PLAN_KEYS {
+        assert!(share(key).is_none(), "{key:?} must be withheld");
+    }
+}
+
+/// A withheld key is logged once (its length, never the key), not silently and not per report.
+#[test]
+fn a_withheld_plan_key_is_logged_once() {
+    let limits = code::plan_limits::PlanLimits::default();
+    let key = "/".repeat(91);
+    for _ in 0..3 {
+        assert!(crate::outbound_plan_report(&key, &None, &limits).is_none());
+    }
+    let n = crate::WITHHELD_PLAN_LOGS.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|l| **l == 91).count();
+    assert_eq!(n, 1);
+}
+
+/// Nothing legitimate changes on the wire: for every portable key the payload the gate lets out is
+/// byte-for-byte the pre-gate shape (`{account, name, limits}` for plan reports, `{accountId, limits}`
+/// for the two provider events).
+#[test]
+fn legitimate_payloads_are_identical_to_the_pre_gate_shape() {
+    use code::plan_limits::{PlanLimits, Window, now};
+    let limits = PlanLimits { five_hour: Some(Window { utilization: 0.5, resets_at: now() + 3600 }), observed_at: now(), ..Default::default() };
+    for key in PORTABLE_PLAN_KEYS {
+        let before = json!({ "account": key, "name": Some("N"), "limits": limits });
+        assert_eq!(crate::shareable_plan_report(key, &Some("N".to_owned()), &limits).unwrap().to_string(), before.to_string(), "{key}");
+    }
+    for id in PORTABLE_PROVIDER_IDS {
+        let cursor = cursor_report(id, 40.0);
+        let before = json!({ "accountId": id, "limits": cursor });
+        assert_eq!(crate::shareable_provider_report(id, &cursor).unwrap().to_string(), before.to_string(), "{id}");
+    }
+}
+
+/// Path 1 of 3, `greeting()`: what a newly connected member is told goes through the gate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn greeting_goes_through_the_sender_gate() {
+    use code::plan_limits::{Account, PlanLimits, Window, now};
+    let _env = TempClaudeEnv::new(None, None).await;
+    let a = node("alpha-greeting-gate");
+    let limits = PlanLimits { five_hour: Some(Window { utilization: 0.5, resets_at: now() + 3600 }), observed_at: now(), ..Default::default() };
+    let accounts: std::collections::BTreeMap<String, Account> = PORTABLE_PLAN_KEYS
+        .iter()
+        .chain(NON_PORTABLE_PLAN_KEYS.iter())
+        .map(|k| ((*k).to_owned(), Account { latest: Some(limits.clone()), name: Some("N".into()), history: vec![] }))
+        .collect();
+    a.state.code.plan.set_accounts(accounts);
+    let mut told: Vec<String> = mesh::RpcHandler::greeting(&MeshRpc { state: a.state.clone() })
+        .into_iter()
+        .filter(|(n, _)| n == MESH_PLAN_LIMITS_EVENT)
+        .map(|(_, p)| p["account"].as_str().unwrap().to_owned())
+        .collect();
+    told.sort();
+    let mut want: Vec<String> = PORTABLE_PLAN_KEYS.iter().map(|k| (*k).to_owned()).collect();
+    want.sort();
+    assert_eq!(told, want, "greeting() sends exactly the portable accounts");
+}
+
+/// Path 2 of 3, a Grok seat's report: nothing but a portable seat reaches a peer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn grok_reports_go_through_the_sender_gate() {
+    use code::plan_limits::{PlanLimits, Window, now};
+    let (a, b) = (node("alpha-grok-gate"), node("bravo-grok-gate"));
+    link(&a, &b).await;
+    let plan = |account: &str| code::grok_plan::GrokPlan {
+        account: account.to_owned(),
+        name: Some("Seat".into()),
+        limits: PlanLimits { five_hour: Some(Window { utilization: 0.4, resets_at: now() + 3600 }), observed_at: now(), ..Default::default() },
+    };
+    for key in NON_PORTABLE_PLAN_KEYS {
+        crate::report_grok_plan(&a.state, plan(key));
+    }
+    // Delivery is ordered: when the control is visible, every report before it has been handled.
+    crate::report_grok_plan(&a.state, plan("grok:team-1:user-1"));
+    until("B has the control", 10, || b.state.code.plan.account("grok:team-1:user-1").latest.is_some()).await;
+    let keys: Vec<String> = b.state.code.plan.accounts().into_keys().collect();
+    assert_eq!(keys, vec!["grok:team-1:user-1".to_owned()], "no withheld key reached the peer");
+}
+
+/// Path 3 of 3, the live report of a Claude session: a session whose account resolves to a UNC-shaped
+/// key (not absolute on unix, so a list of path shapes would let it out) stays on this machine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn live_plan_reports_go_through_the_sender_gate() {
+    use code::acp::CodeEvent;
+    use code::plan_limits::{PlanLimits, Window, now};
+    let _env = TempClaudeEnv::new(Some(("u-live", "o-live", "Live")), None).await;
+    let (a, b) = (node("alpha-live-gate"), node("bravo-live-gate"));
+    link(&a, &b).await;
+    let cwd = a.dir.to_string_lossy().into_owned();
+    let report = || PlanLimits { five_hour: Some(Window { utilization: 0.3, resets_at: now() + 3600 }), observed_at: now(), ..Default::default() };
+    let hostile = r"\\HOST\share\.claude";
+    let bad = a.state.db.create_code_session(&cwd, None, "claude-code", "default").unwrap();
+    a.state.db.set_setting(&code::import_claude::config_dir_key(&bad.id), hostile).unwrap();
+    emit(&a, &bad.id, CodeEvent::PlanLimits { limits: report() });
+    // Not vacuous: the live path really produced that account here.
+    assert!(a.state.code.plan.accounts().contains_key(hostile), "{:?}", a.state.code.plan.accounts().keys().collect::<Vec<_>>());
+    let good = a.state.db.create_code_session(&cwd, None, "claude-code", "default").unwrap();
+    emit(&a, &good.id, CodeEvent::PlanLimits { limits: report() });
+    until("B has the control", 10, || b.state.code.plan.account("u-live:o-live").latest.is_some()).await;
+    let keys: Vec<String> = b.state.code.plan.accounts().into_keys().collect();
+    assert_eq!(keys, vec!["u-live:o-live".to_owned()], "the UNC-shaped key stayed here");
+}
+
+/// Cursor / Antigravity account ids that may leave this machine: a numeric or string user id, a JWT
+/// `sub`, an email, or the last-resort `token:<fingerprint>`.
+const PORTABLE_PROVIDER_IDS: [&str; 7] =
+    ["42", "1234567890", "user_01HXYZ", "a@b.c", "me@example.com", "auth0|65f1", "token:eyJhbGciOiJSUzI1"];
+
+const NON_PORTABLE_PROVIDER_IDS: [&str; 16] = [
+    "",
+    " ",
+    ".",
+    "..",
+    "/home/x",
+    r"\\HOST\share",
+    "~/x",
+    "~",
+    "a b",
+    "token:",
+    "token:a:b",
+    "x/y",
+    r"C:\x",
+    "u\n",
+    "ü@x.y",
+    "a:b",
+];
+
+/// The same gate for the two provider events: a table of ids, one permanent test.
+#[test]
+fn only_portable_provider_account_ids_pass_the_sender_gate() {
+    let limits = code::plan_limits::PlanLimits::default();
+    let share = |id: &str| crate::shareable_provider_report(id, &limits);
+    for id in PORTABLE_PROVIDER_IDS {
+        assert_eq!(share(id).unwrap_or_else(|| panic!("{id:?} must be shared"))["accountId"], id);
+    }
+    for id in NON_PORTABLE_PROVIDER_IDS {
+        assert!(share(id).is_none(), "{id:?} must be withheld");
+    }
+    assert!(share(&"x".repeat(513)).is_none(), "an over-long id is withheld");
+}
+
+fn cursor_report(account: &str, auto: f64) -> code::cursor_plan::CursorPlanLimits {
+    code::cursor_plan::CursorPlanLimits {
+        account_id: account.into(),
+        email: Some("a@b.c".into()),
+        observed_at: code::cursor_plan::now(),
+        resets_at: Some(code::cursor_plan::now() + 86400),
+        auto: Some(auto),
+        api: Some(10.0),
+        total: Some(auto),
+        included_spend_cents: Some(20000),
+        limit_cents: Some(40000),
+        bonus_spend_cents: Some(500),
+        remaining_bonus: Some(true),
+        display_message: None,
+        grants: Vec::new(),
+        grants_remaining_cents: Some(0),
+        slow_pool: Some(false),
+        on_demand_allowed: Some(false),
+    }
+}
+
+/// Cursor's event goes through the gate: a report under a non-portable id stays here, a portable one
+/// (sent after it, so delivery order proves the first was handled) reaches the peer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cursor_reports_go_through_the_sender_gate() {
+    let (a, b) = (node("alpha-cursor-gate"), node("bravo-cursor-gate"));
+    link(&a, &b).await;
+    adopt_cursor_plan(&a.state, cursor_report(r"\\HOST\share\cursor", 55.0), true);
+    adopt_cursor_plan(&a.state, cursor_report("42", 40.0), true);
+    until("B has the control", 10, || b.state.code.cursor_plan.latest().is_some_and(|l| l.account_id == "42")).await;
+    assert_eq!(b.state.code.cursor_plan.latest().unwrap().account_id, "42", "the UNC-shaped id never reached B");
+}
+
+/// Antigravity's event goes through the gate, same shape as Cursor's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn antigravity_reports_go_through_the_sender_gate() {
+    use code::antigravity_plan::AntigravityPlanLimits;
+    let (a, b) = (node("alpha-ag-gate"), node("bravo-ag-gate"));
+    link(&a, &b).await;
+    let report = |id: &str| AntigravityPlanLimits::unavailable(id.into(), None, "n/a".into(), code::antigravity_plan::now());
+    adopt_antigravity_plan(&a.state, report(r"\\HOST\share\ag"), true);
+    adopt_antigravity_plan(&a.state, report("me@example.com"), true);
+    until("B has the control", 10, || b.state.code.antigravity_plan.latest().is_some_and(|l| l.account_id == "me@example.com")).await;
+    assert_eq!(b.state.code.antigravity_plan.latest().unwrap().account_id, "me@example.com");
+}
+
+/// `greeting()` also gates the two provider events it appends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn greeting_gates_the_provider_events_too() {
+    use code::antigravity_plan::AntigravityPlanLimits;
+    let _env = TempClaudeEnv::new(None, None).await;
+    let a = node("alpha-greeting-provider");
+    let rpc = || MeshRpc { state: a.state.clone() };
+    let events = |name: &str| {
+        mesh::RpcHandler::greeting(&rpc()).into_iter().filter(|(n, _)| n == name).map(|(_, p)| p).collect::<Vec<_>>()
+    };
+    a.state.code.cursor_plan.record(cursor_report(r"\\HOST\share\cursor", 55.0));
+    a.state.code.antigravity_plan.record(AntigravityPlanLimits::unavailable(r"\\HOST\share\ag".into(), None, "n/a".into(), code::antigravity_plan::now()));
+    assert!(events(MESH_CURSOR_PLAN_EVENT).is_empty() && events(MESH_ANTIGRAVITY_PLAN_EVENT).is_empty(), "withheld");
+    a.state.code.cursor_plan.record(cursor_report("42", 55.0));
+    a.state.code.antigravity_plan.record(AntigravityPlanLimits::unavailable("me@example.com".into(), None, "n/a".into(), code::antigravity_plan::now()));
+    assert_eq!(events(MESH_CURSOR_PLAN_EVENT)[0]["accountId"], "42");
+    assert_eq!(events(MESH_ANTIGRAVITY_PLAN_EVENT)[0]["accountId"], "me@example.com");
 }
 
 /// Over a real link the receiver names the SENDING node (`handle` passes the session's peer id),
