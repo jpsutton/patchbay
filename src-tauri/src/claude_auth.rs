@@ -677,6 +677,7 @@ mod tests {
 
     #[test]
     fn account_comes_from_claude_json() {
+        let _env = ENV_LOCK.blocking_lock();
         let dir = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(account(&dir), (dir.to_string_lossy().into_owned(), None), "no record: the path");
@@ -706,6 +707,7 @@ mod tests {
     /// from that login never land under the profile's account key.
     #[test]
     fn a_login_the_profile_does_not_describe_stays_unidentified() {
+        let _env = ENV_LOCK.blocking_lock();
         let dir = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let profile = serde_json::json!({ "oauthAccount": {
@@ -751,6 +753,7 @@ mod tests {
     /// accounts or dropping to a path key.
     #[test]
     fn stale_profile_overwrite_keeps_verified_account() {
+        let _env = ENV_LOCK.blocking_lock();
         let dir = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let pro_profile = serde_json::json!({ "oauthAccount": {
@@ -787,6 +790,7 @@ mod tests {
 
     #[test]
     fn mcp_only_credentials_file_is_not_a_claude_login() {
+        let _env = ENV_LOCK.blocking_lock();
         let dir = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join(".credentials.json");
@@ -805,6 +809,7 @@ mod tests {
     /// there is nothing to contradict it.
     #[test]
     fn without_a_readable_login_the_profile_key_stands() {
+        let _env = ENV_LOCK.blocking_lock();
         let dir = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let profile = serde_json::json!({ "oauthAccount": {
