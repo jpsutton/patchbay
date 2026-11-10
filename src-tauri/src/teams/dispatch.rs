@@ -306,7 +306,12 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String> {
 /// `--` precedes every ref and path, and `pr_base` was checked when the team was made.
 fn make_worktree(team: &Team, item_id: &str) -> Result<(std::path::PathBuf, String)> {
     let cwd = Path::new(&team.cwd);
-    let root = Path::new(&team.worktree_root);
+    // Resolved again now: a symlink put in place of the folder since the team was made must not lead outside it.
+    let root = super::resolve(Path::new(&team.worktree_root));
+    let root = root.as_path();
+    if !root.starts_with(super::resolve(cwd)) {
+        bail!("the worktree folder is no longer inside the team folder");
+    }
     let branch = item_id.to_lowercase();
     let path = root.join(&branch);
     if !path.starts_with(root) || branch.contains('/') || branch.starts_with('-') {
@@ -584,6 +589,9 @@ mod tests {
         assert!(w(&saved).allow_unasked && w(&saved).acknowledged());
         // Another agent in the choices, written straight to the file (not through the editor).
         let mut changed = w(&saved);
+        changed.role_id = "builtin-verifier".into();
+        assert!(!changed.acknowledged(), "a different role lapses it");
+        changed.role_id = w(&saved).role_id;
         changed.choices.push(crate::teams::Choice { agent: "cursor".into(), model: None });
         assert!(!changed.acknowledged());
         changed.choices = w(&saved).choices;
@@ -605,6 +613,13 @@ mod tests {
         assert!(make_worktree(&team, "DM-20261109-01").is_err());
         remove_worktree(&team, &path, &branch);
         assert!(!path.exists());
+        // A worktree folder swapped for a link to outside is refused.
+        let outside = d.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let mut linked = team.clone();
+        linked.worktree_root = d.join("proj/swapped").to_string_lossy().into_owned();
+        std::os::unix::fs::symlink(&outside, d.join("proj/swapped")).unwrap();
+        assert!(make_worktree(&linked, "DM-20261109-03").unwrap_err().to_string().contains("no longer inside"));
         let mut bad = team.clone();
         bad.pr_base = "nope".into();
         assert!(make_worktree(&bad, "DM-20261109-02").unwrap_err().to_string().contains("not found"));

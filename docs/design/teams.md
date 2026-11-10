@@ -299,6 +299,14 @@ Routing: the three classes in the table above, with the reference desk's example
    titles"), the editor tick, prompt fencing. Tests: `the_coordinator_fills_a_pool_and_releases_workers`
    fills a 2-worker pool from claude-code and cursor, refuses the third until a release, shows the
    5-per-creator cap isn't consumed, and a worker notes its own item but not another's.
+   Review (2026-11-10) fixes are in the later commits; known limits, not fixed:
+   - The `worktree_root` symlink swap needs shell access as the same user; the same-user limit
+     covers it. Dispatch re-resolves the folder and refuses one that left the team folder.
+   - The acknowledgement snapshot holds the seat's role id, agent, model, choices and mode, not the
+     role's capabilities (editing a role's capabilities does not lapse it).
+   - `team_detach` and `team_archive` don't stop the agent or revoke its bridge token; only
+     `member_release` does.
+   - The bridge token sits in the MCP server's environment, readable by the agent's own shell.
    Not verified: a real agent started by `dispatch_item` (tests use a stand-in agent); the allow
    rule against the team tools' real titles (inferred from `send_agent_message`); a sandbox live
    run; the editor tick in a browser; container isolation for unattended dispatch.

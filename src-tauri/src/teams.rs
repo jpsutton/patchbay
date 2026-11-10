@@ -147,6 +147,9 @@ pub struct AgentGaps {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Ack {
+    /// Missing in an older file, which then reads as a changed seat and lapses.
+    #[serde(default)]
+    pub role_id: String,
     pub agent: String,
     pub model: Option<String>,
     pub choices: Vec<Choice>,
@@ -155,7 +158,7 @@ pub struct Ack {
 
 impl Seat {
     fn snapshot(&self) -> Ack {
-        Ack { agent: self.agent.clone(), model: self.model.clone(), choices: self.choices.clone(), permission_mode: self.permission_mode.clone() }
+        Ack { role_id: self.role_id.clone(), agent: self.agent.clone(), model: self.model.clone(), choices: self.choices.clone(), permission_mode: self.permission_mode.clone() }
     }
 
     fn agents(&self) -> impl Iterator<Item = &str> {
