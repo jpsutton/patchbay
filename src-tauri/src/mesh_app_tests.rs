@@ -1004,6 +1004,7 @@ async fn usage_limit_stops_claude_turns() {
 /// each other"), pinned at the prompt gate where a violation would actually block a send.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_session_is_gated_only_by_its_own_accounts_report() {
+    let _env = TempClaudeEnv::new(None, None).await;
     use code::acp::{AgentCmd, Delivery};
     use code::plan_limits::{PlanLimits, Window, now};
     let a = node("alpha-own-account");
@@ -1095,6 +1096,7 @@ async fn a_session_is_gated_only_by_its_own_accounts_report() {
 /// its own seat's weekly report, and by nothing else.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_grok_seat_gates_its_own_sessions() {
+    let _env = TempClaudeEnv::new(None, None).await;
     use code::acp::{AgentCmd, Delivery};
     use code::plan_limits::{PlanLimits, Window, now};
     let a = node("alpha-grok-seat");

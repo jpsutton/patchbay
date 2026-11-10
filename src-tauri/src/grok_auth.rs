@@ -559,6 +559,7 @@ mod tests {
 
     #[test]
     fn the_home_is_the_provider_s_then_grok_home_then_dot_grok() {
+        let _env = crate::claude_auth::ENV_LOCK.blocking_lock();
         let h = crate::claude_auth::home().unwrap();
         assert_eq!(resolve_dir_with(Some("/srv/grok"), Some("/env".into())).unwrap(), PathBuf::from("/srv/grok"));
         assert_eq!(resolve_dir_with(Some("~/alt"), None).unwrap(), h.join("alt"));
