@@ -595,6 +595,7 @@ async fn phone_chat_runs_on_the_picked_computer() {
 ///
 /// `cargo test --lib manual_phone_gateway -- --ignored --nocapture` (PATCHBAY_TEST_SECS limits it).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
 #[ignore]
 async fn manual_phone_gateway() {
     let n = node("studio");

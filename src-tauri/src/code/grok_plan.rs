@@ -225,6 +225,7 @@ mod tests {
     /// Live check against xAI with the machine's Grok login.
     /// `cargo test --lib live_grok_billing -- --ignored --nocapture`
     #[tokio::test]
+    // Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
     #[ignore]
     async fn live_grok_billing() {
         let plan = fetch(None, "https://cli-chat-proxy.grok.com/v1").await.expect("Grok billing");

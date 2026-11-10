@@ -1999,6 +1999,7 @@ time.sleep(60)
     /// pb-20261107-32 item 5: #[ignore] live test calling the REAL probe (fresh serve child,
     /// session cwd/env). Requires `opencode` on PATH. Exercises the same source the fix uses.
     #[test]
+    // Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
     #[ignore]
     fn opencode_live_probe_reads_session_cwd_config_and_agent_denies() {
         let opencode = std::env::var("OPENCODE_BIN").unwrap_or_else(|_| "opencode".into());

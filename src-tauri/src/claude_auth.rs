@@ -83,7 +83,7 @@ pub(crate) fn home() -> Result<PathBuf> {
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone()
-        .unwrap_or_else(|| crate::test_support::sandbox_home().to_path_buf()));
+        .unwrap_or_else(crate::test_support::test_home));
     #[cfg(not(test))]
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(PathBuf::from)
@@ -689,6 +689,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Run by `test_support::tests::an_exported_home_is_ignored` with a decoy HOME exported: with no
+    /// pin, `home()` is the scratch home whatever `$HOME` says.
+    #[test]
+    fn unpinned_home_is_the_scratch_home() {
+        if crate::test_support::real_home_requested() {
+            return;
+        }
+        let _env = ENV_LOCK.blocking_lock();
+        assert_eq!(test_pin().0, None);
+        assert_eq!(home().unwrap(), crate::test_support::sandbox_home());
+    }
+
     #[test]
     fn account_comes_from_claude_json() {
         let dir = std::env::temp_dir().join(format!("pb-claude-auth-{}", crate::db::new_id()));
@@ -896,6 +908,7 @@ mod tests {
     /// Live check against Anthropic with the machine's Claude Code login.
     /// `cargo test --lib live_claude_login -- --ignored --nocapture`
     #[tokio::test]
+    // Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
     #[ignore]
     async fn live_claude_login_models_and_chat() {
         let token = access_token(None).await.expect("Claude Code login");

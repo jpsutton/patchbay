@@ -9,7 +9,11 @@ write their own state under $HOME; this catches writers nobody has found yet.
     python3 scripts/test_home_audit.py                       # the lib suite
     python3 scripts/test_home_audit.py -- sh -c 'touch "$HOME/x"'   # prove the check itself fails
     python3 scripts/test_home_audit.py --cwd DIR -- ./some-test-binary   # audit any command
+    python3 scripts/test_home_audit.py --seed DIR -- CMD    # start from a copy of DIR, so
+                                                            # CHANGED / REMOVED can fire too
 
+Without --seed the home starts empty, so only NEW paths can appear. TMPDIR is left alone on
+purpose: only $HOME is audited, and the suite's own temp directories live outside it.
 CARGO_HOME / RUSTUP_HOME keep pointing at the real toolchain so the build still works.
 Nothing under the real home is read, written or deleted.
 """
@@ -51,10 +55,26 @@ def diff(before: dict[str, str], after: dict[str, str]) -> list[str]:
     return lines
 
 
+def parse(argv: list[str]):
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Fail when a command touches $HOME.", add_help=True)
+    ap.add_argument("--cwd", help="working directory for the command")
+    ap.add_argument("--seed", help="directory copied into the fresh HOME first")
+    ap.add_argument("command", nargs=argparse.REMAINDER, help="after '--': the command to run (default: the lib suite)")
+    ns = ap.parse_args(argv)
+    cmd = ns.command[1:] if ns.command[:1] == ["--"] else ns.command
+    if ns.command[:1] == ["--"] and not cmd:
+        ap.error("an empty command after '--'")
+    if ns.seed and not Path(ns.seed).is_dir():
+        ap.error(f"--seed {ns.seed!r} is not a directory")
+    return ns, cmd
+
+
 def main(argv: list[str]) -> int:
-    head = argv[: argv.index("--")] if "--" in argv else argv
-    cmd = argv[argv.index("--") + 1:] if "--" in argv else DEFAULT_CMD
-    cwd_arg = head[head.index("--cwd") + 1] if "--cwd" in head else None
+    ns, cmd = parse(argv)
+    cmd = cmd or DEFAULT_CMD
+    cwd_arg = ns.cwd
     real_home = Path.home()
     home = Path(tempfile.mkdtemp(prefix="pb-home-audit-"))
     env = {k: v for k, v in os.environ.items() if k not in DROPPED_ENV}
@@ -62,6 +82,8 @@ def main(argv: list[str]) -> int:
     env.setdefault("CARGO_HOME", str(real_home / ".cargo"))
     env.setdefault("RUSTUP_HOME", str(real_home / ".rustup"))
     cwd = Path(cwd_arg) if cwd_arg else ROOT / "src-tauri" if cmd is DEFAULT_CMD else ROOT
+    if ns.seed:
+        shutil.copytree(ns.seed, home, symlinks=True, dirs_exist_ok=True)
     try:
         before = snapshot(home)
         print(f"HOME={home}\nbefore: {len(before)} entries")

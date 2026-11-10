@@ -404,15 +404,17 @@ fn read_access_token() -> Option<(String, Option<String>)> {
 /// shell's variables nor the developer's real files: no XDG, and the pinned (else scratch) home.
 fn env_xdg_config_home() -> Option<std::ffi::OsString> {
     #[cfg(test)]
-    return None;
-    #[cfg(not(test))]
+    if !crate::test_support::real_home_requested() {
+        return None;
+    }
     std::env::var_os("XDG_CONFIG_HOME")
 }
 
 fn env_home() -> Option<std::ffi::OsString> {
     #[cfg(test)]
-    return crate::claude_auth::home().ok().map(Into::into);
-    #[cfg(not(test))]
+    if !crate::test_support::real_home_requested() {
+        return crate::claude_auth::home().ok().map(Into::into);
+    }
     std::env::var_os("HOME")
 }
 
@@ -618,6 +620,60 @@ pub fn cursor_agent_bin(overrides: &crate::code::agents::AgentPaths) -> Option<P
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Run by `test_support::tests::an_exported_xdg_config_home_is_ignored` with a decoy exported.
+    #[test]
+    fn login_paths_ignore_the_exported_xdg_config_home() {
+        if crate::test_support::real_home_requested() {
+            return;
+        }
+        let _env = crate::claude_auth::ENV_LOCK.blocking_lock();
+        assert!(env_xdg_config_home().is_none());
+        if let Some(decoy) = std::env::var_os("XDG_CONFIG_HOME") {
+            let decoy = PathBuf::from(decoy);
+            assert!(auth_json_paths().iter().chain(vscdb_paths().iter()).all(|p| !p.starts_with(&decoy)));
+        }
+    }
+
+    /// Run by `test_support::tests::the_real_home_hatch_lets_children_inherit_home` with
+    /// PB_TEST_REAL_HOME=1 and a decoy HOME: the child must then see that HOME. (Without the hatch it
+    /// does nothing, so the plain suite passes it trivially.)
+    #[cfg(unix)]
+    #[test]
+    fn agent_status_inherits_home_under_the_hatch() {
+        use std::os::unix::fs::PermissionsExt;
+        if !crate::test_support::real_home_requested() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("pb-cursor-hatch-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("cursor-agent");
+        std::fs::write(&script, "#!/bin/sh\nprintf '%s' \"$HOME\" > \"$(dirname \"$0\")/home.txt\"\necho '{}'\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(agent_status(Some(&script)).is_some());
+        let seen = std::fs::read_to_string(dir.join("home.txt")).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(seen, std::env::var("HOME").unwrap());
+    }
+
+    /// `cursor-agent status` runs with the scratch home, not the developer's.
+    #[cfg(unix)]
+    #[test]
+    fn agent_status_runs_with_the_scratch_home() {
+        use std::os::unix::fs::PermissionsExt;
+        if crate::test_support::real_home_requested() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("pb-cursor-status-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("cursor-agent");
+        std::fs::write(&script, "#!/bin/sh\nprintf '%s' \"$HOME\" > \"$(dirname \"$0\")/home.txt\"\necho '{}'\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(agent_status(Some(&script)).is_some());
+        let seen = std::fs::read_to_string(dir.join("home.txt")).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(seen, crate::test_support::sandbox_home().to_string_lossy());
+    }
 
     fn sample(auto: f64, api: f64, total: f64, resets: i64) -> CursorPlanLimits {
         CursorPlanLimits {

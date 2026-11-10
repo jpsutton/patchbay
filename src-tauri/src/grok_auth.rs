@@ -83,9 +83,9 @@ fn expand_home(d: &str) -> Result<PathBuf> {
 /// A provider's Grok home (`~/` expanded). With none named: `$GROK_HOME` when it is set and not
 /// empty, else `~/.grok`.
 pub fn resolve_dir(dir: Option<&str>) -> Result<PathBuf> {
-    // Tests never read the shell's `GROK_HOME` (a login lives there).
+    // Tests never read the shell's `GROK_HOME` (a login lives there) unless PB_TEST_REAL_HOME=1.
     #[cfg(test)]
-    let env = None;
+    let env = crate::test_support::real_home_requested().then(|| std::env::var("GROK_HOME").ok()).flatten();
     #[cfg(not(test))]
     let env = std::env::var("GROK_HOME").ok();
     resolve_dir_with(dir, env)
@@ -603,6 +603,16 @@ mod tests {
         assert!(!l.is_fresh());
     }
 
+    /// Run by `test_support::tests::an_exported_grok_home_is_ignored` with a decoy GROK_HOME exported.
+    #[test]
+    fn grok_home_ignores_the_exported_variable() {
+        if crate::test_support::real_home_requested() {
+            return;
+        }
+        let _env = crate::claude_auth::ENV_LOCK.blocking_lock();
+        assert_eq!(resolve_dir(None).unwrap(), crate::claude_auth::home().unwrap().join(".grok"));
+    }
+
     #[test]
     fn the_account_key_names_the_team_and_the_user() {
         let l = parse_login(&login_root(entry("a", "r", 3_600_000)), "t").unwrap();
@@ -823,6 +833,7 @@ mod tests {
     /// Live check against xAI with the machine's Grok login.
     /// `cargo test --lib live_grok_login -- --ignored --nocapture`
     #[tokio::test]
+    // Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
     #[ignore]
     async fn live_grok_login_models() {
         let c = credentials(None).await.expect("Grok login");
