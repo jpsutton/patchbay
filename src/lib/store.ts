@@ -52,7 +52,7 @@ import { trackStall } from "./stall";
 import { adoptEarlier } from "./earlierHistory";
 import { appendText } from "./streamText";
 import { readSteers } from "./readSteers";
-import { appendUserChunk } from "./harness";
+import { appendUserChunk, withoutNote } from "./harness";
 import { planUpdateOf } from "./todoPlan";
 import { applyChange, type LayoutChange, type SidebarEntry } from "./sidebarLayout";
 import { applySpawned, applyState, stampFailed } from "./subagents";
@@ -332,12 +332,6 @@ function partFromUpdates(id: string, updates: AcpUpdate[]): TranscriptPart {
 
 let olderPageSeq = 0;
 
-/** Hide the context note Patchbay put before a prompt (see `handoff.rs`) when the agent replays it. */
-function withoutNote(text: string): string {
-  if (!text.startsWith("<patchbay-handoff>")) return text;
-  const end = text.indexOf("</patchbay-handoff>");
-  return end < 0 ? "" : text.slice(end + "</patchbay-handoff>".length).replace(/^\s+/, "");
-}
 
 /** Raise a session's stored activity (its sidebar icon) to `found`; it never goes back down. */
 function recordActivity(id: string, found: Activity) {

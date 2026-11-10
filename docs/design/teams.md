@@ -75,10 +75,10 @@ generated block (team name, its own role, the roster by role, the team tools).
   `CODEX_CONFIG` path in `code/agents.rs` (Grok, Claude Code, Antigravity, Codex).
 - Agents without one (OpenCode, Cursor, Kilo, and Patchbay's own agent, whose instructions are a
   host-wide setting rather than per session) get the same block as a fixed preamble on every
-  prompt with an `agent:` origin: the first brief, every peer message and every dispatch
-  (`dispatch_item` must send with that origin). Prompts the user types get no preamble. Cost: the
-  block's tokens on each such message. A first-message-only preamble was rejected because members
-  lose it on compaction, which happened in the reference desk.
+  prompt, user-typed ones included, not only prompts with an `agent:` origin. Replay and display
+  hide the block so the transcript shows only what the user typed. Cost: the block's tokens on
+  every turn for those agents. A first-message-only preamble was rejected because members lose it
+  on compaction, which happened in the reference desk.
 - Hook agents read instructions only when the agent starts. Attaching a running session, or
   editing its role, takes effect on its next agent start; the UI says so.
 

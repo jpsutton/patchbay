@@ -3530,6 +3530,19 @@ async fn team_preamble_goes_to_agents_without_a_prompt_hook() {
     let (r, got) = tokio::join!(send_agent_message(&a.state, &an, &sender.id, &advisor.id, "hello"), take_agent_message(&mut rx_advisor));
     r.unwrap();
     assert_eq!(got.blocks.len(), 1, "claude-code has a prompt hook, so no preamble: {:?}", got.blocks);
+
+    // A user-origin prompt to a member on a preamble agent also carries the block,
+    // and the stored / event user text doesn't.
+    let (r, got) = tokio::join!(
+        code_prompt_local(&a.state, desk.id.clone(), "user prompt from human".into(), Vec::new(), Vec::new(), "user".into(), None, false),
+        take_agent_message(&mut rx_desk)
+    );
+    r.unwrap();
+    let texts: Vec<&str> = got.blocks.iter().filter_map(|b| b["text"].as_str()).collect();
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    assert!(texts[0].starts_with("<team-instructions>") && texts[0].contains("You are the coordinator"), "{}", texts[0]);
+    assert_eq!(texts[1], "user prompt from human");
+    assert_eq!(got.text, "user prompt from human", "the stored user text does not contain the preamble block");
 }
 
 

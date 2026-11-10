@@ -123,6 +123,28 @@ function chainFrom(s: string, i: number): Piece[] | null {
   return out.length ? out : null;
 }
 
+/**
+ * Hide the context note or team instructions Patchbay put before a prompt when the agent replays it.
+ */
+export function withoutNote(text: string): string {
+  let cur = text;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const trimmed = cur.replace(/^\s+/, "");
+    for (const tag of ["<patchbay-handoff>", "<team-instructions>"]) {
+      if (trimmed.startsWith(tag)) {
+        const close = tag.replace("<", "</");
+        const end = trimmed.indexOf(close);
+        cur = end < 0 ? "" : trimmed.slice(end + close.length).replace(/^\s+/, "");
+        changed = true;
+        break;
+      }
+    }
+  }
+  return cur;
+}
+
 /** The replayed user message an entries array ends with: where its entries start, its text. */
 const runs = new WeakMap<Entry[], { start: number; raw: string; bounds: number[] }>();
 

@@ -3,7 +3,7 @@
  * Run: node --experimental-strip-types src/lib/harness.selftest.ts
  */
 import type { Entry } from "./store";
-import { appendUserChunk, harnessTags } from "./harness.ts";
+import { appendUserChunk, harnessTags, withoutNote } from "./harness.ts";
 
 function eq(actual: unknown, expected: unknown, msg: string) {
   const a = JSON.stringify(actual);
@@ -57,6 +57,17 @@ eq(
   [{ kind: "user", text: `Fix X\n${reminder}\nand Y` }],
   "a wrapper inside the prompt stays",
 );
+
+// withoutNote strips handoff and team-instructions preambles so transcript shows only what user typed.
+eq(withoutNote("<patchbay-handoff>\nhandoff note\n</patchbay-handoff>\nuser message"), "user message", "strip handoff note");
+eq(withoutNote("<team-instructions>\nrole instructions\n</team-instructions>\nuser message"), "user message", "strip team instructions");
+eq(withoutNote("<team-instructions>\nrole instructions\n</team-instructions>"), "", "strip solo team instructions");
+eq(
+  withoutNote("<patchbay-handoff>\nhandoff\n</patchbay-handoff>\n<team-instructions>\ninstructions\n</team-instructions>\nuser message"),
+  "user message",
+  "strip both handoff and team instructions",
+);
+eq(withoutNote("just user text"), "just user text", "plain text untouched");
 
 // Separate messages that arrive back to back, with no line break between them.
 eq(

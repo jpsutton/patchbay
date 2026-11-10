@@ -1160,7 +1160,7 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
     }
     let resolved = resolve(kind, &prefs.agent_paths)?;
     // Team role instructions ride with the custom instructions for agents that have a prompt hook;
-    // the others get them as a preamble on peer messages (`teams::preamble_for`).
+    // the others get them as a preamble on every prompt (`teams::preamble_for`).
     let mut rules = prefs.agent_instructions.trim().to_owned();
     if crate::teams::has_prompt_hook(kind)
         && let Some(team) = crate::teams::instructions_for(data_dir, db, &session.id)

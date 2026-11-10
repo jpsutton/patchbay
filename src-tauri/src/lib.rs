@@ -2639,10 +2639,8 @@ async fn code_prompt_local(
         blocks.extend(tokio::task::spawn_blocking(move || attachments::to_acp_blocks(&dir, &a)).await??);
         atts.push(att);
     }
-    // An agent without a prompt hook gets its team role on each peer message (teams.rs).
-    if code::acp::is_agent_message_origin(&origin)
-        && let Some(preamble) = teams::preamble_for(&state.data_dir, &state.db, &id)
-    {
+    // An agent without a prompt hook gets its team role on every prompt (teams.rs).
+    if let Some(preamble) = teams::preamble_for(&state.data_dir, &state.db, &id) {
         blocks.push(serde_json::json!({ "type": "text", "text": preamble }));
     }
     if !text.is_empty() {

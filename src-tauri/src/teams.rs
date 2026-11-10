@@ -726,7 +726,7 @@ fn home_dir() -> Option<PathBuf> {
 // ---------------- instructions ----------------
 
 /// Agents that take instructions through a system-prompt hook (`code::agents::session_meta`,
-/// `CODEX_CONFIG`). Every other agent gets the block as a preamble on peer messages instead.
+/// `CODEX_CONFIG`). Every other agent gets the block as a preamble on every prompt instead.
 pub fn has_prompt_hook(kind: AgentKind) -> bool {
     matches!(kind, AgentKind::Grok | AgentKind::ClaudeCode | AgentKind::Antigravity | AgentKind::Codex)
 }
