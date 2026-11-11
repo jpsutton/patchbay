@@ -1,13 +1,15 @@
 // Narrow-pane layout measurement with hard assertions (pb-20261110-10). Opens the dev page (fake
 // backend) in headless Chrome, puts 4 sessions side by side, injects a busy pane with queued agent
 // messages and 9-digit token totals, then at pane widths 180/250/340/500 px reports anything under
-// the composer column (and the working line) whose visible right edge is past its pane's. The
+// the composer column (and the working line) whose visible right edge is past its pane's, and where the
+// header's mode and approval controls end up (with the shared chip's minimum width and without it,
+// also for a single un-split pane). The
 // result goes through `layout-assert.mjs`: a failed, empty or half-found measurement FAILS instead
 // of reading as a pass, so the check can't pass on nothing.
 //
 //   pnpm dev                                         # serves :1420, or set PB_URL=http://localhost:<port>
 //   node scripts/e2e-layout-measure.mjs              # measure and assert; exit 1 on any problem
-//   node scripts/e2e-layout-measure.mjs --plant empty|noprobe|overflow   # a planted failure: must exit 1
+//   node scripts/e2e-layout-measure.mjs --plant empty|noprobe|overflow|nomode|bigfloor   # a planted failure: must exit 1
 //   node scripts/e2e-layout-measure.mjs --self-test  # clean run passes, every plant fails
 //
 // Chrome: $CHROME, else the macOS app path (throwaway profile, mock keychain). Chromium only. The
@@ -18,9 +20,15 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { WIDTHS, assertLayout, layoutProblems } from "./layout-assert.mjs";
+import { SINGLE_WIDTHS, WIDTHS, assertLayout, layoutProblems } from "./layout-assert.mjs";
 
-const PLANTS = { empty: "no panes", noprobe: "usage line was not found", overflow: "past the pane edge" };
+const PLANTS = {
+  empty: "no panes",
+  noprobe: "usage line was not found",
+  overflow: "past the pane edge",
+  nomode: "mode control was not found",
+  bigfloor: "the chip's floor",
+};
 const argv = process.argv.slice(2);
 const plantIdx = argv.indexOf("--plant");
 const plant = plantIdx >= 0 ? argv[plantIdx + 1] : undefined;
@@ -50,7 +58,7 @@ if (argv.includes("--self-test")) {
 }
 
 // Runs inside the page. Returns the structured measurement; `plant` breaks one probe on purpose.
-async function measureInPage(widths, plant) {
+async function measureInPage(widths, singleWidths, plant) {
   const { useStore } = await import("/src/lib/store.ts");
   const titles = ["Windows installer testing", "Claude plan preview", "Codex prompt migration", "OpenCode refactor"];
   const ids = titles.map((t) => useStore.getState().codeSessions.find((s) => s.title === t)?.id);
@@ -87,8 +95,15 @@ async function measureInPage(widths, plant) {
           { promptId: "q3", text: "a plain queued message typed by a person that is fairly long" },
         ],
       });
-      p(1, { usage: { ...big, totals: { ...big.totals, input: 31_600_000, cachedRead: 29_300_000, output: 150_000 } } });
-      p(2, { usage: big });
+      // More than three agent modes make the header's mode control the shared chip (ChipSelect), the
+      // one with a minimum width; the fake backend's own modes (two) draw a radio group instead.
+      const fiveModes = {
+        currentModeId: "build",
+        availableModes: ["build", "plan", "review", "debug", "explore"].map((id) => ({ id, name: id[0].toUpperCase() + id.slice(1) })),
+      };
+      p(1, { modes: fiveModes, usage: { ...big, totals: { ...big.totals, input: 31_600_000, cachedRead: 29_300_000, output: 150_000 } } });
+      // Pane 3 never started an agent here, so it has no modes: give it the fake backend's two.
+      p(2, { modes: { currentModeId: "build", availableModes: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }] }, usage: big });
       p(3, { busy: true, turnStartedAt: Date.now() - 48_000, turnChars: 2200, lastForegroundAt: Date.now(), lastPhase: "thinking", usage: big });
       return { code };
     });
@@ -124,8 +139,49 @@ async function measureInPage(widths, plant) {
       const u = pane.querySelector(usageSel);
       const tot = u?.firstElementChild;
       const ring = u?.querySelector("svg")?.getBoundingClientRect();
+      // The header's mode and approval controls, wherever the header put them (the header row at
+      // level 0, the sub-header row once `fitHeader` has moved them), and whether the header still
+      // overflows after it settled.
+      const header = pane.querySelector("header");
+      const rectOf = (el) => {
+        const r = el.getBoundingClientRect();
+        return { l: r.left, t: r.top, r: r.right, b: r.bottom };
+      };
+      const control = (label) => {
+        // The shared chip's button is labelled "<label>, <value>"; the radio group by the label alone.
+        const el = pane.querySelector(`[aria-label="${label}"], [aria-label^="${label},"]`);
+        if (!el) return null;
+        const radio = el.getAttribute("role") === "radiogroup";
+        const box = radio ? el : el.parentElement;
+        const r = rectOf(box);
+        return {
+          kind: radio ? "radiogroup" : "chip",
+          where: box.closest("header") ? "header" : "subheader",
+          width: Math.round(r.r - r.l),
+          pastPaneEdgePx: Math.round((visRight(box) - pr.right) * 10) / 10,
+          minWidth: getComputedStyle(box).minWidth,
+          truncated: el.scrollWidth > el.clientWidth + 1,
+          rect: r,
+        };
+      };
+      const mode = control(plant === "nomode" ? "planted missing" : "Agent mode");
+      const approval = control("Approvals");
+      const gaps = pane.querySelector('[aria-label="What this agent runs without asking"]');
+      const subheader = header?.nextElementSibling?.classList.contains("flex-wrap") ? header.nextElementSibling : null;
+      const overlap = (a, b) => Math.max(0, Math.min(a.r, b.r) - Math.max(a.l, b.l)) * Math.max(0, Math.min(a.b, b.b) - Math.max(a.t, b.t));
+      const rects = [mode?.rect, approval?.rect, gaps && rectOf(gaps)].filter(Boolean);
+      const collisions = [];
+      for (let i = 0; i < rects.length; i++) for (let j = i + 1; j < rects.length; j++) if (overlap(rects[i], rects[j]) > 1) collisions.push(`${i}x${j}`);
+      for (const c of [mode, approval]) if (c) delete c.rect;
       return {
         paneWidth: Math.round(pr.width),
+        headerControls: header && {
+          mode,
+          approval,
+          headerOverflow: header.scrollWidth > header.clientWidth + 1,
+          subheaderOverflow: subheader ? subheader.scrollWidth > subheader.clientWidth + 1 : null,
+          collisions,
+        },
         pastPaneEdge: past,
         queuedRow: li ? { rowRightMinusPaneRight: Math.round(li.getBoundingClientRect().right - pr.right), childWidths: [...li.children].map((c) => `${Math.round(c.getBoundingClientRect().width)}:${(c.textContent || "").trim().slice(0, 14)}`) } : null,
         usage: u ? { shown: u.innerText.replace(/\s+/g, " "), totalsClipped: tot.scrollWidth > tot.clientWidth, totalsOverlapRingPx: ring ? Math.max(0, Math.round(Math.min(visRight(tot), tot.getBoundingClientRect().right) - ring.left)) : null } : null,
@@ -135,6 +191,8 @@ async function measureInPage(widths, plant) {
     });
   const host = document.querySelector("[data-pane-host]");
   if (!host) throw new Error("no [data-pane-host]: the panes did not render");
+  // A chip floor far too big: the header must read worse than it does without the floor.
+  if (plant === "bigfloor") document.head.appendChild(Object.assign(document.createElement("style"), { textContent: "span.min-w-14, span.min-w-18 { min-width: 600px !important; }" }));
   const out = { window: `${innerWidth}x${innerHeight}`, sessions: titles, panes: {} };
   for (const w of widths) {
     host.style.flex = "none";
@@ -146,6 +204,27 @@ async function measureInPage(widths, plant) {
     }
     await new Promise((r) => setTimeout(r, 800));
     out.panes[w] = measure();
+    // The same panes with the chip's minimum width taken off, to compare what the floor changes.
+    const floorOff = document.head.appendChild(Object.assign(document.createElement("style"), { textContent: "span.min-w-14, span.min-w-18 { min-width: 0 !important; }" }));
+    await new Promise((r) => setTimeout(r, 800));
+    (out.noFloor ??= {})[w] = measure();
+    floorOff.remove();
+  }
+  // One pane on its own (no split): `fitHeader` leaves the header alone then, so the mode and
+  // approval controls sit in the header row itself, where the chip's floor adds to what must fit.
+  useStore.setState({ panes: [], activeCodeSessionId: null });
+  useStore.getState().selectCodeSession(ids[1]);
+  await new Promise((r) => setTimeout(r, 1500));
+  for (const w of singleWidths) {
+    host.style.flex = "none";
+    host.style.width = `${w}px`;
+    inject();
+    await new Promise((r) => setTimeout(r, 800));
+    (out.single ??= {})[w] = measure();
+    const floorOff = document.head.appendChild(Object.assign(document.createElement("style"), { textContent: "span.min-w-14, span.min-w-18 { min-width: 0 !important; }" }));
+    await new Promise((r) => setTimeout(r, 800));
+    (out.singleNoFloor ??= {})[w] = measure();
+    floorOff.remove();
   }
   return out;
 }
@@ -202,7 +281,7 @@ for (let i = 0; i < 120 && !ready; i++) {
   if (!ready) await sleep(250);
 }
 await sleep(1500);
-const expr = `(${measureInPage.toString()})(${JSON.stringify(WIDTHS)}, ${JSON.stringify(plant ?? null)})`;
+const expr = `(${measureInPage.toString()})(${JSON.stringify(WIDTHS)}, ${JSON.stringify(SINGLE_WIDTHS)}, ${JSON.stringify(plant ?? null)})`;
 const r = await send("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true });
 let result;
 if (r.result?.exceptionDetails) {
@@ -218,6 +297,18 @@ if (result?.panes) {
   console.log(`window ${result.window}; panes left to right: ${(result.sessions ?? []).join(" | ")}`);
   for (const [w, panes] of Object.entries(result.panes))
     panes.forEach((p, i) => console.log(`pane=${p.paneWidth}px #${i + 1}; pastPaneEdge=${JSON.stringify(p.pastPaneEdge)}; queuedRow=${p.queuedRow ? `rowRight-paneRight=${p.queuedRow.rowRightMinusPaneRight}` : "none"}; usage=${p.usage ? JSON.stringify(p.usage.shown) : "none"} overlapRing=${p.usage?.totalsOverlapRingPx}px; textarea=${p.textarea ? `${p.textarea.clientHeight}/${p.textarea.scrollHeight} clipped=${p.textarea.clipped}` : "none"}; working=${JSON.stringify(p.workingLine)}`));
+}
+// The header's mode and approval controls, with the chip's floor (as shipped) and without it.
+const ctl = (c) => (c ? `${c.kind}@${c.where} ${c.width}px min=${c.minWidth} past=${c.pastPaneEdgePx} trunc=${c.truncated}` : "none");
+const headerLine = (tag, w, p, i) => {
+  const h = p.headerControls;
+  return `${tag} pane=${w}px #${i + 1}: ${h ? `mode[${ctl(h.mode)}] approval[${ctl(h.approval)}] headerOverflow=${h.headerOverflow} subheaderOverflow=${h.subheaderOverflow} collisions=${JSON.stringify(h.collisions)}` : "no header"}`;
+};
+if (result?.panes) {
+  for (const [w, panes] of Object.entries(result.panes)) panes.forEach((p, i) => console.log(headerLine("header", w, p, i)));
+  for (const [w, panes] of Object.entries(result.noFloor ?? {})) panes.forEach((p, i) => console.log(headerLine("header(no floor)", w, p, i)));
+  for (const [w, panes] of Object.entries(result.single ?? {})) panes.forEach((p, i) => console.log(headerLine("single", w, p, i)));
+  for (const [w, panes] of Object.entries(result.singleNoFloor ?? {})) panes.forEach((p, i) => console.log(headerLine("single(no floor)", w, p, i)));
 }
 const problems = layoutProblems(result);
 if (plant) console.log(`planted failure "${plant}": ${problems.length} problem(s) found`);
