@@ -857,6 +857,10 @@ export interface ClaudeConfig {
   disabledPlugins: string[];
   /** MCP servers from Claude's config Patchbay's agent doesn't start. */
   disabledMcpServers: string[];
+  /** Instruction files (CLAUDE.md, AGENTS.md, rules) Patchbay's agent doesn't load, by full path. */
+  disabledInstructions: string[];
+  /** Skills Patchbay's agent doesn't load, by name (`plugin:name` for a plugin's). */
+  disabledSkills: string[];
 }
 
 /** One part of the Claude Code setup and where it comes from (project, user, plugin <name>). */
@@ -877,6 +881,50 @@ export interface ClaudeOverview {
   agents: ClaudeItem[];
   mcpServers: { name: string; source: string; transport: string; disabled: boolean }[];
   hooks: { event: string; matcher: string; command: string; source: string }[];
+}
+
+/** One piece of the agent's system prompt, as the model gets it. */
+export interface PromptSection {
+  /** `provider`, `persona`, `terse`, `environment`, `custom_instructions`, `skills` or `instructions:<path>`. */
+  id: string;
+  group: "standard" | "instructions" | "skills";
+  title: string;
+  /** A file path, or a name for built-in text. */
+  source: string | null;
+  text: string;
+  /** Estimated tokens, whether or not the piece is switched on. */
+  tokens: number;
+  /** Whether it is in the prompt. */
+  enabled: boolean;
+  /** For an instruction file: the path its switch is keyed by. */
+  path: string | null;
+}
+
+export interface PromptSkill {
+  name: string;
+  description: string;
+  source: string;
+  tokens: number;
+  enabled: boolean;
+}
+
+export interface PromptTool {
+  name: string;
+  description: string;
+  tokens: number;
+}
+
+/** What goes into Patchbay's agent prompt (see the Agent prompt page in Settings). */
+export interface AgentPromptPreview {
+  sections: PromptSection[];
+  skills: PromptSkill[];
+  /** Text added to the conversation beside the system prompt. */
+  reminders: PromptSection[];
+  /** The built-in tools; MCP server tools come on top. */
+  tools: PromptTool[];
+  /** Estimated tokens of the enabled sections. */
+  tokens: number;
+  toolsTokens: number;
 }
 
 /** Limits of Patchbay's own agent; `null` keeps its default. */
@@ -995,6 +1043,8 @@ export const defaultPreferences: Preferences = {
     plugins: true,
     disabledPlugins: [],
     disabledMcpServers: [],
+    disabledInstructions: [],
+    disabledSkills: [],
   },
   agentEngine: { maxSteps: null, subagentMaxSteps: null, requestRetries: null, idleTimeoutSecs: null, shellTimeoutSecs: null },
   terminalShell: "",
@@ -1088,6 +1138,8 @@ export const api = {
   webSearchStatus: () =>
     invoke<{ configured: boolean; source: "env" | "keychain" | "database" | null }>("web_search_status"),
   claudeOverview: (cwd: string | null) => invoke<ClaudeOverview>("claude_overview", { cwd }),
+  agentPromptPreview: (cwd: string | null, modelRef: string | null, minify: boolean | null) =>
+    invoke<AgentPromptPreview>("agent_prompt_preview", { cwd, modelRef, minify }),
   setWebSearchKey: (key: string) => invoke<void>("set_web_search_key", { key }),
   clearWebSearchKey: () => invoke<void>("clear_web_search_key"),
   listNativeVoices: () => invoke<NativeVoice[]>("list_native_voices"),

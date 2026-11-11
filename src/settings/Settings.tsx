@@ -4,6 +4,7 @@ import { useStore } from "../lib/store";
 import { ProviderPage } from "./ProviderPage";
 import { ModelPage } from "./ModelPage";
 import { AgentPage, AgentsPage, useAgentList } from "./AgentsPage";
+import { AgentPromptPage } from "./AgentPromptPage";
 import { PREF_SECTIONS, PreferencesPage, type PrefSection } from "./PreferencesPage";
 
 type Selection =
@@ -33,6 +34,14 @@ export function Settings() {
     return { kind: "section", id: "general" };
   });
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // A link from inside Settings (a page that points at another) asks for a section while open.
+  const wantedSection = useStore((s) => s.settingsSection);
+  useEffect(() => {
+    const wanted = PREF_SECTIONS.find((x) => x.id === wantedSection);
+    if (!wanted) return;
+    setSel({ kind: "section", id: wanted.id });
+    useStore.setState({ settingsSection: null });
+  }, [wantedSection]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -220,6 +229,8 @@ export function Settings() {
               <div className="pb-4">
                 <AgentsPage list={agentList} onOpen={(id) => setSel({ kind: "agent", id })} />
               </div>
+            ) : sel.kind === "section" && sel.id === "agent-prompt" ? (
+              <AgentPromptPage />
             ) : sel.kind === "agent" ? (
               <div className="pb-4">
                 <AgentPage key={sel.id} id={sel.id} list={agentList} />

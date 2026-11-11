@@ -108,6 +108,10 @@ pub struct ClaudeConfig {
     pub disabled_plugins: Vec<String>,
     /// MCP servers from Claude's config not to start, by name.
     pub disabled_mcp_servers: Vec<String>,
+    /// Instruction files (CLAUDE.md, AGENTS.md, rules) not to load, by full path.
+    pub disabled_instructions: Vec<String>,
+    /// Skills not to load, by name (`plugin:name` for a plugin's).
+    pub disabled_skills: Vec<String>,
 }
 
 impl Default for ClaudeConfig {
@@ -121,6 +125,8 @@ impl Default for ClaudeConfig {
             plugins: true,
             disabled_plugins: Vec::new(),
             disabled_mcp_servers: Vec::new(),
+            disabled_instructions: Vec::new(),
+            disabled_skills: Vec::new(),
         }
     }
 }

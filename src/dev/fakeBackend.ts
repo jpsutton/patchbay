@@ -1318,6 +1318,59 @@ export function install() {
             ],
           };
         }
+        case "agent_prompt_preview": {
+          const prefs = JSON.parse(db.settings.preferences ?? "{}");
+          const cfg = prefs.claudeConfig ?? {};
+          const minify = (a.minify as boolean | null) ?? !!prefs.minifyPrompts;
+          const cwd = (a.cwd as string | null) ?? "/home/me/src/patchbay";
+          const tok = (t: string) => Math.ceil(t.length / 4);
+          const sec = (id: string, group: string, title: string, source: string | null, text: string, enabled = true, path: string | null = null) => ({
+            id, group, title, source, text, tokens: tok(text), enabled, path,
+          });
+          const wrap = (path: string, text: string) => `# Project instructions (${path})\n\nThese are background context from the project, followed unless the user says otherwise.\n\n${text}`;
+          const instrOn = cfg.instructions !== false;
+          const skillsOn = cfg.skills !== false;
+          const offFile = (p: string) => (cfg.disabledInstructions ?? []).includes(p);
+          const offSkill = (n: string) => (cfg.disabledSkills ?? []).includes(n);
+          const files = [
+            { path: "/home/me/.claude/CLAUDE.md", title: "user: CLAUDE.md", text: "Reply terse. Never run git push without asking.", always: false },
+            { path: `${cwd}/AGENTS.md`, title: "project: AGENTS.md", text: "Run pnpm build before opening a PR.", always: true },
+            { path: `${cwd}/CLAUDE.md`, title: "project: CLAUDE.md", text: "Don't build Rust locally. Fix, push, let CI build.", always: false },
+          ];
+          const skills = [
+            { name: "pdf", description: "Work with PDF files", source: "user" },
+            { name: "caveman:caveman", description: "Ultra-compressed communication mode", source: "plugin caveman" },
+          ];
+          const liveSkills = skills.filter((k) => skillsOn && !offSkill(k.name));
+          const sections = [
+            sec("persona", "standard", "Patchbay agent prompt", minify ? "system.min.md" : "system.md", "You are Patchbay's coding agent, running inside the Patchbay desktop app. (fake preview text)"),
+            ...(minify ? [sec("terse", "standard", "Reply style", "terse.md, with compact prompts", "# Reply style: terse\n\nReply terse, like smart caveman.")] : []),
+            sec("environment", "standard", "Environment", "worked out for each session", `# Environment\n\n- Working directory: ${cwd}\n- Model: ${a.modelRef ?? "none"}`),
+            sec("custom_instructions", "instructions", "Custom instructions", "Settings", prefs.agentInstructions ? `# The user's instructions\n\n${prefs.agentInstructions}` : "", !!prefs.agentInstructions),
+            ...files.map((f) => sec(`instructions:${f.path}`, "instructions", f.title, f.path, wrap(f.path, f.text), (f.always || instrOn) && !offFile(f.path), f.path)),
+            sec(
+              "skills", "skills", "Skills list", "each skill's name and description; its body loads when the agent uses it",
+              liveSkills.length ? `# Skills\n\nThese skills are installed.\n\n${liveSkills.map((k) => `- ${k.name}: ${k.description}`).join("\n")}` : "",
+              liveSkills.length > 0,
+            ),
+          ];
+          const tools = [
+            { name: "Read", description: "Read a file from the project." },
+            { name: "Bash", description: "Run a shell command." },
+            ...(liveSkills.length ? [{ name: "Skill", description: "Load an installed skill." }] : []),
+          ].map((t) => ({ ...t, tokens: tok(t.name + t.description) + 60 }));
+          return {
+            sections,
+            skills: skills.map((k) => ({ ...k, tokens: tok(`- ${k.name}: ${k.description}`), enabled: skillsOn && !offSkill(k.name) })),
+            reminders: [
+              ...(minify ? [sec("terse_nudge", "standard", "Reply-style reminder", "with every prompt, with compact prompts", "TERSE MODE ACTIVE. Enforce this reply: drop articles, filler, pleasantries and hedging.")] : []),
+              sec("context_size", "standard", "Context size note (example numbers)", "messages.json", "Context: 12k tokens. Every token you add is paid again on each later step."),
+            ],
+            tools,
+            tokens: sections.filter((s) => s.enabled).reduce((n, s) => n + s.tokens, 0),
+            toolsTokens: tools.reduce((n, t) => n + t.tokens, 0),
+          };
+        }
         case "web_search_status": return { configured: !!db.settings["web_search.key"], source: db.settings["web_search.key"] ? "keychain" : null };
         case "set_web_search_key": db.settings["web_search.key"] = a.key as string; return null;
         case "clear_web_search_key": delete db.settings["web_search.key"]; return null;

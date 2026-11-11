@@ -465,6 +465,24 @@ async fn claude_overview(state: &AppState, cwd: Option<String>) -> CmdResult<ser
     Ok(tokio::task::spawn_blocking(move || code::native::claude_overview(&prefs, cwd.as_deref())).await.map_err(anyhow::Error::from)?)
 }
 
+/// What goes into Patchbay's agent prompt for `model_ref` in `cwd`'s project, for Settings.
+async fn agent_prompt_preview(
+    state: &AppState,
+    cwd: Option<String>,
+    model_ref: Option<String>,
+    minify: Option<bool>,
+) -> CmdResult<serde_json::Value> {
+    let prefs = prefs::load(&state.db);
+    let (model_name, prefix) = match model_ref.as_deref().filter(|r| !r.is_empty()).map(|r| providers::resolve(&state.db, r)) {
+        Some(Ok(r)) => (r.model.display_name.clone(), providers::system_prefix(&r).into_iter().map(|b| b.text).collect()),
+        _ => ("the selected model".to_owned(), Vec::new()),
+    };
+    let cwd = cwd.map(std::path::PathBuf::from);
+    Ok(tokio::task::spawn_blocking(move || code::native::agent_prompt_preview(&prefs, cwd.as_deref(), &model_name, prefix, minify))
+        .await
+        .map_err(anyhow::Error::from)?)
+}
+
 async fn set_web_search_key(state: &AppState, key: String) -> CmdResult<()> {
     Ok(providers::set_web_search_key(&state.db, &key)?)
 }
