@@ -100,8 +100,10 @@ Facts about an agent or MCP server live with that agent or server: the Agents an
 3. Teams editors: the Requires picker and the seat warnings.
 4. Later and separate: the models.dev snapshot, the ACP `mcpCapabilities` record, the dispatch-time warning or block.
 
-## Decisions for David
+## Decisions (David, 2026-11-11)
 
-1. Enforcement: warn in the editor only (recommended), or also refuse dispatch when `missing` is non-empty.
-2. Model capabilities for agents that pick their own model: a models.dev snapshot (recommended; unknown when not found), or no model check for those agents in v1.
-3. Who owns `subagents` / `web_*` / `computer_use` values: we declare them in the Rust table (recommended), or the user can override per agent in Settings.
+1. Enforcement: warn in the template editor only. Dispatch is not refused.
+2. Model capabilities for agents that pick their own model come from a cached models.dev snapshot. No match means "unknown", never "missing".
+3. Agent facts (`subagents`, `web_*`, `computer_use`) are declared in the Rust table. Settings displays them, with no per-agent user override.
+
+Sequencing: per the director (4fc0a3d8), this comes after the real-backend end-to-end loop works (dispatch, decision, release).
