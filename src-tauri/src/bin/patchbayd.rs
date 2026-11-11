@@ -367,8 +367,15 @@ async fn run(args: Args, data_dir: PathBuf, listen: String) -> Result<()> {
         let ui_dir = find_ui_dir(args.ui_dir.clone())
             .context("built web UI not found; pass --ui-dir <dist> or --no-web")?;
         if !addr.ip().is_loopback() {
+            let note = if addr.ip().is_unspecified() {
+                "on this computer's private and VPN addresses (a wildcard never binds a public one)"
+            } else if patchbay_lib::net_bind::is_public(addr.ip()) {
+                "on a PUBLIC address you named"
+            } else {
+                "beyond this computer"
+            };
             tracing::warn!(
-                "the web UI listens on {addr}, beyond this computer, over plain HTTP. Anyone who gets the token can run \
+                "the web UI listens on {addr}, {note}, over plain HTTP. Anyone who gets the token can run \
                  commands as this user; prefer the default loopback address and an SSH tunnel."
             );
         }

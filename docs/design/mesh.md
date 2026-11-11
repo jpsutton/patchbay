@@ -25,7 +25,7 @@ How Patchbay links one person's computers: membership, data sync, remote control
 
 ### Wire
 
-Each node runs one listener: **WebSocket over TCP**, `0.0.0.0:41890` by default. WebSocket lets a plain Cloudflare Tunnel hostname work with no `cloudflared` on the dialing side, and overlays carry it unchanged.
+Each node runs one listener: **WebSocket over TCP**, `0.0.0.0:41890` by default. A wildcard address binds one listener per private, VPN or loopback address of the host (`net_bind.rs`), never a public one, and re-reads the interface list every 10 seconds. Only a specific IP in `mesh.listen` binds that IP, public or not. The daemon's web UI (`--listen`) follows the same rule. The other listeners (artifact shares, agent messaging bridge) are loopback only. WebSocket lets a plain Cloudflare Tunnel hostname work with no `cloudflared` on the dialing side, and overlays carry it unchanged.
 
 Every connection runs two steps inside the WebSocket (`mesh/handshake.rs`):
 
