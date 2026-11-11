@@ -351,9 +351,10 @@ fn redact_userinfo(s: &str) -> String {
         if b[i] == b'@' {
             // Nearest `:` before the `@` with no whitespace, `/`, `?` or `#` between them.
             // Bounded twice: back to `last` (the end of the previous replacement) and to a
-            // fixed max distance, so an `@`-flood stays linear (DoS: TurnEnd::Error is
-            // unbounded and reaches the HTTP handler per request).
-            const MAX_BACK: usize = 128;
+            // fixed max distance — the FULL pre-clip window (4 KB), so every credential
+            // inside the clip is covered by the scan (DoS: TurnEnd::Error is unbounded
+            // and reaches the HTTP handler per request; the pre-clip caps the input).
+            const MAX_BACK: usize = 4096;
             let floor = i.saturating_sub(MAX_BACK).max(last);
             let mut c = i;
             let mut colon = None;
@@ -785,6 +786,27 @@ mod tests {
             elapsed < std::time::Duration::from_secs(1),
             "must complete well under a second, took {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn long_userinfo_within_the_clip_window_is_redacted() {
+        // Ship's two raw bypass cases: a password longer than a short scan window but
+        // well inside the 4 KB pre-clip must still be redacted (it passed through
+        // unchanged when MAX_BACK was 128).
+        for pw in ["pw!", "pw."] {
+            let password = pw.repeat(60);
+            let input = format!("u:{password}!@h");
+            let out = sanitize_reason(&input);
+            assert!(!out.contains(&password), "password must not appear: {out:?}");
+            assert!(!out.contains(&input), "input must not survive verbatim: {out:?}");
+            assert!(out.contains("[redacted]"), "expected redaction: {out:?}");
+        }
+        // The second raw shape ends the password with its own separator before the `@`.
+        let password2 = "pw.".repeat(60);
+        let input2 = format!("u:{password2}.@h");
+        let out2 = sanitize_reason(&input2);
+        assert!(!out2.contains(&password2), "password must not appear: {out2:?}");
+        assert!(!out2.contains(&input2), "input must not survive verbatim: {out2:?}");
     }
 
     #[test]
