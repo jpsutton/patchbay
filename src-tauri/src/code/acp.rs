@@ -47,6 +47,10 @@ pub enum CodeEvent {
         /// What this agent does without asking, whatever the session's approval mode.
         approval_gaps: &'static [&'static str],
     },
+    /// What the agent does without asking changed with the session's approval mode (Codex).
+    ApprovalGaps {
+        gaps: &'static [&'static str],
+    },
     /// The agent's session config changed (`config_option_update`, or after setting one).
     #[serde(rename_all = "camelCase")]
     Config {
@@ -596,6 +600,9 @@ fn drop_queue(ctx: &TurnCtx, queue: &mut Queue) {
 /// (option id to select, description for the UI).
 pub type AutoApprove = Arc<dyn Fn(&Value, &Value) -> Option<(String, String)> + Send + Sync>;
 
+/// The session's approval mode as saved now (read fresh); `None` when it can't be read.
+pub type PermissionModeNow = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
 /// Builds the ACP `mcpServers` list once the agent's capabilities are known; also returns
 /// names of servers left out because the agent doesn't support their transport.
 pub type McpProvider = Box<dyn FnOnce(&Value) -> (Vec<Value>, Vec<String>) + Send>;
@@ -647,6 +654,7 @@ pub struct SpawnSpec {
     /// Called with the ACP session id once known.
     pub on_session: Box<dyn Fn(String) + Send>,
     pub auto_approve: AutoApprove,
+    pub permission_mode: PermissionModeNow,
     pub mcp: McpProvider,
 }
 
@@ -656,6 +664,7 @@ struct UiClient {
     pending: PendingPermissions,
     questions: PendingQuestions,
     auto_approve: AutoApprove,
+    permission_mode: PermissionModeNow,
     /// Latest known fields per tool call; permission requests may carry only a partial update.
     tool_calls: RefCell<HashMap<String, Value>>,
     /// Which config options stand for model and mode, shared with the command loop.
@@ -828,13 +837,21 @@ impl UiClient {
     /// The agent switched itself into one of its own approval policies (Claude does when a plan
     /// is approved with "auto-accept edits"): put it back, so the session's mode still decides.
     fn keep_mode(&self, current: Option<&str>) {
-        let (Some(current), Some(want)) = (current, self.approvals.select_mode.as_ref()) else { return };
-        if !self.approvals.hide_modes.contains(&current) {
+        let (Some(current), Some(fixed)) = (current, self.approvals.select_mode.as_ref()) else { return };
+        // Codex: the mode the session's approval mode implies right now, read-only when it can't be read.
+        let want = if self.approvals.follows_approval {
+            super::agents::codex_mode_for((self.permission_mode)().as_deref()).to_owned()
+        } else if self.approvals.hide_modes.contains(&current) {
+            fixed.clone()
+        } else {
+            return;
+        };
+        if current == want {
             return;
         }
         let Some(cmds) = self.cmds.upgrade() else { return };
         let (reply, _) = oneshot::channel();
-        let _ = cmds.send(AgentCmd::SetMode { mode_id: want.clone(), reply });
+        let _ = cmds.send(AgentCmd::SetMode { mode_id: want, reply });
         emit(
             &self.sink,
             &self.code_session_id,
@@ -914,6 +931,151 @@ mod tool_call_tests {
     use super::*;
     use acp::Client as _;
 
+    /// A client set up for `kind`'s approvals whose session's approval mode is `mode` (`None`: it
+    /// can't be read), with the receiver that sees what `keep_mode` sends the agent.
+    fn client_for(
+        kind: crate::code::agents::AgentKind,
+        mode: Arc<Mutex<Option<String>>>,
+    ) -> (UiClient, mpsc::UnboundedReceiver<AgentCmd>, mpsc::UnboundedSender<AgentCmd>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let client = UiClient {
+            sink: Arc::new(|_| {}),
+            code_session_id: "c".into(),
+            pending: Arc::default(),
+            questions: Arc::default(),
+            auto_approve: Arc::new(|_, _| None),
+            permission_mode: Arc::new(move || mode.lock().unwrap().clone()),
+            tool_calls: RefCell::default(),
+            config_ids: Rc::default(),
+            config: Rc::default(),
+            approvals: ApprovalSetup::for_agent(kind),
+            cmds: tx.downgrade(),
+            acp_session: Rc::default(),
+        };
+        (client, rx, tx)
+    }
+
+    /// The mode `keep_mode` asked the agent for, if it asked.
+    fn kept(rx: &mut mpsc::UnboundedReceiver<AgentCmd>) -> Option<String> {
+        match rx.try_recv() {
+            Ok(AgentCmd::SetMode { mode_id, .. }) => Some(mode_id),
+            Ok(_) => panic!("keep_mode sent something other than SetMode"),
+            Err(_) => None,
+        }
+    }
+
+    #[test]
+    fn codex_goes_back_to_read_only_when_approve_all_is_switched_off() {
+        use crate::code::agents::AgentKind::Codex;
+        let mode = Arc::new(Mutex::new(Some("always-approve".to_owned())));
+        let (c, mut rx, _tx) = client_for(Codex, mode.clone());
+        // Approve all: workspace-write is the mode it should be in; nothing to put back.
+        c.keep_mode(Some("workspace-write"));
+        assert_eq!(kept(&mut rx), None);
+        // Switched to Ask (or Auto edits): the same mode is now one to revert, to read-only.
+        for approval in ["default", "auto"] {
+            *mode.lock().unwrap() = Some(approval.to_owned());
+            c.keep_mode(Some("workspace-write"));
+            assert_eq!(kept(&mut rx).as_deref(), Some("read-only"), "{approval}");
+            c.keep_mode(Some("read-only"));
+            assert_eq!(kept(&mut rx), None, "{approval}: already right");
+        }
+        // And back to Approve all: read-only is the one to revert.
+        *mode.lock().unwrap() = Some("always-approve".to_owned());
+        c.keep_mode(Some("read-only"));
+        assert_eq!(kept(&mut rx).as_deref(), Some("workspace-write"));
+    }
+
+    /// The race: while the sandbox is being moved (Approve all -> Ask), the agent reports its mode
+    /// (a config update). `keep_mode` reads the SAVED approval mode then, so the new mode must
+    /// already be saved or it would put the old sandbox back and leave Codex writing under Ask.
+    #[test]
+    fn a_mode_report_during_the_switch_to_ask_does_not_flip_the_sandbox_back() {
+        use crate::code::agents::AgentKind::Codex;
+        let saved = Arc::new(Mutex::new(Some("always-approve".to_owned())));
+        let (c, mut rx, _tx) = client_for(Codex, saved.clone());
+        let write = saved.clone();
+        futures::executor::block_on(crate::save_then_move(
+            move |m| {
+                *write.lock().unwrap() = Some(m.to_owned());
+                Ok(())
+            },
+            "always-approve",
+            "default",
+            || async {
+                // Inside the window: the adapter has applied read-only and reports it.
+                c.keep_mode(Some("read-only"));
+                Ok(())
+            },
+        ))
+        .unwrap();
+        assert_eq!(kept(&mut rx), None, "keep_mode flipped the sandbox back during the switch");
+        assert_eq!(saved.lock().unwrap().as_deref(), Some("default"));
+    }
+
+    /// A refused switch to Ask puts the previous mode back, and a report after that is judged
+    /// against it (the sandbox is still the old one, so nothing is flipped).
+    #[test]
+    fn a_refused_switch_restores_the_previous_mode() {
+        use crate::code::agents::AgentKind::Codex;
+        let saved = Arc::new(Mutex::new(Some("always-approve".to_owned())));
+        let (c, mut rx, _tx) = client_for(Codex, saved.clone());
+        let write = saved.clone();
+        let r = futures::executor::block_on(crate::save_then_move(
+            move |m| {
+                *write.lock().unwrap() = Some(m.to_owned());
+                Ok(())
+            },
+            "always-approve",
+            "default",
+            || async { Err(anyhow::anyhow!("agent refused")) },
+        ));
+        assert!(r.is_err());
+        assert_eq!(saved.lock().unwrap().as_deref(), Some("always-approve"));
+        c.keep_mode(Some("workspace-write"));
+        assert_eq!(kept(&mut rx), None, "the old sandbox is the right one again");
+    }
+
+    #[test]
+    fn codex_leaving_for_a_hidden_mode_is_put_back_to_what_approval_implies() {
+        use crate::code::agents::AgentKind::Codex;
+        let mode = Arc::new(Mutex::new(Some("always-approve".to_owned())));
+        let (c, mut rx, _tx) = client_for(Codex, mode.clone());
+        for hidden in ["agent", "agent-full-access"] {
+            *mode.lock().unwrap() = Some("always-approve".to_owned());
+            c.keep_mode(Some(hidden));
+            assert_eq!(kept(&mut rx).as_deref(), Some("workspace-write"), "{hidden} under Approve all");
+            *mode.lock().unwrap() = Some("default".to_owned());
+            c.keep_mode(Some(hidden));
+            assert_eq!(kept(&mut rx).as_deref(), Some("read-only"), "{hidden} under Ask");
+        }
+    }
+
+    #[test]
+    fn codex_falls_back_to_read_only_when_the_approval_mode_cannot_be_read() {
+        use crate::code::agents::AgentKind::Codex;
+        let (c, mut rx, _tx) = client_for(Codex, Arc::new(Mutex::new(None)));
+        for current in ["workspace-write", "agent", "agent-full-access"] {
+            c.keep_mode(Some(current));
+            assert_eq!(kept(&mut rx).as_deref(), Some("read-only"), "{current}");
+        }
+        c.keep_mode(Some("read-only"));
+        assert_eq!(kept(&mut rx), None);
+    }
+
+    #[test]
+    fn other_agents_keep_their_fixed_mode() {
+        use crate::code::agents::AgentKind::ClaudeCode;
+        let (c, mut rx, _tx) = client_for(ClaudeCode, Arc::new(Mutex::new(Some("always-approve".to_owned()))));
+        c.keep_mode(Some("bypassPermissions"));
+        assert_eq!(kept(&mut rx).as_deref(), Some("default"));
+        c.keep_mode(Some("default"));
+        assert_eq!(kept(&mut rx), None);
+        // Not a hidden mode: left alone, whatever the approval mode.
+        c.keep_mode(Some("plan"));
+        assert_eq!(kept(&mut rx), None);
+    }
+
     /// A client whose sink records events and answers each permission request with "allow".
     fn client() -> (UiClient, Arc<Mutex<Vec<CodeEvent>>>, mpsc::UnboundedSender<AgentCmd>) {
         let events: Arc<Mutex<Vec<CodeEvent>>> = Arc::default();
@@ -934,6 +1096,7 @@ mod tool_call_tests {
             pending,
             questions: Arc::default(),
             auto_approve: Arc::new(|_, _| None),
+            permission_mode: Arc::new(|| None),
             tool_calls: RefCell::default(),
             config_ids: Rc::default(),
             config: Rc::default(),
@@ -1431,6 +1594,7 @@ async fn run(
         questions,
         on_session,
         auto_approve,
+        permission_mode,
         mcp,
     } = spec;
     let Launch {
@@ -1517,6 +1681,7 @@ async fn run(
         pending: pending.clone(),
         questions: questions.clone(),
         auto_approve,
+        permission_mode: permission_mode.clone(),
         tool_calls: RefCell::default(),
         config_ids: config_ids.clone(),
         config: config.clone(),
@@ -1661,7 +1826,13 @@ async fn run(
     }
 
     // Agents with approval policies of their own: start in the one that asks.
-    if let Some(want) = approvals.select_mode.as_ref().filter(|m| {
+    let start_mode = if approvals.follows_approval {
+        // Read now, not at launch: the approval mode may have changed while the agent started.
+        Some(super::agents::codex_mode_for(permission_mode().as_deref()).to_owned())
+    } else {
+        approvals.select_mode.clone()
+    };
+    if let Some(want) = start_mode.as_ref().filter(|m| {
         cfg.modes["currentModeId"].as_str() != Some(m.as_str())
             && cfg.modes["availableModes"]
                 .as_array()
@@ -1688,7 +1859,11 @@ async fn run(
             agent_info: init_v["agentInfo"].clone(),
             config_options: cfg.extra.clone(),
             extensions,
-            approval_gaps: approvals.gaps,
+            approval_gaps: if approvals.follows_approval {
+                super::agents::codex_gaps_for(permission_mode().as_deref())
+            } else {
+                approvals.gaps
+            },
         },
     );
     if init_commands.is_array() {
@@ -3044,6 +3219,7 @@ for line in sys.stdin:
             questions: Arc::default(),
             on_session: Box::new(|_| {}),
             auto_approve: Arc::new(|_, _| None),
+            permission_mode: Arc::new(|| None),
             mcp: Box::new(|_| (Vec::new(), Vec::new())),
         });
         Some((events, tx, thread))

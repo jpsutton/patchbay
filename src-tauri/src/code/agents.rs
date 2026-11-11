@@ -214,15 +214,29 @@ pub struct ApprovalSetup {
     pub hide_modes: &'static [&'static str],
     /// What this agent does without asking, whatever the mode. Shown in the session header.
     pub gaps: &'static [&'static str],
+    /// `select_mode` is not fixed: it follows the session's approval mode (`codex_mode_for`), at
+    /// start, on resume, on a change while running, and in `keep_mode`.
+    pub follows_approval: bool,
 }
 
 impl ApprovalSetup {
+    /// `for_agent`, with what depends on the session's approval mode filled in (Codex's sandbox).
+    pub(crate) fn for_session(kind: AgentKind, permission_mode: &str) -> Self {
+        let mut setup = Self::for_agent(kind);
+        if setup.follows_approval {
+            setup.select_mode = Some(codex_mode_for(Some(permission_mode)).into());
+            setup.gaps = codex_gaps_for(Some(permission_mode));
+        }
+        setup
+    }
+
     pub(crate) fn for_agent(kind: AgentKind) -> Self {
         match kind {
             AgentKind::Patchbay => Self {
                 select_mode: None,
                 hide_modes: &[],
                 gaps: &["Reads and searches inside the project run without asking."],
+                ..Self::default()
             },
             // Grok's own mode is pinned to "default" in its config.toml (grok_config.rs).
             AgentKind::Grok | AgentKind::Opencode | AgentKind::Kilo => Self::default(),
@@ -232,21 +246,22 @@ impl ApprovalSetup {
                 gaps: &[
                     "Rules in your own Claude Code settings (permissions.allow) run without asking.",
                 ],
+                ..Self::default()
             },
-            // Codex's modes are approval and sandbox presets. Read-only asks before every edit
-            // and network use; its sandbox still runs shell commands without asking.
+            // Codex's modes are approval and sandbox presets. The session's approval mode picks
+            // one (`codex_mode_for`); none is offered in the UI, and the agent is put back in the
+            // one the approval mode implies if it leaves it. Starts as the asking one.
             AgentKind::Codex => Self {
                 select_mode: Some(CODEX_ASKING_MODE.into()),
-                hide_modes: &["workspace-write", "agent", "agent-full-access"],
-                gaps: &[
-                    "Codex runs shell commands inside its read-only sandbox without asking.",
-                    "Rules in your own Codex config (~/.codex) may let more run without asking.",
-                ],
+                hide_modes: &[CODEX_ASKING_MODE, CODEX_WRITING_MODE, "agent", "agent-full-access"],
+                gaps: CODEX_ASKING_GAPS,
+                follows_approval: true,
             },
             AgentKind::Antigravity => Self {
                 select_mode: Some("default".into()),
                 hide_modes: &["auto_edit", "yolo"],
                 gaps: &["Antigravity reads and searches files without asking."],
+                ..Self::default()
             },
             // Cursor has no per-session approval control over ACP.
             AgentKind::Cursor => Self {
@@ -256,6 +271,7 @@ impl ApprovalSetup {
                     "Cursor edits files in this project without asking, in every mode.",
                     "Shell commands on Cursor's own allowlist (~/.cursor/cli-config.json) run without asking.",
                 ],
+                ..Self::default()
             },
         }
     }
@@ -263,6 +279,39 @@ impl ApprovalSetup {
 
 /// Codex mode that asks before edits; also its starting mode (`INITIAL_AGENT_MODE`).
 const CODEX_ASKING_MODE: &str = "read-only";
+/// Codex mode that edits the project (and the temp folders) without asking; network and anything
+/// outside the sandbox still go through Codex's own `on-request` approvals (pb-20261110-15).
+const CODEX_WRITING_MODE: &str = "workspace-write";
+
+/// The Codex mode a session's approval mode implies: Approve all writes in the project, anything
+/// else (or an approval mode that could not be read) stays read-only. Never `agent` or
+/// `agent-full-access`: those stay hidden and unselected.
+pub(crate) fn codex_mode_for(permission_mode: Option<&str>) -> &'static str {
+    if permission_mode == Some("always-approve") {
+        CODEX_WRITING_MODE
+    } else {
+        CODEX_ASKING_MODE
+    }
+}
+
+const CODEX_CONFIG_GAP: &str = "Rules in your own Codex config (~/.codex) may let more run without asking.";
+const CODEX_ASKING_GAPS: &[&str] = &[
+    "Codex runs shell commands inside its read-only sandbox without asking. It asks before editing files and before network use.",
+    CODEX_CONFIG_GAP,
+];
+const CODEX_WRITING_GAPS: &[&str] = &[
+    "Codex writes in this project and in the temp folders (/tmp and $TMPDIR) without asking. Everything else it asks for (network, files outside the project) is approved automatically under Approve all.",
+    CODEX_CONFIG_GAP,
+];
+
+/// What Codex does without asking under a session's approval mode: the header's text.
+pub(crate) fn codex_gaps_for(permission_mode: Option<&str>) -> &'static [&'static str] {
+    if codex_mode_for(permission_mode) == CODEX_WRITING_MODE {
+        CODEX_WRITING_GAPS
+    } else {
+        CODEX_ASKING_GAPS
+    }
+}
 
 const OPCODE_ALWAYS_APPROVE_MODE: &str = "always-approve";
 
@@ -1127,7 +1176,7 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
         AgentKind::Codex => {
             env.push((
                 "INITIAL_AGENT_MODE".to_owned(),
-                CODEX_ASKING_MODE.to_owned(),
+                codex_mode_for(Some(&session.permission_mode)).to_owned(),
             ));
             // The adapter reads an API key from the environment only when told to sign in with
             // one; without a login it otherwise stops at `auth_required`.
@@ -1195,7 +1244,7 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
         session_meta,
         initial_model: session.agent_model.clone(),
         login_hint: kind.login_hint(),
-        approvals: ApprovalSetup::for_agent(kind),
+        approvals: ApprovalSetup::for_session(kind, &session.permission_mode),
         native: None,
     })
 }
@@ -2163,9 +2212,10 @@ time.sleep(60)
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Codex starts in the mode that asks, and gets custom instructions through `CODEX_CONFIG`.
+    /// Ask first => read-only: Codex starts in the mode that asks, and gets custom instructions
+    /// through `CODEX_CONFIG` (pb-20261110-15 keeps this pin and names it for what it holds).
     #[test]
-    fn codex_launch_asks_and_carries_instructions() {
+    fn codex_launch_under_ask_is_read_only_and_carries_instructions() {
         let dir = std::env::temp_dir().join(format!("pb-ag-{}", crate::db::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = std::sync::Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
@@ -2191,6 +2241,7 @@ time.sleep(60)
         assert_eq!(env(&l, "INITIAL_AGENT_MODE").as_deref(), Some("read-only"));
         assert_eq!(env(&l, "CODEX_CONFIG"), None);
         assert_eq!(l.approvals.select_mode.as_deref(), Some("read-only"));
+        assert_eq!(l.approvals.gaps, codex_gaps_for(Some("default")));
 
         prefs.agent_instructions = "be terse".into();
         crate::prefs::save(&db, &prefs).unwrap();
@@ -2198,6 +2249,72 @@ time.sleep(60)
         let config: Value = serde_json::from_str(&env(&l, "CODEX_CONFIG").unwrap()).unwrap();
         assert_eq!(config, json!({ "developer_instructions": "be terse" }));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Codex session is launched from its SAVED approval mode, every time: Approve all => the
+    /// write-in-project mode (reaching the process as `INITIAL_AGENT_MODE` and as the mode to
+    /// select), anything else => read-only; a resume is just another `prepare` (pb-20261110-15).
+    #[test]
+    fn codex_launch_follows_the_saved_approval_mode_including_on_resume() {
+        let dir = std::env::temp_dir().join(format!("pb-ag-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = std::sync::Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
+        let mut o = AgentPaths::new();
+        o.insert("codex".into(), std::env::current_exe().unwrap().to_string_lossy().into_owned());
+        crate::prefs::save(&db, &crate::prefs::Preferences { agent_paths: o, ..Default::default() }).unwrap();
+        let session = db.create_code_session(&dir.to_string_lossy(), None, "codex", "default").unwrap();
+        let env = |l: &Launch, k: &str| l.env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        let launch = || prepare(&db, &dir, &db.get_code_session(&session.id).unwrap().unwrap()).unwrap();
+
+        for (approval, mode) in [
+            ("always-approve", "workspace-write"),
+            ("default", "read-only"),
+            ("auto", "read-only"),
+            // Switched back and forth, each (re)start reads what is saved now.
+            ("always-approve", "workspace-write"),
+            ("default", "read-only"),
+        ] {
+            db.set_code_session_permission_mode(&session.id, approval).unwrap();
+            let l = launch();
+            assert_eq!(env(&l, "INITIAL_AGENT_MODE").as_deref(), Some(mode), "{approval}");
+            assert_eq!(l.approvals.select_mode.as_deref(), Some(mode), "{approval}");
+            assert_eq!(l.approvals.gaps, codex_gaps_for(Some(approval)), "{approval}");
+            assert!(l.approvals.follows_approval);
+            // The write-capable mode is never offered, and neither are the agent modes.
+            for hidden in ["read-only", "workspace-write", "agent", "agent-full-access"] {
+                assert!(l.approvals.hide_modes.contains(&hidden), "{hidden} stays hidden");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Only Approve all opens write access, and only to `workspace-write`: no input, including an
+    /// unreadable approval mode, ever reaches `agent` or `agent-full-access`.
+    #[test]
+    fn codex_mode_mapping_is_conservative() {
+        assert_eq!(codex_mode_for(Some("always-approve")), "workspace-write");
+        for other in [None, Some("default"), Some("auto"), Some(""), Some("agent"), Some("agent-full-access"), Some("workspace-write")] {
+            assert_eq!(codex_mode_for(other), "read-only", "{other:?}");
+        }
+    }
+
+    /// The header says what is true in each state: Ask asks for edits and network; Approve all
+    /// writes in the project and the temp folders unasked and approves the rest itself.
+    #[test]
+    fn codex_header_text_differs_per_state() {
+        let ask = codex_gaps_for(Some("default")).join(" ");
+        let all = codex_gaps_for(Some("always-approve")).join(" ");
+        assert_ne!(ask, all);
+        assert!(ask.contains("read-only sandbox") && ask.contains("asks before editing files"), "{ask}");
+        assert!(!ask.contains("temp folders"), "{ask}");
+        assert!(all.contains("writes in this project") && all.contains("/tmp and $TMPDIR"), "{all}");
+        assert!(all.contains("network, files outside the project") && all.contains("approved automatically"), "{all}");
+        // Unreadable approval mode reads as Ask, text included.
+        assert_eq!(codex_gaps_for(None), codex_gaps_for(Some("default")));
+        // Other agents keep a fixed setup whatever the session's approval mode is.
+        let claude = ApprovalSetup::for_session(AgentKind::ClaudeCode, "always-approve");
+        assert_eq!(claude, ApprovalSetup::for_agent(AgentKind::ClaudeCode));
+        assert!(!claude.follows_approval);
     }
 
     #[test]
