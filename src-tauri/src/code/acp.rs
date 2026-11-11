@@ -986,6 +986,56 @@ mod tool_call_tests {
         assert_eq!(kept(&mut rx).as_deref(), Some("workspace-write"));
     }
 
+    /// The race: while the sandbox is being moved (Approve all -> Ask), the agent reports its mode
+    /// (a config update). `keep_mode` reads the SAVED approval mode then, so the new mode must
+    /// already be saved or it would put the old sandbox back and leave Codex writing under Ask.
+    #[test]
+    fn a_mode_report_during_the_switch_to_ask_does_not_flip_the_sandbox_back() {
+        use crate::code::agents::AgentKind::Codex;
+        let saved = Arc::new(Mutex::new(Some("always-approve".to_owned())));
+        let (c, mut rx, _tx) = client_for(Codex, saved.clone());
+        let write = saved.clone();
+        futures::executor::block_on(crate::save_then_move(
+            move |m| {
+                *write.lock().unwrap() = Some(m.to_owned());
+                Ok(())
+            },
+            "always-approve",
+            "default",
+            || async {
+                // Inside the window: the adapter has applied read-only and reports it.
+                c.keep_mode(Some("read-only"));
+                Ok(())
+            },
+        ))
+        .unwrap();
+        assert_eq!(kept(&mut rx), None, "keep_mode flipped the sandbox back during the switch");
+        assert_eq!(saved.lock().unwrap().as_deref(), Some("default"));
+    }
+
+    /// A refused switch to Ask puts the previous mode back, and a report after that is judged
+    /// against it (the sandbox is still the old one, so nothing is flipped).
+    #[test]
+    fn a_refused_switch_restores_the_previous_mode() {
+        use crate::code::agents::AgentKind::Codex;
+        let saved = Arc::new(Mutex::new(Some("always-approve".to_owned())));
+        let (c, mut rx, _tx) = client_for(Codex, saved.clone());
+        let write = saved.clone();
+        let r = futures::executor::block_on(crate::save_then_move(
+            move |m| {
+                *write.lock().unwrap() = Some(m.to_owned());
+                Ok(())
+            },
+            "always-approve",
+            "default",
+            || async { Err(anyhow::anyhow!("agent refused")) },
+        ));
+        assert!(r.is_err());
+        assert_eq!(saved.lock().unwrap().as_deref(), Some("always-approve"));
+        c.keep_mode(Some("workspace-write"));
+        assert_eq!(kept(&mut rx), None, "the old sandbox is the right one again");
+    }
+
     #[test]
     fn codex_leaving_for_a_hidden_mode_is_put_back_to_what_approval_implies() {
         use crate::code::agents::AgentKind::Codex;

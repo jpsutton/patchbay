@@ -2687,9 +2687,11 @@ async fn agent_message_refusal_names_the_recipients_account() {
     assert!(err.0.starts_with("Not sent. You have used 97% of dev@example.com Organization's 5-hour limit"), "{}", err.0);
 }
 
-/// Changing a running Codex session's approval mode moves its sandbox with it, sandbox FIRST: a
-/// failed switch back to Ask leaves the saved mode (and so the header) on Approve all rather than
-/// pretending Codex is read-only; other agents are not touched (pb-20261110-15).
+/// Changing a running Codex session's approval mode moves its sandbox with it, the NEW approval
+/// mode saved FIRST: whatever reads the saved mode while the sandbox moves (`keep_mode`, on the
+/// agent reporting its mode) must see the target, or it could flip the sandbox back and leave
+/// Codex writing under Ask. A switch the agent refuses puts the previous mode back; other agents
+/// are not touched (pb-20261110-15).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn codex_sandbox_follows_a_live_approval_change() {
     use code::acp::AgentCmd;
@@ -2700,14 +2702,16 @@ async fn codex_sandbox_follows_a_live_approval_change() {
     let claude = a.state.db.create_code_session(&cwd, None, "claude-code", "default").unwrap();
     let mut codex_rx = a.state.code.attach_test_agent(&codex.id);
     let mut claude_rx = a.state.code.attach_test_agent(&claude.id);
-    let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+    // (mode asked for, approval mode SAVED at the moment it was asked for)
+    let asked: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
     let refuse = Arc::new(AtomicBool::new(false));
     {
-        let (asked, refuse) = (asked.clone(), refuse.clone());
+        let (asked, refuse, db, id) = (asked.clone(), refuse.clone(), a.state.db.clone(), codex.id.clone());
         tokio::spawn(async move {
             while let Some(cmd) = codex_rx.recv().await {
                 if let AgentCmd::SetMode { mode_id, reply } = cmd {
-                    asked.lock().unwrap().push(mode_id);
+                    let saved = db.get_code_session(&id).unwrap().unwrap().permission_mode;
+                    asked.lock().unwrap().push((mode_id, saved));
                     let _ = reply.send(if refuse.load(Ordering::SeqCst) { Err(anyhow::anyhow!("agent refused")) } else { Ok(()) });
                 }
             }
@@ -2725,28 +2729,108 @@ async fn codex_sandbox_follows_a_live_approval_change() {
             .find(|(n, p)| n == code::acp::EVENT && p["event"]["type"] == "approvalGaps")
             .map(|(_, p)| p["event"]["gaps"].to_string())
     };
+    let pair = |m: &str, s: &str| (m.to_owned(), s.to_owned());
 
     set(&codex.id, "always-approve").await.unwrap();
     assert_eq!(saved(&codex.id), "always-approve");
-    assert_eq!(asked.lock().unwrap().as_slice(), ["workspace-write"]);
+    assert_eq!(asked.lock().unwrap().as_slice(), [pair("workspace-write", "always-approve")]);
     assert!(gaps().unwrap().contains("writes in this project"), "{:?}", gaps());
 
-    // Approve all -> Ask: the sandbox goes back to read-only, and the header says so.
+    // Approve all -> Ask: the sandbox goes back to read-only, the header says so, and the saved
+    // mode was already Ask when the agent was asked (save first).
     set(&codex.id, "default").await.unwrap();
     assert_eq!(saved(&codex.id), "default");
-    assert_eq!(asked.lock().unwrap().as_slice(), ["workspace-write", "read-only"]);
+    assert_eq!(asked.lock().unwrap()[1], pair("read-only", "default"), "saved mode must lead the sandbox");
     assert!(gaps().unwrap().contains("read-only sandbox"), "{:?}", gaps());
 
-    // A switch back to Ask the agent refuses is an error and changes nothing saved.
+    // A switch back to Ask the agent refuses is an error that puts the previous mode back.
     set(&codex.id, "always-approve").await.unwrap();
     refuse.store(true, Ordering::SeqCst);
     let before = gaps();
     assert!(set(&codex.id, "default").await.is_err());
-    assert_eq!(saved(&codex.id), "always-approve", "the saved mode must not claim Ask while Codex may still write");
+    assert_eq!(asked.lock().unwrap().last().unwrap(), &pair("read-only", "default"), "asked after saving the target");
+    assert_eq!(saved(&codex.id), "always-approve", "a refused switch must restore the previous mode");
     assert_eq!(gaps(), before);
+    // A refused switch to Approve all restores the safe value too.
+    refuse.store(false, Ordering::SeqCst);
+    set(&codex.id, "default").await.unwrap();
+    refuse.store(true, Ordering::SeqCst);
+    assert!(set(&codex.id, "always-approve").await.is_err());
+    assert_eq!(saved(&codex.id), "default", "a refused widening leaves Ask in place");
 
     // Another agent: saved, no mode change sent, no header event.
     set(&claude.id, "always-approve").await.unwrap();
     assert_eq!(saved(&claude.id), "always-approve");
     assert!(claude_rx.try_recv().is_err());
+}
+
+/// Live, manual: case D of pb-20261110-15 through Patchbay's own `code_set_permission_mode` (not the
+/// raw adapter): a real Codex session started under Approve all writes in the project without a
+/// permission request; after the approval control goes to Ask, the same kind of write is ASKED
+/// again, and a refusal leaves the file absent. Uses your real `codex login` and one small turn per
+/// phase. The project must NOT be under /tmp or $TMPDIR (Codex may write there unasked).
+///
+/// `PB_TEST_REAL_HOME=1 PB_CODEX_SCRATCH=<dir outside tmp> cargo test --lib manual_codex_live_approval_switch -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
+#[ignore]
+async fn manual_codex_live_approval_switch() {
+    let scratch = std::path::PathBuf::from(std::env::var("PB_CODEX_SCRATCH").expect("PB_CODEX_SCRATCH: a folder outside /tmp and $TMPDIR"));
+    let project = scratch.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = project.canonicalize().unwrap();
+    for tmp in ["/tmp", "/private/tmp", &std::env::temp_dir().canonicalize().unwrap().to_string_lossy()] {
+        assert!(!project.starts_with(tmp), "{} is under {tmp}", project.display());
+    }
+    println!("REALPATH project={} $TMPDIR={:?}", project.display(), std::env::var("TMPDIR"));
+    let a = node("codex-live");
+    let s = a.state.db.create_code_session(&project.to_string_lossy(), None, "codex", "always-approve").unwrap();
+    crate::code_start_local(&a.state, s.id.clone()).await.unwrap();
+    let ev = |ty: &str| -> Vec<Value> {
+        a.events.lock().unwrap().iter().filter(|(n, p)| n == code::acp::EVENT && p["event"]["type"] == ty).map(|(_, p)| p["event"].clone()).collect()
+    };
+    until("the session is ready under Approve all", 180, || {
+        ev("sessionReady").last().is_some_and(|e| e["modes"]["currentModeId"] == "workspace-write")
+    })
+    .await;
+    println!("READY currentModeId={}", ev("sessionReady").last().unwrap()["modes"]["currentModeId"]);
+    let chans: crate::api::ChanFactory = Arc::new(|_| None);
+    let prompt = |file: &std::path::Path| {
+        let text = format!("Create the file {} containing the word proof.", file.display());
+        crate::api::call(&a.state, "code_prompt", json!({ "id": s.id, "text": text, "attachmentIds": [] }), &chans)
+    };
+
+    let d1 = project.join("d1.txt");
+    prompt(&d1).await.unwrap();
+    until("the first turn to end", 240, || !ev("promptDone").is_empty()).await;
+    println!("PHASE 1 (Approve all): permission requests={} auto-approved={} file exists={}", ev("permission").len(), ev("autoApproved").len(), d1.exists());
+    assert!(d1.exists());
+    assert!(ev("permission").is_empty(), "Approve all in the project needs no request");
+
+    // The approval control goes to Ask: through the command the UI calls.
+    crate::api::call(&a.state, "code_set_permission_mode", json!({ "id": s.id, "mode": "default" }), &chans).await.unwrap();
+    let saved = a.state.db.get_code_session(&s.id).unwrap().unwrap().permission_mode;
+    println!("SWITCHED saved approval mode={saved} approvalGaps events={}", ev("approvalGaps").len());
+    assert_eq!(saved, "default");
+    assert!(!ev("approvalGaps").is_empty());
+
+    let d2 = project.join("d2.txt");
+    prompt(&d2).await.unwrap();
+    until("a permission request after the switch", 240, || !ev("permission").is_empty()).await;
+    let req = ev("permission").last().cloned().unwrap();
+    let options = req["request"]["options"].as_array().cloned().unwrap_or_default();
+    let reject = options.iter().find(|o| o["kind"] == "reject_once").unwrap_or_else(|| panic!("no reject_once in {req}"));
+    println!("PHASE 2 (Ask): request_permission arrived: options={:?}", options.iter().map(|o| o["kind"].clone()).collect::<Vec<_>>());
+    crate::api::call(
+        &a.state,
+        "code_permission_respond",
+        json!({ "requestId": req["requestId"], "optionId": reject["optionId"], "id": s.id }),
+        &chans,
+    )
+    .await
+    .unwrap();
+    until("the second turn to end", 240, || ev("promptDone").len() >= 2).await;
+    println!("PHASE 2 result: file exists={} (refused)", d2.exists());
+    assert!(!d2.exists(), "the refused write must not have happened");
+    a.state.code.stop(&s.id);
 }
