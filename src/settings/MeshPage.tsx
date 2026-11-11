@@ -445,11 +445,10 @@ function Member() {
         <Row
           label="Listen on"
           hint={
-            mesh.running && mesh.port ? (
-              <span>Listening on port {mesh.port}.</span>
-            ) : (
-              "Address and port other computers connect to. Changes restart the connection."
-            )
+            <span>
+              {mesh.running && mesh.port ? `Listening on port ${mesh.port}. ` : "Address and port other computers connect to. "}
+              0.0.0.0 listens on private and VPN addresses only, never a public one; enter a public IP in full to listen on it. Changes restart the connection.
+            </span>
           }
         >
           <Deferred

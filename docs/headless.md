@@ -79,7 +79,7 @@ ssh -N -L 4420:127.0.0.1:4420 you@server
 
 Then open `http://127.0.0.1:4420/` on the laptop.
 
-`--listen 0.0.0.0:4420` serves it on the network instead, but only over plain HTTP. **Anyone who gets the token can run commands on the server as you**, through the agents and the terminal. Prefer the SSH tunnel, or put the daemon behind a reverse proxy that adds HTTPS.
+`--listen 0.0.0.0:4420` serves it on the network instead, but only over plain HTTP. A wildcard such as `0.0.0.0` or `[::]` binds only this computer's loopback, private (LAN) and VPN (such as Tailscale) addresses. It never binds a public IP address. To serve on a public address you must name it, for example `--listen 203.0.113.7:4420`. **Anyone who gets the token can run commands on the server as you**, through the agents and the terminal. Prefer the SSH tunnel, or put the daemon behind a reverse proxy that adds HTTPS.
 
 ## The read-only session status API
 

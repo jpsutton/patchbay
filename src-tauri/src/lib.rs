@@ -15,6 +15,7 @@ mod gateway;
 mod handoff;
 pub mod ipc;
 mod mesh;
+pub mod net_bind;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 mod portal_shortcuts;
 mod prefs;
