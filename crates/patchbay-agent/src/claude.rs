@@ -223,7 +223,8 @@ fn read_capped(path: &Path) -> Option<String> {
 
 /// Instruction files, broadest first: `AGENTS.md` always; with `instructions` on, also Claude
 /// Code's `~/.claude/CLAUDE.md`, its rules, and per directory `CLAUDE.md`, `.claude/CLAUDE.md`,
-/// `CLAUDE.local.md` and `.claude/rules/*.md`. A file reached twice counts once.
+/// `CLAUDE.local.md` and `.claude/rules/*.md`. A file reached twice counts once. A file named in
+/// `disabled_instructions` (by path) is skipped, `AGENTS.md` too.
 pub fn instructions(home: Option<&Path>, cwd: &Path, cfg: &ClaudeConfig) -> Vec<(PathBuf, String)> {
     let mut paths: Vec<PathBuf> = Vec::new();
     if cfg.instructions
@@ -247,6 +248,7 @@ pub fn instructions(home: Option<&Path>, cwd: &Path, cfg: &ClaudeConfig) -> Vec<
     let mut seen = std::collections::HashSet::new();
     paths
         .into_iter()
+        .filter(|p| !cfg.disabled_instructions.iter().any(|d| Path::new(d) == p.as_path()))
         .filter(|p| p.is_file() && seen.insert(p.canonicalize().unwrap_or_else(|_| p.clone())))
         .filter_map(|p| read_capped(&p).map(|t| (p, t)))
         .collect()
@@ -654,7 +656,11 @@ impl Setup {
         let roots = roots(home, cwd, cfg);
         Setup {
             commands: if cfg.skills { commands(&roots) } else { Vec::new() },
-            skills: if cfg.skills { skills(&roots) } else { Vec::new() },
+            skills: if cfg.skills {
+                skills(&roots).into_iter().filter(|s| !cfg.disabled_skills.contains(&s.name)).collect()
+            } else {
+                Vec::new()
+            },
             agents: if cfg.agents { agents(&roots) } else { Vec::new() },
             hooks: if cfg.hooks { hooks(home, cwd, &roots) } else { Vec::new() },
             mcp: if cfg.mcp_servers {
@@ -901,6 +907,23 @@ mod tests {
         assert_eq!(texts, ["user rules", "agents file", "project claude", "style rule"]);
         let off = instructions(Some(&home), &cwd, &ClaudeConfig { instructions: false, ..Default::default() });
         assert_eq!(off.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>(), ["agents file"]);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn single_instruction_files_and_skills_can_be_disabled() {
+        let (base, home, cwd) = fixture();
+        let all = instructions(Some(&home), &cwd, &ClaudeConfig::default());
+        let off = |p: &Path| ClaudeConfig { disabled_instructions: vec![p.display().to_string()], ..Default::default() };
+        for (gone, _) in &all {
+            let left = instructions(Some(&home), &cwd, &off(gone));
+            assert_eq!(left.len(), all.len() - 1, "{} should be skipped", gone.display());
+            assert!(left.iter().all(|(p, _)| p != gone));
+        }
+        let cfg = ClaudeConfig { disabled_skills: vec!["pdf".into()], ..Default::default() };
+        let setup = Setup::load_from(Some(&home), &cfg, &cwd);
+        assert!(setup.skills.iter().all(|s| s.name != "pdf"));
+        assert!(!Setup::load_from(Some(&home), &ClaudeConfig::default(), &cwd).skills.is_empty());
         let _ = std::fs::remove_dir_all(base);
     }
 

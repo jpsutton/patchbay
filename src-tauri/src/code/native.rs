@@ -111,16 +111,7 @@ impl Host for AppHost {
                 subagent_max_steps: e.subagent_max_steps.map_or(d.subagent_max_steps, |n| n.clamp(1, 10_000) as usize),
                 shell_timeout_ms: e.shell_timeout_secs.map_or(d.shell_timeout_ms, |s| u64::from(s.clamp(1, 600)) * 1000),
             },
-            claude: ClaudeConfig {
-                skills: c.skills,
-                instructions: c.instructions,
-                agents: c.agents,
-                mcp_servers: c.mcp_servers,
-                hooks: c.hooks,
-                plugins: c.plugins,
-                disabled_plugins: c.disabled_plugins,
-                disabled_mcp_servers: c.disabled_mcp_servers,
-            },
+            claude: agent_claude_config(c),
         }
     }
 
@@ -134,6 +125,51 @@ impl Host for AppHost {
             crate::attachments::Prepared::Text { .. } => Err("not an image".into()),
         }
     }
+}
+
+/// The preferences' Claude Code switches in the form the agent takes.
+fn agent_claude_config(c: crate::prefs::ClaudeConfig) -> ClaudeConfig {
+    ClaudeConfig {
+        skills: c.skills,
+        instructions: c.instructions,
+        agents: c.agents,
+        mcp_servers: c.mcp_servers,
+        hooks: c.hooks,
+        plugins: c.plugins,
+        disabled_plugins: c.disabled_plugins,
+        disabled_mcp_servers: c.disabled_mcp_servers,
+        disabled_instructions: c.disabled_instructions,
+        disabled_skills: c.disabled_skills,
+    }
+}
+
+/// What goes into Patchbay's agent prompt, for Settings: the system prompt piece by piece, what
+/// the Claude Code setup adds, and what is sent beside it. Built by the agent's own code from the
+/// current preferences. `cwd` adds a project's instruction files and skills; `minify` overrides
+/// the compact-prompts preference.
+pub fn agent_prompt_preview(
+    prefs: &crate::prefs::Preferences,
+    cwd: Option<&Path>,
+    model_name: &str,
+    provider_prefix: Vec<String>,
+    minify: Option<bool>,
+) -> serde_json::Value {
+    let home = patchbay_agent::claude::home();
+    let cwd = cwd
+        .filter(|p| p.is_dir())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| home.as_deref().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_default());
+    let config = agent_claude_config(prefs.claude_config.clone());
+    let preview = patchbay_agent::preview::build(&patchbay_agent::preview::PreviewRequest {
+        cwd: &cwd,
+        model_name,
+        instructions: &prefs.agent_instructions,
+        config: &config,
+        minify: minify.unwrap_or(prefs.minify_prompts),
+        web_fetch: prefs.web_fetch,
+        provider_prefix,
+    });
+    serde_json::to_value(preview).unwrap_or(serde_json::Value::Null)
 }
 
 /// What Patchbay's agent finds in the user's Claude Code setup, for Settings: everything there,

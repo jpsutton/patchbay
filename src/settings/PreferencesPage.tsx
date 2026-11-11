@@ -11,13 +11,14 @@ import { PromptsPage } from "./PromptsPage";
 import { UsagePage } from "./UsagePage";
 import { ReadAloudSettings } from "./ReadAloudSettings";
 
-export type PrefSection = "general" | "chat" | "prompts" | "agents" | "mcp" | "terminal" | "mesh" | "usage" | "diagnostics";
+export type PrefSection = "general" | "chat" | "prompts" | "agents" | "agent-prompt" | "mcp" | "terminal" | "mesh" | "usage" | "diagnostics";
 
 export const PREF_SECTIONS: { id: PrefSection; label: string }[] = [
   { id: "general", label: "General" },
   { id: "chat", label: "Chat" },
   { id: "prompts", label: "Prompts" },
   { id: "agents", label: "Coding agents" },
+  { id: "agent-prompt", label: "Agent prompt" },
   { id: "mcp", label: "MCP servers" },
   { id: "terminal", label: "Terminal" },
   { id: "mesh", label: "Mesh" },

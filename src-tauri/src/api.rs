@@ -116,6 +116,7 @@ commands! {
     set_setting(key, value);
     web_search_status();
     claude_overview(cwd);
+    agent_prompt_preview(cwd, model_ref, minify);
     set_web_search_key(key);
     clear_web_search_key();
     list_conversations();

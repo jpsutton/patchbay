@@ -25,35 +25,61 @@ pub struct Extras<'a> {
     pub skills: &'a [Skill],
 }
 
-pub fn system_blocks(cwd: &Path, model_name: &str, instructions: &str, mode: Mode, p: Prompts, extras: &Extras) -> Vec<SystemBlock> {
-    // Everything up to here is the same for every session, so the provider can cache it.
-    let mut persona = p.system().trim().to_owned();
-    if let Some(terse) = p.terse() {
-        persona.push_str("\n\n");
-        persona.push_str(terse.trim());
-    }
-    let mut blocks = vec![SystemBlock::cached(persona)];
+/// One piece of the system prompt, in the order it is sent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Section {
+    /// `persona`, `terse`, `environment`, `plan_mode`, `custom_instructions`, `skills`, or
+    /// `instructions:<path>` for one instruction file.
+    pub id: String,
+    /// Which system block it goes in: 0 is the static, cacheable one, 1 the dynamic one.
+    pub block: usize,
+    /// The text as the model gets it.
+    pub text: String,
+}
 
-    let mut dynamic = environment(cwd, model_name, p);
+fn section(id: &str, block: usize, text: String) -> Section {
+    Section { id: id.to_owned(), block, text }
+}
+
+/// The text one instruction file adds to the prompt.
+pub fn instruction_text(p: Prompts, path: &Path, text: &str) -> String {
+    p.msg("project_instructions", &[("path", &path.display().to_string()), ("text", text.trim())])
+}
+
+/// The system prompt piece by piece. [`system_blocks`] joins these, so the two never differ.
+/// `home` is the Claude Code directory the instruction files come from (`claude::home()`).
+pub fn sections(home: Option<&Path>, cwd: &Path, model_name: &str, instructions: &str, mode: Mode, p: Prompts, extras: &Extras) -> Vec<Section> {
+    // Block 0 is the same for every session, so the provider can cache it.
+    let mut out = vec![section("persona", 0, p.system().trim().to_owned())];
+    if let Some(terse) = p.terse() {
+        out.push(section("terse", 0, terse.trim().to_owned()));
+    }
+    out.push(section("environment", 1, environment(cwd, model_name, p)));
     if mode == Mode::Plan {
-        dynamic.push_str("\n\n");
-        dynamic.push_str(&p.msg("plan_mode", &[]));
+        out.push(section("plan_mode", 1, p.msg("plan_mode", &[])));
     }
     if !instructions.trim().is_empty() {
-        dynamic.push_str("\n\n");
-        dynamic.push_str(&p.msg("user_instructions", &[("text", instructions.trim())]));
+        out.push(section("custom_instructions", 1, p.msg("user_instructions", &[("text", instructions.trim())])));
     }
-    for (path, text) in crate::claude::instructions(crate::claude::home().as_deref(), cwd, &extras.claude) {
-        dynamic.push_str("\n\n");
-        dynamic.push_str(&p.msg("project_instructions", &[("path", &path.display().to_string()), ("text", text.trim())]));
+    for (path, text) in crate::claude::instructions(home, cwd, &extras.claude) {
+        out.push(section(&format!("instructions:{}", path.display()), 1, instruction_text(p, &path, &text)));
     }
     if !extras.skills.is_empty() {
-        let list: Vec<String> = extras.skills.iter().map(|s| format!("- {}: {}", s.name, s.description)).collect();
-        dynamic.push_str("\n\n");
-        dynamic.push_str(&p.msg("skills", &[("list", &list.join("\n"))]));
+        out.push(section("skills", 1, skills_text(p, extras.skills)));
     }
-    blocks.push(SystemBlock::new(dynamic));
-    blocks
+    out
+}
+
+/// The skills list the prompt carries: each skill's name and description, not its body.
+pub fn skills_text(p: Prompts, skills: &[Skill]) -> String {
+    let list: Vec<String> = skills.iter().map(|s| format!("- {}: {}", s.name, s.description)).collect();
+    p.msg("skills", &[("list", &list.join("\n"))])
+}
+
+pub fn system_blocks(cwd: &Path, model_name: &str, instructions: &str, mode: Mode, p: Prompts, extras: &Extras) -> Vec<SystemBlock> {
+    let all = sections(crate::claude::home().as_deref(), cwd, model_name, instructions, mode, p, extras);
+    let joined = |block: usize| all.iter().filter(|s| s.block == block).map(|s| s.text.as_str()).collect::<Vec<_>>().join("\n\n");
+    vec![SystemBlock::cached(joined(0)), SystemBlock::new(joined(1))]
 }
 
 fn environment(cwd: &Path, model_name: &str, p: Prompts) -> String {
@@ -131,6 +157,28 @@ mod tests {
         assert!(min[1].text.contains("be terse") && min[1].text.contains("ExitPlanMode") && min[1].text.contains("/tmp"));
         // Only the minified form asks for terse replies.
         assert!(min[0].text.contains("Reply terse") && !full[0].text.contains("Reply terse"));
+    }
+
+    #[test]
+    fn blocks_are_the_sections_joined() {
+        for minify in [false, true] {
+            let p = Prompts::new(minify);
+            // Instruction files off, so the real ~/.claude does not leak into the test.
+            let extras = Extras { claude: ClaudeConfig { instructions: false, ..Default::default() }, skills: &[] };
+            let secs = sections(None, Path::new("/tmp"), "m", "be terse", Mode::Plan, p, &extras);
+            let ids: Vec<&str> = secs.iter().map(|s| s.id.as_str()).collect();
+            let want: &[&str] = if minify {
+                &["persona", "terse", "environment", "plan_mode", "custom_instructions"]
+            } else {
+                &["persona", "environment", "plan_mode", "custom_instructions"]
+            };
+            assert_eq!(ids, want);
+            let blocks = system_blocks(Path::new("/tmp"), "m", "be terse", Mode::Plan, p, &extras);
+            for (i, b) in blocks.iter().enumerate() {
+                let joined = secs.iter().filter(|s| s.block == i).map(|s| s.text.as_str()).collect::<Vec<_>>().join("\n\n");
+                assert_eq!(b.text, joined);
+            }
+        }
     }
 
     #[test]
