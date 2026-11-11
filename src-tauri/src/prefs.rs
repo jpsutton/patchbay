@@ -15,6 +15,7 @@ const KEY: &str = "preferences";
 /// the machine (its shortcut, shell, title bar, agent paths) or the screen (theme, text size).
 pub const SYNCED: &[&str] = &[
     "groupByProject",
+    "groupByTeam",
     "sendKey",
     "launchTab",
     "expandReasoning",
