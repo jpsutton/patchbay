@@ -233,7 +233,18 @@ fn state_of(e: &Evidence) -> (WireState, Option<String>) {
 fn sanitize_reason(message: &str) -> String {
     const MAX_CHARS: usize = 200;
     const TOKEN_RUN_MIN: usize = 16;
-    let s: String = message.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    // Pre-clip BEFORE any redactor: `TurnEnd::Error(String)` is unbounded and reaches the
+    // HTTP handler per request, and the redactors (userinfo's backward scan in particular)
+    // are only linear on a bounded input. Nothing visible is lost: the output is clipped
+    // to 200 chars anyway. 4 KB is a byte bound taken at char boundaries.
+    const MAX_INPUT_BYTES: usize = 4096;
+    let mut s = String::new();
+    for c in message.chars() {
+        if s.len() + c.len_utf8() > MAX_INPUT_BYTES {
+            break;
+        }
+        s.push(if c.is_control() { ' ' } else { c });
+    }
     let s = redact_key_values(&s);
     let s = redact_userinfo(&s);
     let s = redact_paths(&s);
@@ -339,9 +350,14 @@ fn redact_userinfo(s: &str) -> String {
     while i < b.len() {
         if b[i] == b'@' {
             // Nearest `:` before the `@` with no whitespace, `/`, `?` or `#` between them.
+            // Bounded twice: back to `last` (the end of the previous replacement) and to a
+            // fixed max distance, so an `@`-flood stays linear (DoS: TurnEnd::Error is
+            // unbounded and reaches the HTTP handler per request).
+            const MAX_BACK: usize = 128;
+            let floor = i.saturating_sub(MAX_BACK).max(last);
             let mut c = i;
             let mut colon = None;
-            while c > last {
+            while c > floor {
                 c -= 1;
                 let ch = b[c];
                 if ch.is_ascii_whitespace() || ch == b'/' || ch == b'?' || ch == b'#' {
@@ -748,6 +764,78 @@ mod tests {
     fn a_benign_stuck_reason_is_untouched() {
         // Ordinary diagnostics pass through byte-for-byte (no false redactions).
         assert_eq!(sanitize_reason("agent exited mid-turn"), "agent exited mid-turn");
+    }
+
+    #[test]
+    fn hostile_at_flood_is_bounded_and_fast() {
+        // DoS regression: `TurnEnd::Error(String)` is unbounded and reaches the HTTP
+        // handler per request. Pre-clip (4 KB) + the bounded userinfo backward scan keep
+        // an `@`-flood linear; the output stays within the clip bound.
+        let start = std::time::Instant::now();
+        let out1 = sanitize_reason(&"a@".repeat(100_000)); // 200k chars
+        let out2 = sanitize_reason(&"@".repeat(100_000)); // 100k chars
+        let out3 = sanitize_reason(&"a@".repeat(500_000)); // 1MB — Ship's delta shape
+        let out4 = sanitize_reason(&"@".repeat(500_000)); // 1MB
+        let elapsed = start.elapsed();
+        assert!(out1.chars().count() <= 203, "clip bound: {}", out1.chars().count());
+        assert!(out2.chars().count() <= 203, "clip bound: {}", out2.chars().count());
+        assert!(out3.chars().count() <= 203, "clip bound: {}", out3.chars().count());
+        assert!(out4.chars().count() <= 203, "clip bound: {}", out4.chars().count());
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "must complete well under a second, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn table_driven_battery_edges() {
+        // Redacted shapes (the cases the first battery did not cover).
+        let redacted: &[&str] = &[
+            "~/Library/x",
+            "C:/Users/bob/x",
+            "./rel/path",
+            "../rel/path",
+            "/a b/c",
+            "password=abc",
+            "Password: x tail",
+            "api_key=abc",
+            "Authorization: Bearer abc123",
+            "https://user:pass@example.com/p?token=abc",
+        ];
+        for c in redacted {
+            let out = sanitize_reason(c);
+            assert!(out.contains("[redacted]"), "expected redaction: {c:?} -> {out:?}");
+            assert!(!out.contains(c), "must not survive verbatim: {c:?} -> {out:?}");
+        }
+        // Near-misses that must stay untouched (the false-positive samples).
+        for c in ["author", "monkey", "keystone", "and/or", "TCP/IP"] {
+            assert_eq!(sanitize_reason(c), c, "must stay untouched: {c:?}");
+        }
+        // The clip: bounded output with the marker.
+        let long = "word ".repeat(100);
+        let out = sanitize_reason(&long);
+        assert!(out.chars().count() <= 203, "clip bound: {}", out.chars().count());
+        assert!(out.ends_with("..."), "clip marker: {out:?}");
+    }
+
+    #[test]
+    fn fuzz_lite_never_panics_and_always_clips() {
+        // Deterministic xorshift over a hostile alphabet (letters, @ : / \ . = ~ % - ? #,
+        // space): no panics, no unbounded output.
+        let alphabet: Vec<char> = "abcXYZ019@:/\\.=_~% -?#".chars().collect();
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        for n in 0..1000 {
+            let len = (state as usize % 300) + 1;
+            let mut s = String::new();
+            for _ in 0..len {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                s.push(alphabet[(state >> 33) as usize % alphabet.len()]);
+            }
+            let out = sanitize_reason(&s);
+            assert!(out.chars().count() <= 203, "iteration {n}: clip bound: {out:?}");
+        }
     }
 
     // ---- the route ----
