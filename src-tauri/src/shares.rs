@@ -654,20 +654,45 @@ fn listen_addr(base_url: &str) -> SocketAddr {
 /// A bind failure is a warning, not fatal: share creation still works, and a `web`-enabled
 /// daemon serves shares from its main server instead (see `web.rs`). Takes the whole `AppState`
 /// so callers in the `patchbayd` binary (which can't see its private fields) can start it too.
+///
+/// The same listener also serves the read-only session-status route (`session_status`,
+/// pb-20261110-04): the app's 4420 is this server, so without it an app-only host would have
+/// no status API at all. It reads the shared `data_dir/web-token` (0600); without that file
+/// the route is simply not mounted and shares keep serving.
 pub fn spawn(state: &crate::AppState) {
     let registry = state.shares.clone();
+    let token = match crate::web_token::load_token(&state.data_dir, false) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            tracing::warn!("session status API not served, no web token: {e:#}");
+            None
+        }
+    };
+    let state = state.clone();
     crate::api::spawn(async move {
         let addr = listen_addr(&registry.base_url);
         match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => {
                 tracing::info!("artifact share server on http://{addr}");
-                if let Err(e) = axum::serve(listener, router(registry)).await {
+                let app = app_router(registry.clone(), state, token);
+                if let Err(e) = axum::serve(listener, app).await {
                     tracing::warn!("artifact share server stopped: {e:#}");
                 }
             }
             Err(e) => tracing::warn!("could not start artifact share server on {addr}: {e:#}"),
         }
     });
+}
+
+/// The share server's router with the read-only session-status route merged on
+/// (pb-20261110-04). `token` is `None` when the token file could not be created or read: the
+/// route is left off rather than served unauthenticated.
+pub(crate) fn app_router(registry: Arc<ShareRegistry>, state: crate::AppState, token: Option<String>) -> Router {
+    let base = router(registry);
+    match token {
+        Some(t) => base.merge(crate::session_status::router(state, t, crate::session_status::APP)),
+        None => base,
+    }
 }
 
 #[cfg(test)]

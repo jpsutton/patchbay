@@ -35,6 +35,15 @@ struct Agent {
     thread: std::thread::JoinHandle<()>,
 }
 
+/// A session's last turn outcome as the event loop saw it (pb-20261110-04). Affirmative
+/// evidence only: `Clean` on a prompt that finished without an error, `Error` when the agent
+/// reported one. Nothing recorded proves nothing, so the state maps to `unknown`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnEnd {
+    Clean,
+    Error(String),
+}
+
 #[derive(Default)]
 pub struct CodeManager {
     agents: Mutex<HashMap<String, Agent>>,
@@ -42,6 +51,8 @@ pub struct CodeManager {
     pub questions: PendingQuestions,
     /// Sessions whose agent is in the middle of a turn.
     busy: Mutex<std::collections::HashSet<String>>,
+    /// The last turn's outcome per session (`None` when no turn ended since the manager started).
+    turn_ends: Mutex<HashMap<String, TurnEnd>>,
     /// Sessions being handed to another node: no restarts until the handover settles.
     moving: Mutex<HashMap<String, std::time::Instant>>,
     /// The newest agent started for each session. An agent stopped while still starting keeps
@@ -80,6 +91,23 @@ impl CodeManager {
 
     pub fn busy_sessions(&self) -> Vec<String> {
         self.busy.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// Record how a turn ended, so `done` and `stuck` rest on evidence rather than on the
+    /// agent's absence (`session_status`).
+    pub fn note_turn_end(&self, code_session_id: &str, end: TurnEnd) {
+        self.turn_ends.lock().unwrap().insert(code_session_id.to_owned(), end);
+    }
+
+    /// The last turn's outcome, `None` when no turn has ended since the manager started.
+    pub fn turn_end(&self, code_session_id: &str) -> Option<TurnEnd> {
+        self.turn_ends.lock().unwrap().get(code_session_id).cloned()
+    }
+
+    /// A new turn is starting: the previous outcome no longer describes this session, so a
+    /// fixed error stops reading as `stuck` (and a fresh error will be recorded again).
+    pub fn clear_turn_end(&self, code_session_id: &str) {
+        self.turn_ends.lock().unwrap().remove(code_session_id);
     }
 
     /// Mid-turn, or waiting on a permission answer.

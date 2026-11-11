@@ -81,6 +81,50 @@ Then open `http://127.0.0.1:4420/` on the laptop.
 
 `--listen 0.0.0.0:4420` serves it on the network instead, but only over plain HTTP. **Anyone who gets the token can run commands on the server as you**, through the agents and the terminal. Prefer the SSH tunnel, or put the daemon behind a reverse proxy that adds HTTPS.
 
+## The read-only session status API
+
+`GET /api/v1/sessions` reports what every Code session is doing — `needs_you`, `stuck`,
+`running`, `done` or `unknown` — with the evidence behind each state, for observers such as
+Patchbay Central. It is read-only: no writes, no streaming, no deep-link. Send the web token
+as a header:
+
+```bash
+TOKEN="$(cat ~/.local/share/dev.patchbay.app/web-token)"
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:4420/api/v1/sessions
+```
+
+The body is `{ "observed_at", "provider", "sessions": [...] }`; the version lives in the path,
+not in the body. The record schema and the evidence rules that decide each state are in the
+session status contract.
+
+### Finding the token: one file, whatever is running
+
+The token is a file in the data folder — `<data folder>/web-token`, mode `0600`, readable by
+you only — created the first time a surface needs it. The desktop app and `patchbayd` create
+and read the same file (`web_token`), so the `cat` above is the whole discovery path:
+
+- **Desktop app only** (the app owns the data folder): its share server creates the file when
+  it starts, and serves the route on `4420`. The app has no web UI — `4420` is its artifact
+  share server, which serves `/share/…` and this one read-only route, nothing else.
+- **`patchbayd` only**: the daemon creates the file the first time its web UI runs;
+  `patchbayd token` prints the address with the token, `patchbayd token --rotate` replaces it
+  (browsers signed in before must sign in again). A desktop app launched while the daemon owns
+  the data folder attaches to it rather than starting a second server, so there is still one
+  listener and one token.
+- **Both running**: only possible with two data folders (say `patchbayd --data-dir /srv/patchbay`
+  next to the app's default folder) — one process per data folder, so a shared folder is never
+  two servers. Each process creates `web-token` under **its own** data folder, and both default
+  to port `4420`, which is therefore **double-booked by design: the first binder wins**. If the
+  app wins, `patchbayd` exits with a `listening on 127.0.0.1:4420` error instead of serving on
+  another port — give it `--listen <other address>` (or `--no-web`) — and if `patchbayd` wins,
+  the app's share server logs that it could not bind and keeps running without one. Whoever
+  owns `4420` serves both shares and this route, so a consumer should read the token file of
+  the data folder whose listener answered, and should not assume which process owns the port.
+
+The token is a capability: on `patchbayd` it also unlocks `/ws`, which runs agents and
+terminals as this user, so treat the file like a password (it is `0600` for that reason). The
+app's listener serves this one read-only route and no command path.
+
 ## Options
 
 | Option | Meaning |
