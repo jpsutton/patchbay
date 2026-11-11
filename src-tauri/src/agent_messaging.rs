@@ -1247,20 +1247,30 @@ time.sleep(3600)
         unsafe { libc::kill(pid, 0) == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) }
     }
 
-    /// The process is not running: gone, or dead but not yet reaped (state `Z`). After a RUNTIME is
+    /// One `ps -o pid,stat,ppid` observation of `pid`, and whether it shows the process dead: absent
+    /// (gone), or state `Z` with our own pid as parent (killed, not yet reaped by us). After a RUNTIME is
     /// dropped nothing polls tokio's orphan reaper, so a child killed by `kill_on_drop` can stay a
-    /// zombie until some later child exits or the process ends; that is unchanged from before the
-    /// supervisor existed. Only while the runtime is alive does the reaper task reap it (ESRCH).
+    /// zombie until another child exits; only while the runtime is alive does its reaper task reap it.
+    /// A SINGLE snapshot: `kill(pid, 0)` then `ps` was two observations, and a zombie reaped between
+    /// them read as "still running". Anything else (R, S, D, a foreign parent, `ps` failing) is not dead.
+    #[cfg(unix)]
+    fn dead_state(pid: i32) -> (bool, String) {
+        let out = std::process::Command::new("ps").args(["-o", "pid=,stat=,ppid=", "-p", &pid.to_string()]).output();
+        let line = match out {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_owned(),
+            Err(e) => return (false, format!("(ps failed to run: {e})")),
+        };
+        if line.is_empty() {
+            return (true, "(ps lists no such process)".to_owned());
+        }
+        let f: Vec<&str> = line.split_whitespace().collect();
+        let zombie_of_ours = f.get(1).is_some_and(|s| s.starts_with('Z')) && f.get(2).and_then(|p| p.parse::<u32>().ok()) == Some(std::process::id());
+        (zombie_of_ours, line)
+    }
+
     #[cfg(unix)]
     fn process_not_running(pid: i32) -> bool {
-        if process_gone(pid) {
-            return true;
-        }
-        std::process::Command::new("ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().starts_with('Z'))
-            .unwrap_or(false)
+        dead_state(pid).0
     }
 
     /// Kills a stub that is still running when a test ends (e.g. a failed assertion), so a regression
@@ -1324,11 +1334,20 @@ time.sleep(3600)
         drop(rt);
         // Not running: killed by `kill_on_drop`. It may stay a zombie (see `process_not_running`), so
         // this does NOT claim it was reaped; the drop-connection test above proves reaping.
+        // 5s: the kill is synchronous in `drop(rt)`, so a healthy run is dead on the first look; the
+        // deadline only absorbs scheduling delay, and the state check below decides, not the clock.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !process_not_running(pid) && std::time::Instant::now() < deadline {
+        let mut last = dead_state(pid);
+        while !last.0 && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
+            last = dead_state(pid);
         }
-        assert!(process_not_running(pid), "pid {pid} is still running after the runtime that hosted it was dropped");
+        assert!(
+            last.0,
+            "pid {pid} is still running after the runtime that hosted it was dropped; test process pid {}; ps -o pid,stat,ppid: {}",
+            std::process::id(),
+            last.1
+        );
         drop(set);
         let _ = fs::remove_dir_all(&dir);
     }
