@@ -2,7 +2,8 @@
 // over CDP with real key events. Chromium only: no WebKit or Windows claim.
 //   pnpm dev   # in another terminal (serves :1420), or set PB_URL=http://localhost:<port>
 //   node scripts/e2e-options-sheet.mjs
-// Chrome: $CHROME, else the macOS app path.
+// Chrome: $CHROME, else the macOS app path. It runs with a throwaway profile and a mock keychain, so it
+// never touches the real login keychain (and never asks for a missing one under a temp HOME).
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,7 +19,7 @@ const check = (ok, msg) => {
 };
 
 const dir = mkdtempSync(join(tmpdir(), "pb-options-sheet-"));
-const chrome = spawn(chromeBin, ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${dir}`, "--no-first-run", "--window-size=400,800", "about:blank"], { stdio: "ignore" });
+const chrome = spawn(chromeBin, ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${dir}`, "--no-first-run", "--use-mock-keychain", "--password-store=basic", "--window-size=400,800", "about:blank"], { stdio: "ignore" });
 const done = () => {
   chrome.kill();
   try {
