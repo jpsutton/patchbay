@@ -43,6 +43,10 @@ pub fn real_home_requested() -> bool {
 
 static SANDBOX: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
+/// Removes the scratch home when the test process exits. Unix only: `libc` (which declares
+/// `atexit`) is a unix dependency, and the crate has no Windows `atexit`, so on Windows the
+/// `pb-test-home-<pid>` folder stays in the temp dir after a test run (pb-20261110-08).
+#[cfg(unix)]
 extern "C" fn remove_sandbox_at_exit() {
     if let Some(dir) = SANDBOX.get() {
         let _ = std::fs::remove_dir_all(dir);
@@ -52,13 +56,17 @@ extern "C" fn remove_sandbox_at_exit() {
 /// One scratch HOME for every child process a test spawns (shells, agent CLIs, version probes).
 /// Children write their own state under `$HOME` (`~/.config/opencode`, `~/.cursor`, shell history,
 /// ...), which must never land in the developer's real home. Created once per test process and
-/// removed again when the process exits (best effort). Always a temp dir, never the real home.
+/// removed again when the process exits (best effort; not on Windows, see `remove_sandbox_at_exit`).
+/// Always a temp dir, never the real home.
 pub fn sandbox_home() -> &'static std::path::Path {
     SANDBOX.get_or_init(|| {
         let dir = std::env::temp_dir().join(format!("pb-test-home-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         // SAFETY: registers a plain function that only removes the directory created above.
-        unsafe { libc::atexit(remove_sandbox_at_exit) };
+        #[cfg(unix)]
+        unsafe {
+            libc::atexit(remove_sandbox_at_exit)
+        };
         dir
     })
 }
@@ -152,6 +160,8 @@ mod tests {
     }
 
     /// Nothing is left behind by a test process: the scratch home is gone once it has exited.
+    /// Unix only: Windows has no `atexit` registration here (see `remove_sandbox_at_exit`).
+    #[cfg(unix)]
     #[test]
     fn the_scratch_home_is_removed_when_the_process_exits() {
         let child = std::process::Command::new(std::env::current_exe().unwrap())
