@@ -215,21 +215,28 @@ fn state_of(e: &Evidence) -> (WireState, Option<String>) {
 }
 
 /// Contract §3 `stuck_reason` is agreed free text ("Explicit error string"), so the raw
-/// message is bounded and scrubbed before it reaches the wire: control characters flattened
-/// (one line in JSON), the home directory redacted to `~`, token-like runs (16+ chars of
-/// `[A-Za-z0-9+/=_-]`) replaced, then clipped. Redaction errs toward dropping content —
-/// an error string is a diagnostic, not a payload.
+/// message is bounded and scrubbed before it reaches the wire, in this order:
+/// 1. control characters flattened (one line in JSON);
+/// 2. key-name redaction — the whole `key=value`, `key: value` or `key value` match for
+///    `token secret password passwd pwd key auth authorization bearer cookie credential`
+///    (case-insensitive, whole word, any value length);
+/// 3. URL/bare userinfo — `scheme://user:pass@` and `user:pass@`;
+/// 4. path-shaped redaction of every absolute path on both OS families — unix `/…`,
+///    `~/…`, drive `C:\…`/`C:/…`, UNC `\\server\…`, including spaces and dots — plus
+///    relative `./…` and `../…`; the whole path becomes `[redacted]` (there is no
+///    home-prefix rewrite: `/Users/dfrazer2/x` is redacted, never turned into `~2/x`);
+/// 5. token-like runs of 16+ `[A-Za-z0-9+/=_-]` as a backstop;
+/// 6. clipped to 200 chars + `...`.
+/// Redaction errs toward dropping content — an error string is a diagnostic, not a payload.
+/// NOT implemented (deliberate): percent/unicode decoding of values, grapheme-boundary
+/// clipping (the clip is char-boundary), and any `~`-form path rewriting.
 fn sanitize_reason(message: &str) -> String {
     const MAX_CHARS: usize = 200;
     const TOKEN_RUN_MIN: usize = 16;
-    let mut s: String = message.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
-    // The home prefix is the identifying part of a path; the rest keeps its shape.
-    if let Some(home) = crate::code::agents::home_dir()
-        && let Some(h) = home.to_str()
-        && h.len() > 1
-    {
-        s = s.replace(h, "~");
-    }
+    let s: String = message.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let s = redact_key_values(&s);
+    let s = redact_userinfo(&s);
+    let s = redact_paths(&s);
     let mut out = String::with_capacity(s.len());
     let mut run = String::new();
     for c in s.chars() {
@@ -247,6 +254,179 @@ fn sanitize_reason(message: &str) -> String {
     } else {
         out
     }
+}
+
+/// `key=value` / `key: value` / `key value` for the secret key names: the whole match
+/// (key + separators + value tokens) becomes `[redacted]`, any value length. A value that
+/// is itself a key chains (`Authorization: Bearer abc123` redacts as one match).
+fn redact_key_values(s: &str) -> String {
+    const KEYS: &[&str] = &[
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "pwd",
+        "key",
+        "auth",
+        "authorization",
+        "bearer",
+        "cookie",
+        "credential",
+    ];
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    'scan: while i < b.len() {
+        // Whole-word boundary before the key (so `author`/`monkey` never match).
+        if i == 0 || !b[i - 1].is_ascii_alphanumeric() {
+            // Longest match first: `authorization` must beat its own prefix `auth`.
+            let mut best: Option<usize> = None;
+            for k in KEYS {
+                if i + k.len() <= b.len()
+                    && b[i..i + k.len()].eq_ignore_ascii_case(k.as_bytes())
+                    && best.is_none_or(|len| k.len() > len)
+                {
+                    best = Some(k.len());
+                }
+            }
+            if let Some(klen) = best {
+                let mut j = i + klen;
+                let sep_start = j;
+                while j < b.len() && (b[j] == b'=' || b[j] == b':' || b[j].is_ascii_whitespace()) {
+                    j += 1;
+                }
+                // A separator (or end of string) is what makes it `key …`, not `author`.
+                if j > sep_start || j >= b.len() {
+                    loop {
+                        let tok_start = j;
+                        while j < b.len() && !b[j].is_ascii_whitespace() {
+                            j += 1;
+                        }
+                        if j == tok_start {
+                            break;
+                        }
+                        let is_key = KEYS.iter().any(|k| {
+                            j - tok_start == k.len() && b[tok_start..j].eq_ignore_ascii_case(k.as_bytes())
+                        });
+                        let after = j;
+                        while j < b.len() && (b[j] == b'=' || b[j] == b':' || b[j].is_ascii_whitespace()) {
+                            j += 1;
+                        }
+                        if !is_key || j == after {
+                            break;
+                        }
+                    }
+                    out.push_str("[redacted]");
+                    i = j;
+                    continue 'scan;
+                }
+            }
+        }
+        let ch = s[i..].chars().next().expect("char at i");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// `scheme://user:pass@` and bare `user:pass@`: the `user:pass@` part becomes
+/// `[redacted]` (the host after it is not a secret and keeps its shape).
+fn redact_userinfo(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut last = 0;
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'@' {
+            // Nearest `:` before the `@` with no whitespace, `/`, `?` or `#` between them.
+            let mut c = i;
+            let mut colon = None;
+            while c > last {
+                c -= 1;
+                let ch = b[c];
+                if ch.is_ascii_whitespace() || ch == b'/' || ch == b'?' || ch == b'#' {
+                    break;
+                }
+                if ch == b':' {
+                    colon = Some(c);
+                    break;
+                }
+            }
+            if let Some(colon) = colon
+                && colon + 1 < i // pass non-empty
+            {
+                // User part: back from the `:` to whitespace, `/`, `@` or the start.
+                let mut u = colon;
+                while u > last
+                    && !b[u - 1].is_ascii_whitespace()
+                    && b[u - 1] != b'/'
+                    && b[u - 1] != b'@'
+                {
+                    u -= 1;
+                }
+                if u < colon {
+                    out.push_str(&s[last..u]);
+                    out.push_str("[redacted]");
+                    last = i + 1;
+                }
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&s[last..]);
+    out
+}
+
+/// Every absolute path on both OS families (unix `/…`, `~/…`, drive `C:\…`/`C:/…`, UNC
+/// `\\server\…`) plus relative `./…`/`../…`, including spaces and dots, is replaced
+/// wholesale with `[redacted]`. A space continues a path only while the next character is
+/// still path-shaped (so `…/Application Support/…` is one path), which can swallow trailing
+/// prose until a non-path character — over-redaction is the safe direction here.
+fn redact_paths(s: &str) -> String {
+    let b = s.as_bytes();
+    let is_path_char = |c: u8| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, b'/' | b'\\' | b'.' | b'_' | b'-' | b'+' | b'%' | b'#' | b'@' | b'~' | b':' | b'\'')
+    };
+    let mut out = String::with_capacity(s.len());
+    let mut last = 0;
+    let mut i = 0;
+    while i < b.len() {
+        let prev_ok = i == 0 || !b[i - 1].is_ascii_alphanumeric();
+        let start = prev_ok
+            && (b[i] == b'/'
+                || (b[i] == b'~' && i + 1 < b.len() && b[i + 1] == b'/')
+                || (b[i] == b'.'
+                    && i + 1 < b.len()
+                    && (b[i + 1] == b'/' || (i + 2 < b.len() && b[i + 1] == b'.' && b[i + 2] == b'/')))
+                || (b[i].is_ascii_alphabetic()
+                    && i + 2 < b.len()
+                    && b[i + 1] == b':'
+                    && (b[i + 2] == b'/' || b[i + 2] == b'\\'))
+                || (b[i] == b'\\' && i + 1 < b.len() && b[i + 1] == b'\\'));
+        if start {
+            let mut j = i;
+            while j < b.len() {
+                if is_path_char(b[j]) {
+                    j += 1;
+                } else if b[j] == b' ' && j + 1 < b.len() && is_path_char(b[j + 1]) {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            if j > i {
+                out.push_str(&s[last..i]);
+                out.push_str("[redacted]");
+                last = j;
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&s[last..]);
+    out
 }
 
 /// A run long enough to be a token/blob reads as one opaque replacement.
@@ -539,6 +719,35 @@ mod tests {
         assert!(!reason.contains(path_s), "the path must not appear: {reason}");
         assert!(!reason.contains(token), "the token must be redacted: {reason}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stuck_reason_redacts_paths_secrets_and_userinfo() {
+        // Ship's battery: every shape must come out redacted, never verbatim.
+        let cases: &[&str] = &[
+            "/etc/passwd",
+            "/home/bob/x",
+            r"C:\Users\alice\x",
+            r"\\server\share\f",
+            "/Users/dfrazer2/x",
+            "token=abc",
+            "Bearer abc123",
+            "user:pass@host",
+        ];
+        for c in cases {
+            let out = sanitize_reason(c);
+            assert!(!out.contains(c), "must not survive verbatim: {c:?} -> {out:?}");
+            assert!(out.contains("[redacted]"), "expected a redaction marker: {c:?} -> {out:?}");
+        }
+        // A path is redacted AS A PATH — never rewritten to a `~` form (`~2/x` hazard).
+        let out = sanitize_reason("/Users/dfrazer2/x");
+        assert!(!out.contains("~2/x"), "no home-prefix rewrite: {out:?}");
+    }
+
+    #[test]
+    fn a_benign_stuck_reason_is_untouched() {
+        // Ordinary diagnostics pass through byte-for-byte (no false redactions).
+        assert_eq!(sanitize_reason("agent exited mid-turn"), "agent exited mid-turn");
     }
 
     // ---- the route ----
