@@ -406,7 +406,7 @@ export interface SessionRole {
   seatOrder: number;
   joinedAt: number;
 }
-export interface NewTeam { templateId: string; slug: string; cwd: string; projectRules?: string; exportDir?: string }
+export interface NewTeam { templateId: string; slug: string; cwd: string; projectRules?: string; exportDir?: string; worktreeRoot?: string }
 
 export interface Prompt {
   id: string;

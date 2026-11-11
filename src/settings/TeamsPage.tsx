@@ -35,7 +35,7 @@ export function TeamsPage() {
 const SERVER_ERROR_MAP: { match: string; field: string }[] = [
   { match: "export folder", field: "exportDir" },
   { match: "export_dir", field: "exportDir" },
-  { match: "worktree", field: "worktree" },
+  { match: "worktree", field: "worktreeRoot" },
   { match: "pr_base", field: "pr_base" },
   { match: "branch", field: "pr_base" },
   { match: "id prefix", field: "id_prefix" },
@@ -51,7 +51,7 @@ function TeamsPanel() {
   const [teams, setTeams] = useState<Team[]>([]);
   const [sel, setSel] = useState<string | "new" | null>(null);
   const [detail, setDetail] = useState<TeamDetail | null>(null);
-  const [draft, setDraft] = useState({ templateId: "", slug: "", cwd: "", projectRules: "", exportDir: "" });
+  const [draft, setDraft] = useState({ templateId: "", slug: "", cwd: "", projectRules: "", exportDir: "", worktreeRoot: "" });
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [genericError, setGenericError] = useState<string | null>(null);
   const [touched, setTouched] = useState<Record<string, boolean>>({});
@@ -183,6 +183,21 @@ function TeamsPanel() {
                 <span className="text-[11px] text-danger">{fieldErrors.exportDir}</span>
               )}
             </Field>
+            <Field label="Worktree folder" hint="Needed to dispatch workers: each gets a git worktree here. Must be inside the team folder.">
+              <input
+                className={input}
+                placeholder={draft.cwd.trim() ? `${draft.cwd.trim().replace(/\/+$/, "")}/.trees` : "e.g. <team folder>/.trees"}
+                value={draft.worktreeRoot}
+                onChange={(e) => {
+                  setDraft({ ...draft, worktreeRoot: e.target.value });
+                  setFieldErrors((f) => ({ ...f, worktreeRoot: "" }));
+                  setGenericError(null);
+                }}
+              />
+              {fieldErrors.worktreeRoot && (
+                <span className="text-[11px] text-danger">{fieldErrors.worktreeRoot}</span>
+              )}
+            </Field>
             <Field label="Project rules" hint="Given to every member">
               <textarea className={`${input} h-28 resize-y font-mono text-xs`} placeholder="e.g. set CARGO_TARGET_DIR" value={draft.projectRules} onChange={(e) => setDraft({ ...draft, projectRules: e.target.value })} />
             </Field>
@@ -194,14 +209,15 @@ function TeamsPanel() {
                   setFieldErrors({});
                   setGenericError(null);
                   const exportDir = draft.exportDir.trim() || undefined;
-                  const t = await api.createTeam({ ...draft, slug: slugTrim, cwd: draft.cwd.trim(), exportDir });
+                  const worktreeRoot = draft.worktreeRoot.trim() || undefined;
+                  const t = await api.createTeam({ ...draft, slug: slugTrim, cwd: draft.cwd.trim(), exportDir, worktreeRoot });
                   await reload();
                   setSel(t.id);
                 } catch (e) {
                   const msg = errorText(e);
                   const lower = msg.toLowerCase();
                   const entry = SERVER_ERROR_MAP.find((m) => lower.includes(m.match));
-                  if (entry && (entry.field === "slug" || entry.field === "cwd" || entry.field === "exportDir")) {
+                  if (entry && (entry.field === "slug" || entry.field === "cwd" || entry.field === "exportDir" || entry.field === "worktreeRoot")) {
                     setFieldErrors({ [entry.field]: msg });
                   } else {
                     setGenericError(msg);
