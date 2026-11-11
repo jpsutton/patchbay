@@ -197,6 +197,8 @@ export function TerminalPane({
         } catch {
           /* ignore */
         }
+        // Showing the terminal puts the typing cursor in it.
+        termRef.current?.focus();
       });
   }, [visible]);
 

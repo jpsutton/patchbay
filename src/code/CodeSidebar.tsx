@@ -26,6 +26,7 @@ import {
 } from "../lib/sidebarLayout";
 import { startSessionDrag } from "../lib/paneDrag";
 import { rowStatus } from "../lib/sessionLive";
+import { focusComposer } from "../lib/shortcuts";
 
 const COLLAPSED_KEY = "patchbay.codeSidebar.collapsed";
 /** The folder order from before the layout synced. It seeds the first layout. */
@@ -442,6 +443,8 @@ export function CodeSidebar() {
             await refresh();
           }
           select(s.id);
+          // Clicking the open session too: its composer takes the cursor.
+          focusComposer();
         }}
         menu={(rename) =>
           sessionActions(s, {
