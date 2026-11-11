@@ -333,7 +333,7 @@ export function TemplatesEditor() {
                   </select>
                 </Field>
                 <Field label="Agent">
-                  <select className={input} value={s.agent} disabled={ro} onChange={(e) => setSeat(i, { agent: e.target.value })}>
+                  <select className={input} value={s.agent} disabled={ro} onChange={(e) => setSeat(i, { agent: e.target.value, model: null })}>
                     {Object.entries(AGENT_LABELS).map(([id, label]) => (
                       <option key={id} value={id}>{label}</option>
                     ))}
@@ -373,7 +373,7 @@ export function TemplatesEditor() {
                             disabled={ro}
                             onChange={(e) => {
                               const cur = s.choices ?? [];
-                              setSeat(i, { choices: cur.map((x, cj) => (cj === ci ? { ...x, agent: e.target.value } : x)) });
+                              setSeat(i, { choices: cur.map((x, cj) => (cj === ci ? { ...x, agent: e.target.value, model: null } : x)) });
                             }}
                           >
                             {Object.entries(AGENT_LABELS).map(([id, label]) => (
