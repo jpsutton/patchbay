@@ -8,6 +8,7 @@ import { PaneContext, ViewActive } from "../lib/shortcuts";
 import { fuzzyPaths } from "../lib/fuzzy";
 import { ArrowUpIcon, PaperclipIcon, SlidersIcon } from "./icons";
 import { ChipRows } from "./ChipSelect";
+import { focusables, trapTarget } from "../lib/focusTrap";
 import { isRemoteApp, isWeb } from "../lib/platform";
 
 const MAX_ATTACHMENTS = 10;
@@ -248,6 +249,8 @@ export function Composer({
   // one button; a row of them doesn't fit.
   const sheetFooter = (isRemoteApp() || narrow) && !!footer;
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const optionsBtnRef = useRef<HTMLButtonElement>(null);
+  const sheetRef = useRef<HTMLDivElement>(null);
 
   useLayoutEffect(() => {
     const el = rootRef.current;
@@ -263,11 +266,35 @@ export function Composer({
     if (!sheetFooter) setOptionsOpen(false);
   }, [sheetFooter]);
 
+  // Focus goes into the sheet when it opens and back to the button that opened it when it closes.
+  useEffect(() => {
+    if (!optionsOpen) return;
+    const sheet = sheetRef.current;
+    if (sheet) (focusables(sheet)[0] ?? sheet).focus();
+    const btn = optionsBtnRef.current;
+    return () => btn?.focus();
+  }, [optionsOpen]);
+
   useEffect(() => {
     if (!optionsOpen) return;
     const onKey = (e: KeyboardEvent) => {
       // A confirmation raised from the sheet draws above it and takes its own keys.
       if (useStore.getState().confirm) return;
+      // Tab stays on the sheet's controls; the open chip list takes its own Tab.
+      if (e.key === "Tab" && !e.metaKey && !e.ctrlKey && !e.altKey && !document.querySelector("[data-chip-menu]")) {
+        const sheet = sheetRef.current;
+        if (!sheet) return;
+        const items = focusables(sheet);
+        const to = trapTarget(items.length, items.indexOf(document.activeElement as HTMLElement), e.shiftKey);
+        if (to !== null) {
+          e.preventDefault();
+          items[to].focus();
+        } else if (items.length === 0) {
+          e.preventDefault();
+          sheet.focus();
+        }
+        return;
+      }
       // The sheet covers the app, so the app's shortcuts must not act on what is behind it.
       if (e.metaKey || e.ctrlKey || e.altKey) {
         e.stopPropagation();
@@ -802,6 +829,7 @@ export function Composer({
           <>
             <button
               className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] border border-border text-muted hover:bg-panel-2/60 hover:text-fg"
+              ref={optionsBtnRef}
               onClick={() => setOptionsOpen(true)}
               title={footerLabel}
               aria-label={footerLabel}
@@ -842,9 +870,12 @@ export function Composer({
         createPortal(
           <div className="fixed inset-0 z-[60] flex flex-col justify-end bg-black/45" onClick={() => setOptionsOpen(false)}>
             <div
+              ref={sheetRef}
               role="dialog"
+              aria-modal="true"
               aria-label={footerLabel}
-              className="flex max-h-[calc(100%-env(safe-area-inset-top)-16px)] flex-col rounded-t-2xl border-t border-border bg-raised px-2 pb-[calc(env(safe-area-inset-bottom)+8px)] pt-2"
+              tabIndex={-1}
+              className="outline-none flex max-h-[calc(100%-env(safe-area-inset-top)-16px)] flex-col rounded-t-2xl border-t border-border bg-raised px-2 pb-[calc(env(safe-area-inset-bottom)+8px)] pt-2"
               onClick={(e) => e.stopPropagation()}
             >
               <div className="shrink-0 px-3 pb-1 pt-1 text-[13px] text-muted">{footerLabel}</div>
