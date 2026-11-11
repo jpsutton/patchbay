@@ -89,7 +89,10 @@ Patchbay Central. It is read-only: no writes, no streaming, no deep-link. Send t
 as a header:
 
 ```bash
+# Linux
 TOKEN="$(cat ~/.local/share/dev.patchbay.app/web-token)"
+# macOS
+TOKEN="$(cat "$HOME/Library/Application Support/dev.patchbay.app/web-token")"
 curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:4420/api/v1/sessions
 ```
 
