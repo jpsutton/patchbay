@@ -20,6 +20,8 @@ Your computers must be able to reach each other over the network. Patchbay doesn
 
 Each computer listens on TCP port **41890** by default. You can change the address and port in **Settings → Mesh → Listen on**.
 
+The default, `0.0.0.0:41890`, listens on this computer's loopback, home or office network and VPN addresses (such as Tailscale), and **never on a public IP address**. The same goes for `[::]`. Patchbay checks the network addresses again every few seconds, so a VPN that connects later gets its listener too. To listen on a public address on purpose, enter that address in full, for example `203.0.113.7:41890`. Reaching a computer over the internet is safer through a [Cloudflare Tunnel](#cloudflare-tunnel).
+
 The computers don't all need to reach each other. If laptop A can't reach desktop B, but both can reach a home server C, Patchbay finds that out and sends A's traffic for B through C. It keeps trying the direct route and switches back as soon as it works. Settings → Mesh shows a relayed computer as "Connected · through C".
 
 ## Setting up a mesh

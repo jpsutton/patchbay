@@ -32,6 +32,14 @@ fn node(name: &str) -> Node {
     Node { state: AppState::new(db, dir.clone(), mesh, emit), dir, events }
 }
 
+/// Startup runs the CLAUDE_SECURESTORAGE_CONFIG_DIR check (`AppState::new` -> `warn_unmodelled_env`).
+#[test]
+fn app_state_new_checks_the_securestorage_variable() {
+    let before = claude_auth::STARTUP_ENV_CHECKS.with(|c| c.get());
+    let _n = node("startup-env-check");
+    assert_eq!(claude_auth::STARTUP_ENV_CHECKS.with(|c| c.get()), before + 1);
+}
+
 async fn until(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
     let t0 = std::time::Instant::now();
     while !f() {
@@ -595,6 +603,7 @@ async fn phone_chat_runs_on_the_picked_computer() {
 ///
 /// `cargo test --lib manual_phone_gateway -- --ignored --nocapture` (PATCHBAY_TEST_SECS limits it).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
 #[ignore]
 async fn manual_phone_gateway() {
     let n = node("studio");
@@ -824,12 +833,19 @@ fn unidentified_default_logs_for(node_id: &str) -> Vec<String> {
 struct TempClaudeEnv {
     _guard: tokio::sync::MutexGuard<'static, ()>,
     dir: PathBuf,
+    /// The pin this one replaced, put back on drop.
+    prev: Option<(Option<PathBuf>, Option<String>)>,
 }
 
 impl TempClaudeEnv {
-    async fn new(portable_default: Option<(&str, &str, &str)>, config_dir: Option<String>) -> Self {
+    /// Pin HOME to a fresh temp dir and the account-directory variable to `config_dir`; `None`
+    /// pins it to "unset" (empty), NOT to whatever the developer's shell exports.
+    fn pin(
+        guard: tokio::sync::MutexGuard<'static, ()>,
+        portable_default: Option<(&str, &str, &str)>,
+        config_dir: Option<String>,
+    ) -> Self {
         ensure_test_tracing();
-        let guard = claude_auth::ENV_LOCK.lock().await;
         let dir = std::env::temp_dir().join(format!("pb-claude-home-{}", db::new_id()));
         std::fs::create_dir_all(dir.join(".claude")).unwrap();
         if let Some((u, o, name)) = portable_default {
@@ -838,31 +854,95 @@ impl TempClaudeEnv {
             }});
             std::fs::write(dir.join(".claude.json"), profile.to_string()).unwrap();
         }
-        claude_auth::set_test_env(Some(dir.clone()), config_dir);
-        Self { _guard: guard, dir }
+        let prev = claude_auth::test_pin();
+        claude_auth::set_test_env(Some(dir.clone()), Some(config_dir.unwrap_or_default()));
+        Self { _guard: guard, dir, prev: Some(prev) }
+    }
+
+    async fn new(portable_default: Option<(&str, &str, &str)>, config_dir: Option<String>) -> Self {
+        Self::pin(claude_auth::ENV_LOCK.lock().await, portable_default, config_dir)
+    }
+
+    /// Put back the pin this one replaced (once; `Drop` calls it too).
+    fn restore(&mut self) {
+        if let Some((home, cfg)) = self.prev.take() {
+            claude_auth::set_test_env(home, cfg);
+        }
     }
 
     fn new_blocking(portable_default: Option<(&str, &str, &str)>, config_dir: Option<String>) -> Self {
-        ensure_test_tracing();
-        let guard = claude_auth::ENV_LOCK.blocking_lock();
-        let dir = std::env::temp_dir().join(format!("pb-claude-home-{}", db::new_id()));
-        std::fs::create_dir_all(dir.join(".claude")).unwrap();
-        if let Some((u, o, name)) = portable_default {
-            let profile = serde_json::json!({ "oauthAccount": {
-                "accountUuid": u, "organizationUuid": o, "organizationName": name
-            }});
-            std::fs::write(dir.join(".claude.json"), profile.to_string()).unwrap();
-        }
-        claude_auth::set_test_env(Some(dir.clone()), config_dir);
-        Self { _guard: guard, dir }
+        Self::pin(claude_auth::ENV_LOCK.blocking_lock(), portable_default, config_dir)
     }
 }
 
 impl Drop for TempClaudeEnv {
     fn drop(&mut self) {
-        claude_auth::set_test_env(None, None);
+        self.restore();
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// The pin wins over the developer's shell: `TempClaudeEnv(.., None)` pins the account-directory
+/// variable to "unset" (not "whatever is exported"), and drop puts back exactly the previous pin.
+#[test]
+fn temp_claude_env_pins_the_ambient_variable_and_restores_on_drop() {
+    // Each case holds the lock for its whole body, so no other test's pin can be mistaken for ours.
+    let before = {
+        let guard = claude_auth::ENV_LOCK.blocking_lock();
+        let before = claude_auth::test_pin();
+        let mut env = TempClaudeEnv::pin(guard, None, None);
+        assert_eq!(claude_auth::test_pin().1, Some(String::new()), "pinned to unset, not left to the shell");
+        assert_eq!(claude_auth::config_dir().unwrap(), env.dir.join(".claude"));
+        env.restore();
+        assert_eq!(claude_auth::test_pin(), before, "restoring puts back the previous pin");
+        before
+    };
+    let guard = claude_auth::ENV_LOCK.blocking_lock();
+    let again = claude_auth::test_pin();
+    let mut env = TempClaudeEnv::pin(guard, None, Some("/pinned/elsewhere".into()));
+    assert_eq!(claude_auth::config_dir().unwrap(), PathBuf::from("/pinned/elsewhere"));
+    env.restore();
+    assert_eq!(claude_auth::test_pin(), again);
+    drop(env);
+    // Both cases saw an unpinned process (nothing else holds a pin outside the lock).
+    assert_eq!(before, (None, None));
+}
+
+/// With the pin in place the default account is the pinned temp dir's, whatever the shell exports.
+#[tokio::test]
+async fn pinned_default_account_is_the_temp_dirs() {
+    let _env = TempClaudeEnv::new(Some(("u-pin", "o-pin", "Pin")), None).await;
+    assert_eq!(crate::default_plan_account().0, "u-pin:o-pin");
+}
+
+/// A shell that exports `CLAUDE_CONFIG_DIR` (David's Teams panes do) must not change a pinned test:
+/// run the pinned tests in a child with a decoy exported (a directory holding ANOTHER account's
+/// profile) and they still pass. The child's output must show both tests actually ran.
+#[test]
+fn pinned_tests_ignore_an_exported_account_directory() {
+    let decoy = std::env::temp_dir().join(format!("pb-decoy-claude-{}", db::new_id()));
+    std::fs::create_dir_all(&decoy).unwrap();
+    let profile = serde_json::json!({ "oauthAccount": {
+        "accountUuid": "u-decoy", "organizationUuid": "o-decoy", "organizationName": "Decoy"
+    }});
+    std::fs::write(decoy.join(".claude.json"), profile.to_string()).unwrap();
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "mesh_app_tests::pinned_default_account_is_the_temp_dirs",
+            "mesh_app_tests::usage_limit_stops_claude_turns",
+            "--test-threads=1",
+        ])
+        .env("CLAUDE_CONFIG_DIR", &decoy)
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&decoy);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("2 passed"),
+        "the pin must beat the exported variable:\n{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// The usage guard: a Claude Code turn past the plan limit is cancelled once, with a notice, and
@@ -955,7 +1035,12 @@ async fn usage_limit_stops_claude_turns() {
     assert!(usable.is_none());
 
     emit(&a, &claude.id, CodeEvent::PromptDone { stop_reason: json!("cancelled") });
-    let err = prompt(claude.id.clone()).await.unwrap_err();
+    // Bounded: a guard that lets the prompt through leaves it awaiting an agent reply that never
+    // comes (the test agent is a bare channel), so fail fast instead of hanging the binary.
+    let sent = tokio::time::timeout(std::time::Duration::from_secs(10), prompt(claude.id.clone()))
+        .await
+        .expect("code_prompt hung: the usage guard let the prompt reach the agent, which never replies");
+    let err = sent.unwrap_err();
     assert!(err.0.starts_with("Not sent. You have used 97%"), "{}", err.0);
 
     // Turning the guard off lets prompts through again.
@@ -999,6 +1084,7 @@ async fn usage_limit_stops_claude_turns() {
 /// each other"), pinned at the prompt gate where a violation would actually block a send.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_session_is_gated_only_by_its_own_accounts_report() {
+    let _env = TempClaudeEnv::new(None, None).await;
     use code::acp::{AgentCmd, Delivery};
     use code::plan_limits::{PlanLimits, Window, now};
     let a = node("alpha-own-account");
@@ -1090,6 +1176,7 @@ async fn a_session_is_gated_only_by_its_own_accounts_report() {
 /// its own seat's weekly report, and by nothing else.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_grok_seat_gates_its_own_sessions() {
+    let _env = TempClaudeEnv::new(None, None).await;
     use code::acp::{AgentCmd, Delivery};
     use code::plan_limits::{PlanLimits, Window, now};
     let a = node("alpha-grok-seat");
@@ -1210,30 +1297,399 @@ async fn plan_limits_reach_every_member() {
     // B's older report, sent to A on reconnect, didn't replace A's.
     assert_eq!(five(&a), Some(0.5));
 
-    // An untagged report, from a member before accounts were told apart, is the default login's.
-    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &json!(report(0.1, 120)));
+    // An untagged report, from a member before accounts were told apart, names no account: it is
+    // ignored, however new (this one is the newest B has seen, so adopting it would show), and
+    // the member is logged once. A tagged report sent after it is filed: the channel works.
+    let before = b.state.code.plan.accounts();
+    let newest = json!(report(0.1, 0));
+    let logged = || UNTAGGED_PLAN_LOGS.lock().unwrap().iter().filter(|(m, _)| *m == bn).count();
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &newest);
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &newest);
+    assert_eq!(b.state.code.plan.accounts(), before, "an untagged report is filed in no bucket");
     assert_eq!(five(&b), Some(0.5));
+    assert_eq!(logged(), 1, "logged once per member, not once per report");
+    let tagged = json!({ "account": me, "limits": report(0.6, 20) });
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &tagged);
+    assert_eq!(five(&b), Some(0.6), "a tagged report in the same run is filed");
+    // Back to untagged after a tagged one is a state change: logged again, with the member named.
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &newest);
+    assert_eq!(logged(), 2);
+    assert_eq!(five(&b), Some(0.6));
+    assert!(
+        UNTAGGED_PLAN_LOGS.lock().unwrap().iter().any(|(m, line)| *m == bn && *line == format!("{UNTAGGED_PLAN_LOG} from {bn}")),
+        "the log line names the member"
+    );
+    // An empty or blank account is untagged too: same drop, same state (already untagged: no new
+    // log), the accounts untouched, and a control tagged report sent after them is filed.
+    let held = b.state.code.plan.accounts();
+    for blank in ["", "   "] {
+        let blanked = json!({ "account": blank, "limits": report(0.2, 0) });
+        mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &blanked);
+    }
+    assert_eq!(b.state.code.plan.accounts(), held, "a blank account is filed in no bucket");
+    assert_eq!(logged(), 2, "still the same untagged state");
+    let control = json!({ "account": me, "limits": report(0.7, 15) });
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &control);
+    assert_eq!(five(&b), Some(0.7), "the control after the blank ones is filed");
+    // A tagged report whose limits don't parse is not an old member: nothing filed, nothing logged
+    // (and before this change such a payload was filed as an empty report under the default).
+    // A FRESH account key, so a parse guard that quietly files an empty report would show at once
+    // (an account already holding a newer report would hide it: adoption keeps the newer one).
+    let held = b.state.code.plan.accounts();
+    assert!(!held.contains_key("u8:o8"));
+    let garbage = json!({ "account": "u8:o8", "limits": "garbage" });
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &garbage);
+    assert!(!b.state.code.plan.accounts().contains_key("u8:o8"), "unparseable limits file nothing, not even an empty account");
+    assert_eq!(b.state.code.plan.accounts(), held, "unparseable limits are not filed");
+    assert_eq!(logged(), 2, "and the member is not blamed as an older Patchbay");
     // Another account's report is kept apart, under its own name.
     let other = json!({ "account": "u2:o2", "name": "Team", "limits": report(0.9, 10) });
-    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &other);
-    assert_eq!((five(&b), five_of(&b, "u2:o2")), (Some(0.5), Some(0.9)));
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &other);
+    assert_eq!((five(&b), five_of(&b, "u2:o2")), (Some(0.7), Some(0.9)));
     assert_eq!(b.state.code.plan.account("u2:o2").name.as_deref(), Some("Team"));
 
     // A path-keyed report from another member (Claude Code had no oauthAccount there) is the
     // same login as the default here — not a second account under that foreign path.
     let foreign = json!({ "account": "/home/molly/.claude", "limits": report(0.53, 5) });
-    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &foreign);
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &foreign);
     assert_eq!(five(&b), Some(0.53));
     assert!(
         !b.state.code.plan.accounts().contains_key("/home/molly/.claude"),
         "foreign path fallbacks must not appear as their own account"
     );
     let foreign_work = json!({ "account": "/Users/other/work", "limits": report(0.55, 2) });
-    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, MESH_PLAN_LIMITS_EVENT, &foreign_work);
+    mesh::RpcHandler::event(&MeshRpc { state: b.state.clone() }, &bn, MESH_PLAN_LIMITS_EVENT, &foreign_work);
     assert_eq!(five(&b), Some(0.55));
     assert!(
         !b.state.code.plan.accounts().contains_key("/Users/other/work"),
         "foreign non-default path must collapse onto default, not stay as a ghost account"
+    );
+}
+
+/// Account keys that may leave this machine: Claude's `<accountUuid>:<organizationUuid>` and Grok's
+/// `grok:<team or personal>:<user>`.
+const PORTABLE_PLAN_KEYS: [&str; 8] = [
+    "u1:o1",
+    "u2:o2",
+    "u-mesh-def:o-mesh-def",
+    "d6f72690-3451-4e35-afa6-d653c2ce62ad:25c4ff7e-72e8-4c05-b845-c761306a53cc",
+    "grok:team-1:user-1",
+    "grok:personal:user-1",
+    "grok:personal:auth0|abc",
+    "grok:team_9:u.s@x+y=z",
+];
+
+/// Everything else stays on this machine: blank keys, home paths in every spelling (a UNC path
+/// would leak a host name) and shapes that are merely not ids.
+const NON_PORTABLE_PLAN_KEYS: [&str; 41] = [
+    "",
+    " ",
+    "   ",
+    "\t",
+    "\n",
+    "/home/molly/.claude",
+    "/Users/u/.claude/",
+    "~/foo/.claude",
+    "~",
+    r"~\.claude",
+    r"C:\Users\u\.claude",
+    "C:/Users/u/.claude",
+    "C:",
+    r"c:\x",
+    r"\\HOST\share\.claude",
+    r"\\?\C:\x",
+    "//host/share",
+    ".claude",
+    "./x",
+    "default",
+    "sk-ant-api03-abc",
+    "user@example.com",
+    "u1",
+    "u1:o1:x",
+    "grok",
+    "grok:",
+    "grok:team",
+    "grok::user",
+    "grok:team:",
+    ":o1",
+    "u1:",
+    "u1:o1 ",
+    " u1:o1",
+    "u1:o1\n",
+    "u1:o 1",
+    "ü:o1",
+    "u1:o/1",
+    "u1:o1/",
+    "a/b:c",
+    "grok:team:user:extra",
+    "grok:te/am:user",
+];
+
+/// Only portable identities pass the sender gate; every other shape is withheld. Permanent table.
+#[test]
+fn only_portable_plan_accounts_pass_the_sender_gate() {
+    let limits = code::plan_limits::PlanLimits::default();
+    let share = |a: &str| crate::shareable_plan_report(a, &Some("N".into()), &limits);
+    for key in PORTABLE_PLAN_KEYS {
+        let ok = share(key).unwrap_or_else(|| panic!("{key:?} must be shared"));
+        assert_eq!(ok["account"], key);
+        assert_eq!(ok["name"], "N");
+    }
+    for key in NON_PORTABLE_PLAN_KEYS {
+        assert!(share(key).is_none(), "{key:?} must be withheld");
+    }
+}
+
+/// A withheld key is logged once (its length, never the key), not silently and not per report.
+#[test]
+fn a_withheld_plan_key_is_logged_once() {
+    let limits = code::plan_limits::PlanLimits::default();
+    let key = "/".repeat(91);
+    for _ in 0..3 {
+        assert!(crate::outbound_plan_report(&key, &None, &limits).is_none());
+    }
+    let n = crate::WITHHELD_PLAN_LOGS.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|l| **l == 91).count();
+    assert_eq!(n, 1);
+}
+
+/// Nothing legitimate changes on the wire: for every portable key the payload the gate lets out is
+/// byte-for-byte the pre-gate shape (`{account, name, limits}` for plan reports, `{accountId, limits}`
+/// for the two provider events).
+#[test]
+fn legitimate_payloads_are_identical_to_the_pre_gate_shape() {
+    use code::plan_limits::{PlanLimits, Window, now};
+    let limits = PlanLimits { five_hour: Some(Window { utilization: 0.5, resets_at: now() + 3600 }), observed_at: now(), ..Default::default() };
+    for key in PORTABLE_PLAN_KEYS {
+        let before = json!({ "account": key, "name": Some("N"), "limits": limits });
+        assert_eq!(crate::shareable_plan_report(key, &Some("N".to_owned()), &limits).unwrap().to_string(), before.to_string(), "{key}");
+    }
+    for id in PORTABLE_PROVIDER_IDS {
+        let cursor = cursor_report(id, 40.0);
+        let before = json!({ "accountId": id, "limits": cursor });
+        assert_eq!(crate::shareable_provider_report(id, &cursor).unwrap().to_string(), before.to_string(), "{id}");
+    }
+}
+
+/// Path 1 of 3, `greeting()`: what a newly connected member is told goes through the gate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn greeting_goes_through_the_sender_gate() {
+    use code::plan_limits::{Account, PlanLimits, Window, now};
+    let _env = TempClaudeEnv::new(None, None).await;
+    let a = node("alpha-greeting-gate");
+    let limits = PlanLimits { five_hour: Some(Window { utilization: 0.5, resets_at: now() + 3600 }), observed_at: now(), ..Default::default() };
+    let accounts: std::collections::BTreeMap<String, Account> = PORTABLE_PLAN_KEYS
+        .iter()
+        .chain(NON_PORTABLE_PLAN_KEYS.iter())
+        .map(|k| ((*k).to_owned(), Account { latest: Some(limits.clone()), name: Some("N".into()), history: vec![] }))
+        .collect();
+    a.state.code.plan.set_accounts(accounts);
+    let mut told: Vec<String> = mesh::RpcHandler::greeting(&MeshRpc { state: a.state.clone() })
+        .into_iter()
+        .filter(|(n, _)| n == MESH_PLAN_LIMITS_EVENT)
+        .map(|(_, p)| p["account"].as_str().unwrap().to_owned())
+        .collect();
+    told.sort();
+    let mut want: Vec<String> = PORTABLE_PLAN_KEYS.iter().map(|k| (*k).to_owned()).collect();
+    want.sort();
+    assert_eq!(told, want, "greeting() sends exactly the portable accounts");
+}
+
+/// Path 2 of 3, a Grok seat's report: nothing but a portable seat reaches a peer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn grok_reports_go_through_the_sender_gate() {
+    use code::plan_limits::{PlanLimits, Window, now};
+    let (a, b) = (node("alpha-grok-gate"), node("bravo-grok-gate"));
+    link(&a, &b).await;
+    let plan = |account: &str| code::grok_plan::GrokPlan {
+        account: account.to_owned(),
+        name: Some("Seat".into()),
+        limits: PlanLimits { five_hour: Some(Window { utilization: 0.4, resets_at: now() + 3600 }), observed_at: now(), ..Default::default() },
+    };
+    for key in NON_PORTABLE_PLAN_KEYS {
+        crate::report_grok_plan(&a.state, plan(key));
+    }
+    // Delivery is ordered: when the control is visible, every report before it has been handled.
+    crate::report_grok_plan(&a.state, plan("grok:team-1:user-1"));
+    until("B has the control", 10, || b.state.code.plan.account("grok:team-1:user-1").latest.is_some()).await;
+    let keys: Vec<String> = b.state.code.plan.accounts().into_keys().collect();
+    assert_eq!(keys, vec!["grok:team-1:user-1".to_owned()], "no withheld key reached the peer");
+}
+
+/// Path 3 of 3, the live report of a Claude session: a session whose account resolves to a UNC-shaped
+/// key (not absolute on unix, so a list of path shapes would let it out) stays on this machine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn live_plan_reports_go_through_the_sender_gate() {
+    use code::acp::CodeEvent;
+    use code::plan_limits::{PlanLimits, Window, now};
+    let _env = TempClaudeEnv::new(Some(("u-live", "o-live", "Live")), None).await;
+    let (a, b) = (node("alpha-live-gate"), node("bravo-live-gate"));
+    link(&a, &b).await;
+    let cwd = a.dir.to_string_lossy().into_owned();
+    let report = || PlanLimits { five_hour: Some(Window { utilization: 0.3, resets_at: now() + 3600 }), observed_at: now(), ..Default::default() };
+    let hostile = r"\\HOST\share\.claude";
+    let bad = a.state.db.create_code_session(&cwd, None, "claude-code", "default").unwrap();
+    a.state.db.set_setting(&code::import_claude::config_dir_key(&bad.id), hostile).unwrap();
+    emit(&a, &bad.id, CodeEvent::PlanLimits { limits: report() });
+    // Not vacuous: the live path really produced that account here.
+    assert!(a.state.code.plan.accounts().contains_key(hostile), "{:?}", a.state.code.plan.accounts().keys().collect::<Vec<_>>());
+    let good = a.state.db.create_code_session(&cwd, None, "claude-code", "default").unwrap();
+    emit(&a, &good.id, CodeEvent::PlanLimits { limits: report() });
+    until("B has the control", 10, || b.state.code.plan.account("u-live:o-live").latest.is_some()).await;
+    let keys: Vec<String> = b.state.code.plan.accounts().into_keys().collect();
+    assert_eq!(keys, vec!["u-live:o-live".to_owned()], "the UNC-shaped key stayed here");
+}
+
+/// Cursor / Antigravity account ids that may leave this machine: a numeric or string user id, a JWT
+/// `sub`, an email, or the last-resort `token:<fingerprint>`.
+const PORTABLE_PROVIDER_IDS: [&str; 7] =
+    ["42", "1234567890", "user_01HXYZ", "a@b.c", "me@example.com", "auth0|65f1", "token:eyJhbGciOiJSUzI1"];
+
+const NON_PORTABLE_PROVIDER_IDS: [&str; 16] = [
+    "",
+    " ",
+    ".",
+    "..",
+    "/home/x",
+    r"\\HOST\share",
+    "~/x",
+    "~",
+    "a b",
+    "token:",
+    "token:a:b",
+    "x/y",
+    r"C:\x",
+    "u\n",
+    "ü@x.y",
+    "a:b",
+];
+
+/// The same gate for the two provider events: a table of ids, one permanent test.
+#[test]
+fn only_portable_provider_account_ids_pass_the_sender_gate() {
+    let limits = code::plan_limits::PlanLimits::default();
+    let share = |id: &str| crate::shareable_provider_report(id, &limits);
+    for id in PORTABLE_PROVIDER_IDS {
+        assert_eq!(share(id).unwrap_or_else(|| panic!("{id:?} must be shared"))["accountId"], id);
+    }
+    for id in NON_PORTABLE_PROVIDER_IDS {
+        assert!(share(id).is_none(), "{id:?} must be withheld");
+    }
+    assert!(share(&"x".repeat(513)).is_none(), "an over-long id is withheld");
+}
+
+fn cursor_report(account: &str, auto: f64) -> code::cursor_plan::CursorPlanLimits {
+    code::cursor_plan::CursorPlanLimits {
+        account_id: account.into(),
+        email: Some("a@b.c".into()),
+        observed_at: code::cursor_plan::now(),
+        resets_at: Some(code::cursor_plan::now() + 86400),
+        auto: Some(auto),
+        api: Some(10.0),
+        total: Some(auto),
+        included_spend_cents: Some(20000),
+        limit_cents: Some(40000),
+        bonus_spend_cents: Some(500),
+        remaining_bonus: Some(true),
+        display_message: None,
+        grants: Vec::new(),
+        grants_remaining_cents: Some(0),
+        slow_pool: Some(false),
+        on_demand_allowed: Some(false),
+    }
+}
+
+/// Cursor's event goes through the gate: a report under a non-portable id stays here, a portable one
+/// (sent after it, so delivery order proves the first was handled) reaches the peer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cursor_reports_go_through_the_sender_gate() {
+    let (a, b) = (node("alpha-cursor-gate"), node("bravo-cursor-gate"));
+    link(&a, &b).await;
+    adopt_cursor_plan(&a.state, cursor_report(r"\\HOST\share\cursor", 55.0), true);
+    adopt_cursor_plan(&a.state, cursor_report("42", 40.0), true);
+    until("B has the control", 10, || b.state.code.cursor_plan.latest().is_some_and(|l| l.account_id == "42")).await;
+    assert_eq!(b.state.code.cursor_plan.latest().unwrap().account_id, "42", "the UNC-shaped id never reached B");
+}
+
+/// Antigravity's event goes through the gate, same shape as Cursor's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn antigravity_reports_go_through_the_sender_gate() {
+    use code::antigravity_plan::AntigravityPlanLimits;
+    let (a, b) = (node("alpha-ag-gate"), node("bravo-ag-gate"));
+    link(&a, &b).await;
+    let report = |id: &str| AntigravityPlanLimits::unavailable(id.into(), None, "n/a".into(), code::antigravity_plan::now());
+    adopt_antigravity_plan(&a.state, report(r"\\HOST\share\ag"), true);
+    adopt_antigravity_plan(&a.state, report("me@example.com"), true);
+    until("B has the control", 10, || b.state.code.antigravity_plan.latest().is_some_and(|l| l.account_id == "me@example.com")).await;
+    assert_eq!(b.state.code.antigravity_plan.latest().unwrap().account_id, "me@example.com");
+}
+
+/// `greeting()` also gates the two provider events it appends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn greeting_gates_the_provider_events_too() {
+    use code::antigravity_plan::AntigravityPlanLimits;
+    let _env = TempClaudeEnv::new(None, None).await;
+    let a = node("alpha-greeting-provider");
+    let rpc = || MeshRpc { state: a.state.clone() };
+    let events = |name: &str| {
+        mesh::RpcHandler::greeting(&rpc()).into_iter().filter(|(n, _)| n == name).map(|(_, p)| p).collect::<Vec<_>>()
+    };
+    a.state.code.cursor_plan.record(cursor_report(r"\\HOST\share\cursor", 55.0));
+    a.state.code.antigravity_plan.record(AntigravityPlanLimits::unavailable(r"\\HOST\share\ag".into(), None, "n/a".into(), code::antigravity_plan::now()));
+    assert!(events(MESH_CURSOR_PLAN_EVENT).is_empty() && events(MESH_ANTIGRAVITY_PLAN_EVENT).is_empty(), "withheld");
+    a.state.code.cursor_plan.record(cursor_report("42", 55.0));
+    a.state.code.antigravity_plan.record(AntigravityPlanLimits::unavailable("me@example.com".into(), None, "n/a".into(), code::antigravity_plan::now()));
+    assert_eq!(events(MESH_CURSOR_PLAN_EVENT)[0]["accountId"], "42");
+    assert_eq!(events(MESH_ANTIGRAVITY_PLAN_EVENT)[0]["accountId"], "me@example.com");
+}
+
+/// Over a real link the receiver names the SENDING node (`handle` passes the session's peer id),
+/// not some other id; a tagged report with unreadable limits sent the same way is not logged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn untagged_plan_usage_over_a_live_link_names_the_sender() {
+    let (a, b) = (node("alpha-untagged"), node("bravo-untagged"));
+    link(&a, &b).await;
+    let an = a.state.mesh.node_id().to_owned();
+    let line = format!("{UNTAGGED_PLAN_LOG} from {an}");
+    let logged = || UNTAGGED_PLAN_LOGS.lock().unwrap().iter().filter(|(m, l)| *m == an && *l == line).count();
+    a.state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, json!({ "fiveHour": { "utilization": 0.99, "resetsAt": 1 }, "observedAt": 1 }));
+    until("B logs A's node id", 10, || logged() == 1).await;
+    a.state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, json!({ "account": "u8:o8", "limits": "garbage" }));
+    // A later control (tagged, readable) is delivered, which also proves the garbage one was processed first.
+    let ok = json!({ "account": "u9:o9", "limits": { "fiveHour": { "utilization": 0.3, "resetsAt": code::plan_limits::now() + 3600 }, "observedAt": code::plan_limits::now() } });
+    a.state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, ok);
+    until("B files the control", 10, || b.state.code.plan.account("u9:o9").latest.is_some()).await;
+    // Delivery is ordered, so the garbage report (sent first, for a key nothing else uses) was
+    // processed before the control became visible: it must have filed nothing.
+    assert!(!b.state.code.plan.accounts().contains_key("u8:o8"), "unparseable limits file nothing, not even an empty account");
+    assert_eq!(logged(), 1, "the unreadable tagged report was not logged as untagged");
+    assert!(b.state.code.plan.accounts().keys().all(|k| k == "u9:o9"), "nothing else was filed");
+}
+
+/// A report relayed through a middle node (A and C cannot reach each other) arrives on a session
+/// with the ORIGIN: C names A, not the relay B (circuits handshake end to end).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn relayed_untagged_plan_usage_names_the_origin_not_the_relay() {
+    let (a, b, c) = (node("alpha-relay-plan"), node("bravo-relay-plan"), node("charlie-relay-plan"));
+    link(&a, &b).await;
+    let (an, bn, cn) = (a.state.mesh.node_id().to_owned(), b.state.mesh.node_id().to_owned(), c.state.mesh.node_id().to_owned());
+    a.state.mesh.block_direct(&cn);
+    c.state.mesh.block_direct(&an);
+    until("B listens", 5, || b.state.mesh.bound_port().is_some()).await;
+    let url = format!("127.0.0.1:{}", b.state.mesh.bound_port().unwrap());
+    c.state.mesh.join(&url, PASS, "c").unwrap();
+    until("join request", 10, || !b.state.mesh.status()["pending"].as_array().unwrap().is_empty()).await;
+    b.state.mesh.approve(&cn).await.unwrap();
+    until("C is a member", 10, || c.state.mesh.is_member()).await;
+    let state_of = |n: &Node, id: &str| {
+        n.state.mesh.status()["members"].as_array().unwrap().iter().find(|m| m["nodeId"] == id).map(|m| m["state"].as_str().unwrap().to_owned()).unwrap_or_default()
+    };
+    until("A reaches C via B", 20, || state_of(&a, &cn) == "relay").await;
+    a.state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, json!({ "fiveHour": { "utilization": 0.99, "resetsAt": 1 }, "observedAt": 1 }));
+    let from_a = format!("{UNTAGGED_PLAN_LOG} from {an}");
+    until("C names A", 10, || UNTAGGED_PLAN_LOGS.lock().unwrap().iter().any(|(m, l)| *m == an && *l == from_a)).await;
+    assert!(
+        !UNTAGGED_PLAN_LOGS.lock().unwrap().iter().any(|(m, _)| *m == bn),
+        "the relay is never named for A's report"
     );
 }
 
@@ -1819,6 +2275,7 @@ async fn cursor_plan_limits_reach_peers_on_the_same_account() {
     until("B takes the newer report", 10, || b.state.code.cursor_plan.latest().is_some_and(|l| l.auto == Some(55.0))).await;
     mesh::RpcHandler::event(
         &MeshRpc { state: b.state.clone() },
+        "a-member",
         MESH_CURSOR_PLAN_EVENT,
         &json!({ "accountId": "other", "limits": report(99.0, 5, "other") }),
     );
@@ -2188,4 +2645,262 @@ async fn remote_window_catches_up_and_saves_through_the_host() {
     // B's save lands on A.
     save_code_transcript(&b.state, s.id.clone(), "{\"v\":1}".into()).await.unwrap();
     assert_eq!(a.state.db.code_transcript(&s.id).unwrap().as_deref(), Some("{\"v\":1}"));
+}
+
+/// An agent's message to a session whose Claude account is over the limit is refused naming the
+/// RECIPIENT and its account; a target on no plan account (opencode) is never stopped by it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_message_refusal_names_the_recipients_account() {
+    let _env = TempClaudeEnv::new(None, None).await;
+    use code::plan_limits::{PlanLimits, Window, now};
+    let a = node("alpha-recipient-limit");
+    let an = a.state.mesh.node_id().to_owned();
+    let cwd = a.dir.to_string_lossy().into_owned();
+    a.state.code.plan.record(
+        &crate::default_plan_account().0,
+        Some("dev@example.com Organization".into()),
+        PlanLimits { five_hour: Some(Window { utilization: 0.97, resets_at: now() + 3600 }), observed_at: now() - 60, ..Default::default() },
+    );
+    let src = a.state.db.create_code_session(&cwd, None, "opencode", "default").unwrap();
+    let claude = a.state.db.create_code_session(&cwd, None, "claude-code", "default").unwrap();
+    let oc = a.state.db.create_code_session(&cwd, None, "opencode", "default").unwrap();
+    let _claude_rx = a.state.code.attach_test_agent(&claude.id);
+    let mut oc_rx = a.state.code.attach_test_agent(&oc.id);
+
+    let err = send_agent_message(&a.state, &an, &src.id, &claude.id, "hi").await.unwrap_err().to_string();
+    assert!(err.starts_with("Not sent. "), "{err}");
+    assert!(err.contains(&claude.id) && err.contains(&format!("'{}'", claude.title)), "names the recipient: {err}");
+    assert!(err.contains("5-hour") && err.contains("97%") && err.contains("resets in"), "window, percent, reset: {err}");
+    assert!(!err.contains("example.com") && !err.contains("Organization"), "no account label (an email) leaks: {err}");
+    assert!(!err.contains("You have used"), "never says the sender used anything: {err}");
+
+    // An opencode recipient is exempt from the Claude guard (and so would an opencode sender be).
+    let (r, got) = tokio::join!(send_agent_message(&a.state, &an, &claude.id, &oc.id, "hi"), take_agent_message(&mut oc_rx));
+    assert_eq!(r.unwrap()["delivery"], "sent");
+    assert!(got.text.contains("hi"), "{}", got.text);
+
+    // A human's prompt to the same session keeps the existing first-person wording.
+    let chans: crate::api::ChanFactory = Arc::new(|_| None);
+    let err = crate::api::call(&a.state, "code_prompt", json!({ "id": claude.id, "text": "more", "attachmentIds": [] }), &chans)
+        .await
+        .unwrap_err();
+    assert!(err.0.starts_with("Not sent. You have used 97% of dev@example.com Organization's 5-hour limit"), "{}", err.0);
+}
+
+/// Changing a running Codex session's approval mode moves its sandbox with it, the NEW approval
+/// mode saved FIRST: whatever reads the saved mode while the sandbox moves (`keep_mode`, on the
+/// agent reporting its mode) must see the target, or it could flip the sandbox back and leave
+/// Codex writing under Ask. A switch the agent refuses puts the previous mode back; other agents
+/// are not touched (pb-20261110-15).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn codex_sandbox_follows_a_live_approval_change() {
+    use code::acp::AgentCmd;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let a = node("alpha-codex-approval");
+    let cwd = a.dir.to_string_lossy().into_owned();
+    let codex = a.state.db.create_code_session(&cwd, None, "codex", "default").unwrap();
+    let claude = a.state.db.create_code_session(&cwd, None, "claude-code", "default").unwrap();
+    let mut codex_rx = a.state.code.attach_test_agent(&codex.id);
+    let mut claude_rx = a.state.code.attach_test_agent(&claude.id);
+    // (mode asked for, approval mode SAVED at the moment it was asked for)
+    let asked: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
+    let refuse = Arc::new(AtomicBool::new(false));
+    {
+        let (asked, refuse, db, id) = (asked.clone(), refuse.clone(), a.state.db.clone(), codex.id.clone());
+        tokio::spawn(async move {
+            while let Some(cmd) = codex_rx.recv().await {
+                if let AgentCmd::SetMode { mode_id, reply } = cmd {
+                    let saved = db.get_code_session(&id).unwrap().unwrap().permission_mode;
+                    asked.lock().unwrap().push((mode_id, saved));
+                    let _ = reply.send(if refuse.load(Ordering::SeqCst) { Err(anyhow::anyhow!("agent refused")) } else { Ok(()) });
+                }
+            }
+        });
+    }
+    let chans: crate::api::ChanFactory = Arc::new(|_| None);
+    let set = |id: &str, mode: &str| crate::api::call(&a.state, "code_set_permission_mode", json!({ "id": id, "mode": mode }), &chans);
+    let saved = |id: &str| a.state.db.get_code_session(id).unwrap().unwrap().permission_mode;
+    let gaps = || {
+        a.events
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(n, p)| n == code::acp::EVENT && p["event"]["type"] == "approvalGaps")
+            .map(|(_, p)| p["event"]["gaps"].to_string())
+    };
+    let pair = |m: &str, s: &str| (m.to_owned(), s.to_owned());
+
+    set(&codex.id, "always-approve").await.unwrap();
+    assert_eq!(saved(&codex.id), "always-approve");
+    assert_eq!(asked.lock().unwrap().as_slice(), [pair("workspace-write", "always-approve")]);
+    assert!(gaps().unwrap().contains("writes in this project"), "{:?}", gaps());
+
+    // Approve all -> Ask: the sandbox goes back to read-only, the header says so, and the saved
+    // mode was already Ask when the agent was asked (save first).
+    set(&codex.id, "default").await.unwrap();
+    assert_eq!(saved(&codex.id), "default");
+    assert_eq!(asked.lock().unwrap()[1], pair("read-only", "default"), "saved mode must lead the sandbox");
+    assert!(gaps().unwrap().contains("read-only sandbox"), "{:?}", gaps());
+
+    // A switch back to Ask the agent refuses is an error that puts the previous mode back.
+    set(&codex.id, "always-approve").await.unwrap();
+    refuse.store(true, Ordering::SeqCst);
+    let before = gaps();
+    assert!(set(&codex.id, "default").await.is_err());
+    assert_eq!(asked.lock().unwrap().last().unwrap(), &pair("read-only", "default"), "asked after saving the target");
+    assert_eq!(saved(&codex.id), "always-approve", "a refused switch must restore the previous mode");
+    assert_eq!(gaps(), before);
+    // A refused switch to Approve all restores the safe value too.
+    refuse.store(false, Ordering::SeqCst);
+    set(&codex.id, "default").await.unwrap();
+    refuse.store(true, Ordering::SeqCst);
+    assert!(set(&codex.id, "always-approve").await.is_err());
+    assert_eq!(saved(&codex.id), "default", "a refused widening leaves Ask in place");
+
+    // Another agent: saved, no mode change sent, no header event.
+    set(&claude.id, "always-approve").await.unwrap();
+    assert_eq!(saved(&claude.id), "always-approve");
+    assert!(claude_rx.try_recv().is_err());
+}
+
+/// Live, manual: case D of pb-20261110-15 through Patchbay's own `code_set_permission_mode` (not the
+/// raw adapter): a real Codex session started under Approve all writes in the project without a
+/// permission request; after the approval control goes to Ask, the same kind of write is ASKED
+/// again, and a refusal leaves the file absent. Uses your real `codex login` and one small turn per
+/// phase. The project must NOT be under /tmp or $TMPDIR (Codex may write there unasked).
+///
+/// `PB_TEST_REAL_HOME=1 PB_CODEX_SCRATCH=<dir outside tmp> cargo test --lib manual_codex_live_approval_switch -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
+#[ignore]
+async fn manual_codex_live_approval_switch() {
+    let scratch = std::path::PathBuf::from(std::env::var("PB_CODEX_SCRATCH").expect("PB_CODEX_SCRATCH: a folder outside /tmp and $TMPDIR"));
+    let project = scratch.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = project.canonicalize().unwrap();
+    for tmp in ["/tmp", "/private/tmp", &std::env::temp_dir().canonicalize().unwrap().to_string_lossy()] {
+        assert!(!project.starts_with(tmp), "{} is under {tmp}", project.display());
+    }
+    println!("REALPATH project={} $TMPDIR={:?}", project.display(), std::env::var("TMPDIR"));
+    let a = node("codex-live");
+    let s = a.state.db.create_code_session(&project.to_string_lossy(), None, "codex", "always-approve").unwrap();
+    crate::code_start_local(&a.state, s.id.clone()).await.unwrap();
+    let ev = |ty: &str| -> Vec<Value> {
+        a.events.lock().unwrap().iter().filter(|(n, p)| n == code::acp::EVENT && p["event"]["type"] == ty).map(|(_, p)| p["event"].clone()).collect()
+    };
+    until("the session is ready under Approve all", 180, || {
+        ev("sessionReady").last().is_some_and(|e| e["modes"]["currentModeId"] == "workspace-write")
+    })
+    .await;
+    println!("READY currentModeId={}", ev("sessionReady").last().unwrap()["modes"]["currentModeId"]);
+    let chans: crate::api::ChanFactory = Arc::new(|_| None);
+    let prompt = |file: &std::path::Path| {
+        let text = format!("Create the file {} containing the word proof.", file.display());
+        crate::api::call(&a.state, "code_prompt", json!({ "id": s.id, "text": text, "attachmentIds": [] }), &chans)
+    };
+
+    let d1 = project.join("d1.txt");
+    prompt(&d1).await.unwrap();
+    until("the first turn to end", 240, || !ev("promptDone").is_empty()).await;
+    println!("PHASE 1 (Approve all): permission requests={} auto-approved={} file exists={}", ev("permission").len(), ev("autoApproved").len(), d1.exists());
+    assert!(d1.exists());
+    assert!(ev("permission").is_empty(), "Approve all in the project needs no request");
+
+    // The approval control goes to Ask: through the command the UI calls.
+    crate::api::call(&a.state, "code_set_permission_mode", json!({ "id": s.id, "mode": "default" }), &chans).await.unwrap();
+    let saved = a.state.db.get_code_session(&s.id).unwrap().unwrap().permission_mode;
+    println!("SWITCHED saved approval mode={saved} approvalGaps events={}", ev("approvalGaps").len());
+    assert_eq!(saved, "default");
+    assert!(!ev("approvalGaps").is_empty());
+
+    let d2 = project.join("d2.txt");
+    prompt(&d2).await.unwrap();
+    until("a permission request after the switch", 240, || !ev("permission").is_empty()).await;
+    let req = ev("permission").last().cloned().unwrap();
+    let options = req["request"]["options"].as_array().cloned().unwrap_or_default();
+    let reject = options.iter().find(|o| o["kind"] == "reject_once").unwrap_or_else(|| panic!("no reject_once in {req}"));
+    println!("PHASE 2 (Ask): request_permission arrived: options={:?}", options.iter().map(|o| o["kind"].clone()).collect::<Vec<_>>());
+    crate::api::call(
+        &a.state,
+        "code_permission_respond",
+        json!({ "requestId": req["requestId"], "optionId": reject["optionId"], "id": s.id }),
+        &chans,
+    )
+    .await
+    .unwrap();
+    until("the second turn to end", 240, || ev("promptDone").len() >= 2).await;
+    println!("PHASE 2 result: file exists={} (refused)", d2.exists());
+    assert!(!d2.exists(), "the refused write must not have happened");
+    a.state.code.stop(&s.id);
+}
+
+/// An agent's own approval modes can't be set by a caller, through the local command or through the
+/// mesh `code.set_mode` (which a mesh member, or a phone through the gateway, reaches): they would
+/// replace Patchbay's approval control and nothing would put it back. The agent never hears of a
+/// refused attempt; a visible mode (and for Codex, the mode the approval control implies) still works
+/// (pb-20261110-18).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hidden_agent_modes_are_refused_through_ipc_and_mesh() {
+    use crate::mesh::RpcHandler as _;
+    use code::acp::AgentCmd;
+    use code::agents::{AgentKind, ApprovalSetup};
+    let a = node("alpha-hidden-modes");
+    let cwd = a.dir.to_string_lossy().into_owned();
+    let chans: crate::api::ChanFactory = Arc::new(|_| None);
+    // (agent, the session's approval mode, a visible mode that must still work)
+    let cases = [
+        ("claude-code", "default", "plan"),
+        ("antigravity", "default", "default"),
+        ("codex", "default", "read-only"),
+        ("codex", "always-approve", "workspace-write"),
+    ];
+    for (agent, approval, visible) in cases {
+        let kind = AgentKind::parse(agent).unwrap();
+        let setup = ApprovalSetup::for_session(kind, approval);
+        // Every id the agent hides, except the one Codex's approval control implies.
+        let hidden: Vec<&str> = setup.hide_modes.iter().copied().filter(|m| *m != visible).collect();
+        assert!(!hidden.is_empty(), "{agent} hides modes");
+        let s = a.state.db.create_code_session(&cwd, None, agent, approval).unwrap();
+        let mut rx = a.state.code.attach_test_agent(&s.id);
+        let reached: Arc<Mutex<Vec<String>>> = Arc::default();
+        {
+            let reached = reached.clone();
+            tokio::spawn(async move {
+                while let Some(cmd) = rx.recv().await {
+                    if let AgentCmd::SetMode { mode_id, reply } = cmd {
+                        reached.lock().unwrap().push(mode_id);
+                        let _ = reply.send(Ok(()));
+                    }
+                }
+            });
+        }
+        let ipc = |mode: &str| crate::api::call(&a.state, "code_set_mode", json!({ "id": s.id, "modeId": mode }), &chans);
+        let mesh = |mode: &str| {
+            let rpc = crate::MeshRpc { state: a.state.clone() };
+            let params = json!({ "id": s.id, "modeId": mode });
+            async move { rpc.call("peer".into(), "code.set_mode".into(), params).await }
+        };
+        for mode in &hidden {
+            let e = ipc(mode).await.expect_err(&format!("{agent} {approval}: IPC set_mode {mode}")).0;
+            assert!(e.contains("can't be set directly"), "{agent} {mode}: {e}");
+            let e = mesh(mode).await.expect_err(&format!("{agent} {approval}: mesh set_mode {mode}")).to_string();
+            assert!(e.contains("can't be set directly"), "{agent} {mode}: {e}");
+        }
+        assert!(reached.lock().unwrap().is_empty(), "{agent} {approval}: a refused mode reached the agent: {:?}", reached.lock().unwrap());
+        ipc(visible).await.unwrap_or_else(|e| panic!("{agent} {approval}: IPC {visible}: {}", e.0));
+        mesh(visible).await.unwrap_or_else(|e| panic!("{agent} {approval}: mesh {visible}: {e:#}"));
+        assert_eq!(reached.lock().unwrap().as_slice(), [visible, visible], "{agent} {approval}");
+    }
+    // An agent with no hidden modes is untouched.
+    let s = a.state.db.create_code_session(&cwd, None, "opencode", "default").unwrap();
+    let mut rx = a.state.code.attach_test_agent(&s.id);
+    tokio::spawn(async move {
+        while let Some(cmd) = rx.recv().await {
+            if let AgentCmd::SetMode { reply, .. } = cmd {
+                let _ = reply.send(Ok(()));
+            }
+        }
+    });
+    crate::api::call(&a.state, "code_set_mode", json!({ "id": s.id, "modeId": "build" }), &chans).await.unwrap();
 }

@@ -1,0 +1,162 @@
+{
+  "observed_at": 1731278700000,
+  "provider": "patchbayd-synthetic",
+  "sessions": [
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "short_id": "00000000",
+      "title": "Synthetic session alpha",
+      "cwd": "/workspace/patchbay-central",
+      "project_name": "patchbay-central",
+      "agent": "gemini",
+      "source": "patchbay_daemon_api",
+      "state": "needs_you",
+      "archived": false,
+      "updated_at": 1731278695000,
+      "last_activity_at": 1731278695000,
+      "question": {
+        "prompt": "Approve deployment of live status adapter?",
+        "options": [
+          "Approve",
+          "Reject"
+        ],
+        "tool_name": "ask_question",
+        "source_evidence": "ask_question (tool_use)",
+        "status": "pending",
+        "resolution_evidence": null
+      },
+      "stuck_reason": null,
+      "observation_freshness": {
+        "basis": "live_memory",
+        "observed_at": 1731278695000
+      },
+      "field_provenance": {
+        "id": "sqlite",
+        "state": "live_memory",
+        "cwd": "sqlite",
+        "agent": "sqlite",
+        "updated_at": "sqlite"
+      },
+      "navigation_target_id": "00000000-0000-4000-8000-000000000001",
+      "navigation_target_uri": null,
+      "capabilities": {
+        "can_focus": false,
+        "can_answer": false,
+        "answer_type": "none"
+      },
+      "teams": null
+    },
+    {
+      "id": "e2a1b3c4-5d6e-7f8a-9b0c-1d2e3f4a5b6c",
+      "short_id": "e2a1b3c4",
+      "title": "Completed turn with retained question",
+      "cwd": "/workspace/patchbay-central",
+      "project_name": "patchbay-central",
+      "agent": "codex",
+      "source": "patchbay_daemon_api",
+      "state": "done",
+      "archived": false,
+      "updated_at": 1731278685000,
+      "last_activity_at": 1731278685000,
+      "question": {
+        "prompt": "Prior question from earlier completed turn",
+        "options": [
+          "Yes",
+          "No"
+        ],
+        "tool_name": "ask_question",
+        "source_evidence": "ask_question (tool_use)",
+        "status": "resolved",
+        "resolution_evidence": null
+      },
+      "stuck_reason": null,
+      "observation_freshness": {
+        "basis": "sqlite_poll",
+        "observed_at": 1731278685000
+      },
+      "field_provenance": {
+        "id": "sqlite",
+        "state": "sqlite",
+        "cwd": "sqlite",
+        "agent": "sqlite",
+        "updated_at": "sqlite"
+      },
+      "navigation_target_id": "e2a1b3c4-5d6e-7f8a-9b0c-1d2e3f4a5b6c",
+      "navigation_target_uri": null,
+      "capabilities": {
+        "can_focus": false,
+        "can_answer": false,
+        "answer_type": "none"
+      },
+      "teams": null
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "short_id": "00000000",
+      "title": "Active running worker session",
+      "cwd": "/workspace/patchbay-central",
+      "project_name": "patchbay-central",
+      "agent": "codex",
+      "source": "patchbay_daemon_api",
+      "state": "running",
+      "archived": false,
+      "updated_at": 1731278695000,
+      "last_activity_at": 1731278695000,
+      "question": null,
+      "stuck_reason": null,
+      "observation_freshness": {
+        "basis": "live_memory",
+        "observed_at": 1731278695000
+      },
+      "field_provenance": {
+        "id": "sqlite",
+        "state": "live_memory",
+        "cwd": "sqlite",
+        "agent": "sqlite",
+        "updated_at": "sqlite"
+      },
+      "navigation_target_id": "00000000-0000-4000-8000-000000000002",
+      "navigation_target_uri": null,
+      "capabilities": {
+        "can_focus": false,
+        "can_answer": false,
+        "answer_type": "none"
+      },
+      "teams": null
+    },
+    {
+      "id": "78901234-abcd-ef01-2345-6789abcdef01",
+      "short_id": "78901234",
+      "title": "Completed turn session",
+      "cwd": "/workspace/patchbay-central",
+      "project_name": "patchbay-central",
+      "agent": "claude",
+      "source": "patchbay_daemon_api",
+      "state": "done",
+      "archived": false,
+      "updated_at": 1731278680000,
+      "last_activity_at": 1731278680000,
+      "question": null,
+      "stuck_reason": null,
+      "observation_freshness": {
+        "basis": "sqlite_poll",
+        "observed_at": 1731278680000
+      },
+      "field_provenance": {
+        "id": "sqlite",
+        "state": "sqlite",
+        "cwd": "sqlite",
+        "agent": "sqlite",
+        "updated_at": "sqlite"
+      },
+      "navigation_target_id": "78901234-abcd-ef01-2345-6789abcdef01",
+      "navigation_target_uri": null,
+      "capabilities": {
+        "can_focus": false,
+        "can_answer": false,
+        "answer_type": "none"
+      },
+      "teams": null
+    }
+  ]
+}

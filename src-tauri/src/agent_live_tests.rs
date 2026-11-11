@@ -220,18 +220,21 @@ fn live(kind: AgentKind) {
 }
 
 #[test]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
 #[ignore]
 fn agents_live_claude_code() {
     live(AgentKind::ClaudeCode);
 }
 
 #[test]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
 #[ignore]
 fn agents_live_opencode() {
     live(AgentKind::Opencode);
 }
 
 #[test]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
 #[ignore]
 fn agents_live_cursor() {
     live(AgentKind::Cursor);
@@ -241,6 +244,7 @@ fn agents_live_cursor() {
 /// stream stays out of the parent's transcript. Spends a little Cursor quota:
 /// `cargo test --lib agents_live_cursor_background_subagent -- --ignored --nocapture`
 #[test]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
 #[ignore]
 fn agents_live_cursor_background_subagent() {
     let kind = AgentKind::Cursor;
@@ -283,18 +287,21 @@ fn agents_live_cursor_background_subagent() {
 }
 
 #[test]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
 #[ignore]
 fn agents_live_kilo() {
     live(AgentKind::Kilo);
 }
 
 #[test]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
 #[ignore]
 fn agents_live_codex() {
     live(AgentKind::Codex);
 }
 
 #[test]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
 #[ignore]
 fn agents_live_antigravity() {
     live(AgentKind::Antigravity);

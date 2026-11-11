@@ -61,6 +61,7 @@ fn parts() -> Vec<Part> {
 }
 
 #[tokio::test]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
 #[ignore]
 async fn smoke_chat_openai() {
     let out = sample(ProviderKind::OpenaiChat, parts()).await;
@@ -71,6 +72,7 @@ async fn smoke_chat_openai() {
 }
 
 #[tokio::test]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
 #[ignore]
 async fn smoke_chat_anthropic() {
     let out = sample(ProviderKind::Anthropic, parts()).await;
@@ -79,6 +81,7 @@ async fn smoke_chat_anthropic() {
 }
 
 #[tokio::test]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
 #[ignore]
 async fn smoke_generate_title() {
     // The mock echoes the prompt, so the title is the first line of the echo.
@@ -90,6 +93,7 @@ async fn smoke_generate_title() {
 }
 
 #[tokio::test]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
 #[ignore]
 async fn smoke_anthropic_pdf_document() {
     let pdf = Part::Document { mime: "application/pdf".into(), name: "a.pdf".into(), data: "JVBERi0xLjQK".into() };
@@ -101,6 +105,7 @@ async fn smoke_anthropic_pdf_document() {
 
 /// Writes a GROK_HOME for manual ACP probing; prints its path and env.
 #[test]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
 #[ignore]
 fn smoke_render_grok_config() {
     let dir = std::env::temp_dir().join("patchbay-smoke");
@@ -146,6 +151,7 @@ fn smoke_agent() -> String {
 
 /// Full Code-tab path: CodeManager -> ACP client -> agent -> mock model.
 #[test]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
 #[ignore]
 fn smoke_code_agent_edit_with_permission() {
     use std::sync::Mutex;
@@ -360,6 +366,7 @@ fn smoke_code_agent_edit_with_permission() {
 
 /// Rewind: dropping the first prompt reverts its file edit and its history.
 #[test]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
 #[ignore]
 fn smoke_code_rewind() {
     use std::sync::Mutex;
@@ -481,6 +488,7 @@ fn smoke_code_rewind() {
 /// Fork: a new Code session made from the agent's copy loads the conversation up to the chosen
 /// prompt, through the same path `code_fork` takes.
 #[test]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
 #[ignore]
 fn smoke_code_fork() {
     use std::sync::Mutex;
@@ -575,6 +583,7 @@ fn smoke_code_fork() {
 
 /// Saved rules answer permission requests, and configured MCP servers reach the agent.
 #[test]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
 #[ignore]
 fn smoke_code_rules_and_mcp() {
     use std::sync::Mutex;
@@ -707,6 +716,7 @@ fn smoke_code_rules_and_mcp() {
 /// on PATH (the test is skipped without it), and uses the real home directory, so it only
 /// asserts when you have Claude skills or plugins.
 #[test]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
 #[ignore]
 fn smoke_claude_config_toggle() {
     use std::sync::Mutex;
@@ -803,6 +813,7 @@ fn smoke_claude_config_toggle() {
 /// Makes a few tiny real requests. Needs `PATCHBAY_LIVE_CLAUDE=1` so the `smoke` CI run skips it.
 /// `PATCHBAY_LIVE_CLAUDE=1 cargo test --lib live_claude_login -- --ignored --nocapture`
 #[test]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
 #[ignore]
 fn live_claude_login() {
     if std::env::var("PATCHBAY_LIVE_CLAUDE").is_err() {
@@ -948,6 +959,7 @@ fn live_claude_login() {
 /// Chat with web search on, against a provider that has no search of its own: the model gets the
 /// Brave search tool, calls it, and answers from the result. With the setting off it gets no tools.
 #[tokio::test(flavor = "multi_thread")]
+// Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
 #[ignore]
 async fn smoke_chat_web_search_fallback() {
     use std::sync::Mutex;

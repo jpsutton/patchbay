@@ -629,6 +629,7 @@ export type CodeEvent =
       approvalGaps?: string[];
     }
   | { type: "config"; models: AcpModels | null; modes: AcpModes | null; configOptions: AcpConfigOption[] | null }
+  | { type: "approvalGaps"; gaps: string[] }
   | { type: "autoApproved"; toolCallId: string; description: string }
   | { type: "notice"; message: string }
   /** Patchbay's own: the turn has had nothing from the agent for the stall limit. Nothing was cancelled. */
@@ -856,6 +857,10 @@ export interface ClaudeConfig {
   disabledPlugins: string[];
   /** MCP servers from Claude's config Patchbay's agent doesn't start. */
   disabledMcpServers: string[];
+  /** Instruction files (CLAUDE.md, AGENTS.md, rules) Patchbay's agent doesn't load, by full path. */
+  disabledInstructions: string[];
+  /** Skills Patchbay's agent doesn't load, by name (`plugin:name` for a plugin's). */
+  disabledSkills: string[];
 }
 
 /** One part of the Claude Code setup and where it comes from (project, user, plugin <name>). */
@@ -876,6 +881,50 @@ export interface ClaudeOverview {
   agents: ClaudeItem[];
   mcpServers: { name: string; source: string; transport: string; disabled: boolean }[];
   hooks: { event: string; matcher: string; command: string; source: string }[];
+}
+
+/** One piece of the agent's system prompt, as the model gets it. */
+export interface PromptSection {
+  /** `provider`, `persona`, `terse`, `environment`, `custom_instructions`, `skills` or `instructions:<path>`. */
+  id: string;
+  group: "standard" | "instructions" | "skills";
+  title: string;
+  /** A file path, or a name for built-in text. */
+  source: string | null;
+  text: string;
+  /** Estimated tokens, whether or not the piece is switched on. */
+  tokens: number;
+  /** Whether it is in the prompt. */
+  enabled: boolean;
+  /** For an instruction file: the path its switch is keyed by. */
+  path: string | null;
+}
+
+export interface PromptSkill {
+  name: string;
+  description: string;
+  source: string;
+  tokens: number;
+  enabled: boolean;
+}
+
+export interface PromptTool {
+  name: string;
+  description: string;
+  tokens: number;
+}
+
+/** What goes into Patchbay's agent prompt (see the Agent prompt page in Settings). */
+export interface AgentPromptPreview {
+  sections: PromptSection[];
+  skills: PromptSkill[];
+  /** Text added to the conversation beside the system prompt. */
+  reminders: PromptSection[];
+  /** The built-in tools; MCP server tools come on top. */
+  tools: PromptTool[];
+  /** Estimated tokens of the enabled sections. */
+  tokens: number;
+  toolsTokens: number;
 }
 
 /** Limits of Patchbay's own agent; `null` keeps its default. */
@@ -952,6 +1001,8 @@ export interface Preferences {
   readAloudServerVoice: string;
   /** An OpenAI-compatible provider whose key and URL to use. */
   readAloudServerProviderId: string;
+  /** Samples per second of the raw PCM the speech server sends. Must match the server. */
+  readAloudServerSampleRate: number;
   /** Model ref that rewrites a reply for the ear before it is spoken. Empty means off. */
   readAloudRewriteModel: string;
 }
@@ -992,6 +1043,8 @@ export const defaultPreferences: Preferences = {
     plugins: true,
     disabledPlugins: [],
     disabledMcpServers: [],
+    disabledInstructions: [],
+    disabledSkills: [],
   },
   agentEngine: { maxSteps: null, subagentMaxSteps: null, requestRetries: null, idleTimeoutSecs: null, shellTimeoutSecs: null },
   terminalShell: "",
@@ -1005,13 +1058,19 @@ export const defaultPreferences: Preferences = {
   readAloudServerModel: "",
   readAloudServerVoice: "",
   readAloudServerProviderId: "",
+  readAloudServerSampleRate: 24000,
   readAloudRewriteModel: "",
 };
 
-export interface SpeechAudio {
-  mime: string;
-  audioBase64: string;
-}
+/**
+ * What a speech request sends back, in order (speech.rs, `SpeechEvent`): one `start`, any number
+ * of `chunk`s, then `end`. `pcm`: the chunks are raw mono s16le samples. Otherwise they
+ * are pieces of one audio file of type `mime`. `data` is base64.
+ */
+export type SpeechEvent =
+  | { type: "start"; mime: string; pcm: boolean }
+  | { type: "chunk"; data: string }
+  | { type: "end" };
 
 export interface NativeVoice {
   id: string;
@@ -1079,18 +1138,34 @@ export const api = {
   webSearchStatus: () =>
     invoke<{ configured: boolean; source: "env" | "keychain" | "database" | null }>("web_search_status"),
   claudeOverview: (cwd: string | null) => invoke<ClaudeOverview>("claude_overview", { cwd }),
+  agentPromptPreview: (cwd: string | null, modelRef: string | null, minify: boolean | null) =>
+    invoke<AgentPromptPreview>("agent_prompt_preview", { cwd, modelRef, minify }),
   setWebSearchKey: (key: string) => invoke<void>("set_web_search_key", { key }),
   clearWebSearchKey: () => invoke<void>("clear_web_search_key"),
   listNativeVoices: () => invoke<NativeVoice[]>("list_native_voices"),
   speakNative: (text: string, voice: string, rate: string) => invoke<void>("speak_native", { text, voice, rate }),
   stopNative: () => invoke<void>("stop_native"),
-  synthesizeSpeech: (input: {
-    providerId: string;
-    baseUrl: string;
-    model: string;
-    voice: string;
-    text: string;
-  }) => invoke<SpeechAudio>("synthesize_speech", input),
+  /**
+   * Speech from a speech server, streamed to `onAudio` as the server makes it. Resolves once it
+   * has all been sent, or after `cancelSpeech(streamId)`. `streamId` names this request.
+   */
+  synthesizeSpeech: (
+    input: {
+      providerId: string;
+      baseUrl: string;
+      model: string;
+      voice: string;
+      text: string;
+      streamId: string;
+    },
+    onAudio: (e: SpeechEvent) => void,
+  ) => {
+    const ch = new Channel<SpeechEvent>();
+    ch.onmessage = onAudio;
+    return invoke<void>("synthesize_speech", { ...input, onAudio: ch });
+  },
+  /** Drop a `synthesizeSpeech` request's connection to the speech server. */
+  cancelSpeech: (streamId: string) => invoke<void>("cancel_speech", { streamId }),
   rewriteForSpeech: (modelRef: string, text: string) => invoke<string>("rewrite_for_speech", { modelRef, text }),
   getSetting: (key: string) => invoke<string | null>("get_setting", { key }),
   setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),

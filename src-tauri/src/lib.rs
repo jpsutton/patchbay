@@ -15,14 +15,17 @@ mod gateway;
 mod handoff;
 pub mod ipc;
 mod mesh;
+pub mod net_bind;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 mod portal_shortcuts;
 mod prefs;
 mod providers;
 pub mod shares;
+mod session_status;
 mod speech;
 mod terminal;
 mod usage;
+pub mod web_token;
 pub mod agent_messaging;
 #[cfg(feature = "web")]
 pub mod web;
@@ -91,6 +94,7 @@ impl AppState {
         mesh: Mesh,
         emit: mesh::node::UiSink,
     ) -> Self {
+        claude_auth::warn_unmodelled_env();
         // The public base URL for share links is a per-node setting (default loopback). Phase 2
         // can point it at the gateway proxy without changing the share mechanism.
         let base_url = db
@@ -381,7 +385,10 @@ async fn get_preferences(state: &AppState) -> CmdResult<prefs::Preferences> {
     Ok(prefs::load(&state.db))
 }
 
-/// One clip from a speech server. The window or browser plays the bytes; this process holds the key.
+/// Speech from a speech server, streamed to the screen that asked as the server makes it (see
+/// `speech::SpeechEvent`). The screen plays it; this process holds the key. Returns when the
+/// audio has all been sent or `cancel_speech(stream_id)` ended it.
+#[allow(clippy::too_many_arguments)]
 async fn synthesize_speech(
     state: &AppState,
     provider_id: String,
@@ -389,8 +396,19 @@ async fn synthesize_speech(
     model: String,
     voice: String,
     text: String,
-) -> CmdResult<speech::SpeechAudio> {
-    Ok(speech::synthesize(&state.db, &provider_id, &base_url, &model, &voice, &text).await?)
+    stream_id: String,
+    on_audio: Chan<speech::SpeechEvent>,
+) -> CmdResult<()> {
+    Ok(speech::synthesize_stream(&state.db, &provider_id, &base_url, &model, &voice, &text, &stream_id, |ev| {
+        on_audio.send(ev)
+    })
+    .await?)
+}
+
+/// Stop a `synthesize_speech` request: its connection to the speech server is dropped.
+async fn cancel_speech(_state: &AppState, stream_id: String) -> CmdResult<()> {
+    speech::cancel_stream(&stream_id);
+    Ok(())
 }
 
 /// Part of a reply, rewritten by the user's chosen model so it reads well aloud.
@@ -445,6 +463,24 @@ async fn claude_overview(state: &AppState, cwd: Option<String>) -> CmdResult<ser
     let prefs = prefs::load(&state.db);
     let cwd = cwd.map(std::path::PathBuf::from);
     Ok(tokio::task::spawn_blocking(move || code::native::claude_overview(&prefs, cwd.as_deref())).await.map_err(anyhow::Error::from)?)
+}
+
+/// What goes into Patchbay's agent prompt for `model_ref` in `cwd`'s project, for Settings.
+async fn agent_prompt_preview(
+    state: &AppState,
+    cwd: Option<String>,
+    model_ref: Option<String>,
+    minify: Option<bool>,
+) -> CmdResult<serde_json::Value> {
+    let prefs = prefs::load(&state.db);
+    let (model_name, prefix) = match model_ref.as_deref().filter(|r| !r.is_empty()).map(|r| providers::resolve(&state.db, r)) {
+        Some(Ok(r)) => (r.model.display_name.clone(), providers::system_prefix(&r).into_iter().map(|b| b.text).collect()),
+        _ => ("the selected model".to_owned(), Vec::new()),
+    };
+    let cwd = cwd.map(std::path::PathBuf::from);
+    Ok(tokio::task::spawn_blocking(move || code::native::agent_prompt_preview(&prefs, cwd.as_deref(), &model_name, prefix, minify))
+        .await
+        .map_err(anyhow::Error::from)?)
 }
 
 async fn set_web_search_key(state: &AppState, key: String) -> CmdResult<()> {
@@ -852,6 +888,7 @@ async fn update_code_session(
 async fn delete_code_session(state: &AppState, id: String) -> CmdResult<()> {
     state.code.stop(&id);
     state.code.titles.forget(&id);
+    state.code.clear_turn_end(&id);
     // Must match the id `TerminalPane` opens with.
     state.terminals.close(&format!("term-{id}"));
     for key in [code::import_claude::config_dir_key(&id), code::import_claude::fallback_key(&id)] {
@@ -964,6 +1001,81 @@ fn on_session_lost(state: &AppState, id: String, message: code::acp::UserMessage
     });
 }
 
+/// True when `key` has the shape of a portable plan-account id, the only keys that may leave this
+/// machine: Claude Code's `<accountUuid>:<organizationUuid>` or Grok's `grok:<team id or
+/// "personal">:<user id>`. An ALLOWLIST on purpose: empty or blank keys, home paths (`/x`, `~/x`,
+/// `C:\x`, UNC `\\host\share`, `~\x`) and any shape nobody has thought of fail it, where a list of
+/// bad shapes keeps missing one (and a UNC path would leak a host name). Segments are ASCII
+/// letters, digits and `. _ - @ + = |`; a lone letter before the colon is a Windows drive. The
+/// charset is wide because Grok's ids are opaque strings from its `auth.json`.
+fn is_portable_plan_account(key: &str) -> bool {
+    let seg = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-@+=|".contains(&b));
+    match key.split(':').collect::<Vec<_>>().as_slice() {
+        [user, org] => *user != "grok" && seg(user) && seg(org) && user.len() > 1,
+        ["grok", team, user] => seg(team) && seg(user),
+        _ => false,
+    }
+}
+
+/// The mesh payload for a plan report, or `None` when the account is not a portable id (see
+/// [`is_portable_plan_account`]). The one gate every outbound plan-usage path goes through (the
+/// live report, a Grok seat's report and `greeting()`). Residual, by design: with HOME
+/// unresolvable a local session can still resolve to the empty account and be gated under it
+/// (`default_plan_account` falls back to `("", None)`; `Hit::message` handles an empty name).
+fn shareable_plan_report<L: serde::Serialize>(account: &str, name: &Option<String>, limits: &L) -> Option<serde_json::Value> {
+    is_portable_plan_account(account).then(|| serde_json::json!({ "account": account, "name": name, "limits": limits }))
+}
+
+/// True when `id` may leave this machine as a Cursor / Antigravity account id: what those producers
+/// emit is Cursor's `userId` (a number or string), a JWT `sub`, an email address, or the last-resort
+/// `token:<fingerprint>` (`cursor_plan::identity`, `antigravity_plan`'s auth). Same allowlist
+/// charset as [`is_portable_plan_account`]; no path separators, `~`, spaces or empty/dots-only ids.
+fn is_portable_provider_account_id(id: &str) -> bool {
+    let body = id.strip_prefix("token:").unwrap_or(id);
+    !body.is_empty()
+        && body.len() <= 512
+        && !body.bytes().all(|b| b == b'.')
+        && body.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-@+=|".contains(&b))
+}
+
+/// The mesh payload for a Cursor / Antigravity report, or `None` when its account id is not
+/// portable. `limits` also carries the account id (and a display email, which is not a key).
+fn shareable_provider_report<L: serde::Serialize>(account_id: &str, limits: &L) -> Option<serde_json::Value> {
+    is_portable_provider_account_id(account_id).then(|| serde_json::json!({ "accountId": account_id, "limits": limits }))
+}
+
+#[cfg(test)]
+pub(crate) static WITHHELD_PLAN_LOGS: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+/// Log a withheld key once (its length only, never the key, which may be a path) so a legitimate
+/// account that fails an allowlist is not a silent stop.
+fn note_withheld_account(account: &str) {
+    static SEEN: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+    if SEEN.lock().unwrap_or_else(|e| e.into_inner()).insert(account.to_owned()) {
+        tracing::info!("plan usage for an account key of {} characters is not shared: not a portable account id", account.len());
+        #[cfg(test)]
+        WITHHELD_PLAN_LOGS.lock().unwrap_or_else(|e| e.into_inner()).push(account.len());
+    }
+}
+
+/// [`shareable_plan_report`] for a real send, logging what it withholds.
+fn outbound_plan_report<L: serde::Serialize>(account: &str, name: &Option<String>, limits: &L) -> Option<serde_json::Value> {
+    let report = shareable_plan_report(account, name, limits);
+    if report.is_none() {
+        note_withheld_account(account);
+    }
+    report
+}
+
+/// [`shareable_provider_report`] for a real send, logging what it withholds.
+fn outbound_provider_report<L: serde::Serialize>(account_id: &str, limits: &L) -> Option<serde_json::Value> {
+    let report = shareable_provider_report(account_id, limits);
+    if report.is_none() {
+        note_withheld_account(account_id);
+    }
+    report
+}
+
 fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     use code::acp::CodeEvent;
     // A session on a Grok login has no response headers to read its usage from: ask the billing
@@ -979,13 +1091,12 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
         let (account, name) = plan_account(state, &prefs::load(&state.db), &env.code_session_id).unwrap_or_else(default_plan_account);
         // Upgrade a local path fallback to the portable account id when `.claude.json` has it.
         let (account, name) = resolve_plan_account(&state.db, &account, name);
-        if !claude_auth::is_path_account_key(&account) {
+        if let Some(tagged) = outbound_plan_report(&account, &name, &limits) {
             if account == default_plan_account().0 {
                 note_default_plan_portable(state.mesh.node_id(), true);
             }
-            let tagged = serde_json::json!({ "account": account, "name": name, "limits": limits });
             state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, tagged);
-        } else if is_default_claude_dir_path(&account) {
+        } else if account == default_plan_account().0 || is_default_claude_dir_path(&account) {
             note_default_plan_portable(state.mesh.node_id(), false);
         }
         adopt_plan_limits(state, &account, name, limits, true);
@@ -1010,6 +1121,9 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
         }
         if matches!(env.event, CodeEvent::UserPrompt { delivery: code::acp::Delivery::Sent, .. }) {
             state.code.set_busy(&env.code_session_id, true);
+            // A new turn is in flight: the last turn's outcome no longer says anything about
+            // this session, and a fixed error must stop reading as `stuck` (pb-20261110-04).
+            state.code.clear_turn_end(&env.code_session_id);
             let _ = state.code.cursor_plan.cancel_resume(&env.code_session_id);
             if state.code.plan.cancel_resume(&env.code_session_id) {
                 save_resumes(state);
@@ -1044,6 +1158,12 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
                             }
                         }
                         r["configOptions"] = ev["configOptions"].clone();
+                    }
+                }
+                CodeEvent::ApprovalGaps { .. } => {
+                    // The same text for a window attaching later, which replays `ready`.
+                    if let Some(r) = live.get_mut(&id).and_then(|l| l.ready.as_mut()) {
+                        r["approvalGaps"] = ev["gaps"].clone();
                     }
                 }
                 CodeEvent::AuthRequired { .. } => live.entry(id).or_default().auth = Some(ev),
@@ -1099,6 +1219,17 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
                     live.remove(&id);
                     state.code.stall.forget(&id);
                 }
+                // How the turn ended is the evidence `session_status` serves `done` and
+                // `stuck` from: affirmative, never inferred from the agent going quiet.
+                CodeEvent::PromptDone { stop_reason } => {
+                    let end = if stop_reason.as_str() == Some("error") {
+                        code::TurnEnd::Error("the turn ended with an error".into())
+                    } else {
+                        code::TurnEnd::Clean
+                    };
+                    state.code.note_turn_end(&id, end);
+                }
+                CodeEvent::Error { message } => state.code.note_turn_end(&id, code::TurnEnd::Error(message.clone())),
                 _ => {}
             }
         }
@@ -1123,6 +1254,28 @@ pub(crate) const UNIDENTIFIED_DEFAULT_PLAN_LOG: &str =
 #[cfg(test)]
 pub(crate) static UNIDENTIFIED_DEFAULT_PLAN_LOGS: std::sync::Mutex<Vec<(String, String)>> =
     std::sync::Mutex::new(Vec::new());
+
+pub(crate) const UNTAGGED_PLAN_LOG: &str =
+    "ignoring untagged plan usage (older Patchbay; upgrade to share usage)";
+
+#[cfg(test)]
+pub(crate) static UNTAGGED_PLAN_LOGS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// Log once per member per state change when a peer sends plan usage with no account tag, and
+/// forget it once the member sends a tagged report (so a downgrade or upgrade logs again).
+fn note_untagged_plan_member(member: &str, untagged: bool) {
+    static UNTAGGED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let mut set = UNTAGGED.lock().unwrap();
+    if !untagged {
+        set.remove(member);
+    } else if set.insert(member.to_owned()) {
+        let line = format!("{UNTAGGED_PLAN_LOG} from {member}");
+        tracing::info!("{line}");
+        #[cfg(test)]
+        UNTAGGED_PLAN_LOGS.lock().unwrap().push((member.to_owned(), line));
+    }
+}
 
 /// Log once per state transition per node when the sender's default Claude account lacks a
 /// portable identity, and clear that state once a portable default identity is observed.
@@ -1305,7 +1458,9 @@ fn fold_plan_accounts(
 
 /// The account Claude Code itself signs in with, and its organization's name.
 fn default_plan_account() -> (String, Option<String>) {
-    claude_auth::resolve_dir(None).map(|d| claude_auth::account(&d)).unwrap_or_default()
+    // The setting IS known here (none: the ambient one), so the tier is read from the item
+    // `access_token` reads, not from a guess about a resolved path.
+    claude_auth::account_for(None).unwrap_or_default()
 }
 
 /// One Claude account's usage, named for the panel.
@@ -1404,8 +1559,7 @@ fn adopt_cursor_plan(state: &AppState, mut limits: code::cursor_plan::CursorPlan
     }
     save_cursor_plan(state);
     (state.emit)(CURSOR_PLAN_EVENT, serde_json::to_value(&limits).unwrap_or_default());
-    if seen_here {
-        let tagged = serde_json::json!({ "accountId": limits.account_id, "limits": limits });
+    if seen_here && let Some(tagged) = outbound_provider_report(&limits.account_id, &limits) {
         state.mesh.broadcast_event(MESH_CURSOR_PLAN_EVENT, tagged);
     }
     enforce_cursor_plan_limit(state);
@@ -1547,8 +1701,7 @@ fn adopt_antigravity_plan(
     }
     save_antigravity_plan(state);
     (state.emit)(ANTIGRAVITY_PLAN_EVENT, serde_json::to_value(&limits).unwrap_or_default());
-    if seen_here {
-        let tagged = serde_json::json!({ "accountId": limits.account_id, "limits": limits });
+    if seen_here && let Some(tagged) = outbound_provider_report(&limits.account_id, &limits) {
         state.mesh.broadcast_event(MESH_ANTIGRAVITY_PLAN_EVENT, tagged);
     }
 }
@@ -1753,8 +1906,9 @@ fn grok_logins(db: &Db) -> Vec<(Option<String>, String)> {
 
 /// A Grok seat's usage, seen here: tell the mesh, then count it like any plan report.
 fn report_grok_plan(state: &AppState, plan: code::grok_plan::GrokPlan) {
-    let tagged = serde_json::json!({ "account": plan.account, "name": plan.name, "limits": plan.limits });
-    state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, tagged);
+    if let Some(tagged) = outbound_plan_report(&plan.account, &plan.name, &plan.limits) {
+        state.mesh.broadcast_event(MESH_PLAN_LIMITS_EVENT, tagged);
+    }
     adopt_plan_limits(state, &plan.account, plan.name, plan.limits, true);
 }
 
@@ -1774,7 +1928,7 @@ async fn poll_grok_plan(state: &AppState, home: Option<String>, base_url: String
 /// The plan account a subscription-login provider runs on: a Claude or a Grok seat.
 fn provider_plan_account(p: &Provider) -> Option<String> {
     match p.auth_mode {
-        db::AuthMode::ClaudeLogin => claude_auth::resolve_dir(p.claude_config_dir.as_deref()).ok().map(|d| claude_auth::account(&d).0),
+        db::AuthMode::ClaudeLogin => claude_auth::account_for(p.claude_config_dir.as_deref()).ok().map(|a| a.0),
         db::AuthMode::GrokLogin => grok_auth::resolve_dir(p.grok_home.as_deref()).ok().map(|d| grok_auth::account(&d).0),
         db::AuthMode::ApiKey => None,
     }
@@ -1825,9 +1979,9 @@ fn plan_account(state: &AppState, prefs: &prefs::Preferences, id: &str) -> Optio
     match AgentKind::parse(&session.agent) {
         Some(AgentKind::ClaudeCode) if !prefs.agent_providers.contains_key(AgentKind::ClaudeCode.id()) => {
             if let Some(dir) = state.db.get_setting(&code::import_claude::config_dir_key(id)).ok().flatten()
-                && let Ok(d) = claude_auth::resolve_dir(Some(&dir))
+                && let Ok(a) = claude_auth::account_for(Some(&dir))
             {
-                return Some(claude_auth::account(&d));
+                return Some(a);
             }
             Some(default_plan_account())
         }
@@ -1836,7 +1990,7 @@ fn plan_account(state: &AppState, prefs: &prefs::Preferences, id: &str) -> Optio
             .and_then(|r| state.db.get_model(&r).ok().flatten())
             .and_then(|m| state.db.get_provider(&m.provider_id).ok().flatten())
             .and_then(|(p, _)| match p.auth_mode {
-                db::AuthMode::ClaudeLogin => claude_auth::resolve_dir(p.claude_config_dir.as_deref()).ok().map(|d| claude_auth::account(&d)),
+                db::AuthMode::ClaudeLogin => claude_auth::account_for(p.claude_config_dir.as_deref()).ok(),
                 db::AuthMode::GrokLogin => grok_auth::resolve_dir(p.grok_home.as_deref()).ok().map(|d| grok_auth::account(&d)),
                 db::AuthMode::ApiKey => None,
             }),
@@ -2379,6 +2533,12 @@ async fn code_stop(state: &AppState, id: String) -> CmdResult<()> {
     Ok(())
 }
 
+/// How a refusal to an agent's message names the session that would have run it.
+fn recipient_name(state: &AppState, id: &str) -> String {
+    let title = state.db.get_code_session(id).ok().flatten().map(|s| s.title).unwrap_or_default();
+    format!("'{title}' ({id})")
+}
+
 async fn code_prompt_local(
     state: &AppState,
     id: String,
@@ -2397,15 +2557,21 @@ async fn code_prompt_local(
         && let Some(hit) = state.code.plan.hit(&account, &prefs.usage_limit, code::plan_limits::now())
     {
         let label = plan_account_label(state, &account);
-        anyhow::bail!(
-            "Not sent. {}",
-            hit.message(prefs.usage_limit.percent, code::plan_limits::now(), &label)
-        );
+        let (limit, now) = (prefs.usage_limit.percent, code::plan_limits::now());
+        // Another agent's message wakes THIS session: say the limit is the recipient's.
+        if origin.starts_with("agent:") {
+            anyhow::bail!("Not sent. {}", hit.recipient_message(limit, now, &recipient_name(state, &id)));
+        }
+        anyhow::bail!("Not sent. {}", hit.message(limit, now, &label));
     }
     if on_cursor_session(state, &id)
         && let Some(hit) = state.code.cursor_plan.hit(&prefs.cursor_usage_limit, code::cursor_plan::now())
     {
-        anyhow::bail!("Not sent. {}", hit.message(code::cursor_plan::now()));
+        let now = code::cursor_plan::now();
+        if origin.starts_with("agent:") {
+            anyhow::bail!("Not sent. {}", hit.recipient_message(now, &recipient_name(state, &id)));
+        }
+        anyhow::bail!("Not sent. {}", hit.message(now));
     }
     let mut blocks = Vec::new();
     // @-mentioned project files go as standard ACP resource links; the agent reads them itself.
@@ -2975,7 +3141,26 @@ async fn code_set_mode(state: &AppState, id: String, mode_id: String) -> CmdResu
         state.mesh.rpc(&host, "code.set_mode", serde_json::json!({ "id": id, "modeId": mode_id })).await?;
         return Ok(());
     }
+    check_mode_request(state, &id, &mode_id)?;
     Ok(state.code.set_mode(&id, mode_id).await?)
+}
+
+/// Refuse, loudly, a request to set an agent mode that a caller may not pick: one of the agent's
+/// own approval modes (they replace Patchbay's approval control and nothing would put them back),
+/// or for Codex any mode but the one the session's approval mode implies. Patchbay's own code
+/// moves the mode through `CodeManager::set_mode`, which this does not guard. The two callers of
+/// this are the local command and the mesh `code.set_mode` (which phones reach through the
+/// gateway); `code.set_config_option` is checked in the agent's command loop, where the mode
+/// option's id is known.
+fn check_mode_request(state: &AppState, id: &str, mode_id: &str) -> anyhow::Result<()> {
+    let Some(session) = state.db.get_code_session(id)? else { return Ok(()) };
+    let Some(kind) = code::agents::AgentKind::parse(&session.agent) else { return Ok(()) };
+    let setup = code::agents::ApprovalSetup::for_session(kind, &session.permission_mode);
+    if let Some(why) = setup.refuse_mode(mode_id, Some(&session.permission_mode)) {
+        tracing::warn!("refused setting {mode_id} on session {id} ({}): {why}", kind.id());
+        anyhow::bail!("{why}");
+    }
+    Ok(())
 }
 
 /// Patchbay's Ask / Auto / Always-approve policy for this session's ACP permission prompts.
@@ -2987,7 +3172,56 @@ async fn code_set_permission_mode(state: &AppState, id: String, mode: String) ->
             .await?;
         return Ok(());
     }
-    Ok(state.db.set_code_session_permission_mode(&id, &mode)?)
+    Ok(set_permission_mode_local(state, &id, &mode).await?)
+}
+
+/// Save a session's approval mode. A running Codex session also has its sandbox moved to the
+/// mode the approval implies (Approve all writes in the project, anything else is read-only) and
+/// its header text refreshed. The NEW mode is saved FIRST and the sandbox moved after, so
+/// `keep_mode` (which reads the saved mode whenever the agent reports its mode) always sees the
+/// target and can't flip the sandbox back in the middle of the switch; if the agent refuses, the
+/// previous mode is put back. A failed switch to Ask therefore never leaves Codex writing under
+/// an Ask session.
+async fn set_permission_mode_local(state: &AppState, id: &str, mode: &str) -> anyhow::Result<()> {
+    let session = state.db.get_code_session(id)?;
+    let codex = session
+        .as_ref()
+        .is_some_and(|s| code::agents::AgentKind::parse(&s.agent) == Some(code::agents::AgentKind::Codex));
+    let save = |m: &str| state.db.set_code_session_permission_mode(id, m).map_err(anyhow::Error::from);
+    if !(codex && state.code.is_running(id)) {
+        return save(mode);
+    }
+    let previous = session.map(|s| s.permission_mode).unwrap_or_else(|| "default".into());
+    save_then_move(save, &previous, mode, || {
+        state.code.set_mode(id, code::agents::codex_mode_for(Some(mode)).to_owned())
+    })
+    .await?;
+    on_code_event(
+        state,
+        code::acp::Envelope {
+            code_session_id: id.to_owned(),
+            event: code::acp::CodeEvent::ApprovalGaps { gaps: code::agents::codex_gaps_for(Some(mode)) },
+        },
+    );
+    Ok(())
+}
+
+/// Save `new`, then run `move_sandbox`; if that fails, save `previous` again and return the error.
+/// The order is the point: anything that reads the saved mode while the sandbox moves sees `new`.
+async fn save_then_move<Fut: std::future::Future<Output = anyhow::Result<()>>>(
+    save: impl Fn(&str) -> anyhow::Result<()>,
+    previous: &str,
+    new: &str,
+    move_sandbox: impl FnOnce() -> Fut,
+) -> anyhow::Result<()> {
+    save(new)?;
+    if let Err(e) = move_sandbox().await {
+        if let Err(restore) = save(previous) {
+            tracing::warn!("could not put the approval mode back to {previous}: {restore:#}");
+        }
+        return Err(e);
+    }
+    Ok(())
 }
 
 async fn code_rewind(
@@ -3346,11 +3580,12 @@ impl mesh::RpcHandler for MeshRpc {
             }
             "code.set_mode" => {
                 ensure_local_host(state, &id()?)?;
+                check_mode_request(state, &id()?, param(&p, "modeId")?)?;
                 state.code.set_mode(&id()?, param(&p, "modeId")?.to_owned()).await.map(|_| Value::Null)
             }
             "code.set_permission_mode" => {
                 ensure_local_host(state, &id()?)?;
-                state.db.set_code_session_permission_mode(&id()?, param(&p, "mode")?).map(|_| Value::Null)
+                set_permission_mode_local(state, &id()?, param(&p, "mode")?).await.map(|_| Value::Null)
             }
             "code.rewind" => {
                 ensure_local_host(state, &id()?)?;
@@ -3474,7 +3709,7 @@ impl mesh::RpcHandler for MeshRpc {
         }
     }
 
-    fn event(&self, name: &str, payload: &serde_json::Value) {
+    fn event(&self, from: &str, name: &str, payload: &serde_json::Value) {
         if name == "mesh://term" {
             let terms = self.state.remote_terms.lock().unwrap();
             if let Some(t) = payload["termId"].as_str().and_then(|id| terms.get(id))
@@ -3486,16 +3721,16 @@ impl mesh::RpcHandler for MeshRpc {
         }
         if name == MESH_PLAN_LIMITS_EVENT {
             use code::plan_limits::PlanLimits;
-            let tagged = payload["account"].as_str().zip(serde_json::from_value::<PlanLimits>(payload["limits"].clone()).ok());
-            let (account, name, mut l) = match tagged {
-                Some((a, l)) => (a.to_owned(), payload["name"].as_str().map(str::to_owned), l),
-                // Untagged, from a member before accounts were told apart: the default login's.
-                None => {
-                    let Ok(l) = serde_json::from_value::<PlanLimits>(payload.clone()) else { return };
-                    let (a, n) = default_plan_account();
-                    (a, n, l)
-                }
-            };
+            // An absent, null, empty or blank `account` is untagged: one branch, so the forms cannot
+            // drift. Untagged, from a member before accounts were told apart: which account it
+            // describes is unknown, so it is filed under none (a missing report never gates, so
+            // nothing is blocked). Only a payload with no usable tag blames the sender's age: a
+            // tagged one whose limits don't parse comes from a newer peer and is dropped silently.
+            let account = payload["account"].as_str().map(str::trim).filter(|a| !a.is_empty());
+            note_untagged_plan_member(from, account.is_none());
+            let Some(account) = account else { return };
+            let Ok(l) = serde_json::from_value::<PlanLimits>(payload["limits"].clone()) else { return };
+            let (account, name, mut l) = (account.to_owned(), payload["name"].as_str().map(str::to_owned), l);
             // Their clock may run ahead of ours; a later report seen here must still win.
             l.observed_at = l.observed_at.min(code::plan_limits::now());
             adopt_plan_limits(&self.state, &account, name, l, false);
@@ -3536,30 +3771,28 @@ impl mesh::RpcHandler for MeshRpc {
             .accounts()
             .into_iter()
             .filter_map(|(account, a)| {
-                if claude_auth::is_path_account_key(&account) {
-                    if is_default_claude_dir_path(&account) {
+                let limits = a.latest?;
+                let Some(payload) = outbound_plan_report(&account, &a.name, &limits) else {
+                    if account == default_plan_account().0 || is_default_claude_dir_path(&account) {
                         note_default_plan_portable(self.state.mesh.node_id(), false);
                     }
                     return None;
-                }
+                };
                 if account == default_plan_account().0 {
                     note_default_plan_portable(self.state.mesh.node_id(), true);
                 }
-                let payload = serde_json::json!({ "account": account, "name": a.name, "limits": a.latest? });
                 Some((MESH_PLAN_LIMITS_EVENT.to_owned(), payload))
             })
             .collect();
-        if let Some(l) = self.state.code.cursor_plan.latest() {
-            out.push((
-                MESH_CURSOR_PLAN_EVENT.to_owned(),
-                serde_json::json!({ "accountId": l.account_id, "limits": l }),
-            ));
+        if let Some(l) = self.state.code.cursor_plan.latest()
+            && let Some(payload) = outbound_provider_report(&l.account_id, &l)
+        {
+            out.push((MESH_CURSOR_PLAN_EVENT.to_owned(), payload));
         }
-        if let Some(l) = self.state.code.antigravity_plan.latest() {
-            out.push((
-                MESH_ANTIGRAVITY_PLAN_EVENT.to_owned(),
-                serde_json::json!({ "accountId": l.account_id, "limits": l }),
-            ));
+        if let Some(l) = self.state.code.antigravity_plan.latest()
+            && let Some(payload) = outbound_provider_report(&l.account_id, &l)
+        {
+            out.push((MESH_ANTIGRAVITY_PLAN_EVENT.to_owned(), payload));
         }
         out
     }
@@ -4058,6 +4291,9 @@ pub fn open_locked_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow:
     let (agent_messaging, message_listener) =
         agent_messaging::AgentMessagingBridge::bind(Some(mcp_log_path))?;
     let _ = state.agent_message_bridge.set(agent_messaging.clone());
+    // First one wins in a process (tests open many states); the app and daemon open exactly one.
+    let _ = patchbay_agent::set_observer(agent_messaging.supervisor_observer());
+    agent_messaging.log_app_start();
     agent_messaging.serve(message_listener, state.clone());
     if mesh.is_member() {
         api::spawn(async move { mesh.start() });
@@ -4122,6 +4358,10 @@ pub fn open_locked_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow:
 impl AppState {
     /// Stop everything this node runs: agents, terminals and the mesh.
     pub fn shutdown(&self) {
+        // First, so the children that die with the app are told apart from mid-session deaths.
+        if let Some(bridge) = self.agent_message_bridge.get() {
+            bridge.begin_shutdown();
+        }
         self.code.stop_all();
         self.terminals.close_all();
         self.mesh.stop();

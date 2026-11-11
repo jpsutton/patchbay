@@ -116,7 +116,7 @@ export function UsageBar({
   return (
     <>
       <div
-        className={`meta mt-1.5 flex h-5 items-center gap-3 px-1.5 text-faint ${remote ? "cursor-pointer rounded-md active:bg-panel-2" : ""}`}
+        className={`meta @container mt-1.5 flex h-5 items-center gap-3 px-1.5 text-faint ${remote ? "cursor-pointer rounded-md active:bg-panel-2" : ""}`}
         aria-label={remote ? "Token usage, tap for details" : "Token usage"}
         role={remote ? "button" : undefined}
         tabIndex={remote ? 0 : undefined}
@@ -134,10 +134,10 @@ export function UsageBar({
       >
         {/* Narrow screens (phones) leave out the cached count; it is in the tooltip / sheet. The context fill and the prompt cache clock are only in the meter's tooltip / sheet. */}
         {hasTotals && totals && (
-          <div className="flex shrink-0 items-center gap-2 whitespace-nowrap" title={remote ? undefined : detail}>
+          <div className="flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap" title={remote ? undefined : detail}>
             <span>
               In <span className="text-muted">{fmtTokens(totals.input)}</span>
-              {totals.cachedRead > 0 && <span className="hidden sm:inline"> ({fmtTokens(totals.cachedRead)} cached)</span>}
+              {totals.cachedRead > 0 && <span className="hidden @sm:inline"> ({fmtTokens(totals.cachedRead)} cached)</span>}
             </span>
             <span>·</span>
             <span>
@@ -145,8 +145,8 @@ export function UsageBar({
             </span>
             {cost != null && (
               <>
-                <span>·</span>
-                <span>{reported != null ? fmtCost(cost) : `~${fmtCost(cost)}`}</span>
+                <span className="hidden @[14rem]:inline">·</span>
+                <span className="hidden @[14rem]:inline">{reported != null ? fmtCost(cost) : `~${fmtCost(cost)}`}</span>
               </>
             )}
           </div>

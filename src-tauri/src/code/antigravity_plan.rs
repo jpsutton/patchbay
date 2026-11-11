@@ -893,6 +893,21 @@ pub async fn fetch(auth: &AntigravityAuth) -> Result<AntigravityPlanLimits> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both account-id forms the auth readers produce pass the sender gate: the Google email, and the
+    /// last-resort `token:<first 16 characters>`.
+    #[test]
+    fn every_identity_form_passes_the_sender_gate() {
+        let _g = crate::test_support::gemini_home_lock();
+        let with_email = auth_from_wrapped_token(&serde_json::json!({ "access_token": "ya29.a0AfH6SMBx1234567890abcdef" }), Some("me@example.com".into())).unwrap();
+        assert_eq!(with_email.account_id, "me@example.com");
+        let fingerprint = auth_from_wrapped_token(&serde_json::json!({ "access_token": "ya29.a0AfH6SMBx1234567890abcdef" }), None).unwrap();
+        // (a google_accounts.json under the scratch HOME could name an email instead; both forms pass.)
+        for id in [with_email.account_id, fingerprint.account_id] {
+            assert!(crate::is_portable_provider_account_id(&id), "{id:?} must pass the gate");
+        }
+        assert!(crate::is_portable_provider_account_id("token:ya29.a0AfH6SMBx12"), "a truncated 16-character prefix");
+    }
     use serde_json::json;
 
     fn sample_body() -> Value {

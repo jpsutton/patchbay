@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.singleton.1.6.0.schema.json
+PackageIdentifier: jpsutton.patchbayd
+PackageVersion: 0.23.1
+PackageLocale: en-US
+Publisher: Patchbay
+PackageName: patchbayd
+License: Apache-2.0
+ShortDescription: Patchbay without a window: the headless daemon that serves the Patchbay UI to a browser.
+PackageUrl: https://github.com/jpsutton/patchbay
+Installers:
+  - Architecture: x64
+    InstallerType: zip
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: patchbayd-0.23.1-windows-x86_64\patchbayd.exe
+        PortableCommandAlias: patchbayd
+    InstallerUrl: https://github.com/jpsutton/patchbay/releases/download/v0.23.1/patchbayd-0.23.1-windows-x86_64.zip
+    InstallerSha256: 723A120407E2116FEA3D6FE2C1F5DCF6BA81E24F09038F6B401D78E68F4F5559
+    UpgradeBehavior: uninstallPrevious
+ManifestType: singleton
+ManifestVersion: 1.6.0

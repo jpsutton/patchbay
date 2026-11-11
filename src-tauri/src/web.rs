@@ -12,12 +12,14 @@
 //!
 //! Anyone holding the token can run agents and terminals as this user, so the server binds to
 //! loopback unless told otherwise, and every socket must present the token before anything else.
+//! Even then `0.0.0.0` never reaches a public address; only a public IP named in `--listen` does
+//! (`net_bind`).
 
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as AxumPath, Request, State};
@@ -31,6 +33,7 @@ use tokio::sync::mpsc;
 use crate::AppState;
 use crate::ipc::server::{Events, ready_frame, serve_session};
 use crate::ipc::token_matches;
+use crate::net_bind::{Binder, RESCAN};
 
 pub struct Config {
     pub listen: SocketAddr,
@@ -48,6 +51,11 @@ struct Ctx {
 }
 
 pub async fn serve(state: AppState, events: Events, cfg: Config) -> Result<()> {
+    // The read-only session-status route (pb-20261110-04), built before the state moves into
+    // the context below: the same handler the desktop app's share server serves, on the same
+    // token file, so one discovery path covers a daemon-only, app-only or both-running host.
+    let status =
+        crate::session_status::router(state.clone(), cfg.token.clone(), crate::session_status::DAEMON);
     let ctx = Ctx { state, events, ui_dir: Arc::new(cfg.ui_dir), token: cfg.token.into() };
     // Share tokens are opaque capabilities; this route takes no path argument, so there is nothing
     // to traverse. It is registered before the static fallback so `/share/<token>` is never treated
@@ -60,12 +68,31 @@ pub async fn serve(state: AppState, events: Events, cfg: Config) -> Result<()> {
         // only the opaque token to that node over the mesh and enforces validity there.
         .route("/share/{node_id}/{token}", get(share_proxy))
         .fallback(get(static_file))
-        .with_state(ctx);
-    let listener = tokio::net::TcpListener::bind(cfg.listen)
-        .await
-        .with_context(|| format!("listening on {}", cfg.listen))?;
-    axum::serve(listener, app).await?;
-    Ok(())
+        .with_state(ctx)
+        .merge(status);
+    // A wildcard `--listen` binds only private, VPN and loopback addresses, never a public one
+    // (`net_bind`); the interface list is re-read every `RESCAN`. A failed first bind is fatal.
+    let mut binder = Binder::new(cfg.listen);
+    let mut first = true;
+    loop {
+        let synced = binder
+            .sync(|listener| {
+                let app = app.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = axum::serve(listener, app).await {
+                        tracing::warn!("web UI listener stopped: {e:#}");
+                    }
+                })
+            })
+            .await;
+        match synced {
+            Ok(()) => {}
+            Err(e) if first => return Err(e.context(format!("listening on {}", cfg.listen))),
+            Err(e) => tracing::warn!("web UI: {e:#}"),
+        }
+        first = false;
+        tokio::time::sleep(RESCAN).await;
+    }
 }
 
 async fn ws(State(ctx): State<Ctx>, headers: HeaderMap, upgrade: WebSocketUpgrade) -> Response {

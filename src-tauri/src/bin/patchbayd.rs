@@ -94,24 +94,9 @@ fn parse_args() -> Result<Args> {
     Ok(a)
 }
 
-/// The web UI's access token, created on first use (readable by this user only).
-fn load_token(data_dir: &std::path::Path, rotate: bool) -> Result<String> {
-    let path = data_dir.join("web-token");
-    if !rotate
-        && let Ok(t) = std::fs::read_to_string(&path)
-        && !t.trim().is_empty()
-    {
-        return Ok(t.trim().to_owned());
-    }
-    std::fs::create_dir_all(data_dir)?;
-    let token = hex::encode(rand::random::<[u8; 24]>());
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-    std::io::Write::write_all(&mut opts.open(&path)?, token.as_bytes())?;
-    Ok(token)
-}
+/// The web UI's access token lives in one place for every surface (`web_token`, pb-20261110-04):
+/// the daemon and the desktop app create and read the same `data_dir/web-token`, so a local
+/// consumer has one discovery path whichever is running.
 
 #[cfg_attr(not(feature = "web"), allow(dead_code))]
 fn find_ui_dir(given: Option<PathBuf>) -> Option<PathBuf> {
@@ -336,7 +321,7 @@ fn main() -> Result<()> {
         return print_agents(&data_dir);
     }
     if args.token {
-        let token = load_token(&data_dir, args.rotate)?;
+        let token = patchbay_lib::web_token::load_token(&data_dir, args.rotate)?;
         println!("{}", url_for(&listen, &token));
         return Ok(());
     }
@@ -382,12 +367,19 @@ async fn run(args: Args, data_dir: PathBuf, listen: String) -> Result<()> {
         let ui_dir = find_ui_dir(args.ui_dir.clone())
             .context("built web UI not found; pass --ui-dir <dist> or --no-web")?;
         if !addr.ip().is_loopback() {
+            let note = if addr.ip().is_unspecified() {
+                "on this computer's private and VPN addresses (a wildcard never binds a public one)"
+            } else if patchbay_lib::net_bind::is_public(addr.ip()) {
+                "on a PUBLIC address you named"
+            } else {
+                "beyond this computer"
+            };
             tracing::warn!(
-                "the web UI listens on {addr}, beyond this computer, over plain HTTP. Anyone who gets the token can run \
+                "the web UI listens on {addr}, {note}, over plain HTTP. Anyone who gets the token can run \
                  commands as this user; prefer the default loopback address and an SSH tunnel."
             );
         }
-        let token = load_token(&data_dir, false)?;
+        let token = patchbay_lib::web_token::load_token(&data_dir, false)?;
         let cfg = patchbay_lib::web::Config { listen: addr, ui_dir, token: token.clone() };
         let state = state.clone();
         let task = tokio::spawn(patchbay_lib::web::serve(state, events.clone(), cfg));

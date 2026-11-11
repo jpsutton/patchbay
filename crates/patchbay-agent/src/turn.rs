@@ -166,8 +166,14 @@ pub(crate) async fn registry_for(session: &Arc<Session>) -> Registry {
     let mcp = session.mcp.lock().await.clone();
     let model_id = session.state.lock().await.model_id.clone();
     let search = session.host.web_search_key().is_some() || session.host.native_web_search(&model_id);
-    let mut registry = Registry::builtin(settings.web_fetch, search);
-    for t in mcp.tools() {
+    assemble_registry(settings.web_fetch, search, mcp.tools(), &setup)
+}
+
+/// The built-in tools, `mcp` tools and the ones the Claude Code `setup` adds (Skill, custom
+/// subagent types). Shared with the prompt preview in Settings, so it shows the real list.
+pub(crate) fn assemble_registry(web_fetch: bool, web_search: bool, mcp: Vec<Arc<dyn Tool>>, setup: &claude::Setup) -> Registry {
+    let mut registry = Registry::builtin(web_fetch, web_search);
+    for t in mcp {
         registry.push(t);
     }
     if !setup.skills.is_empty() {

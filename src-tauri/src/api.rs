@@ -110,12 +110,14 @@ commands! {
     delete_model(id);
     get_preferences();
     set_preferences(prefs);
-    synthesize_speech(provider_id, base_url, model, voice, text);
+    synthesize_speech(provider_id, base_url, model, voice, text, stream_id, on_audio);
+    cancel_speech(stream_id);
     rewrite_for_speech(model_ref, text);
     get_setting(key);
     set_setting(key, value);
     web_search_status();
     claude_overview(cwd);
+    agent_prompt_preview(cwd, model_ref, minify);
     set_web_search_key(key);
     clear_web_search_key();
     list_conversations();

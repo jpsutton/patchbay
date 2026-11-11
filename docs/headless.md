@@ -13,7 +13,7 @@ Download it from the [Releases page](https://github.com/jpsutton/patchbay/releas
 | Fedora, openSUSE | `patchbayd-<version>-1.x86_64.rpm` |
 | Arch Linux | `patchbayd` in the jpsutton pacman repository (set it up as in the main README, then `sudo pacman -Sy patchbayd`) |
 | Any Linux | `patchbayd-<version>-linux-x86_64.tar.gz` (glibc 2.39 or newer) |
-| Windows | `patchbayd-<version>-windows-x86_64.zip` |
+| Windows | `patchbayd-<version>-windows-x86_64.zip` (winget support is in progress, see [winget.md](winget.md)) |
 | macOS | `patchbayd-<version>-macos-aarch64.tar.gz` (Apple silicon) |
 
 The packages install `patchbayd` and the web UI under `/usr/lib/patchbayd`, with `patchbayd` on your `PATH` and two systemd units (see below). They don't conflict with the desktop app's packages. The coding agent is built in. Other coding agents (Claude Code, OpenCode, Grok Build and so on) are found on `PATH` as in the desktop app.
@@ -79,7 +79,54 @@ ssh -N -L 4420:127.0.0.1:4420 you@server
 
 Then open `http://127.0.0.1:4420/` on the laptop.
 
-`--listen 0.0.0.0:4420` serves it on the network instead, but only over plain HTTP. **Anyone who gets the token can run commands on the server as you**, through the agents and the terminal. Prefer the SSH tunnel, or put the daemon behind a reverse proxy that adds HTTPS.
+`--listen 0.0.0.0:4420` serves it on the network instead, but only over plain HTTP. A wildcard such as `0.0.0.0` or `[::]` binds only this computer's loopback, private (LAN) and VPN (such as Tailscale) addresses. It never binds a public IP address. To serve on a public address you must name it, for example `--listen 203.0.113.7:4420`. **Anyone who gets the token can run commands on the server as you**, through the agents and the terminal. Prefer the SSH tunnel, or put the daemon behind a reverse proxy that adds HTTPS.
+
+## The read-only session status API
+
+`GET /api/v1/sessions` reports what every Code session is doing — `needs_you`, `stuck`,
+`running`, `done` or `unknown` — with the evidence behind each state, for observers such as
+Patchbay Central. It is read-only: no writes, no streaming, no deep-link. Send the web token
+as a header:
+
+```bash
+# Linux
+TOKEN="$(cat ~/.local/share/dev.patchbay.app/web-token)"
+# macOS
+TOKEN="$(cat "$HOME/Library/Application Support/dev.patchbay.app/web-token")"
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:4420/api/v1/sessions
+```
+
+The body is `{ "observed_at", "provider", "sessions": [...] }`; the version lives in the path,
+not in the body. The record schema and the evidence rules that decide each state are in the
+session status contract.
+
+### Finding the token: one file, whatever is running
+
+The token is a file in the data folder — `<data folder>/web-token`, mode `0600`, readable by
+you only — created the first time a surface needs it. The desktop app and `patchbayd` create
+and read the same file (`web_token`), so the `cat` above is the whole discovery path:
+
+- **Desktop app only** (the app owns the data folder): its share server creates the file when
+  it starts, and serves the route on `4420`. The app has no web UI — `4420` is its artifact
+  share server, which serves `/share/…` and this one read-only route, nothing else.
+- **`patchbayd` only**: the daemon creates the file the first time its web UI runs;
+  `patchbayd token` prints the address with the token, `patchbayd token --rotate` replaces it
+  (browsers signed in before must sign in again). A desktop app launched while the daemon owns
+  the data folder attaches to it rather than starting a second server, so there is still one
+  listener and one token.
+- **Both running**: only possible with two data folders (say `patchbayd --data-dir /srv/patchbay`
+  next to the app's default folder) — one process per data folder, so a shared folder is never
+  two servers. Each process creates `web-token` under **its own** data folder, and both default
+  to port `4420`, which is therefore **double-booked by design: the first binder wins**. If the
+  app wins, `patchbayd` exits with a `listening on 127.0.0.1:4420` error instead of serving on
+  another port — give it `--listen <other address>` (or `--no-web`) — and if `patchbayd` wins,
+  the app's share server logs that it could not bind and keeps running without one. Whoever
+  owns `4420` serves both shares and this route, so a consumer should read the token file of
+  the data folder whose listener answered, and should not assume which process owns the port.
+
+The token is a capability: on `patchbayd` it also unlocks `/ws`, which runs agents and
+terminals as this user, so treat the file like a password (it is `0600` for that reason). The
+app's listener serves this one read-only route and no command path.
 
 ## Options
 

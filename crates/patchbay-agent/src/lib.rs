@@ -12,6 +12,7 @@ mod extract;
 mod history;
 mod host;
 mod mcp;
+pub use mcp::{McpChildEvent, McpChildInfo, McpObserver, McpSet, set_observer};
 mod prompt;
 mod prompts;
 mod reqlog;
@@ -23,6 +24,7 @@ mod tools;
 mod turn;
 
 pub mod claude;
+pub mod preview;
 pub mod proc;
 pub use agent::serve;
 pub use history::{HistoryWindow, history_window};

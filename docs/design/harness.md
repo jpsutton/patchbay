@@ -119,9 +119,17 @@ All prompt text is in `crates/patchbay-agent/prompts/`, loaded by `prompts.rs`:
 
 Who decides:
 1. The session, if it chose: the ACP config option `minify_prompts` (`session/set_config_option`, values `on` and `off`, listed in `configOptions` of `session/new` and `session/load`), or `_meta.minifyPrompts` on `session/new` and `session/load`. The choice is saved with the session.
-2. Otherwise the host's `Settings::minify_prompts`: in the app, Settings → Coding agents → Patchbay → "Compact prompts" (it applies to the next request, with no restart); for the `patchbay-agent` stdio binary, `PATCHBAY_AGENT_MINIFY=1`.
+2. Otherwise the host's `Settings::minify_prompts`: in the app, Settings → Agent prompt → "Compact prompts" (it applies to the next request, with no restart); for the `patchbay-agent` stdio binary, `PATCHBAY_AGENT_MINIFY=1`.
 
 A subagent uses its parent's form from the moment it starts. Adding a prompt means adding both forms; adding a message means a `{full, min}` pair in `messages.json`.
+
+## Prompt preview
+
+Settings → Agent prompt shows what goes into the agent's system prompt, in the order the model reads it: the standard prompt (and the provider's own prefix line, such as the Claude login identity), the custom instructions and each instruction file, then the skills list. It also lists what is sent beside it: the reminders and the built-in tool descriptions. Each part shows where it comes from, a token estimate (four characters to a token) and its text.
+
+The text is not a copy. `prompt::sections` builds the pieces and `system_blocks` joins them, so a turn and the preview run the same code; `turn::assemble_registry` does the same for the tool list. `preview::build` adds what is switched off (marked `enabled: false`) so the page can list it. The `agent_prompt_preview` command serves it.
+
+Switches: the category switches in `ClaudeConfig` (instructions, skills), plus one per instruction file (`disabled_instructions`, by full path, `AGENTS.md` included) and one per skill (`disabled_skills`, by name). A disabled skill is not offered as a `/name` command either. Slash commands from `commands/` have no per-item switch.
 
 ## Tests
 

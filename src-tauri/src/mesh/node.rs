@@ -23,6 +23,7 @@ use super::secrets::{self, DataKey};
 use super::sync::{self, Applied, LocalDefaults, Op, VersionVector};
 use super::wire::{EV_JOIN_REQUEST, EV_JOIN_RESOLVED, FEATURE_GATEWAY, Hello, JoinRequest, LinkReport, Msg, PROTOCOL_VERSION};
 use crate::db::{Db, now_ms};
+use crate::net_bind::{Binder, RESCAN};
 
 pub use patchbay_mesh::ws::DEFAULT_PORT;
 const PASSPHRASE: &str = "mesh:passphrase";
@@ -51,8 +52,8 @@ pub trait RpcHandler: Send + Sync {
     async fn call(&self, from: String, method: String, params: Value) -> Result<Value>;
     /// Remote changes were written to the database.
     fn synced(&self, _applied: &Applied) {}
-    /// A live event arrived from another node (before it goes to the UI).
-    fn event(&self, _name: &str, _payload: &Value) {}
+    /// A live event arrived from another node, `from` the peer that sent it (before it goes to the UI).
+    fn event(&self, _from: &str, _name: &str, _payload: &Value) {}
     /// Live events (name, payload) for a member that just connected, to catch it up.
     fn greeting(&self) -> Vec<(String, Value)> {
         Vec::new()
@@ -867,10 +868,13 @@ impl Inner {
 
     // ---------------- tasks ----------------
 
+    /// Listens on the configured address. A wildcard (`0.0.0.0`) binds only this computer's
+    /// private, VPN and loopback addresses, never a public one (see `net_bind`); the interface
+    /// list is re-read every `RESCAN`, and a failed bind is retried then too.
     async fn listen(self: Arc<Self>, token: CancellationToken) {
         let addr = self.listen_addr();
-        let listener = match tokio::net::TcpListener::bind(&addr).await {
-            Ok(l) => l,
+        let want = match addr.parse::<std::net::SocketAddr>() {
+            Ok(a) => a,
             Err(e) => {
                 tracing::warn!("mesh: cannot listen on {addr}: {e}");
                 self.st.lock().unwrap().listen_error = Some(format!("{e}"));
@@ -878,10 +882,40 @@ impl Inner {
                 return;
             }
         };
-        *self.bound_port.lock().unwrap() = listener.local_addr().ok().map(|a| a.port());
-        self.st.lock().unwrap().listen_error = None;
-        self.check_problem();
-        self.emit_status();
+        let mut binder = Binder::new(want);
+        let mut shown: Option<(Option<u16>, Option<String>)> = None;
+        loop {
+            let result = binder
+                .sync(|listener| {
+                    let (inner, token) = (self.clone(), token.clone());
+                    tokio::spawn(inner.accept_loop(listener, token))
+                })
+                .await;
+            if token.is_cancelled() {
+                return;
+            }
+            let state = match result {
+                Ok(()) => (binder.port(), None),
+                Err(e) => {
+                    tracing::warn!("mesh: cannot listen on {addr}: {e:#}");
+                    (None, Some(format!("{e:#}")))
+                }
+            };
+            if shown.as_ref() != Some(&state) {
+                *self.bound_port.lock().unwrap() = state.0;
+                self.st.lock().unwrap().listen_error = state.1.clone();
+                self.check_problem();
+                self.emit_status();
+                shown = Some(state);
+            }
+            tokio::select! {
+                _ = token.cancelled() => return,
+                _ = tokio::time::sleep(RESCAN) => {}
+            }
+        }
+    }
+
+    async fn accept_loop(self: Arc<Self>, listener: tokio::net::TcpListener, token: CancellationToken) {
         loop {
             let (tcp, peer) = tokio::select! {
                 _ = token.cancelled() => return,
@@ -1955,7 +1989,7 @@ impl Inner {
                 }
                 self.fanout(Some(from), &name, &payload);
                 if let Some(h) = self.handler.read().unwrap().clone() {
-                    h.event(&name, &payload);
+                    h.event(from, &name, &payload);
                 }
                 self.ui(&name, payload);
             }

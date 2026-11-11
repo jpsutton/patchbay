@@ -2810,6 +2810,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "if-addrs"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b2eeee38fef3aa9b4cc5f1beea8a2444fc00e7377cafae396de3f5c2065e24"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "ignore"
 version = "0.4.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4083,7 +4093,7 @@ checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "patchbay"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4098,6 +4108,7 @@ dependencies = [
  "gdkwayland-sys",
  "gtk",
  "hex",
+ "if-addrs",
  "ignore",
  "image",
  "indexmap 2.14.0",
@@ -4135,6 +4146,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tray-icon",
+ "unicode-normalization",
  "urlencoding",
  "uuid",
  "zip 9.1.2",
@@ -4142,7 +4154,7 @@ dependencies = [
 
 [[package]]
 name = "patchbay-agent"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4166,7 +4178,7 @@ dependencies = [
 
 [[package]]
 name = "patchbay-llm"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "futures",
  "reqwest 0.12.24",
@@ -4180,7 +4192,7 @@ dependencies = [
 
 [[package]]
 name = "patchbay-mesh"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
