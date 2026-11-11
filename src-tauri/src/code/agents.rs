@@ -210,7 +210,8 @@ pub struct ApprovalSetup {
     /// Agent mode to select once the session is up, and again whenever the agent leaves it for
     /// one in `hide_modes`.
     pub select_mode: Option<String>,
-    /// Agent modes that are really approval policies of the agent's own; hidden from the UI.
+    /// Agent modes that are really approval policies of the agent's own; hidden from the UI, and
+    /// refused when a caller tries to set one directly (`refuse_mode`).
     pub hide_modes: &'static [&'static str],
     /// What this agent does without asking, whatever the mode. Shown in the session header.
     pub gaps: &'static [&'static str],
@@ -228,6 +229,23 @@ impl ApprovalSetup {
             setup.gaps = codex_gaps_for(Some(permission_mode));
         }
         setup
+    }
+
+    /// Why a caller (the UI, a mesh peer, a phone) may not set the agent to `mode_id`, or `None`
+    /// when it may. The agent's own approval modes are hidden because Patchbay's approval control
+    /// decides what runs without asking; setting one directly would remove that control, and
+    /// nothing would put it back. Codex's mode follows the approval control, so only the mode that
+    /// control implies right now is accepted. `approval_now`: the session's saved approval mode.
+    pub(crate) fn refuse_mode(&self, mode_id: &str, approval_now: Option<&str>) -> Option<String> {
+        if self.follows_approval {
+            let implied = codex_mode_for(approval_now);
+            return (mode_id != implied).then(|| {
+                format!("Codex's mode follows the session's approval control ({implied} right now), so \"{mode_id}\" can't be set directly.")
+            });
+        }
+        self.hide_modes.contains(&mode_id).then(|| {
+            format!("\"{mode_id}\" is one of the agent's own approval modes, which Patchbay's approval control replaces, so it can't be set directly.")
+        })
     }
 
     pub(crate) fn for_agent(kind: AgentKind) -> Self {
@@ -285,7 +303,7 @@ const CODEX_WRITING_MODE: &str = "workspace-write";
 
 /// The Codex mode a session's approval mode implies: Approve all writes in the project, anything
 /// else (or an approval mode that could not be read) stays read-only. Never `agent` or
-/// `agent-full-access`: those stay hidden and unselected.
+/// `agent-full-access`: this mapping never picks them, and `refuse_mode` refuses a caller that names them.
 pub(crate) fn codex_mode_for(permission_mode: Option<&str>) -> &'static str {
     if permission_mode == Some("always-approve") {
         CODEX_WRITING_MODE

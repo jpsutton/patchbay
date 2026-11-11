@@ -2834,3 +2834,73 @@ async fn manual_codex_live_approval_switch() {
     assert!(!d2.exists(), "the refused write must not have happened");
     a.state.code.stop(&s.id);
 }
+
+/// An agent's own approval modes can't be set by a caller, through the local command or through the
+/// mesh `code.set_mode` (which a mesh member, or a phone through the gateway, reaches): they would
+/// replace Patchbay's approval control and nothing would put it back. The agent never hears of a
+/// refused attempt; a visible mode (and for Codex, the mode the approval control implies) still works
+/// (pb-20261110-18).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hidden_agent_modes_are_refused_through_ipc_and_mesh() {
+    use crate::mesh::RpcHandler as _;
+    use code::acp::AgentCmd;
+    use code::agents::{AgentKind, ApprovalSetup};
+    let a = node("alpha-hidden-modes");
+    let cwd = a.dir.to_string_lossy().into_owned();
+    let chans: crate::api::ChanFactory = Arc::new(|_| None);
+    // (agent, the session's approval mode, a visible mode that must still work)
+    let cases = [
+        ("claude-code", "default", "plan"),
+        ("antigravity", "default", "default"),
+        ("codex", "default", "read-only"),
+        ("codex", "always-approve", "workspace-write"),
+    ];
+    for (agent, approval, visible) in cases {
+        let kind = AgentKind::parse(agent).unwrap();
+        let setup = ApprovalSetup::for_session(kind, approval);
+        // Every id the agent hides, except the one Codex's approval control implies.
+        let hidden: Vec<&str> = setup.hide_modes.iter().copied().filter(|m| *m != visible).collect();
+        assert!(!hidden.is_empty(), "{agent} hides modes");
+        let s = a.state.db.create_code_session(&cwd, None, agent, approval).unwrap();
+        let mut rx = a.state.code.attach_test_agent(&s.id);
+        let reached: Arc<Mutex<Vec<String>>> = Arc::default();
+        {
+            let reached = reached.clone();
+            tokio::spawn(async move {
+                while let Some(cmd) = rx.recv().await {
+                    if let AgentCmd::SetMode { mode_id, reply } = cmd {
+                        reached.lock().unwrap().push(mode_id);
+                        let _ = reply.send(Ok(()));
+                    }
+                }
+            });
+        }
+        let ipc = |mode: &str| crate::api::call(&a.state, "code_set_mode", json!({ "id": s.id, "modeId": mode }), &chans);
+        let mesh = |mode: &str| {
+            let rpc = crate::MeshRpc { state: a.state.clone() };
+            let params = json!({ "id": s.id, "modeId": mode });
+            async move { rpc.call("peer".into(), "code.set_mode".into(), params).await }
+        };
+        for mode in &hidden {
+            let e = ipc(mode).await.expect_err(&format!("{agent} {approval}: IPC set_mode {mode}")).0;
+            assert!(e.contains("can't be set directly"), "{agent} {mode}: {e}");
+            let e = mesh(mode).await.expect_err(&format!("{agent} {approval}: mesh set_mode {mode}")).to_string();
+            assert!(e.contains("can't be set directly"), "{agent} {mode}: {e}");
+        }
+        assert!(reached.lock().unwrap().is_empty(), "{agent} {approval}: a refused mode reached the agent: {:?}", reached.lock().unwrap());
+        ipc(visible).await.unwrap_or_else(|e| panic!("{agent} {approval}: IPC {visible}: {}", e.0));
+        mesh(visible).await.unwrap_or_else(|e| panic!("{agent} {approval}: mesh {visible}: {e:#}"));
+        assert_eq!(reached.lock().unwrap().as_slice(), [visible, visible], "{agent} {approval}");
+    }
+    // An agent with no hidden modes is untouched.
+    let s = a.state.db.create_code_session(&cwd, None, "opencode", "default").unwrap();
+    let mut rx = a.state.code.attach_test_agent(&s.id);
+    tokio::spawn(async move {
+        while let Some(cmd) = rx.recv().await {
+            if let AgentCmd::SetMode { reply, .. } = cmd {
+                let _ = reply.send(Ok(()));
+            }
+        }
+    });
+    crate::api::call(&a.state, "code_set_mode", json!({ "id": s.id, "modeId": "build" }), &chans).await.unwrap();
+}
