@@ -106,6 +106,13 @@ Environment and config changes go in the existing `env` and config-writing steps
 - `hide_modes`: `acceptEdits`, `auto`, `bypassPermissions`, `dontAsk`. Keep `default` and `plan` in the agent-mode control. Leaving plan mode re-selects `default`, not the mode ExitPlanMode's options would pick.
 - Gaps: rules in the user's `permissions.allow` (in their Claude settings) run without asking. Patchbay could pass `_meta.claudeCode.options.settings` to override them, but that block is SDK-side and unverified, and overriding the user's own allow rules is a choice to make deliberately. Start by documenting the gap.
 
+### Codex (`codex-acp` 2.2.2)
+
+- Codex's four modes are approval + sandbox presets: `read-only` (asks to edit and for network; sandbox `readOnly`), `workspace-write` (sandbox `workspaceWrite`, network off, writable roots: the project plus `$TMPDIR` and `/tmp`), `agent` (the same sandbox with an automatic reviewer) and `agent-full-access` (no sandbox, never asks). Approval policy is `on-request` in the first three: anything outside the sandbox is asked.
+- The session's approval mode picks the preset (`codex_mode_for`): **Approve all => `workspace-write`**, everything else (Ask first, Auto edits, or an approval mode that can't be read) => `read-only`. None of the four is offered in the agent-mode control: the approval control is the only one, and `agent` and `agent-full-access` are never selected.
+- The mapping reaches the process at launch (`INITIAL_AGENT_MODE`, `select_mode`), again on every resume (`prepare` reads the saved mode), and on a live change of the approval control (the sandbox moves first; if the agent refuses, the saved mode is left alone). `keep_mode` puts Codex back in whatever the current approval mode implies, `read-only` when it can't be read.
+- Gaps, per state: under Ask, shell commands run in the read-only sandbox without asking and edits and network are asked. Under Approve all, Codex writes in the project and in `/tmp` and `$TMPDIR` without asking, and everything else it asks for (network, files outside those) is approved automatically.
+
 ### Cursor CLI (2026.10.01)
 
 - No per-session control exists. ACP modes `agent`, `plan` and `ask` are task modes. `--force` (per process) makes Cursor ask about nothing, which is the opposite of what's wanted.

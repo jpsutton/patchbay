@@ -1121,6 +1121,12 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
                         r["configOptions"] = ev["configOptions"].clone();
                     }
                 }
+                CodeEvent::ApprovalGaps { .. } => {
+                    // The same text for a window attaching later, which replays `ready`.
+                    if let Some(r) = live.get_mut(&id).and_then(|l| l.ready.as_mut()) {
+                        r["approvalGaps"] = ev["gaps"].clone();
+                    }
+                }
                 CodeEvent::AuthRequired { .. } => live.entry(id).or_default().auth = Some(ev),
                 CodeEvent::AuthResolved => {
                     if let Some(l) = live.get_mut(&id) {
@@ -3097,7 +3103,32 @@ async fn code_set_permission_mode(state: &AppState, id: String, mode: String) ->
             .await?;
         return Ok(());
     }
-    Ok(state.db.set_code_session_permission_mode(&id, &mode)?)
+    Ok(set_permission_mode_local(state, &id, &mode).await?)
+}
+
+/// Save a session's approval mode. A running Codex session also has its sandbox moved to the
+/// mode the approval implies (Approve all writes in the project, anything else is read-only) and
+/// its header text refreshed. The sandbox moves FIRST and a failure leaves the saved mode alone,
+/// so a failed switch back to Ask can never leave Codex writing under an Ask session.
+async fn set_permission_mode_local(state: &AppState, id: &str, mode: &str) -> anyhow::Result<()> {
+    let codex = state
+        .db
+        .get_code_session(id)?
+        .is_some_and(|s| code::agents::AgentKind::parse(&s.agent) == Some(code::agents::AgentKind::Codex));
+    if codex && state.code.is_running(id) {
+        state.code.set_mode(id, code::agents::codex_mode_for(Some(mode)).to_owned()).await?;
+    }
+    state.db.set_code_session_permission_mode(id, mode)?;
+    if codex && state.code.is_running(id) {
+        on_code_event(
+            state,
+            code::acp::Envelope {
+                code_session_id: id.to_owned(),
+                event: code::acp::CodeEvent::ApprovalGaps { gaps: code::agents::codex_gaps_for(Some(mode)) },
+            },
+        );
+    }
+    Ok(())
 }
 
 async fn code_rewind(
@@ -3460,7 +3491,7 @@ impl mesh::RpcHandler for MeshRpc {
             }
             "code.set_permission_mode" => {
                 ensure_local_host(state, &id()?)?;
-                state.db.set_code_session_permission_mode(&id()?, param(&p, "mode")?).map(|_| Value::Null)
+                set_permission_mode_local(state, &id()?, param(&p, "mode")?).await.map(|_| Value::Null)
             }
             "code.rewind" => {
                 ensure_local_host(state, &id()?)?;

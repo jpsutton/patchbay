@@ -2686,3 +2686,67 @@ async fn agent_message_refusal_names_the_recipients_account() {
         .unwrap_err();
     assert!(err.0.starts_with("Not sent. You have used 97% of dev@example.com Organization's 5-hour limit"), "{}", err.0);
 }
+
+/// Changing a running Codex session's approval mode moves its sandbox with it, sandbox FIRST: a
+/// failed switch back to Ask leaves the saved mode (and so the header) on Approve all rather than
+/// pretending Codex is read-only; other agents are not touched (pb-20261110-15).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn codex_sandbox_follows_a_live_approval_change() {
+    use code::acp::AgentCmd;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let a = node("alpha-codex-approval");
+    let cwd = a.dir.to_string_lossy().into_owned();
+    let codex = a.state.db.create_code_session(&cwd, None, "codex", "default").unwrap();
+    let claude = a.state.db.create_code_session(&cwd, None, "claude-code", "default").unwrap();
+    let mut codex_rx = a.state.code.attach_test_agent(&codex.id);
+    let mut claude_rx = a.state.code.attach_test_agent(&claude.id);
+    let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+    let refuse = Arc::new(AtomicBool::new(false));
+    {
+        let (asked, refuse) = (asked.clone(), refuse.clone());
+        tokio::spawn(async move {
+            while let Some(cmd) = codex_rx.recv().await {
+                if let AgentCmd::SetMode { mode_id, reply } = cmd {
+                    asked.lock().unwrap().push(mode_id);
+                    let _ = reply.send(if refuse.load(Ordering::SeqCst) { Err(anyhow::anyhow!("agent refused")) } else { Ok(()) });
+                }
+            }
+        });
+    }
+    let chans: crate::api::ChanFactory = Arc::new(|_| None);
+    let set = |id: &str, mode: &str| crate::api::call(&a.state, "code_set_permission_mode", json!({ "id": id, "mode": mode }), &chans);
+    let saved = |id: &str| a.state.db.get_code_session(id).unwrap().unwrap().permission_mode;
+    let gaps = || {
+        a.events
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(n, p)| n == code::acp::EVENT && p["event"]["type"] == "approvalGaps")
+            .map(|(_, p)| p["event"]["gaps"].to_string())
+    };
+
+    set(&codex.id, "always-approve").await.unwrap();
+    assert_eq!(saved(&codex.id), "always-approve");
+    assert_eq!(asked.lock().unwrap().as_slice(), ["workspace-write"]);
+    assert!(gaps().unwrap().contains("writes in this project"), "{:?}", gaps());
+
+    // Approve all -> Ask: the sandbox goes back to read-only, and the header says so.
+    set(&codex.id, "default").await.unwrap();
+    assert_eq!(saved(&codex.id), "default");
+    assert_eq!(asked.lock().unwrap().as_slice(), ["workspace-write", "read-only"]);
+    assert!(gaps().unwrap().contains("read-only sandbox"), "{:?}", gaps());
+
+    // A switch back to Ask the agent refuses is an error and changes nothing saved.
+    set(&codex.id, "always-approve").await.unwrap();
+    refuse.store(true, Ordering::SeqCst);
+    let before = gaps();
+    assert!(set(&codex.id, "default").await.is_err());
+    assert_eq!(saved(&codex.id), "always-approve", "the saved mode must not claim Ask while Codex may still write");
+    assert_eq!(gaps(), before);
+
+    // Another agent: saved, no mode change sent, no header event.
+    set(&claude.id, "always-approve").await.unwrap();
+    assert_eq!(saved(&claude.id), "always-approve");
+    assert!(claude_rx.try_recv().is_err());
+}

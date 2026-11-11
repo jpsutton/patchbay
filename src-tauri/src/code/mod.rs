@@ -217,6 +217,11 @@ impl CodeManager {
                     }
                 })
             },
+            permission_mode: {
+                let db = db.clone();
+                let csid = code_session_id.to_owned();
+                Arc::new(move || db.get_code_session(&csid).ok().flatten().map(|s| s.permission_mode))
+            },
             auto_approve: {
                 let db = db.clone();
                 let cwd = session.cwd.clone();
