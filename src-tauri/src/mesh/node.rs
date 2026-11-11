@@ -51,8 +51,8 @@ pub trait RpcHandler: Send + Sync {
     async fn call(&self, from: String, method: String, params: Value) -> Result<Value>;
     /// Remote changes were written to the database.
     fn synced(&self, _applied: &Applied) {}
-    /// A live event arrived from another node (before it goes to the UI).
-    fn event(&self, _name: &str, _payload: &Value) {}
+    /// A live event arrived from another node, `from` the peer that sent it (before it goes to the UI).
+    fn event(&self, _from: &str, _name: &str, _payload: &Value) {}
     /// Live events (name, payload) for a member that just connected, to catch it up.
     fn greeting(&self) -> Vec<(String, Value)> {
         Vec::new()
@@ -1955,7 +1955,7 @@ impl Inner {
                 }
                 self.fanout(Some(from), &name, &payload);
                 if let Some(h) = self.handler.read().unwrap().clone() {
-                    h.event(&name, &payload);
+                    h.event(from, &name, &payload);
                 }
                 self.ui(&name, payload);
             }

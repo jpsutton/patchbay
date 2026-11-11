@@ -77,7 +77,8 @@ Labels: Cursor's ACP modes include one called "Ask" (read-only Q&A), shown right
 pub struct ApprovalSetup {
     /// Mode to select right after session/new or session/load, so the agent asks.
     pub select_mode: Option<String>,
-    /// Agent modes that are really approval policies; hidden from the agent-mode control.
+    /// Agent modes that are really approval policies; hidden from the agent-mode control, and
+    /// refused when a caller (the UI, a mesh peer, a phone) tries to set one directly.
     pub hide_modes: Vec<String>,
     /// What this agent does without asking, whatever the mode. Shown in the header.
     pub gaps: Vec<&'static str>,
@@ -85,6 +86,10 @@ pub struct ApprovalSetup {
 ```
 
 Environment and config changes go in the existing `env` and config-writing steps.
+
+### Direct mode changes
+
+An agent's hidden modes are approval policies of its own (Claude Code `bypassPermissions`, Antigravity `yolo`, Codex `agent-full-access` and the rest): setting one removes Patchbay's approval control for the session and nothing puts it back. So a request to set the agent mode is refused, with an error to the caller and a log line, when it names an id in the agent's `hide_modes` (`ApprovalSetup::refuse_mode`). For Codex, whose mode follows the approval control, only the mode that control implies right now is accepted. The check sits at every way in: the local `code_set_mode` command, the mesh `code.set_mode` (a mesh member can call it on any session its computer hosts; a phone reaches the same handler through the gateway's `CODE_METHODS`), and `code.set_config_option` where the option is the agent's mode option (checked in the agent's command loop, where that option's id is known). Patchbay's own code moves the mode through `CodeManager::set_mode`, which is not guarded.
 
 ### Patchbay (the built-in agent)
 
@@ -105,6 +110,13 @@ Environment and config changes go in the existing `env` and config-writing steps
 - After `session/new` or `session/load`, `session/set_mode` to `default` (its "Manual" mode). The starting mode comes only from the user's settings files; `_meta.claudeCode.options.permissionMode` is overwritten by the adapter.
 - `hide_modes`: `acceptEdits`, `auto`, `bypassPermissions`, `dontAsk`. Keep `default` and `plan` in the agent-mode control. Leaving plan mode re-selects `default`, not the mode ExitPlanMode's options would pick.
 - Gaps: rules in the user's `permissions.allow` (in their Claude settings) run without asking. Patchbay could pass `_meta.claudeCode.options.settings` to override them, but that block is SDK-side and unverified, and overriding the user's own allow rules is a choice to make deliberately. Start by documenting the gap.
+
+### Codex (`codex-acp` 2.2.2)
+
+- Codex's four modes are approval + sandbox presets: `read-only` (asks to edit and for network; sandbox `readOnly`), `workspace-write` (sandbox `workspaceWrite`, network off, writable roots: the project plus `$TMPDIR` and `/tmp`), `agent` (the same sandbox with an automatic reviewer) and `agent-full-access` (no sandbox, never asks). Approval policy is `on-request` in the first three: anything outside the sandbox is asked.
+- The session's approval mode picks the preset (`codex_mode_for`): **Approve all => `workspace-write`**, everything else (Ask first, Auto edits, or an approval mode that can't be read) => `read-only`. None of the four is offered in the agent-mode control: the approval control is the only one, and `agent` and `agent-full-access` are never selected: a direct `set_mode` that names one is refused (see "Direct mode changes").
+- The mapping reaches the process at launch (`INITIAL_AGENT_MODE`, `select_mode`), again on every resume (`prepare` reads the saved mode), and on a live change of the approval control (the new approval mode is saved first, then the sandbox moves; if the agent refuses, the previous mode is put back, so a failed switch to Ask never leaves Codex writing). `keep_mode` puts Codex back in whatever the current approval mode implies, `read-only` when it can't be read.
+- Gaps, per state: under Ask, shell commands run in the read-only sandbox without asking and edits and network are asked. Under Approve all, Codex writes in the project and in `/tmp` and `$TMPDIR` without asking, and everything else it asks for (network, files outside those) is approved automatically.
 
 ### Cursor CLI (2026.10.01)
 

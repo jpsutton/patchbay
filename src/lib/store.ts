@@ -827,6 +827,9 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
     case "authResolved":
       next = { ...s, auth: null };
       break;
+    case "approvalGaps":
+      next = { ...s, approvalGaps: e.gaps ?? [] };
+      break;
     case "config":
       // Options-based agents resend their full config; legacy model/mode lists stay as they are.
       next = {

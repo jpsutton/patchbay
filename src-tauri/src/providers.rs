@@ -208,7 +208,11 @@ fn grok_version() -> &'static str {
         // A hung `grok` must not hold a request up: ask on a thread and give it a few seconds.
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(std::process::Command::new(&r.program).arg("--version").output());
+            let mut cmd = std::process::Command::new(&r.program);
+            cmd.arg("--version");
+            #[cfg(test)]
+            crate::test_support::isolate_std(&mut cmd);
+            let _ = tx.send(cmd.output());
         });
         rx.recv_timeout(std::time::Duration::from_secs(3))
             .ok()

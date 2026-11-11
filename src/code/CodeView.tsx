@@ -1234,6 +1234,18 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     return () => window.removeEventListener("keydown", esc);
   }, [isDrawerOpen]);
   const viewActive = useContext(ViewActive) && paneFocused;
+  // Moving to a session (a click, a new session, back/forward) puts the typing cursor in its
+  // composer. A session still starting has the composer disabled, so the focus waits for it to
+  // take input, once per session. Not on the phone, where it would raise the keyboard.
+  const focusedFor = useRef<string | null>(null);
+  const focusStatus = state?.status;
+  useEffect(() => {
+    if (remote || !viewActive || !activeId || focusedFor.current === activeId) return;
+    const el = containerRef.current?.querySelector<HTMLTextAreaElement>("textarea[data-composer]");
+    if (!el || el.disabled) return;
+    focusedFor.current = activeId;
+    el.focus();
+  }, [remote, viewActive, activeId, focusStatus]);
   const listenOn = useStore((s) => s.prefs.readAloudListen);
   const skipListen = useRef(false);
   useStopSpeechWhenHidden();
@@ -2114,7 +2126,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
           </div>
           <div className="mx-auto w-full max-w-[var(--chat-width)] px-6 pb-3 pt-2">
             {(s?.queued.length ?? 0) > 0 && (
-              <ul className="mb-2 flex flex-col gap-1" aria-label="Queued messages">
+              <ul className="@container mb-2 flex flex-col gap-1" aria-label="Queued messages">
                 {s!.queued.map((q) => {
                   const fromAgent = isAgentOrigin(q.origin);
                   const agent = fromAgent ? parseAgentMessageLabel(q.text, q.origin) : null;
@@ -2126,10 +2138,17 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                         fromAgent ? "border-accent/35 bg-accent/[0.04]" : "border-border bg-panel"
                       }`}
                       data-origin={fromAgent ? "agent" : undefined}
+                      title={[agent?.label, body.trim()].filter(Boolean).join("\n") || undefined}
                     >
-                      <span className={`shrink-0 font-mono text-[10px] uppercase tracking-[0.08em] ${fromAgent ? "text-accent-ink/80" : "text-faint"}`}>
-                        {fromAgent ? `Queued · ${agent?.label ?? "Agent"}` : "Queued"}
+                      {/* Under 12rem the word, "Send now" and the X cannot all fit, so the word goes. */}
+                      <span className={`hidden shrink-0 font-mono text-[10px] uppercase tracking-[0.08em] @[12rem]:inline ${fromAgent ? "text-accent-ink/80" : "text-faint"}`}>
+                        Queued
                       </span>
+                      {agent && (
+                        <span className="min-w-0 max-w-[50%] shrink truncate font-mono text-[10px] uppercase tracking-[0.08em] text-accent-ink/80">
+                          · {agent.title ?? agent.label}
+                        </span>
+                      )}
                       <span className="min-w-0 flex-1 truncate text-muted">
                         {body.trim() || q.attachments?.map((a) => a.name).join(", ")}
                       </span>

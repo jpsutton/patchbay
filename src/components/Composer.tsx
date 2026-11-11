@@ -8,12 +8,16 @@ import { PaneContext, ViewActive } from "../lib/shortcuts";
 import { fuzzyPaths } from "../lib/fuzzy";
 import { ArrowUpIcon, PaperclipIcon, SlidersIcon } from "./icons";
 import { ChipRows } from "./ChipSelect";
+import { focusables, trapTarget } from "../lib/focusTrap";
 import { isRemoteApp, isWeb } from "../lib/platform";
 
 const MAX_ATTACHMENTS = 10;
 /** How long fetched slash commands are reused, and how soon an empty answer is asked again. */
 const SLASH_TTL_MS = 60_000;
 const SLASH_EMPTY_RETRY_MS = 3_000;
+/** Inner width (px) the fullest footer needs: three chips at their minimum widths, the options button and the
+ *  listen button squeezed to its icon (14), Stop and Send both showing. Below it the chips go behind settings. */
+const NARROW_COMPOSER_PX = 412;
 
 function fmtSize(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -239,9 +243,74 @@ export function Composer({
   const [files, setFiles] = useState<string[] | null>(null);
   const filesAt = useRef(0);
   const menuRef = useRef<HTMLDivElement>(null);
-  // The phone keeps the footer's chips in a sheet behind one button; a row of them doesn't fit.
-  const sheetFooter = isRemoteApp() && !!footer;
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [narrow, setNarrow] = useState(false);
+  // The phone, and a desktop composer in a narrow pane, keep the footer's chips in a sheet behind
+  // one button; a row of them doesn't fit.
+  const sheetFooter = (isRemoteApp() || narrow) && !!footer;
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const optionsBtnRef = useRef<HTMLButtonElement>(null);
+  const sheetRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    setNarrow(el.clientWidth < NARROW_COMPOSER_PX);
+    const ro = new ResizeObserver(([e]) => setNarrow(e.contentRect.width < NARROW_COMPOSER_PX));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // The sheet unmounts when the composer widens; don't let it reopen by itself on the next narrowing.
+  useEffect(() => {
+    if (!sheetFooter) setOptionsOpen(false);
+  }, [sheetFooter]);
+
+  // Focus goes into the sheet when it opens and back to the button that opened it when it closes.
+  useEffect(() => {
+    if (!optionsOpen) return;
+    const sheet = sheetRef.current;
+    if (sheet) (focusables(sheet)[0] ?? sheet).focus();
+    const btn = optionsBtnRef.current;
+    return () => btn?.focus();
+  }, [optionsOpen]);
+
+  useEffect(() => {
+    if (!optionsOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      // A confirmation raised from the sheet draws above it and takes its own keys.
+      if (useStore.getState().confirm) return;
+      // Tab stays on the sheet's controls; the open chip list takes its own Tab.
+      if (e.key === "Tab" && !e.metaKey && !e.ctrlKey && !e.altKey && !document.querySelector("[data-chip-menu]")) {
+        const sheet = sheetRef.current;
+        if (!sheet) return;
+        const items = focusables(sheet);
+        const to = trapTarget(items.length, items.indexOf(document.activeElement as HTMLElement), e.shiftKey);
+        if (to !== null) {
+          e.preventDefault();
+          items[to].focus();
+        } else if (items.length === 0) {
+          e.preventDefault();
+          sheet.focus();
+        }
+        return;
+      }
+      // The sheet covers the app, so the app's shortcuts must not act on what is behind it.
+      if (e.metaKey || e.ctrlKey || e.altKey) {
+        e.stopPropagation();
+        return;
+      }
+      if (e.key !== "Escape") return;
+      // The open chip list takes Escape. Closing the sheet too would unmount the chip first.
+      if (document.querySelector("[data-chip-menu]")) return;
+      // Capture phase, so the app's Escape shortcut (which stops the turn) never sees it.
+      e.preventDefault();
+      e.stopPropagation();
+      setOptionsOpen(false);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [optionsOpen]);
 
   // "@query" right before the caret, when mentions are on.
   const mention = useMemo(() => {
@@ -465,12 +534,28 @@ export function Composer({
     onRestored?.();
   }, [restore]);
 
-  useEffect(() => {
+  const fitHeight = () => {
     const el = ref.current;
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 280)}px`;
-  }, [text]);
+  };
+
+  useEffect(fitHeight, [text, placeholder]);
+
+  // Wrapping changes with the pane's width; compare width only so writing the height cannot loop.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    let w = el.clientWidth;
+    const ro = new ResizeObserver(() => {
+      if (el.clientWidth === w) return;
+      w = el.clientWidth;
+      fitHeight();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // In a browser, dropped files arrive as HTML5 drops carrying their contents, not local paths.
   const webDrops = () => {
@@ -570,6 +655,7 @@ export function Composer({
 
   return (
     <div
+      ref={rootRef}
       className={`relative rounded-2xl border bg-raised shadow-raised transition-colors focus-within:border-fg/20 ${
         dragging ? "border-accent" : "border-border"
       }`}
@@ -707,7 +793,8 @@ export function Composer({
           );
         }}
       />
-      <div className="flex items-center gap-1.5 px-2.5 pb-2.5">
+      {/* In the narrowest desktop panes Stop and Send don't fit beside the other buttons; wrap, or Send lands in the next pane. */}
+      <div className={`flex items-center gap-1.5 px-2.5 pb-2.5${narrow && !isRemoteApp() ? " flex-wrap justify-end" : ""}`}>
         <button
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] border border-border text-muted hover:bg-panel-2/60 hover:text-fg disabled:opacity-40"
           onClick={pick}
@@ -742,6 +829,7 @@ export function Composer({
           <>
             <button
               className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] border border-border text-muted hover:bg-panel-2/60 hover:text-fg"
+              ref={optionsBtnRef}
               onClick={() => setOptionsOpen(true)}
               title={footerLabel}
               aria-label={footerLabel}
@@ -782,9 +870,12 @@ export function Composer({
         createPortal(
           <div className="fixed inset-0 z-[60] flex flex-col justify-end bg-black/45" onClick={() => setOptionsOpen(false)}>
             <div
+              ref={sheetRef}
               role="dialog"
+              aria-modal="true"
               aria-label={footerLabel}
-              className="flex max-h-[calc(100%-env(safe-area-inset-top)-16px)] flex-col rounded-t-2xl border-t border-border bg-raised px-2 pb-[calc(env(safe-area-inset-bottom)+8px)] pt-2"
+              tabIndex={-1}
+              className="outline-none flex max-h-[calc(100%-env(safe-area-inset-top)-16px)] flex-col rounded-t-2xl border-t border-border bg-raised px-2 pb-[calc(env(safe-area-inset-bottom)+8px)] pt-2"
               onClick={(e) => e.stopPropagation()}
             >
               <div className="shrink-0 px-3 pb-1 pt-1 text-[13px] text-muted">{footerLabel}</div>

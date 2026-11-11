@@ -629,6 +629,7 @@ export type CodeEvent =
       approvalGaps?: string[];
     }
   | { type: "config"; models: AcpModels | null; modes: AcpModes | null; configOptions: AcpConfigOption[] | null }
+  | { type: "approvalGaps"; gaps: string[] }
   | { type: "autoApproved"; toolCallId: string; description: string }
   | { type: "notice"; message: string }
   /** Patchbay's own: the turn has had nothing from the agent for the stall limit. Nothing was cancelled. */

@@ -825,6 +825,7 @@ mod tests {
     /// Against this machine's real opencode database (read-only):
     /// `PB_OPENCODE_SESSION=ses_… cargo test --lib live_readout -- --ignored --nocapture`
     #[test]
+    // Manual test. If it needs your real home or logins, run it with PB_TEST_REAL_HOME=1 (see test_support).
     #[ignore]
     fn live_readout() {
         let session = std::env::var("PB_OPENCODE_SESSION").expect("set PB_OPENCODE_SESSION");
