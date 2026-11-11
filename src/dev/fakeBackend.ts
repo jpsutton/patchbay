@@ -1270,6 +1270,7 @@ export function install() {
             readAloudEngine?: string;
             readAloudRate?: string;
             readAloudServerUrl?: string;
+            readAloudServerSampleRate?: number;
           };
           if (p.terminalShell && !p.terminalShell.startsWith("/")) throw `terminal shell ${p.terminalShell} does not exist`;
           if (p.autoCompactPercent != null && (p.autoCompactPercent < 10 || p.autoCompactPercent > 99)) throw "auto-compact threshold must be between 10 and 99%";
@@ -1280,6 +1281,7 @@ export function install() {
           if (p.readAloudRate && !["slower", "normal", "faster"].includes(p.readAloudRate)) throw "read aloud speed must be one of slower, normal, faster";
           const speechUrl = p.readAloudServerUrl?.trim() ?? "";
           if (speechUrl && !speechUrl.startsWith("http://") && !speechUrl.startsWith("https://")) throw "speech server URL must be an http or https URL";
+          if (p.readAloudServerSampleRate != null && (p.readAloudServerSampleRate < 8000 || p.readAloudServerSampleRate > 96000)) throw "speech server sample rate must be between 8000 and 96000 Hz";
           db.settings.preferences = JSON.stringify(a.prefs);
           return null;
         }
@@ -1287,6 +1289,7 @@ export function install() {
         case "speak_native": return null;
         case "stop_native": return null;
         case "rewrite_for_speech": throw "pnpm dev has no model to rewrite speech. Run the app.";
+        case "cancel_speech": return null;
         case "synthesize_speech": throw "pnpm dev has no speech server. Use System or Built-in, or run the app.";
         case "claude_overview": {
           const cfg = JSON.parse(db.settings.preferences ?? "{}").claudeConfig ?? {};
