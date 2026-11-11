@@ -20,9 +20,11 @@ mod portal_shortcuts;
 mod prefs;
 mod providers;
 pub mod shares;
+mod session_status;
 mod speech;
 mod terminal;
 mod usage;
+pub mod web_token;
 pub mod agent_messaging;
 #[cfg(feature = "web")]
 pub mod web;
@@ -871,6 +873,7 @@ async fn update_code_session(
 async fn delete_code_session(state: &AppState, id: String) -> CmdResult<()> {
     state.code.stop(&id);
     state.code.titles.forget(&id);
+    state.code.clear_turn_end(&id);
     // Must match the id `TerminalPane` opens with.
     state.terminals.close(&format!("term-{id}"));
     for key in [code::import_claude::config_dir_key(&id), code::import_claude::fallback_key(&id)] {
@@ -1103,6 +1106,9 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
         }
         if matches!(env.event, CodeEvent::UserPrompt { delivery: code::acp::Delivery::Sent, .. }) {
             state.code.set_busy(&env.code_session_id, true);
+            // A new turn is in flight: the last turn's outcome no longer says anything about
+            // this session, and a fixed error must stop reading as `stuck` (pb-20261110-04).
+            state.code.clear_turn_end(&env.code_session_id);
             let _ = state.code.cursor_plan.cancel_resume(&env.code_session_id);
             if state.code.plan.cancel_resume(&env.code_session_id) {
                 save_resumes(state);
@@ -1198,6 +1204,17 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
                     live.remove(&id);
                     state.code.stall.forget(&id);
                 }
+                // How the turn ended is the evidence `session_status` serves `done` and
+                // `stuck` from: affirmative, never inferred from the agent going quiet.
+                CodeEvent::PromptDone { stop_reason } => {
+                    let end = if stop_reason.as_str() == Some("error") {
+                        code::TurnEnd::Error("the turn ended with an error".into())
+                    } else {
+                        code::TurnEnd::Clean
+                    };
+                    state.code.note_turn_end(&id, end);
+                }
+                CodeEvent::Error { message } => state.code.note_turn_end(&id, code::TurnEnd::Error(message.clone())),
                 _ => {}
             }
         }

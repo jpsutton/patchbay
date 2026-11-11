@@ -1234,6 +1234,18 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     return () => window.removeEventListener("keydown", esc);
   }, [isDrawerOpen]);
   const viewActive = useContext(ViewActive) && paneFocused;
+  // Moving to a session (a click, a new session, back/forward) puts the typing cursor in its
+  // composer. A session still starting has the composer disabled, so the focus waits for it to
+  // take input, once per session. Not on the phone, where it would raise the keyboard.
+  const focusedFor = useRef<string | null>(null);
+  const focusStatus = state?.status;
+  useEffect(() => {
+    if (remote || !viewActive || !activeId || focusedFor.current === activeId) return;
+    const el = containerRef.current?.querySelector<HTMLTextAreaElement>("textarea[data-composer]");
+    if (!el || el.disabled) return;
+    focusedFor.current = activeId;
+    el.focus();
+  }, [remote, viewActive, activeId, focusStatus]);
   const listenOn = useStore((s) => s.prefs.readAloudListen);
   const skipListen = useRef(false);
   useStopSpeechWhenHidden();
