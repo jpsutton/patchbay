@@ -554,7 +554,7 @@ impl TeamsDb {
     }
 
     /// Places taken in `seat`, reserved ones (a dispatch in progress) included.
-    fn seat_load(&self, team_id: &str, seat: &str) -> Result<i64> {
+    pub fn seat_load(&self, team_id: &str, seat: &str) -> Result<i64> {
         Ok(self.0.query_row("SELECT COUNT(*) FROM members WHERE team_id = ?1 AND seat = ?2 AND left_at IS NULL", params![team_id, seat], |r| r.get(0))?)
     }
 

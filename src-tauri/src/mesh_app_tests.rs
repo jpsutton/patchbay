@@ -3921,9 +3921,9 @@ async fn team_roster_shows_empty_seats_and_team_send_errors() {
 
     // 2. team_send error text for an empty seat (dispatches caller)
     let err_seat = call(&desk.id, "team_send", json!({ "to": "workers", "message": "hi" })).await.unwrap_err().to_string();
-    assert_eq!(err_seat, "no live member in seat workers; start one with dispatch_item");
+    assert_eq!(err_seat, "no member in seat workers; start one with dispatch_item");
     let err_role = call(&desk.id, "team_send", json!({ "to": "Worker", "message": "hi" })).await.unwrap_err().to_string();
-    assert_eq!(err_role, "no live member in seat workers; start one with dispatch_item");
+    assert_eq!(err_role, "no member in seat workers; start one with dispatch_item");
 
     // 3. Attach worker: filled 1, open 0; hint does NOT appear for worker
     teams::team_attach(&a.state, team.id.clone(), worker.id.clone(), "workers".into()).await.unwrap();
@@ -3939,6 +3939,29 @@ async fn team_roster_shows_empty_seats_and_team_send_errors() {
     // 4. Non-dispatches caller (worker) sends to empty seat: keeps standard text
     let err_worker = call(&worker.id, "team_send", json!({ "to": "lead", "message": "hi" })).await.unwrap_err().to_string();
     assert_eq!(err_worker, "no teammate with role or session id lead; see team_roster");
+
+    // 5. Reserved seat counts in filled, so open is 0 and team_send doesn't suggest dispatching
+    let conn = rusqlite::Connection::open(a.state.data_dir.join("teams.db")).unwrap();
+    conn.execute(
+        "INSERT INTO members(team_id, session_id, seat, role_id, status, joined_at) VALUES (?1, 'res-lead', 'lead', 'builtin-lead', 'reserved', 0)",
+        [&team.id],
+    )
+    .unwrap();
+    let r_reserved = call(&desk.id, "team_roster", json!({})).await.unwrap();
+    let lead_seat = r_reserved["seats"].as_array().unwrap().iter().find(|s| s["seat"] == "lead").unwrap();
+    assert_eq!(lead_seat["filled"], 1);
+    assert_eq!(lead_seat["open"], 0);
+    let err_reserved = call(&desk.id, "team_send", json!({ "to": "lead", "message": "hi" })).await.unwrap_err().to_string();
+    assert_eq!(err_reserved, "no teammate with role or session id lead; see team_roster");
+
+    // 6. Template error fallback: roster returns seats: [] without erroring
+    conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+    conn.execute("UPDATE teams SET template_id = 'broken-tpl' WHERE id = ?1", [&team.id]).unwrap();
+    let r_broken = call(&desk.id, "team_roster", json!({})).await.unwrap();
+    assert_eq!(r_broken["seats"], json!([]));
+    assert_eq!(r_broken["members"].as_array().unwrap().len(), 2);
+    let err_broken = call(&desk.id, "team_send", json!({ "to": "workers", "message": "hi" })).await.unwrap_err().to_string();
+    assert_eq!(err_broken, "no teammate with role or session id workers; see team_roster");
 }
 
 /// Phase 4: the coordinator fills a 2-worker pool from mixed agents, the third dispatch is refused

@@ -649,41 +649,43 @@ fn roster(state: &AppState, tdb: &TeamsDb, c: &Caller) -> Result<Value> {
                 "sessionId": m.session_id,
                 "role": roles.iter().find(|r| r.id == m.role_id).map(|r| super::dispatch::strip_forged_tags(&r.name)),
                 "seat": super::dispatch::strip_forged_tags(&m.seat),
-                "agent": s.as_ref().map(|s| s.agent.clone()),
-                "model": s.as_ref().and_then(|s| s.agent_model.clone().or(s.model_ref.clone())),
+                "agent": s.as_ref().map(|s| super::dispatch::strip_forged_tags(&s.agent)),
+                "model": s.as_ref().and_then(|s| s.agent_model.as_deref().or(s.model_ref.as_deref()).map(super::dispatch::strip_forged_tags)),
                 "activity": local.then(|| session_activity(state, &m.session_id).as_str()),
                 "item": held.map(|i| i.id.clone()),
             })
         })
         .collect();
 
-    let tpl = tdb.template(&team.template_id)?;
-    let seats: Vec<Value> = tpl
-        .seats
-        .iter()
-        .map(|s| {
-            let filled = raw_members.iter().filter(|m| m.seat == s.seat).count() as u32;
-            let open = s.count.saturating_sub(filled);
-            let role_name = roles
-                .iter()
-                .find(|r| r.id == s.role_id)
-                .map_or("", |r| r.name.as_str());
-            let mut agents: Vec<String> = vec![s.agent.clone()];
-            for ch in &s.choices {
-                if !agents.contains(&ch.agent) {
-                    agents.push(ch.agent.clone());
+    let seats: Vec<Value> = match tdb.template(&team.template_id) {
+        Ok(tpl) => tpl
+            .seats
+            .iter()
+            .map(|s| {
+                let filled = tdb.seat_load(&team.id, &s.seat).unwrap_or(0) as u32;
+                let open = s.count.saturating_sub(filled);
+                let role_name = roles
+                    .iter()
+                    .find(|r| r.id == s.role_id)
+                    .map_or("", |r| r.name.as_str());
+                let mut agents: Vec<String> = vec![s.agent.clone()];
+                for ch in &s.choices {
+                    if !agents.contains(&ch.agent) {
+                        agents.push(ch.agent.clone());
+                    }
                 }
-            }
-            json!({
-                "seat": super::dispatch::strip_forged_tags(&s.seat),
-                "role": super::dispatch::strip_forged_tags(role_name),
-                "agents": agents.iter().map(|a| super::dispatch::strip_forged_tags(a)).collect::<Vec<_>>(),
-                "count": s.count,
-                "filled": filled,
-                "open": open,
+                json!({
+                    "seat": super::dispatch::strip_forged_tags(&s.seat),
+                    "role": super::dispatch::strip_forged_tags(role_name),
+                    "agents": agents.iter().map(|a| super::dispatch::strip_forged_tags(a)).collect::<Vec<_>>(),
+                    "count": s.count,
+                    "filled": filled,
+                    "open": open,
+                })
             })
-        })
-        .collect();
+            .collect(),
+        Err(_) => Vec::new(),
+    };
 
     let mut out = serde_json::Map::new();
     out.insert("members".into(), json!(members));
@@ -709,12 +711,13 @@ fn resolve_target(tdb: &TeamsDb, c: &Caller, to: &str) -> Result<String> {
         [one] => Ok(one.session_id.clone()),
         [] => {
             if c.role.caps.dispatches {
-                let tpl = tdb.template(&c.team.template_id)?;
-                if let Some(s) = tpl.seats.iter().find(|s| {
-                    (same(&s.seat, to) || roles.iter().any(|r| r.id == s.role_id && same(&r.name, to)))
-                        && !members.iter().any(|m| m.seat == s.seat)
-                }) {
-                    bail!("no live member in seat {}; start one with dispatch_item", super::dispatch::strip_forged_tags(&s.seat));
+                if let Ok(tpl) = tdb.template(&c.team.template_id) {
+                    if let Some(s) = tpl.seats.iter().find(|s| {
+                        (same(&s.seat, to) || roles.iter().any(|r| r.id == s.role_id && same(&r.name, to)))
+                            && tdb.seat_load(&c.team.id, &s.seat).unwrap_or(0) == 0
+                    }) {
+                        bail!("no member in seat {}; start one with dispatch_item", super::dispatch::strip_forged_tags(&s.seat));
+                    }
                 }
             }
             bail!("no teammate with role or session id {to}; see team_roster")
@@ -846,9 +849,25 @@ mod tests {
 
         // lead seat is empty
         let err_coord = resolve_target(&t, &coord, "lead").unwrap_err().to_string();
-        assert_eq!(err_coord, "no live member in seat lead; start one with dispatch_item");
+        assert_eq!(err_coord, "no member in seat lead; start one with dispatch_item");
 
         let err_worker = resolve_target(&t, &worker, "lead").unwrap_err().to_string();
         assert_eq!(err_worker, "no teammate with role or session id lead; see team_roster");
+
+        // Reserved seat counts as occupied, so resolve_target falls through instead of saying no member
+        t.0.execute(
+            "INSERT INTO members(team_id, session_id, seat, role_id, status, joined_at) VALUES (?1, 'res1', 'lead', 'builtin-lead', 'reserved', 0)",
+            params![team.id],
+        )
+        .unwrap();
+        let err_reserved = resolve_target(&t, &coord, "lead").unwrap_err().to_string();
+        assert_eq!(err_reserved, "no teammate with role or session id lead; see team_roster");
+
+        // Missing template falls through to standard error
+        let mut broken_team = team.clone();
+        broken_team.template_id = "nonexistent".into();
+        let broken_coord = Caller { team: broken_team, me: coord.me.clone(), role: coord.role.clone() };
+        let err_broken = resolve_target(&t, &broken_coord, "advisor").unwrap_err().to_string();
+        assert_eq!(err_broken, "no teammate with role or session id advisor; see team_roster");
     }
 }
