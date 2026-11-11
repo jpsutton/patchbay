@@ -199,7 +199,7 @@ impl WireState {
 /// no evidence at all — is `unknown`. Silence never becomes a state.
 fn state_of(e: &Evidence) -> (WireState, Option<String>) {
     if let Some(crate::code::TurnEnd::Error(message)) = &e.turn_end {
-        return (WireState::Stuck, Some(message.clone()));
+        return (WireState::Stuck, Some(sanitize_reason(message)));
     }
     if e.running && e.waiting {
         return (WireState::NeedsYou, None);
@@ -212,6 +212,51 @@ fn state_of(e: &Evidence) -> (WireState, Option<String>) {
         return (WireState::Done, None);
     }
     (WireState::Unknown, None)
+}
+
+/// Contract §3 `stuck_reason` is agreed free text ("Explicit error string"), so the raw
+/// message is bounded and scrubbed before it reaches the wire: control characters flattened
+/// (one line in JSON), the home directory redacted to `~`, token-like runs (16+ chars of
+/// `[A-Za-z0-9+/=_-]`) replaced, then clipped. Redaction errs toward dropping content —
+/// an error string is a diagnostic, not a payload.
+fn sanitize_reason(message: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    const TOKEN_RUN_MIN: usize = 16;
+    let mut s: String = message.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    // The home prefix is the identifying part of a path; the rest keeps its shape.
+    if let Some(home) = crate::code::agents::home_dir()
+        && let Some(h) = home.to_str()
+        && h.len() > 1
+    {
+        s = s.replace(h, "~");
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut run = String::new();
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-') {
+            run.push(c);
+        } else {
+            flush_token_run(&mut out, &mut run, TOKEN_RUN_MIN);
+            out.push(c);
+        }
+    }
+    flush_token_run(&mut out, &mut run, TOKEN_RUN_MIN);
+    if out.chars().count() > MAX_CHARS {
+        let clipped: String = out.chars().take(MAX_CHARS).collect();
+        format!("{clipped}...")
+    } else {
+        out
+    }
+}
+
+/// A run long enough to be a token/blob reads as one opaque replacement.
+fn flush_token_run(out: &mut String, run: &mut String, min: usize) {
+    if run.chars().count() >= min {
+        out.push_str("[redacted]");
+    } else {
+        out.push_str(run);
+    }
+    run.clear();
 }
 
 /// What a pending question carries on the wire (contract §3 `QuestionEvidence`).
@@ -453,6 +498,47 @@ mod tests {
         e.question = Some(pending_question());
         e.turn_end = Some(crate::code::TurnEnd::Error("the turn ended with an error".into()));
         assert_eq!(state_of(&e).0, WireState::Stuck, "unrecovered error beats everything else");
+    }
+
+    #[tokio::test]
+    async fn stuck_reason_redacts_the_home_path_and_the_token() {
+        // The contract key is agreed free text ("Explicit error string"), so an error
+        // string carrying a home-directory path and a token must not reach the response
+        // verbatim (Ship's probe: the raw message used to pass through from state_of).
+        let (s, dir) = state();
+        let id = s
+            .db
+            .create_code_session(std::env::temp_dir().to_str().unwrap(), None, "patchbay", "default")
+            .expect("session row")
+            .id
+            .clone();
+        let home = crate::code::agents::home_dir().expect("home dir");
+        let path = home
+            .join("Library")
+            .join("Application Support")
+            .join("dev.patchbay.app")
+            .join("web-token");
+        let token = "0123456789abcdef0123456789abcdef0123456789abcdef"; // 48 hex, like web-token
+        s.code.note_turn_end(
+            &id,
+            crate::code::TurnEnd::Error(format!("agent died reading {} with token={}", path.display(), token)),
+        );
+        let tok = crate::web_token::load_token(&dir, false).unwrap();
+        let res = router(s.clone(), tok.clone(), DAEMON)
+            .oneshot(get(Some(&tok), "/api/v1/sessions"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_json(res).await;
+        let session = &body["sessions"][0];
+        assert_eq!(session["state"], json!("stuck"), "explicit error is stuck");
+        let reason = session["stuck_reason"].as_str().expect("stuck_reason text");
+        let home_s = home.to_str().expect("home utf-8");
+        let path_s = path.to_str().expect("path utf-8");
+        assert!(!reason.contains(home_s), "home directory must be redacted: {reason}");
+        assert!(!reason.contains(path_s), "the path must not appear: {reason}");
+        assert!(!reason.contains(token), "the token must be redacted: {reason}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---- the route ----
