@@ -73,6 +73,10 @@ To try the UI alone in a browser, run `pnpm dev` and open http://localhost:1420.
 
 The mesh's end-to-end tests run real nodes over WebSocket on localhost: `cargo test --lib mesh`.
 
+### Narrow-pane layout check
+
+For work on rows that sit under the transcript in a split with narrow panes (queued messages, the usage line, the composer, the working line), `scripts/e2e-layout-measure.mjs` measures the real page: with `pnpm dev` running, `node scripts/e2e-layout-measure.mjs` opens it in headless Chrome, puts four sessions side by side, injects a busy pane with queued agent messages and nine-digit token totals, and at 180, 250, 340 and 500 px a pane reports what ends past its pane's right edge. It fails (exit 1) on any layout problem and on a failed or empty measurement: a probe that finds nothing, a pane or width that is missing, injected state that is not on screen. The rules are in `scripts/layout-assert.mjs`, tested without a browser by `scripts/layoutAssert.selftest.mjs` (part of `pnpm run selftests`). `--plant empty|noprobe|overflow` breaks the measurement or the layout on purpose and must exit 1; `--self-test` runs the clean measurement and every plant. When a change renames a selector the script uses, it fails loudly; update the script with the change. Chromium only; the composer chip row's collision with itself (pb-20261109-17) is not asserted.
+
 ## Debugging a reply stream that breaks
 
 When a provider's stream ends in an error (for example `stream error: error decoding response body`), the error message now carries the whole cause chain, the HTTP version, the `content-encoding` and `transfer-encoding` headers, how many chunks and bytes arrived and how long that took, and the start of the event it was in the middle of. The same text goes to the log at `warn` level, so it shows up in the session's `.jsonl` (`error` field) and on stderr.
