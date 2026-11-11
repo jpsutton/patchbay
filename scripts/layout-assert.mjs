@@ -6,6 +6,13 @@ export const PANES = 4;
 
 const isNum = (n) => typeof n === "number" && Number.isFinite(n);
 
+/**
+ * The usage line drops its cost under 14rem of ITS OWN width (a container query), not the pane's.
+ * Measured on the clean tree: panes of 180 and 250 px show no "$", panes of 340 and 500 px show it,
+ * so the cut sits between (a pane of about 300 px is a usage row of about 14rem).
+ */
+const COST_SHOWN_FROM = 300;
+
 /** Every way the measurement is wrong or missing, as readable lines. Empty list = it passed. */
 export function layoutProblems(result) {
   const out = [];
@@ -28,6 +35,8 @@ export function layoutProblems(result) {
       if (!Array.isArray(p.pastPaneEdge)) bad(`${at}: the past-the-edge probe returned nothing`);
       else if (p.pastPaneEdge.length) bad(`${at}: ${p.pastPaneEdge.length} element(s) past the pane edge: ${p.pastPaneEdge.slice(0, 4).join(", ")}`);
       if (!p.usage || typeof p.usage.shown !== "string" || !p.usage.shown) bad(`${at}: the usage line was not found`);
+      else if (width < COST_SHOWN_FROM && p.usage.shown.includes("$")) bad(`${at}: the usage line shows its cost ("${p.usage.shown}") in a pane this narrow`);
+      else if (width >= COST_SHOWN_FROM && !p.usage.shown.includes("$")) bad(`${at}: the usage line lost its cost ("${p.usage.shown}")`);
       else if (!isNum(p.usage.totalsOverlapRingPx)) bad(`${at}: the usage ring was not found`);
       else if (p.usage.totalsOverlapRingPx > 0) bad(`${at}: usage totals overlap the ring by ${p.usage.totalsOverlapRingPx}px`);
       if (!p.textarea) bad(`${at}: the composer textarea was not found`);
@@ -39,6 +48,9 @@ export function layoutProblems(result) {
         else if (p.queuedRow.rowRightMinusPaneRight > 0) bad(`${at}: the queued row ends ${p.queuedRow.rowRightMinusPaneRight}px past the pane`);
       }
       if ((i === 0 || i === 3) && !(Array.isArray(p.workingLine) && p.workingLine.length)) bad(`${at}: the working line was not found`);
+      // The first span is the label ("Writing…"); it keeps its width. The timer after it is meant to
+      // truncate in narrow panes (it does in the clean run), so only the label is asserted.
+      else if ((i === 0 || i === 3) && /\| TRUNCATED \|/.test(p.workingLine[0])) bad(`${at}: the working-line label is truncated (${p.workingLine[0]})`);
     });
   }
   return out;

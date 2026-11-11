@@ -155,6 +155,12 @@ const chromeBin = process.env.CHROME ?? "/Applications/Google Chrome.app/Content
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const dir = mkdtempSync(join(tmpdir(), "pb-layout-measure-"));
 const chrome = spawn(chromeBin, ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${dir}`, "--no-first-run", "--use-mock-keychain", "--password-store=basic", "--window-size=1056,753", "about:blank"], { stdio: "ignore" });
+// A missing or unusable Chrome says so and leaves nothing behind (no unhandled ENOENT stack, no temp dir).
+chrome.once("error", (e) => {
+  console.error(`could not start Chrome at ${chromeBin}: ${e.code ?? e.message} (set CHROME to a Chrome or Chromium binary)`);
+  cleanup();
+  process.exit(2);
+});
 const cleanup = () => {
   chrome.kill();
   try {

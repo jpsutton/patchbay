@@ -13,7 +13,8 @@ const equal = (got, want, msg) => {
 const pane = (width, i) => ({
   paneWidth: width,
   pastPaneEdge: [],
-  usage: { shown: "In 1M", totalsClipped: false, totalsOverlapRingPx: 0 },
+  // As measured on the clean tree: the cost is there from a pane of about 300 px.
+  usage: { shown: width < 300 ? "In 1M · Out 2k" : "In 1M · Out 2k · $1.00", totalsClipped: false, totalsOverlapRingPx: 0 },
   textarea: { clientHeight: 46, scrollHeight: 46, clipped: false },
   queuedRow: i === 0 ? { rowRightMinusPaneRight: -25, childWidths: ["41:Queued"] } : null,
   workingLine: i === 0 || i === 3 ? ["Writing… | full | 78px"] : null,
@@ -52,6 +53,19 @@ plant("ring probe found nothing", (r) => (r.panes[340][3].usage.totalsOverlapRin
 plant("textarea probe found nothing", (r) => (r.panes[180][1].textarea = null));
 plant("queued row never injected", (r) => (r.panes[250][0].queuedRow = null));
 plant("working line never injected", (r) => (r.panes[500][3].workingLine = null));
+// The two regressions #412 fixed, as planted in its source (pb-20261110-10).
+plant("the cost shows in a 180px pane (UsageBar's cost spans made plain)", (r) => (r.panes[180][0].usage.shown = "In 1M · Out 2k · $162.07"));
+plant("the cost shows in a 250px pane", (r) => (r.panes[250][2].usage.shown = "In 1M · Out 2k · $162.07"));
+plant("the cost is gone from a 500px pane", (r) => (r.panes[500][1].usage.shown = "In 1M · Out 2k"));
+plant("the working-line label truncates (WorkingIndicator's min width removed)", (r) => (r.panes[180][0].workingLine = ["Writing… | TRUNCATED | 29px", "6h 59m · ~2.7k tokens | TRUNCATED | 31px"]));
+plant("the working-line label truncates on pane 4", (r) => (r.panes[250][3].workingLine = ["Thinking… | TRUNCATED | 40px", "48s | full | 102px"]));
+{
+  // The timer after the label truncates in the clean run at 180 and 250 px: not a failure.
+  const r = good();
+  r.panes[180][0].workingLine = ["Writing… | full | 78px", "6h 59m · ~2.7k tokens | TRUNCATED | 31px"];
+  r.panes[250][3].workingLine = ["Thinking… | full | 78px", "48s · ~550 tokens | TRUNCATED | 102px"];
+  equal(throws(r), false, "a truncated timer is not a failure");
+}
 // A real layout failure is red too.
 plant("an element past the pane edge", (r) => (r.panes[180][1].pastPaneEdge = ["span +414.6px"]));
 plant("usage over the ring", (r) => (r.panes[250][2].usage.totalsOverlapRingPx = 12));
