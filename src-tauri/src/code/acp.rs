@@ -2223,9 +2223,20 @@ async fn run(
                         }));
                     }
                     AgentCmd::SetConfigOption { config_id, value, reply } => {
-                        let r = set_config_option(&conn, &session_id, &config_id, &value)
-                            .await
-                            .map(apply_config);
+                        // The mode option is the one `SetMode` also reaches, and callers (the UI, a
+                        // mesh peer, a phone) may not pick the agent's own approval modes with it.
+                        let refused = (config_ids.borrow().mode.as_deref() == Some(config_id.as_str()))
+                            .then(|| approvals.refuse_mode(&value, permission_mode().as_deref()))
+                            .flatten();
+                        let r = match refused {
+                            Some(why) => {
+                                tracing::warn!("refused setting {config_id} to {value} on session {csid}: {why}");
+                                Err(anyhow!(why))
+                            }
+                            None => set_config_option(&conn, &session_id, &config_id, &value)
+                                .await
+                                .map(apply_config),
+                        };
                         let _ = reply.send(r);
                     }
                     AgentCmd::Rewind { ordinal, preview, revert_files, reply } => {
@@ -3039,6 +3050,9 @@ if "--login" in sys.argv:
     sys.exit(0)
 no_methods = "--no-methods" in sys.argv
 legacy = "--legacy-config" in sys.argv
+def mode_opt(cur):
+    return {"id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": cur,
+            "options": [{"value": v, "name": v} for v in ("default", "plan", "bypassPermissions")]}
 authed = no_methods or os.path.exists("signed-in")
 lock = threading.Lock()
 held = None
@@ -3094,12 +3108,18 @@ for line in sys.stdin:
     elif meth == "session/new":
         if authed:
             r = {"sessionId": "s1"}
+            if "--config-options" in sys.argv:
+                r["configOptions"] = [mode_opt("default")]
             if legacy:
                 r["models"] = {"currentModelId": "m1", "availableModels": [{"modelId": "m1", "name": "M1"}, {"modelId": "m2", "name": "M2"}]}
                 r["modes"] = {"currentModeId": "ask", "availableModes": [{"id": "ask", "name": "Ask"}, {"id": "go", "name": "Go"}]}
             send({"jsonrpc": "2.0", "id": i, "result": r})
         else:
             err(i, "Authentication required")
+    elif meth == "session/set_config_option" and "--config-options" in sys.argv:
+        with open(__import__("os").path.join(__import__("os").path.dirname(__import__("os").path.abspath(__file__)), "received.txt"), "a") as f:
+            f.write(p["value"] + "\n")
+        send({"jsonrpc": "2.0", "id": i, "result": {"configOptions": [mode_opt(p["value"])]}})
     elif meth in ("session/set_model", "session/set_mode") and legacy:
         send({"jsonrpc": "2.0", "id": i, "result": {}})
     elif meth == "session/prompt":
@@ -3187,6 +3207,16 @@ for line in sys.stdin:
         login_hint: &'static str,
         ext: crate::code::agents::Extensions,
     ) -> Option<Fake> {
+        spawn_fake_agent_full(dir, flags, login_hint, ext, Default::default())
+    }
+
+    fn spawn_fake_agent_full(
+        dir: &std::path::Path,
+        flags: &[&str],
+        login_hint: &'static str,
+        ext: crate::code::agents::Extensions,
+        approvals: crate::code::agents::ApprovalSetup,
+    ) -> Option<Fake> {
         let python = ["python3", "python"].into_iter().find(|p| {
             std::process::Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success())
         })?;
@@ -3210,7 +3240,7 @@ for line in sys.stdin:
                 session_meta: json!({}),
                 initial_model: None,
                 login_hint,
-                approvals: Default::default(),
+                approvals,
                 native: None,
             },
             cwd: dir.to_owned(),
@@ -3384,6 +3414,36 @@ for line in sys.stdin:
         assert_eq!(modes["availableModes"].as_array().map(Vec::len), Some(2));
         assert_eq!(config_options, &json!([]));
         drop(evs);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `session/set_config_option` carries the agent's mode too: the mode option may not be set to
+    /// one of the agent's own approval modes, and the agent never hears of the attempt (pb-20261110-18).
+    #[test]
+    fn a_config_option_cannot_pick_a_hidden_mode() {
+        use crate::code::agents::{AgentKind, ApprovalSetup};
+        let dir = std::env::temp_dir().join(format!("pb-cfgmode-{}", crate::db::new_id()));
+        let approvals = ApprovalSetup::for_agent(AgentKind::ClaudeCode);
+        assert!(approvals.hide_modes.contains(&"bypassPermissions"));
+        let Some((events, tx, thread)) =
+            spawn_fake_agent_full(&dir, &["--no-methods", "--config-options"], "", Default::default(), approvals)
+        else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        wait_for(&events, "sessionReady", |evs| evs.iter().any(|e| matches!(e, CodeEvent::SessionReady { .. })));
+        let set = |value: &str| {
+            let (reply, rx) = tokio::sync::oneshot::channel();
+            tx.send(AgentCmd::SetConfigOption { config_id: "mode".into(), value: value.into(), reply }).unwrap();
+            rx.blocking_recv().unwrap()
+        };
+        let refused = set("bypassPermissions").unwrap_err().to_string();
+        assert!(refused.contains("can't be set directly"), "{refused}");
+        set("plan").expect("a visible mode still works");
+        let received = std::fs::read_to_string(dir.join("received.txt")).unwrap();
+        assert_eq!(received.lines().collect::<Vec<_>>(), ["plan"], "the hidden mode must never reach the agent");
         tx.send(AgentCmd::Shutdown).unwrap();
         thread.join().unwrap();
         let _ = std::fs::remove_dir_all(dir);

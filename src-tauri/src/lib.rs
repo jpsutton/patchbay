@@ -3091,7 +3091,26 @@ async fn code_set_mode(state: &AppState, id: String, mode_id: String) -> CmdResu
         state.mesh.rpc(&host, "code.set_mode", serde_json::json!({ "id": id, "modeId": mode_id })).await?;
         return Ok(());
     }
+    check_mode_request(state, &id, &mode_id)?;
     Ok(state.code.set_mode(&id, mode_id).await?)
+}
+
+/// Refuse, loudly, a request to set an agent mode that a caller may not pick: one of the agent's
+/// own approval modes (they replace Patchbay's approval control and nothing would put them back),
+/// or for Codex any mode but the one the session's approval mode implies. Patchbay's own code
+/// moves the mode through `CodeManager::set_mode`, which this does not guard. The two callers of
+/// this are the local command and the mesh `code.set_mode` (which phones reach through the
+/// gateway); `code.set_config_option` is checked in the agent's command loop, where the mode
+/// option's id is known.
+fn check_mode_request(state: &AppState, id: &str, mode_id: &str) -> anyhow::Result<()> {
+    let Some(session) = state.db.get_code_session(id)? else { return Ok(()) };
+    let Some(kind) = code::agents::AgentKind::parse(&session.agent) else { return Ok(()) };
+    let setup = code::agents::ApprovalSetup::for_session(kind, &session.permission_mode);
+    if let Some(why) = setup.refuse_mode(mode_id, Some(&session.permission_mode)) {
+        tracing::warn!("refused setting {mode_id} on session {id} ({}): {why}", kind.id());
+        anyhow::bail!("{why}");
+    }
+    Ok(())
 }
 
 /// Patchbay's Ask / Auto / Always-approve policy for this session's ACP permission prompts.
@@ -3511,6 +3530,7 @@ impl mesh::RpcHandler for MeshRpc {
             }
             "code.set_mode" => {
                 ensure_local_host(state, &id()?)?;
+                check_mode_request(state, &id()?, param(&p, "modeId")?)?;
                 state.code.set_mode(&id()?, param(&p, "modeId")?.to_owned()).await.map(|_| Value::Null)
             }
             "code.set_permission_mode" => {
