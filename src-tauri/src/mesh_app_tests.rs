@@ -3869,6 +3869,78 @@ async fn team_tools_check_the_callers_role() {
     assert!(told.text.contains("the user answered: B"), "{}", told.text);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_roster_shows_empty_seats_and_team_send_errors() {
+    let a = node("alpha-roster");
+    let p = a.dir.join("proj");
+    repo(&p);
+    let cwd = p.to_string_lossy().into_owned();
+    let mk = |agent: &str| a.state.db.create_code_session(&cwd, None, agent, "default").unwrap();
+    let (desk, worker) = (mk("opencode"), mk("cursor"));
+
+    let builtin = teams::list_team_templates(&a.state).await.unwrap().into_iter().find(|t| t.id == "builtin-triage-desk").unwrap();
+    let mut value = serde_json::to_value(&builtin).unwrap();
+    for s in value["seats"].as_array_mut().unwrap() {
+        if s["seat"] == "workers" {
+            s["count"] = json!(1);
+        }
+    }
+    value["id"] = json!(null);
+    value["name"] = json!("single-worker");
+    let tpl = teams::save_template(&a.state, serde_json::from_value(value).unwrap()).await.unwrap();
+
+    let team = teams::create_team(
+        &a.state,
+        serde_json::from_value(json!({
+            "templateId": tpl.id, "slug": "t", "idPrefix": "T", "cwd": cwd,
+            "exportDir": a.dir.join("out").to_string_lossy(),
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    teams::team_attach(&a.state, team.id.clone(), desk.id.clone(), "coordinator".into()).await.unwrap();
+
+    let call = |s: &str, tool: &str, args: Value| {
+        let state = a.state.clone();
+        let (s, tool) = (s.to_owned(), tool.to_owned());
+        async move { teams::call_tool(&state, &s, &tool, &args).await }
+    };
+
+    // 1. Roster shows an empty worker seat as open 1 / filled 0, and the hint appears for coordinator.
+    let r_coord = call(&desk.id, "team_roster", json!({})).await.unwrap();
+    assert_eq!(r_coord["members"].as_array().unwrap().len(), 1);
+    let worker_seat = r_coord["seats"].as_array().unwrap().iter().find(|s| s["seat"] == "workers").unwrap();
+    assert_eq!(worker_seat["count"], 1);
+    assert_eq!(worker_seat["filled"], 0);
+    assert_eq!(worker_seat["open"], 1);
+    assert_eq!(worker_seat["role"], "Worker");
+    assert!(worker_seat["agents"].as_array().unwrap().iter().any(|a| a == "claude-code"));
+    assert_eq!(r_coord["hint"], "Start a worker in an open seat with dispatch_item(itemId).");
+
+    // 2. team_send error text for an empty seat (dispatches caller)
+    let err_seat = call(&desk.id, "team_send", json!({ "to": "workers", "message": "hi" })).await.unwrap_err().to_string();
+    assert_eq!(err_seat, "no live member in seat workers; start one with dispatch_item");
+    let err_role = call(&desk.id, "team_send", json!({ "to": "Worker", "message": "hi" })).await.unwrap_err().to_string();
+    assert_eq!(err_role, "no live member in seat workers; start one with dispatch_item");
+
+    // 3. Attach worker: filled 1, open 0; hint does NOT appear for worker
+    teams::team_attach(&a.state, team.id.clone(), worker.id.clone(), "workers".into()).await.unwrap();
+
+    let r_worker = call(&worker.id, "team_roster", json!({})).await.unwrap();
+    assert_eq!(r_worker["members"].as_array().unwrap().len(), 2);
+    let worker_seat_filled = r_worker["seats"].as_array().unwrap().iter().find(|s| s["seat"] == "workers").unwrap();
+    assert_eq!(worker_seat_filled["count"], 1);
+    assert_eq!(worker_seat_filled["filled"], 1);
+    assert_eq!(worker_seat_filled["open"], 0);
+    assert!(r_worker.get("hint").is_none());
+
+    // 4. Non-dispatches caller (worker) sends to empty seat: keeps standard text
+    let err_worker = call(&worker.id, "team_send", json!({ "to": "lead", "message": "hi" })).await.unwrap_err().to_string();
+    assert_eq!(err_worker, "no teammate with role or session id lead; see team_roster");
+}
+
 /// Phase 4: the coordinator fills a 2-worker pool from mixed agents, the third dispatch is refused
 /// until one is released, the 5-per-creator cap doesn't block, and a worker notes its own item only.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

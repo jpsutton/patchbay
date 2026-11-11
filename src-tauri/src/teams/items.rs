@@ -438,7 +438,7 @@ pub fn tool_defs() -> Vec<Value> {
     };
     let text = |d: &str| json!({ "type": "string", "description": d });
     vec![
-        tool("team_roster", "List the members of your team: role, seat, session id, agent, model, what each is doing now, and the item it holds.", json!({}), &[]),
+        tool("team_roster", "List the members of your team and open seats: role, seat, session id, agent, model, what each is doing now, and the item it holds.", json!({}), &[]),
         tool("team_send", "Message a teammate by role name (e.g. \"Advisor\") or session id. Same delivery rules as send_agent_message.", json!({ "to": text("A role name or a session id from team_roster."), "message": text("The message.") }), &["to", "message"]),
         tool("item_add", "Add an item to the team's board (status noticed). Needs the writes_items capability.", json!({ "title": text("What the item is."), "type": text("bug, feature, polish, chore... Default task."), "severity": text("Default normal."), "plan": text("Optional plan or notes.") }), &["title"]),
         tool("item_set", "Change named fields of an item: title, type, severity, status (noticed, triaged, blocked, dispatched, in-progress, awaiting-review, done, dropped), assignee (a member's session id, or null), plan, prUrl. Needs the writes_items capability.", json!({ "itemId": text("The item id."), "title": text("New title."), "type": text("New type."), "severity": text("New severity."), "status": text("New status."), "assignee": text("A member's session id; empty to clear."), "plan": text("New plan text."), "prUrl": text("Pull request URL.") }), &["itemId"]),
@@ -488,7 +488,7 @@ fn run_tool(state: &AppState, session: &str, name: &str, args: &Value) -> Result
     let s = |k: &str| args[k].as_str().map(str::trim).filter(|v| !v.is_empty());
     let need_s = |k: &str| s(k).ok_or_else(|| anyhow!("{k} is required"));
     let result = match name {
-        "team_roster" => roster(state, &tdb, &c.team)?,
+        "team_roster" => roster(state, &tdb, &c)?,
         "team_send" => {
             let target = resolve_target(&tdb, &c, need_s("to")?)?;
             return Ok(Outcome { value: Value::Null, tells, send: Some((session.to_owned(), target, need_s("message")?.to_owned())) });
@@ -634,20 +634,21 @@ pub(super) fn changed(state: &AppState, tdb: &TeamsDb, team_id: &str, event: &st
     // The Teams page refreshes by polling; nothing else to tell.
 }
 
-fn roster(state: &AppState, tdb: &TeamsDb, team: &Team) -> Result<Value> {
+fn roster(state: &AppState, tdb: &TeamsDb, c: &Caller) -> Result<Value> {
+    let team = &c.team;
     let roles = tdb.roles()?;
     let items = tdb.items(&team.id, None)?;
-    let rows: Vec<Value> = tdb
-        .members(&team.id)?
-        .into_iter()
+    let raw_members = tdb.members(&team.id)?;
+    let members: Vec<Value> = raw_members
+        .iter()
         .map(|m| {
             let s = state.db.get_code_session(&m.session_id).ok().flatten();
             let local = s.as_ref().is_some_and(|s| s.host_node.as_deref() == Some(state.mesh.node_id()));
             let held = items.iter().find(|i| i.member_session.as_deref() == Some(&m.session_id) && !matches!(i.status.as_str(), "done" | "dropped"));
             json!({
                 "sessionId": m.session_id,
-                "role": roles.iter().find(|r| r.id == m.role_id).map(|r| r.name.clone()),
-                "seat": m.seat,
+                "role": roles.iter().find(|r| r.id == m.role_id).map(|r| super::dispatch::strip_forged_tags(&r.name)),
+                "seat": super::dispatch::strip_forged_tags(&m.seat),
                 "agent": s.as_ref().map(|s| s.agent.clone()),
                 "model": s.as_ref().and_then(|s| s.agent_model.clone().or(s.model_ref.clone())),
                 "activity": local.then(|| session_activity(state, &m.session_id).as_str()),
@@ -655,7 +656,42 @@ fn roster(state: &AppState, tdb: &TeamsDb, team: &Team) -> Result<Value> {
             })
         })
         .collect();
-    Ok(json!(rows))
+
+    let tpl = tdb.template(&team.template_id)?;
+    let seats: Vec<Value> = tpl
+        .seats
+        .iter()
+        .map(|s| {
+            let filled = raw_members.iter().filter(|m| m.seat == s.seat).count() as u32;
+            let open = s.count.saturating_sub(filled);
+            let role_name = roles
+                .iter()
+                .find(|r| r.id == s.role_id)
+                .map_or("", |r| r.name.as_str());
+            let mut agents: Vec<String> = vec![s.agent.clone()];
+            for ch in &s.choices {
+                if !agents.contains(&ch.agent) {
+                    agents.push(ch.agent.clone());
+                }
+            }
+            json!({
+                "seat": super::dispatch::strip_forged_tags(&s.seat),
+                "role": super::dispatch::strip_forged_tags(role_name),
+                "agents": agents.iter().map(|a| super::dispatch::strip_forged_tags(a)).collect::<Vec<_>>(),
+                "count": s.count,
+                "filled": filled,
+                "open": open,
+            })
+        })
+        .collect();
+
+    let mut out = serde_json::Map::new();
+    out.insert("members".into(), json!(members));
+    out.insert("seats".into(), json!(seats));
+    if c.role.caps.dispatches {
+        out.insert("hint".into(), json!("Start a worker in an open seat with dispatch_item(itemId)."));
+    }
+    Ok(Value::Object(out))
 }
 
 /// The session `to` names: a member's session id, or the one other member holding that role.
@@ -671,7 +707,18 @@ fn resolve_target(tdb: &TeamsDb, c: &Caller, to: &str) -> Result<String> {
         .collect();
     match hits.as_slice() {
         [one] => Ok(one.session_id.clone()),
-        [] => bail!("no teammate with role or session id {to}; see team_roster"),
+        [] => {
+            if c.role.caps.dispatches {
+                let tpl = tdb.template(&c.team.template_id)?;
+                if let Some(s) = tpl.seats.iter().find(|s| {
+                    (same(&s.seat, to) || roles.iter().any(|r| r.id == s.role_id && same(&r.name, to)))
+                        && !members.iter().any(|m| m.seat == s.seat)
+                }) {
+                    bail!("no live member in seat {}; start one with dispatch_item", super::dispatch::strip_forged_tags(&s.seat));
+                }
+            }
+            bail!("no teammate with role or session id {to}; see team_roster")
+        }
         many => bail!("{} members hold the role {to}; use one of their session ids: {}", many.len(), many.iter().map(|m| m.session_id.as_str()).collect::<Vec<_>>().join(", ")),
     }
 }
@@ -787,5 +834,21 @@ mod tests {
         let done = t.answer_user(&team.id, &d2.id, "A").unwrap();
         assert_eq!((done.status.as_str(), done.user_answer.as_deref()), ("resolved", Some("A")));
         assert!(t.answer_user(&team.id, &d2.id, "B").is_err());
+    }
+
+    #[test]
+    fn empty_seat_resolution_shows_dispatch_hint_only_for_dispatchers() {
+        let (_d, t, team) = setup();
+        t.attach(&team.id, "desk1", "coordinator").unwrap();
+        t.attach(&team.id, "w1", "workers").unwrap();
+        let coord = Caller::of(&t, "desk1").unwrap();
+        let worker = Caller::of(&t, "w1").unwrap();
+
+        // lead seat is empty
+        let err_coord = resolve_target(&t, &coord, "lead").unwrap_err().to_string();
+        assert_eq!(err_coord, "no live member in seat lead; start one with dispatch_item");
+
+        let err_worker = resolve_target(&t, &worker, "lead").unwrap_err().to_string();
+        assert_eq!(err_worker, "no teammate with role or session id lead; see team_roster");
     }
 }
