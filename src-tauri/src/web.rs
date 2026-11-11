@@ -48,6 +48,11 @@ struct Ctx {
 }
 
 pub async fn serve(state: AppState, events: Events, cfg: Config) -> Result<()> {
+    // The read-only session-status route (pb-20261110-04), built before the state moves into
+    // the context below: the same handler the desktop app's share server serves, on the same
+    // token file, so one discovery path covers a daemon-only, app-only or both-running host.
+    let status =
+        crate::session_status::router(state.clone(), cfg.token.clone(), crate::session_status::DAEMON);
     let ctx = Ctx { state, events, ui_dir: Arc::new(cfg.ui_dir), token: cfg.token.into() };
     // Share tokens are opaque capabilities; this route takes no path argument, so there is nothing
     // to traverse. It is registered before the static fallback so `/share/<token>` is never treated
@@ -60,7 +65,8 @@ pub async fn serve(state: AppState, events: Events, cfg: Config) -> Result<()> {
         // only the opaque token to that node over the mesh and enforces validity there.
         .route("/share/{node_id}/{token}", get(share_proxy))
         .fallback(get(static_file))
-        .with_state(ctx);
+        .with_state(ctx)
+        .merge(status);
     let listener = tokio::net::TcpListener::bind(cfg.listen)
         .await
         .with_context(|| format!("listening on {}", cfg.listen))?;
