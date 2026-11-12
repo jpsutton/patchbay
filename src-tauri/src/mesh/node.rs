@@ -1729,6 +1729,8 @@ impl Inner {
             let mut st = self.st.lock().unwrap();
             let keep_new = match st.sessions.get(&node) {
                 None => true,
+                // A session whose loop has ended never beats a live connection.
+                Some(old) if old.tx.is_closed() => true,
                 Some(old) if old.via.is_some() && via.is_none() => true,
                 Some(old) if old.via.is_none() && via.is_some() => false,
                 Some(old) => {
@@ -1760,28 +1762,31 @@ impl Inner {
         self.emit_status();
         self.send_links();
 
-        let db = self.db.clone();
-        let my_vv = tokio::task::spawn_blocking(move || db.with_conn(|c| sync::version_vector(c))).await??;
-        send(&mut sec, &link, &Msg::SyncVv { vv: my_vv })?;
-        for r in self.st.lock().unwrap().links.values() {
-            let _ = tx.send(Msg::Links(r.clone()));
-        }
-        for p in self.own_stream_snapshots() {
-            send(&mut sec, &link, &Msg::Event { name: "mesh://chat".into(), payload: p })?;
-        }
-        // Nodes already waiting here may be decided there too.
-        for req in self.local_requests() {
-            send(&mut sec, &link, &Msg::Event { name: EV_JOIN_REQUEST.into(), payload: json!(req) })?;
-        }
-        let greeting = self.handler.read().unwrap().clone().map(|h| h.greeting()).unwrap_or_default();
-        for (name, payload) in greeting {
-            send(&mut sec, &link, &Msg::Event { name, payload })?;
-        }
-        let mut peer_vv: Option<VersionVector> = None;
-        let mut changed = self.changed.subscribe();
-        let mut ping = tokio::time::interval(Duration::from_secs(5));
-        let mut last_seen = Instant::now();
+        // Everything from here on runs inside `res`, so a failure anywhere (the peer dropping the
+        // link mid-greeting, say) still reaches the cleanup below. Returning early would leave a
+        // dead session registered, shown as connected while every RPC to it fails.
         let res: Result<()> = async {
+            let db = self.db.clone();
+            let my_vv = tokio::task::spawn_blocking(move || db.with_conn(|c| sync::version_vector(c))).await??;
+            send(&mut sec, &link, &Msg::SyncVv { vv: my_vv })?;
+            for r in self.st.lock().unwrap().links.values() {
+                let _ = tx.send(Msg::Links(r.clone()));
+            }
+            for p in self.own_stream_snapshots() {
+                send(&mut sec, &link, &Msg::Event { name: "mesh://chat".into(), payload: p })?;
+            }
+            // Nodes already waiting here may be decided there too.
+            for req in self.local_requests() {
+                send(&mut sec, &link, &Msg::Event { name: EV_JOIN_REQUEST.into(), payload: json!(req) })?;
+            }
+            let greeting = self.handler.read().unwrap().clone().map(|h| h.greeting()).unwrap_or_default();
+            for (name, payload) in greeting {
+                send(&mut sec, &link, &Msg::Event { name, payload })?;
+            }
+            let mut peer_vv: Option<VersionVector> = None;
+            let mut changed = self.changed.subscribe();
+            let mut ping = tokio::time::interval(Duration::from_secs(5));
+            let mut last_seen = Instant::now();
             loop {
                 tokio::select! {
                     _ = kill.cancelled() => return Ok(()),
