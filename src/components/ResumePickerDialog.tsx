@@ -63,6 +63,9 @@ export function ResumePickerDialog() {
                     <span className="block break-words text-danger">{r.error ?? "resume failed"}</span>
                   )}
                   {r.action === "sent" && <span className="block text-muted">continuing with one prompt</span>}
+                  {r.action === "running" && (
+                    <span className="block text-muted">still working — left alone (no extra prompt)</span>
+                  )}
                   {r.action === "skipped" && (
                     <span className="block text-muted">skipped — you won&apos;t be reminded next launch</span>
                   )}
@@ -101,7 +104,8 @@ export function ResumePickerDialog() {
         </div>
         <div className="mb-3 text-xs leading-5 text-muted">
           Patchbay was closed while these sessions were working. Each one you check gets a single
-          prompt to continue; unchecking skips it for good.
+          prompt to continue; unchecking skips it for good. Esc or &quot;Not now&quot; keeps this
+          list for the next launch — nothing is sent and no flag is cleared.
         </div>
         <ul className="mb-4 max-h-[50vh] space-y-1.5 overflow-y-auto">
           {picker.candidates.map((c) => (
@@ -124,6 +128,7 @@ export function ResumePickerDialog() {
         </ul>
         <div className="flex justify-end gap-2">
           <button
+            autoFocus
             className="h-[34px] rounded-lg px-3.5 text-xs text-muted hover:bg-panel-2 hover:text-fg"
             disabled={busy}
             onClick={() => useStore.getState().closeResumePicker()}
@@ -131,7 +136,6 @@ export function ResumePickerDialog() {
             Not now
           </button>
           <button
-            autoFocus
             disabled={busy}
             className="h-[34px] rounded-lg bg-accent px-3.5 text-xs font-semibold text-accent-fg disabled:opacity-50"
             onClick={() => useStore.getState().applyResume(checkedIds)}

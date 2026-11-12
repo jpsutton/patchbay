@@ -492,7 +492,7 @@ export interface ResumeCandidate {
 /** What happened to one candidate when the picker's choices were applied. */
 export interface ResumeResult {
   id: string;
-  action: "sent" | "skipped" | "error";
+  action: "sent" | "skipped" | "error" | "running";
   error?: string;
 }
 
@@ -1314,6 +1314,9 @@ export const api = {
   quitProceed: () => invoke<void>("quit_proceed"),
   /** The wait dialog's "Keep Patchbay open": drop the pending quit; no flag is touched. */
   quitCancel: () => invoke<void>("quit_cancel"),
+  /** The wait dialog's live state: a quit pending + the backend's own working-session list. */
+  quitWaitStatus: () =>
+    invoke<{ showing: boolean; active: { id: string; title: string; waiting: boolean }[] }>("quit_wait_status"),
   /** Cancel the running turn and send this queued prompt next. */
   codeSendNow: (id: string, promptId: string) => invoke<void>("code_send_now", { id, promptId }),
   getCodeTranscript: (id: string) => invoke<string | null>("get_code_transcript", { id }),

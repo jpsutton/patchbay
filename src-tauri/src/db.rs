@@ -1748,6 +1748,76 @@ mod tests {
         (Db::open(&path).unwrap(), path)
     }
 
+    /// pb-20261111-22: migrations apply BY INDEX — a DB already migrated through #434's
+    /// `extra_names` (user_version 19) must gain `active_turn_since` LAST (user_version 20),
+    /// keep the provider's ExtraNames data, and not re-migrate on reopen. The migration-swap
+    /// plant (mine before #434's) turns this red while the rest of the suite stays green.
+    #[test]
+    fn upgrade_from_extra_names_adds_active_turn_since_last() {
+        let dir = std::env::temp_dir().join(format!("pb-migrate-upgrade-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db.sqlite");
+        let idx = MIGRATIONS.iter().position(|m| m.contains("extra_names")).expect("#434 migration present");
+        let mine = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("active_turn_since"))
+            .expect("active_turn_since migration present");
+        assert_eq!(idx + 1, 19, "extra_names ends the staging era at user_version 19");
+        assert!(mine > idx, "active_turn_since must be APPENDED after extra_names (index order)");
+        {
+            // A DB exactly as David's staging build has it: through extra_names, with data.
+            let conn = Connection::open(&path).unwrap();
+            for (i, sql) in MIGRATIONS.iter().enumerate().take(idx + 1) {
+                conn.execute_batch(sql).unwrap();
+                conn.pragma_update(None, "user_version", (i + 1) as i64).unwrap();
+            }
+            conn.execute(
+                "INSERT INTO providers (id, name, kind, base_url, created_at, extra_names) VALUES ('p1', 'P', 'openai-chat', 'http://x', 1, '[\"X-Api-Key\"]')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO code_sessions (id, cwd, title, created_at, updated_at) VALUES ('s1', '/w', 'T', 1, 1)",
+                [],
+            )
+            .unwrap();
+        }
+        // The upgrade: Db::open applies whatever is left (from index 19 on).
+        let db = Db::open(&path).unwrap();
+        assert_eq!(
+            db.with_conn(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))).unwrap(),
+            MIGRATIONS.len() as i64,
+            "the remaining migrations ran"
+        );
+        db.with_conn(|c| {
+            let cols: Vec<String> = c
+                .prepare("SELECT name FROM pragma_table_info('code_sessions')")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert!(cols.iter().any(|c| c == "active_turn_since"), "the column exists: {cols:?}");
+            let names: String = c
+                .query_row("SELECT extra_names FROM providers WHERE id = 'p1'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(names, r#"["X-Api-Key"]"#, "ExtraNames data intact");
+        });
+        db.set_code_session_active_turn("s1", Some(7)).unwrap();
+        assert_eq!(db.code_sessions_with_active_turn().unwrap(), vec!["s1".to_string()]);
+        // Reopen: re-running a migration would fail on a duplicate column — opening twice and
+        // staying at the same version proves it does not re-migrate.
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        assert_eq!(
+            db.with_conn(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))).unwrap(),
+            MIGRATIONS.len() as i64,
+            "reopen does not re-migrate"
+        );
+        assert_eq!(db.code_session_active_turn("s1").unwrap(), Some(7));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn code_session_activity_is_stored_without_bumping_updated_at() {
         let (db, _) = temp_db();

@@ -2978,6 +2978,11 @@ const RESUME_CONTINUE_TEXT: &str = "Continue from where you stopped (Patchbay wa
 async fn resume_candidates(state: &AppState) -> CmdResult<Vec<serde_json::Value>> {
     let mut out = Vec::new();
     for id in state.db.code_sessions_with_active_turn()? {
+        // A session already running or busy is mid-turn RIGHT NOW (a reload or a second
+        // window re-asking): never offer it — offering it again would double-prompt.
+        if state.code.is_running(&id) || state.code.is_busy(&id) {
+            continue;
+        }
         if let Some(s) = state.db.get_code_session(&id)? {
             out.push(serde_json::json!({ "id": s.id, "title": s.title, "agent": s.agent, "cwd": s.cwd }));
         }
@@ -2993,6 +2998,12 @@ async fn resume_candidates(state: &AppState) -> CmdResult<Vec<serde_json::Value>
 async fn resume_apply(state: &AppState, checked: Vec<String>) -> CmdResult<Vec<serde_json::Value>> {
     let mut out = Vec::new();
     for id in state.db.code_sessions_with_active_turn()? {
+        // Live-turn guard, checked first: never prompt it again and never clear a live
+        // turn's flag (a racing second apply, or an unchecked click on a working session).
+        if state.code.is_running(&id) || state.code.is_busy(&id) {
+            out.push(serde_json::json!({ "id": id, "action": "running" }));
+            continue;
+        }
         if !checked.contains(&id) {
             let _ = state.db.set_code_session_active_turn(&id, None);
             out.push(serde_json::json!({ "id": id, "action": "skipped" }));

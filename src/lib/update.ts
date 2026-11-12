@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import { api, errorText } from "./ipc";
 import { isRemoteApp, isWeb } from "./platform";
@@ -30,6 +31,13 @@ export function useUpdateChecks() {
         .catch((e) => console.warn("update check:", errorText(e)));
     const first = setTimeout(check, FIRST_CHECK_MS);
     const every = setInterval(check, CHECK_EVERY_MS);
+    // Cancelling the quit wait (Keep Patchbay open) must not leave this button dead for the
+    // whole session: clear `installing` and re-check, which refills the pending update so the
+    // install is retryable (pb-20261111-22).
+    listen("quit://cancelled", () => {
+      useUpdate.setState({ installing: false });
+      check();
+    }).catch(() => {});
     return () => {
       clearTimeout(first);
       clearInterval(every);
@@ -43,7 +51,7 @@ export async function installUpdate() {
   if (!available || installing) return;
   const { ok } = await useStore.getState().askConfirm({
     title: `Update to Patchbay ${available.version}?`,
-    body: "Patchbay downloads the update and restarts. Agents still working in the Code tab are stopped.",
+    body: "Patchbay downloads the update, waits for any agents still working, then restarts.",
     confirmLabel: "Update and restart",
   });
   if (!ok) return;

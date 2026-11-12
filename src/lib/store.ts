@@ -1266,7 +1266,11 @@ export const useStore = create<Store>((set, get) => ({
     ),
   initResumePicker: async () => {
     try {
-      const candidates = await api.resumeCandidates();
+      const candidates = (await api.resumeCandidates()).filter(
+        // A session working right now (reload, second window) is never re-offered: checking
+        // it would send a duplicate continue prompt (pb-20261111-22).
+        (c) => !useStore.getState().code[c.id]?.busy,
+      );
       if (candidates.length > 0) set({ resumePicker: { candidates, results: null, busy: false } });
     } catch {
       // A failed probe must never break startup; the picker simply does not appear.

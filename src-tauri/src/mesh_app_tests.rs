@@ -2709,8 +2709,33 @@ async fn resume_apply_unchecked_clears_the_flag_without_any_prompt() {
     let a = node("alpha-resume-skipped");
     let cwd = a.dir.join("proj");
     repo(&cwd);
-    let s = a.state.db.create_code_session(&cwd.to_string_lossy(), None, "grok", "default").unwrap();
+    // A STARTABLE session (patchbay + provider + model): if resume_apply wrongly prompted,
+    // the agent would launch and the prompt would show — "zero prompts" must not hold trivially.
+    let s = a.state.db.create_code_session(&cwd.to_string_lossy(), None, "patchbay", "default").unwrap();
     a.state.db.set_code_session_active_turn(&s.id, Some(crate::db::now_ms())).unwrap();
+    let prov = crate::db::Provider {
+        id: "mock".into(),
+        name: "Mock LLM".into(),
+        kind: crate::db::ProviderKind::OpenaiChat,
+        base_url: "http://127.0.0.1:8765/v1".into(),
+        has_key: true,
+        auth_mode: Default::default(),
+        claude_config_dir: None,
+        grok_home: None,
+    };
+    a.state.db.upsert_provider(&prov, Some("mock-key")).unwrap();
+    a.state
+        .db
+        .upsert_model(&crate::db::Model {
+            id: "test-model".into(),
+            provider_id: "mock".into(),
+            model_id: "test-model".into(),
+            display_name: "Test Model".into(),
+            vision: false,
+            context_window: None,
+            params: crate::db::ModelParams::default(),
+        })
+        .unwrap();
     let chans: crate::api::ChanFactory = Arc::new(|_| None);
     let r = crate::api::call(&a.state, "resume_apply", json!({ "checked": [] }), &chans)
         .await
@@ -2848,6 +2873,11 @@ async fn active_turn_flag_follows_the_turn_lifecycle() {
     a.state.shutdown();
     assert!(flag().is_some(), "Quit now must leave the flag set for the relaunch");
     assert_eq!(a.state.db.code_sessions_with_active_turn().unwrap(), vec![s.id.clone()]);
+    // The guard itself: turn-end events arriving AFTER shutdown (stop_all's death throes)
+    // must not clear the flag — the plant "shutdown never sets the guard" turns this red.
+    ev(code::acp::CodeEvent::PromptDone { stop_reason: json!("cancelled") });
+    ev(code::acp::CodeEvent::Status { state: "exited".into(), message: None });
+    assert!(flag().is_some(), "shutdown guard: events after shutdown must not clear the flag");
 }
 
 /// An agent's message to a session whose Claude account is over the limit is refused naming the
