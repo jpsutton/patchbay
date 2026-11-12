@@ -24,6 +24,7 @@ mod tools;
 mod turn;
 
 pub mod claude;
+pub mod preview;
 pub mod proc;
 pub use agent::serve;
 pub use history::{HistoryWindow, history_window};

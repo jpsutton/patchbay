@@ -246,6 +246,10 @@ ALTER TABLE code_sessions ADD COLUMN created_by TEXT;
 -- default. Not synced: a path on one node means nothing on another.
 ALTER TABLE providers ADD COLUMN grok_home TEXT;
 "#, r#"
+-- The NAMES of a provider's extra request headers and query parameters (JSON, `ExtraNames`), so
+-- Settings can list them. The values are secrets and live only in the keyring. Not synced.
+ALTER TABLE providers ADD COLUMN extra_names TEXT;
+"#, r#"
 -- When this session's current turn started (ms since epoch), NULL when no turn is running.
 -- The continuous active set behind the graceful-close resume picker (pb-20261111-22): set when
 -- a turn starts, cleared when it ends (done, error, user Stop), so a value left set means the
@@ -319,6 +323,21 @@ impl AuthMode {
             "grok_login" => Self::GrokLogin,
             _ => Self::ApiKey,
         }
+    }
+}
+
+/// The names of a provider's extra request headers and query parameters. Names are not secret.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtraNames {
+    #[serde(default)]
+    pub headers: Vec<String>,
+    #[serde(default)]
+    pub query: Vec<String>,
+}
+
+impl ExtraNames {
+    pub fn is_empty(&self) -> bool {
+        self.headers.is_empty() && self.query.is_empty()
     }
 }
 
@@ -691,6 +710,22 @@ impl Db {
     pub fn clear_inline_key(&self, id: &str) -> Result<()> {
         self.conn()
             .execute("UPDATE providers SET inline_key = NULL WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// The names of a provider's extra headers and query parameters (never their values).
+    pub fn provider_extra_names(&self, id: &str) -> Result<ExtraNames> {
+        let json: Option<String> = self
+            .conn()
+            .query_row("SELECT extra_names FROM providers WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?
+            .flatten();
+        Ok(json.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default())
+    }
+
+    pub fn set_provider_extra_names(&self, id: &str, names: &ExtraNames) -> Result<()> {
+        let json = (!names.is_empty()).then(|| serde_json::to_string(names)).transpose()?;
+        self.conn().execute("UPDATE providers SET extra_names = ?2 WHERE id = ?1", params![id, json])?;
         Ok(())
     }
 

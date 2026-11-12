@@ -11,7 +11,7 @@ use crate::types::*;
 use crate::wire;
 
 /// Everything about the endpoint and the sampling parameters; the conversation is the [`Request`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     pub format: WireFormat,
     pub base_url: String,
@@ -19,6 +19,8 @@ pub struct Config {
     pub key: Option<String>,
     pub auth: AuthScheme,
     pub extra_headers: Vec<(String, String)>,
+    /// Query parameters added to every request URL (Azure OpenAI's `api-version`, a gateway's key).
+    pub extra_query: Vec<(String, String)>,
     /// Headers that carry the request's `cache_key` (the session id), for endpoints that group
     /// a conversation's requests by header (Grok's `x-grok-conv-id`, `x-grok-session-id`).
     pub session_headers: Vec<String>,
@@ -41,6 +43,29 @@ pub struct Config {
     pub cache_ttl: CacheTtl,
 }
 
+/// Never prints a secret: the key, header values and query values show only that they are set.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn names(l: &[(String, String)]) -> Vec<&str> {
+            l.iter().map(|(n, _)| n.as_str()).collect()
+        }
+        f.debug_struct("Config")
+            .field("format", &self.format)
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("key", &self.key.as_ref().map(|_| "<redacted>"))
+            .field("auth", &self.auth)
+            .field("extra_headers", &names(&self.extra_headers))
+            .field("extra_query", &names(&self.extra_query))
+            .field("session_headers", &self.session_headers)
+            .field("request_id_header", &self.request_id_header)
+            .field("max_output_tokens", &self.max_output_tokens)
+            .field("max_retries", &self.max_retries)
+            .field("idle_timeout", &self.idle_timeout)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Config {
     pub fn new(format: WireFormat, base_url: impl Into<String>, model: impl Into<String>) -> Self {
         Config {
@@ -54,6 +79,7 @@ impl Config {
                 _ => AuthScheme::Bearer,
             },
             extra_headers: Vec::new(),
+            extra_query: Vec::new(),
             session_headers: Vec::new(),
             request_id_header: None,
             max_output_tokens: None,
@@ -185,6 +211,9 @@ impl Client {
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")
             .json(body);
+        if !cfg.extra_query.is_empty() {
+            rb = rb.query(&cfg.extra_query);
+        }
         if let Some(k) = cfg.key.as_deref().filter(|k| !k.is_empty()) {
             rb = match cfg.auth {
                 AuthScheme::Bearer => rb.bearer_auth(k),
@@ -210,11 +239,17 @@ impl Client {
                     retryable: true,
                     cancelled: false,
                 }),
-                Ok(r) => r.map_err(|e| Error {
-                    message: format!("request failed: {}", diag::chain(&e)),
-                    status: None,
-                    retryable: e.is_connect() || e.is_timeout() || e.is_request(),
-                    cancelled: false,
+                // `without_url`: reqwest prints the full URL, and the query may hold a secret. The
+                // host and path (no query) are put back, so the message still says where it failed.
+                Ok(r) => r.map_err(|e| {
+                    let retryable = e.is_connect() || e.is_timeout() || e.is_request();
+                    let target = url.split('?').next().unwrap_or(url);
+                    Error {
+                        message: format!("request failed: {} (POST {target})", diag::chain(&e.without_url())),
+                        status: None,
+                        retryable,
+                        cancelled: false,
+                    }
                 })?,
             },
         };
@@ -264,7 +299,7 @@ impl Client {
                 }
                 Some(Err(e)) => {
                     return Err(Error {
-                        message: watch.failure(&format!("stream error: {}", diag::chain(&e)), &sse.pending()),
+                        message: watch.failure(&format!("stream error: {}", diag::chain(&e.without_url())), &sse.pending()),
                         status: None,
                         retryable: true,
                         cancelled: false,
@@ -309,6 +344,118 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A configured secret never shows in a `{:?}` of the config (a log line, a panic message).
+    #[test]
+    fn debug_output_hides_the_key_header_values_and_query_values() {
+        let mut cfg = Config::new(WireFormat::ChatCompletions, "http://x/v1", "m");
+        cfg.key = Some("SECRET-KEY-123".into());
+        cfg.extra_headers = vec![("api-key".into(), "SECRET-HEADER-456".into())];
+        cfg.extra_query = vec![("code".into(), "SECRET-QUERY-789".into()), ("api-version".into(), "2024-10-21".into())];
+        let shown = format!("{cfg:?}");
+        for secret in ["SECRET-KEY-123", "SECRET-HEADER-456", "SECRET-QUERY-789", "2024-10-21"] {
+            assert!(!shown.contains(secret), "{secret} leaked into: {shown}");
+        }
+        for name in ["api-key", "code", "api-version"] {
+            assert!(shown.contains(name), "{name} (a name, not a secret) should show: {shown}");
+        }
+    }
+
+    /// The extra headers and query parameters reach the server: the request line carries the query
+    /// (and keeps one already on the base URL's path), the headers carry the values.
+    #[tokio::test]
+    async fn extra_headers_and_query_parameters_reach_the_server() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 16384];
+            let n = sock.read(&mut buf).await.unwrap();
+            let _ = sock.write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}").await;
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        });
+        let mut cfg = Config::new(WireFormat::ChatCompletions, format!("http://127.0.0.1:{port}/openai/deployments/d"), "m");
+        cfg.max_retries = 0;
+        cfg.key = Some("the-key".into());
+        cfg.extra_headers = vec![("api-key".into(), "azure-value".into())];
+        cfg.extra_query = vec![("api-version".into(), "2024-10-21".into()), ("code".into(), "a b&c".into())];
+        let req = Request { messages: vec![Message::user("hi")], ..Default::default() };
+        let _ = Client::new(cfg).complete(&req, &CancellationToken::new(), |_| {}).await;
+        let seen = server.await.unwrap();
+        let first = seen.lines().next().unwrap();
+        assert!(first.starts_with("POST /openai/deployments/d/chat/completions?"), "{first}");
+        assert!(first.contains("api-version=2024-10-21"), "{first}");
+        assert!(first.contains("code=a+b%26c") || first.contains("code=a%20b%26c"), "the value is URL-encoded: {first}");
+        let lower = seen.to_ascii_lowercase();
+        assert!(lower.contains("api-key: azure-value"), "{seen}");
+        assert!(lower.contains("authorization: bearer the-key"), "{seen}");
+    }
+
+    /// reqwest prints the full URL in "error sending request", and the query may hold a secret.
+    /// Every error string (the Retrying reason and the final message) must be URL-stripped, yet
+    /// still say which host failed.
+    #[tokio::test]
+    async fn a_refused_connection_does_not_leak_query_values_into_error_text() {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port() // dropped: nothing listens, the connect is refused
+        };
+        let mut cfg = Config::new(WireFormat::ChatCompletions, format!("http://127.0.0.1:{port}/openai/deployments/d"), "m");
+        cfg.max_retries = 1;
+        cfg.extra_query = vec![("code".into(), "SECRET-Q".into())];
+        let req = Request { messages: vec![Message::user("hi")], ..Default::default() };
+        let reasons = std::sync::Mutex::new(Vec::<String>::new());
+        let err = Client::new(cfg)
+            .complete(&req, &CancellationToken::new(), |e| {
+                if let Event::Retrying { reason, .. } = e {
+                    reasons.lock().unwrap().push(reason);
+                }
+            })
+            .await
+            .unwrap_err();
+        let reasons = reasons.into_inner().unwrap();
+        assert_eq!(reasons.len(), 1, "one retry was reported: {reasons:?}");
+        for text in reasons.iter().chain(std::iter::once(&err.message)) {
+            assert!(!text.contains("SECRET-Q"), "query value leaked: {text}");
+            assert!(!text.contains("code="), "query string leaked: {text}");
+        }
+        assert!(err.message.starts_with("request failed:"), "{}", err.message);
+        let target = format!("(POST http://127.0.0.1:{port}/openai/deployments/d/chat/completions)");
+        assert!(err.message.ends_with(&target), "still names the host and path: {}", err.message);
+        assert!(err.message.contains("Connection refused") || err.message.contains("connect"), "and the cause: {}", err.message);
+    }
+
+    /// The same for a body that breaks after the headers: the stream error must not carry the URL.
+    #[tokio::test]
+    async fn a_broken_stream_does_not_leak_query_values_into_error_text() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 16384];
+            let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+            // A chunk that promises more bytes than it sends, then the connection drops.
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n20\r\ndata: {")
+                .await;
+        });
+        let mut cfg = Config::new(WireFormat::ChatCompletions, format!("http://127.0.0.1:{port}/v1"), "m");
+        cfg.max_retries = 0;
+        cfg.extra_query = vec![("code".into(), "SECRET-Q".into())];
+        let req = Request { messages: vec![Message::user("hi")], ..Default::default() };
+        let err = Client::new(cfg).complete(&req, &CancellationToken::new(), |_| {}).await.unwrap_err();
+        assert!(!err.message.contains("SECRET-Q") && !err.message.contains("code="), "{}", err.message);
+    }
+
+    /// Azure OpenAI through a query string on the base URL (the row's UNKNOWN, now measured): the path
+    /// is appended after the query, so the URL is wrong. Use `extra_query` instead.
+    #[test]
+    fn a_query_string_on_the_base_url_ends_up_before_the_path() {
+        let cfg = Config::new(WireFormat::ChatCompletions, "https://x.openai.azure.com/openai/deployments/d?api-version=2024-10-21", "m");
+        assert_eq!(wire::url(&cfg), "https://x.openai.azure.com/openai/deployments/d?api-version=2024-10-21/chat/completions");
+    }
 
     #[test]
     fn the_session_id_goes_under_each_named_header() {

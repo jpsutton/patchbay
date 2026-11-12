@@ -1,5 +1,7 @@
 # patchbayd on Windows: managed updates with winget
 
+> **Not working yet:** the manifest fails to parse and the installed daemon cannot find its UI (pb-20261111-25/-26). Use the release zip.
+
 The Windows daemon is a zip with no updater of its own. This sets up `winget` to install and update it from a manifest Patchbay publishes on GitHub Pages. Nothing is submitted to Microsoft's winget-pkgs.
 
 ## Use it

@@ -11,7 +11,7 @@ import {
 } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { PermissionRulesList } from "./PermissionRules";
-import { Choice, Deferred, LongText, Row } from "./PreferencesPage";
+import { Choice, Deferred, Row } from "./PreferencesPage";
 import { Toggle } from "../components/Toggle";
 import { input } from "./ProviderPage";
 import { Dot } from "../components/Dot";
@@ -209,12 +209,6 @@ function PatchbayModelSettings() {
     <>
       <Row label="Web fetch tool" hint="Let the agent download web pages you or it reference.">
         <Toggle label="Web fetch tool" checked={prefs.webFetch} onChange={(webFetch) => update({ webFetch })} />
-      </Row>
-      <Row
-        label="Compact prompts"
-        hint="Send the agent's own prompts and tool descriptions in a shortened form (about a fifth less prompt text) and ask it to reply tersely, like the caveman plugin: no articles, filler or hedging, code and errors exact. Saves input and output tokens. Each session can switch it in its own options."
-      >
-        <Toggle label="Compact prompts" checked={prefs.minifyPrompts} onChange={(minifyPrompts) => update({ minifyPrompts })} />
       </Row>
       <Row
         label="Web search (Brave)"
@@ -666,16 +660,17 @@ export function AgentsPage({ list, onOpen }: { list: AgentList; onOpen: (id: Age
         />
       </Row>
       <div className="pt-3">
-        <div className="text-sm">Custom instructions</div>
+        <div className="text-sm">Agent prompt</div>
         <div className="mt-0.5 text-xs text-muted">
-          Added to the agent's system prompt in every Code session, alongside the project's AGENTS.md. Each agent's page
-          says whether it receives them.
+          Custom instructions, compact prompts, CLAUDE.md and AGENTS.md files and skills now live together under{" "}
+          <button
+            className="text-accent-ink underline underline-offset-2"
+            onClick={() => useStore.getState().openSettingsAt("agent-prompt")}
+          >
+            Agent prompt
+          </button>
+          , with a preview of the prompt they build.
         </div>
-        <LongText
-          value={prefs.agentInstructions}
-          placeholder="e.g. Run the test suite after changing code. Never commit without asking."
-          onCommit={(v) => update({ agentInstructions: v })}
-        />
       </div>
 
       <div className="pt-3 text-sm">Agents</div>

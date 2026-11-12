@@ -290,9 +290,28 @@ async fn save_provider(state: &AppState, input: ProviderInput) -> CmdResult<Prov
     Ok(saved)
 }
 
+/// The names of a provider's extra headers and query parameters; the values never leave Rust.
+async fn provider_extras(state: &AppState, id: String) -> CmdResult<db::ExtraNames> {
+    Ok(state.db.provider_extra_names(&id)?)
+}
+
+/// Save a provider's extra headers and query parameters (values to the keyring only).
+async fn set_provider_extras(
+    state: &AppState,
+    id: String,
+    headers: Vec<providers::ExtraEntry>,
+    query: Vec<providers::ExtraEntry>,
+) -> CmdResult<db::ExtraNames> {
+    if state.db.get_provider(&id)?.is_none() {
+        return Err(CmdError("provider not found".into()));
+    }
+    providers::set_extras(&state.db, &providers::Keyring, &id, &headers, &query)?;
+    Ok(state.db.provider_extra_names(&id)?)
+}
+
 async fn delete_provider(state: &AppState, id: String) -> CmdResult<()> {
     providers::delete_key(&id);
-    state.db.delete_provider(&id)?;
+    providers::delete_provider_with(&state.db, &providers::Keyring, &id)?;
     state.mesh.secrets_changed();
     Ok(())
 }
@@ -320,7 +339,8 @@ async fn discover_models(
         }
         providers::Auth::Key => providers::load_key(&p.id, inline.as_deref()),
     };
-    Ok(providers::discover_models_for(&p.kind, &p.base_url, key.as_deref(), auth, grok_user.as_deref()).await?)
+    let extras = providers::required_extras(&state.db, &providers::Keyring, &p.id)?;
+    Ok(providers::discover_models_for(&p.kind, &p.base_url, key.as_deref(), auth, grok_user.as_deref(), &extras).await?)
 }
 
 async fn list_models(state: &AppState) -> CmdResult<Vec<Model>> {
@@ -390,7 +410,10 @@ async fn get_preferences(state: &AppState) -> CmdResult<prefs::Preferences> {
     Ok(prefs::load(&state.db))
 }
 
-/// One clip from a speech server. The window or browser plays the bytes; this process holds the key.
+/// Speech from a speech server, streamed to the screen that asked as the server makes it (see
+/// `speech::SpeechEvent`). The screen plays it; this process holds the key. Returns when the
+/// audio has all been sent or `cancel_speech(stream_id)` ended it.
+#[allow(clippy::too_many_arguments)]
 async fn synthesize_speech(
     state: &AppState,
     provider_id: String,
@@ -398,8 +421,19 @@ async fn synthesize_speech(
     model: String,
     voice: String,
     text: String,
-) -> CmdResult<speech::SpeechAudio> {
-    Ok(speech::synthesize(&state.db, &provider_id, &base_url, &model, &voice, &text).await?)
+    stream_id: String,
+    on_audio: Chan<speech::SpeechEvent>,
+) -> CmdResult<()> {
+    Ok(speech::synthesize_stream(&state.db, &provider_id, &base_url, &model, &voice, &text, &stream_id, |ev| {
+        on_audio.send(ev)
+    })
+    .await?)
+}
+
+/// Stop a `synthesize_speech` request: its connection to the speech server is dropped.
+async fn cancel_speech(_state: &AppState, stream_id: String) -> CmdResult<()> {
+    speech::cancel_stream(&stream_id);
+    Ok(())
 }
 
 /// Part of a reply, rewritten by the user's chosen model so it reads well aloud.
@@ -454,6 +488,24 @@ async fn claude_overview(state: &AppState, cwd: Option<String>) -> CmdResult<ser
     let prefs = prefs::load(&state.db);
     let cwd = cwd.map(std::path::PathBuf::from);
     Ok(tokio::task::spawn_blocking(move || code::native::claude_overview(&prefs, cwd.as_deref())).await.map_err(anyhow::Error::from)?)
+}
+
+/// What goes into Patchbay's agent prompt for `model_ref` in `cwd`'s project, for Settings.
+async fn agent_prompt_preview(
+    state: &AppState,
+    cwd: Option<String>,
+    model_ref: Option<String>,
+    minify: Option<bool>,
+) -> CmdResult<serde_json::Value> {
+    let prefs = prefs::load(&state.db);
+    let (model_name, prefix) = match model_ref.as_deref().filter(|r| !r.is_empty()).map(|r| providers::resolve(&state.db, r)) {
+        Some(Ok(r)) => (r.model.display_name.clone(), providers::system_prefix(&r).into_iter().map(|b| b.text).collect()),
+        _ => ("the selected model".to_owned(), Vec::new()),
+    };
+    let cwd = cwd.map(std::path::PathBuf::from);
+    Ok(tokio::task::spawn_blocking(move || code::native::agent_prompt_preview(&prefs, cwd.as_deref(), &model_name, prefix, minify))
+        .await
+        .map_err(anyhow::Error::from)?)
 }
 
 async fn set_web_search_key(state: &AppState, key: String) -> CmdResult<()> {

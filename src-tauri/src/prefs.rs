@@ -75,6 +75,9 @@ pub struct Preferences {
     pub read_aloud_server_voice: String,
     /// An `openai_chat` provider whose key and base URL to use. Empty means the URL above, with no key.
     pub read_aloud_server_provider_id: String,
+    /// Samples per second of the raw PCM (s16le, mono) the speech server streams. The request has
+    /// no field for it, so this must match what the server sends: OpenAI and most servers send 24000.
+    pub read_aloud_server_sample_rate: u32,
     /// Model ref that rewrites each reply for the ear before it is spoken (file names, code and
     /// numbers read naturally). Empty means off: the reply is cleaned up with local rules only.
     pub read_aloud_rewrite_model: String,
@@ -145,6 +148,10 @@ pub struct ClaudeConfig {
     pub disabled_plugins: Vec<String>,
     /// MCP servers from Claude's config that Patchbay's agent doesn't start, by name.
     pub disabled_mcp_servers: Vec<String>,
+    /// Instruction files (CLAUDE.md, AGENTS.md, rules) Patchbay's agent doesn't load, by full path.
+    pub disabled_instructions: Vec<String>,
+    /// Skills Patchbay's agent doesn't load, by name (`plugin:name` for a plugin's).
+    pub disabled_skills: Vec<String>,
 }
 
 /// Limits of Patchbay's own agent. `None` = the agent's default.
@@ -198,6 +205,8 @@ impl Default for ClaudeConfig {
             plugins: true,
             disabled_plugins: Vec::new(),
             disabled_mcp_servers: Vec::new(),
+            disabled_instructions: Vec::new(),
+            disabled_skills: Vec::new(),
         }
     }
 }
@@ -226,6 +235,7 @@ impl Default for Preferences {
             read_aloud_server_model: String::new(),
             read_aloud_server_voice: String::new(),
             read_aloud_server_provider_id: String::new(),
+            read_aloud_server_sample_rate: 24_000,
             read_aloud_rewrite_model: String::new(),
             default_agent: "patchbay".into(),
             agent_paths: Default::default(),
@@ -300,6 +310,9 @@ impl Preferences {
         short_setting("speech server voice", &self.read_aloud_server_voice, 80)?;
         short_setting("speech provider", &self.read_aloud_server_provider_id, 80)?;
         short_setting("speech rewrite model", &self.read_aloud_rewrite_model, 80)?;
+        if !(8_000..=96_000).contains(&self.read_aloud_server_sample_rate) {
+            return Err("speech server sample rate must be between 8000 and 96000 Hz".into());
+        }
         let url = self.read_aloud_server_url.trim();
         if !url.is_empty() {
             if url.len() > 500 || !(url.starts_with("https://") || url.starts_with("http://")) {
@@ -449,5 +462,8 @@ mod tests {
         assert!(bad(|p| p.terminal_shell = "/no/such/shell".into()));
         assert!(bad(|p| p.read_aloud_engine = "whisper".into()));
         assert!(bad(|p| p.read_aloud_server_url = "file:///tmp/voice".into()));
+        assert!(bad(|p| p.read_aloud_server_sample_rate = 0));
+        assert!(bad(|p| p.read_aloud_server_sample_rate = 192_000));
+        assert!(!bad(|p| p.read_aloud_server_sample_rate = 44_100));
     }
 }
