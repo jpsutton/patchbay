@@ -3013,6 +3013,7 @@ async fn a_failed_peer_message_turn_logs_msg_turn_failed_with_a_code() {
     let failed = |id: &str, origin: &str, resets_at| {
         code::acp::CodeEvent::TurnFailed { prompt_id: id.into(), origin: origin.into(), kind: "usage_limit_exceeded".into(), resets_at }
     };
+    let before = n.events.lock().unwrap().len();
     on_code_event(&n.state, envelope("session-tgt", failed("m1", "agent:node-a:session-src", Some(1794449520))));
     on_code_event(&n.state, envelope("session-tgt", failed("m2", "me", None)));
     let lines = lines_with(&log, "msg_turn_failed");
@@ -3023,8 +3024,17 @@ async fn a_failed_peer_message_turn_logs_msg_turn_failed_with_a_code() {
     on_code_event(&n.state, envelope("session-tgt", failed("m3", "agent:node-a:session-src", None)));
     let last = lines_with(&log, "msg_turn_failed").pop().unwrap();
     assert!(last.contains("message_id=m3") && !last.contains("resets_at"), "no reset time, no field: {last}");
-    // It is a log-only event: nothing was emitted to a window or the mesh for it.
-    assert!(n.events.lock().unwrap().iter().all(|(name, _)| !name.contains("turn")), "{:?}", n.events.lock().unwrap());
+    // It is a log-only event: nothing was emitted to a window or the mesh for it. (Without the early
+    // return, serde cannot serialize the variant and the sink would get a null payload instead.)
+    let after_failed = n.events.lock().unwrap().clone(); // one lock: a failure message must not lock again
+    assert_eq!(after_failed.len(), before, "TurnFailed reached the sink: {after_failed:?}");
+    // The sink does see ordinary events, so "no new event" above means something.
+    on_code_event(&n.state, envelope("session-tgt", code::acp::CodeEvent::PromptDone { stop_reason: json!("error") }));
+    let seen = n.events.lock().unwrap().clone();
+    assert_eq!(seen.len(), before + 1, "{seen:?}");
+    let (name, payload) = seen.last().unwrap();
+    assert_eq!(name, "code://event");
+    assert!(!payload.is_null() && payload.to_string().contains("promptDone"), "{payload}");
 }
 
 /// The last night's stall, as one grep: a message that was delivered and whose turn failed (the
