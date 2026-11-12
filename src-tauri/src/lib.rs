@@ -4098,6 +4098,34 @@ fn coalesce_term_input(
     (method, params)
 }
 
+/// Source-level stand-in for running a build without the scratch overlay (nothing is launched, no
+/// HOME is overridden): the real build's identifier IS the default folder's name, so it gets
+/// unscoped keychain names and the live data; the overlay's identifier is not, so it is scoped.
+#[cfg(test)]
+#[test]
+fn only_the_overlay_identifier_is_scoped_away_from_the_live_folder() {
+    let id_of = |json: &str| serde_json::from_str::<serde_json::Value>(json).unwrap()["identifier"].as_str().unwrap().to_owned();
+    let real = id_of(include_str!("../tauri.conf.json"));
+    let scratch = id_of(include_str!("../tauri.scratch.conf.json"));
+    assert_eq!(real, DEFAULT_APP_ID, "the real app's data folder is the default one");
+    assert_ne!(scratch, DEFAULT_APP_ID);
+    let base = default_data_dir().unwrap().parent().unwrap().to_owned();
+    assert_eq!(mesh::keys::data_dir_scope(&base.join(&real)), None, "overlay removed: the live folder, unscoped names");
+    assert!(mesh::keys::data_dir_scope(&base.join(&scratch)).is_some(), "overlay applied: its own scope");
+}
+
+/// Opening a state on a non-default folder sets the keychain scope (deleting that call used to
+/// leave every non-ignored test green). Every folder tests open is non-default.
+#[cfg(test)]
+#[test]
+fn opening_a_state_on_a_non_default_folder_sets_the_keychain_scope() {
+    let dir = std::env::temp_dir().join(format!("pb-scope-open-{}", db::new_id()));
+    let state = open_state(dir.clone(), std::sync::Arc::new(|_: &str, _: serde_json::Value| {})).unwrap();
+    assert!(matches!(providers::keyring_scope_for_tests(), Some(Some(_))), "{:?}", providers::keyring_scope_for_tests());
+    drop(state);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[cfg(test)]
 #[test]
 fn coalesce_term_input_merges_writes_in_order() {
@@ -4337,12 +4365,16 @@ async fn usage_report(state: &AppState, days: u32) -> CmdResult<UsageReport> {
     })
 }
 
+/// The identifier of the real app: `tauri.conf.json` carries it, and the folder named after it is
+/// the one `default_data_dir` returns, which is what keeps its keychain names unscoped.
+pub const DEFAULT_APP_ID: &str = "dev.patchbay.app";
+
 /// Where the desktop app keeps its data (Tauri's `app_data_dir` for `dev.patchbay.app`), so the
 /// daemon can take over a computer's existing setup. Its mesh secrets use the keyring's unscoped
 /// names (see `OsKeyStore`).
 pub fn default_data_dir() -> anyhow::Result<PathBuf> {
     use anyhow::Context as _;
-    const ID: &str = "dev.patchbay.app";
+    const ID: &str = DEFAULT_APP_ID;
     let home = || std::env::var_os("HOME").map(PathBuf::from).context("HOME is not set");
     if cfg!(target_os = "macos") {
         return Ok(home()?.join("Library/Application Support").join(ID));
@@ -4392,7 +4424,10 @@ pub fn data_dir_busy(data_dir: &std::path::Path) -> String {
 /// `open_state` for a caller that already holds the folder's lock (`lock_data_dir`).
 pub fn open_locked_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow::Result<AppState> {
     let db = Arc::new(Db::open(&data_dir.join("patchbay.sqlite"))?);
-    providers::set_keyring_scope(mesh::keys::data_dir_scope(&data_dir));
+    providers::set_keyring_scope(mesh::keys::data_dir_scope(&data_dir))?;
+    // Tests open many states against the real keychain; the copy has its own tests with a fake one.
+    #[cfg(not(test))]
+    providers::copy_unscoped_keys(&db);
     let keys = Arc::new(mesh::keys::OsKeyStore::new(&data_dir));
     let mesh = Mesh::new(db.clone(), data_dir.clone(), keys)?;
     let mcp_log_path = data_dir.join("logs").join("agent-messaging-mcp.log");
