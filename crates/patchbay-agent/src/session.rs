@@ -648,4 +648,45 @@ mod tests {
             self.data.clone()
         }
     }
+
+    /// The escape directions of `may_read`, on their own (the test above stops at its first
+    /// in-root assert on Windows, so these never ran there): what lies outside the working
+    /// directory asks first, however the path is spelled.
+    #[tokio::test]
+    async fn may_read_refuses_what_lies_outside_the_working_directory() {
+        let base = std::env::temp_dir().join(format!("pb-mayread-out-{}", uuid::Uuid::new_v4()));
+        let cwd = base.join("work");
+        let data = base.join("data");
+        let id = "0b91d1a5-9d5e-4a2b-8c3f-1e2d3c4b5a6a";
+        std::fs::create_dir_all(cwd.join("src")).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "s").unwrap();
+        std::fs::write(base.join("stolen.txt"), "s").unwrap();
+        std::fs::write(cwd.join("src/main.rs"), "fn main() {}").unwrap();
+
+        let (a, b) = tokio::io::duplex(64);
+        let (peer, _incoming) = crate::rpc::connect(a, b);
+        let host = Arc::new(TestHost { data });
+        let s = Session::new(id.into(), cwd.clone(), host, peer, "pb-mock".into(), Mode::Default);
+
+        assert!(!s.may_read(&outside.join("secret.txt")));
+        assert!(!s.may_read(&base.join("stolen.txt")));
+        assert!(!s.may_read(&cwd.join("../stolen.txt")));
+        assert!(!s.may_read(&cwd.join("src/../../stolen.txt")));
+        // The control, so the refusals are not just "everything is refused": an existing file in the cwd.
+        assert!(s.may_read(&cwd.join("src/main.rs")));
+        #[cfg(windows)]
+        {
+            let r = cwd.display();
+            assert!(!s.may_read(std::path::Path::new(&format!("{r}\\src/..\\../stolen.txt"))), "mixed separators");
+            // A junction in the cwd that points outside it.
+            let out = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(cwd.join("link")).arg(&outside).output().unwrap();
+            assert!(out.status.success(), "mklink /J failed");
+            assert!(!s.may_read(&cwd.join("link/secret.txt")), "a file behind a junction");
+            assert!(!s.may_read(&cwd.join("link/newfile.txt")), "a new file behind a junction");
+        }
+    }
+
 }

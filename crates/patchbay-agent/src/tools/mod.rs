@@ -393,4 +393,165 @@ mod tests {
         assert!(c.starts_with("aaaaaaaaaa\n…[80 characters cut]…\naaaaaaaaaa"), "{c}");
         assert_eq!(clip_middle("short", 20), "short");
     }
+
+    // --- pb-20261111-71: the sandbox boundary on Windows -----------------------------------
+    // Until now no test exercised an ESCAPE on Windows: the symlink test is `cfg(unix)`, and on
+    // the Windows runner the two tests that fail (`insideness_folds_dotdot`, the `may_read` one)
+    // stop at their first, in-root assert, so the escape asserts after it never ran. These run
+    // the escape directions on their own, on every platform, and add the Windows-only ones
+    // (a junction, a directory symlink, an 8.3 short-name alias, mixed separators).
+
+    fn scratch(tag: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("pb-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    /// `..` out of the root is outside, however it is written.
+    #[test]
+    fn dotdot_out_of_the_root_is_not_inside() {
+        let base = scratch("dotdot");
+        let root = base.join("work");
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        assert!(!inside(&root, &root.join("../outside.txt")));
+        assert!(!inside(&root, &root.join("a/../../outside.txt")));
+        assert!(!inside(&root, &root.join("a/../..")));
+        // A sibling whose name starts with the root's name is not under it.
+        assert!(!inside(&root, &base.join("work-evil/x.txt")));
+        // The control: staying under the root with `..` that does not climb out. The path
+        // exists, so both sides resolve alike (a path that does not exist yet is the over-deny).
+        std::fs::write(root.join("a/in.txt"), "x").unwrap();
+        assert!(inside(&root, &root.join("a/../a/in.txt")));
+    }
+
+    /// An absolute path somewhere else is outside.
+    #[test]
+    fn an_absolute_path_elsewhere_is_not_inside() {
+        let base = scratch("elsewhere");
+        let root = base.join("work");
+        std::fs::create_dir_all(&root).unwrap();
+        #[cfg(unix)]
+        let elsewhere = PathBuf::from("/etc/passwd");
+        #[cfg(windows)]
+        let elsewhere = PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into())).join("System32");
+        assert!(!inside(&root, &elsewhere));
+    }
+
+    /// Windows accepts `\` and `/` in one path: `..` written either way must climb out all the same.
+    #[test]
+    #[cfg(windows)]
+    fn dotdot_with_mixed_separators_is_not_inside() {
+        let base = scratch("mixed");
+        let root = base.join("work");
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::write(base.join("stolen.txt"), "s").unwrap();
+        let r = root.display();
+        for escape in [
+            format!("{r}\\a/../..\\stolen.txt"),
+            format!("{r}/a\\..\\../stolen.txt"),
+            format!("{r}\\..\\stolen.txt"),
+            format!("{r}/../stolen.txt"),
+            format!("{r}\\a\\..\\..\\stolen.txt"),
+        ] {
+            assert!(!inside(&root, Path::new(&escape)), "mixed separators escaped the root: {escape}");
+        }
+        // The control: the same mixture that stays under the root, on a file that exists.
+        std::fs::write(root.join("a/in.txt"), "x").unwrap();
+        assert!(inside(&root, Path::new(&format!("{r}\\a/../a\\in.txt"))));
+    }
+
+    #[cfg(windows)]
+    fn junction(link: &Path, target: &Path) {
+        // `mklink /J` makes a directory junction and needs no privilege.
+        let out = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(link).arg(target).output().unwrap();
+        assert!(out.status.success(), "mklink /J failed: {} {}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// A junction inside the root that points outside it: what lies behind it is outside, whether
+    /// the file exists or is about to be written.
+    #[test]
+    #[cfg(windows)]
+    fn a_junction_out_of_the_root_is_not_inside() {
+        let base = scratch("junction");
+        let root = base.join("work");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "s").unwrap();
+        std::fs::write(base.join("stolen.txt"), "s").unwrap();
+        std::fs::write(root.join("real/in.txt"), "x").unwrap();
+        junction(&root.join("link"), &outside);
+
+        assert!(!inside(&root, &root.join("link/secret.txt")), "an existing file behind a junction");
+        assert!(!inside(&root, &root.join("link/newfile.txt")), "a new file behind a junction");
+        assert!(!inside(&root, &root.join("link")), "the junction itself names a place outside");
+        assert!(!inside(&root, &root.join("link/../stolen.txt")), "junction + .. escaped the root");
+        // The controls: a real directory under the root stays inside, so the asserts above are not vacuous.
+        assert!(inside(&root, &root.join("real/in.txt")));
+        // A junction that points back inside stays inside.
+        junction(&root.join("inlink"), &root.join("real"));
+        assert!(inside(&root, &root.join("inlink/in.txt")));
+    }
+
+    /// A directory symlink needs a privilege (or developer mode) to create: where it cannot be made
+    /// the test says so and returns; the GitHub runner can.
+    #[test]
+    #[cfg(windows)]
+    fn a_directory_symlink_out_of_the_root_is_not_inside() {
+        let base = scratch("dirsym");
+        let root = base.join("work");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "s").unwrap();
+        if let Err(e) = std::os::windows::fs::symlink_dir(&outside, root.join("link")) {
+            eprintln!("skipped: cannot create a directory symlink here ({e})");
+            return;
+        }
+        assert!(!inside(&root, &root.join("link/secret.txt")));
+        assert!(!inside(&root, &root.join("link/newfile.txt")));
+        assert!(!inside(&root, &root.join("link")));
+    }
+
+    #[cfg(windows)]
+    fn short_path(p: &Path) -> PathBuf {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        unsafe extern "system" {
+            fn GetShortPathNameW(long: *const u16, short: *mut u16, len: u32) -> u32;
+        }
+        let wide: Vec<u16> = p.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut buf = vec![0u16; 1024];
+        // SAFETY: `wide` is NUL-terminated and `buf` is as long as the length passed.
+        let n = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) } as usize;
+        assert!(n > 0 && n < buf.len(), "GetShortPathNameW failed for {}", p.display());
+        PathBuf::from(std::ffi::OsString::from_wide(&buf[..n]))
+    }
+
+    /// A place outside the root reached by its 8.3 short name is still outside, and a place inside
+    /// the root reached by its short name is still inside (both sides must agree on the spelling).
+    #[test]
+    #[cfg(windows)]
+    fn an_8_3_short_name_alias_cannot_hide_a_place_outside_the_root() {
+        let base = scratch("short");
+        let root = base.join("work_directory_with_a_long_name");
+        let outside = base.join("outside_directory_with_a_long_name");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "s").unwrap();
+        std::fs::write(root.join("in.txt"), "x").unwrap();
+        let (short_outside, short_root) = (short_path(&outside), short_path(&root));
+        if short_outside == outside || short_root == root {
+            eprintln!("skipped: this volume does not make 8.3 short names");
+            return;
+        }
+        // Outside, by its short name: an existing file and one about to be written.
+        assert!(!inside(&root, &short_outside.join("secret.txt")), "existing file via an 8.3 alias");
+        assert!(!inside(&root, &short_outside.join("newfile.txt")), "new file via an 8.3 alias");
+        assert!(!inside(&short_root, &outside.join("secret.txt")), "root by short name, file by long name");
+        // Inside, by either spelling of either side, for a file that exists.
+        assert!(inside(&root, &short_root.join("in.txt")));
+        assert!(inside(&short_root, &root.join("in.txt")));
+        assert!(inside(&short_root, &short_root.join("in.txt")));
+    }
+
 }
