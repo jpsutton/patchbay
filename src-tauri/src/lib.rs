@@ -1098,6 +1098,13 @@ fn outbound_provider_report<L: serde::Serialize>(account_id: &str, limits: &L) -
 
 fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     use code::acp::CodeEvent;
+    // The delivery log (pb-20261111-46): a peer message's turn starting or failing.
+    if let Some(bridge) = state.agent_message_bridge.get() {
+        bridge.log_code_event(&env.code_session_id, &env.event);
+    }
+    if matches!(env.event, CodeEvent::TurnFailed { .. }) {
+        return; // log only: it is not a transcript event
+    }
     // A session on a Grok login has no response headers to read its usage from: ask the billing
     // endpoint after each model call and each finished turn (at most once per gap per login).
     if matches!(env.event, CodeEvent::ContextUsage { .. } | CodeEvent::SessionStatus { .. } | CodeEvent::PromptDone { .. })
@@ -2827,6 +2834,9 @@ async fn deliver_agent_message_local(
         code::acp::Delivery::Steered => "steered",
         code::acp::Delivery::Queued => "queued",
     };
+    if let Some(bridge) = state.agent_message_bridge.get() {
+        bridge.log_message_delivery(&prompt_id, source_session_id, target_session_id, delivery_str);
+    }
     Ok(serde_json::json!({
         "targetSessionId": target_session_id,
         "targetTitle": target.title,

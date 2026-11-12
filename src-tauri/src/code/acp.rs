@@ -98,6 +98,16 @@ pub enum CodeEvent {
         message: String,
         quiet_secs: u64,
     },
+    /// Patchbay's own, for the delivery log (pb-20261111-46): a turn ended in an error. Structured
+    /// codes only (never the agent's error text, which can carry account details). Never reaches a
+    /// window: `on_code_event` logs it and stops.
+    #[serde(skip)]
+    TurnFailed {
+        prompt_id: String,
+        origin: String,
+        kind: String,
+        resets_at: Option<u64>,
+    },
     #[serde(rename_all = "camelCase")]
     PromptDone {
         stop_reason: Value,
@@ -459,6 +469,38 @@ fn transport_backoff(attempt: u32) -> std::time::Duration {
     }
 }
 
+/// A structured error code: what an agent puts in `data` to name a failure, never prose.
+fn is_code_token(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 48 && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// What went wrong with a turn, as a structured code, plus when the agent says it may be retried
+/// (epoch seconds or milliseconds, as sent). Reads `data.errorKind`, `data.codex_error_info` and
+/// `data.error_kind` when they are code tokens (Claude's and Codex's own names, `usage_limit_exceeded`
+/// among them); otherwise the JSON-RPC code. NEVER the message: it can carry account details.
+fn failure_kind(e: &acp::Error) -> (String, Option<u64>) {
+    let data = e.data.as_ref();
+    let kind = ["errorKind", "codex_error_info", "error_kind"]
+        .iter()
+        .find_map(|k| data.and_then(|d| d[*k].as_str()).filter(|s| is_code_token(s)))
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("rpc_{}", i32::from(e.code)));
+    let resets_at = ["resetsAt", "resets_at", "reset_at"]
+        .iter()
+        .find_map(|k| data.and_then(|d| d[*k].as_u64()));
+    (kind, resets_at)
+}
+
+/// The delivery log's record that the turn for `msg` failed (see `CodeEvent::TurnFailed`).
+fn turn_failed(msg: &UserMessage, kind: &str, resets_at: Option<u64>) -> CodeEvent {
+    CodeEvent::TurnFailed {
+        prompt_id: msg.id.clone(),
+        origin: msg.origin.clone(),
+        kind: kind.to_owned(),
+        resets_at,
+    }
+}
+
 /// Start a turn for `msg` with `session/prompt`.
 fn start_turn(ctx: &TurnCtx, msg: UserMessage) -> Result<Delivery> {
     emit(&ctx.sink, &ctx.csid, msg.event(Delivery::Sent));
@@ -474,6 +516,7 @@ fn start_turn(ctx: &TurnCtx, msg: UserMessage) -> Result<Delivery> {
                 Ok(r) => r,
                 Err(e) => {
                     emit(sink, csid, CodeEvent::Error { message: format!("{e:#}") });
+                    emit(sink, csid, turn_failed(&msg, "bad_request", None));
                     emit(sink, csid, CodeEvent::PromptDone { stop_reason: json!("error") });
                     break false;
                 }
@@ -498,6 +541,7 @@ fn start_turn(ctx: &TurnCtx, msg: UserMessage) -> Result<Delivery> {
                         ctx.auth_lost.set(true);
                         emit(sink, csid, CodeEvent::AuthRequired { message, methods: ctx.auth_methods.clone() });
                     }
+                    emit(sink, csid, turn_failed(&msg, "auth_required", None));
                     emit(sink, csid, CodeEvent::PromptDone { stop_reason: json!("error") });
                     break false;
                 }
@@ -516,6 +560,7 @@ fn start_turn(ctx: &TurnCtx, msg: UserMessage) -> Result<Delivery> {
                 }
                 Err(e) if is_session_lost(&e) => {
                     emit(sink, csid, CodeEvent::SessionLost { message: msg.clone(), error: e.to_string() });
+                    emit(sink, csid, turn_failed(&msg, "session_lost", None));
                     emit(sink, csid, CodeEvent::PromptDone { stop_reason: json!("error") });
                     break false;
                 }
@@ -529,6 +574,8 @@ fn start_turn(ctx: &TurnCtx, msg: UserMessage) -> Result<Delivery> {
                         e.to_string()
                     };
                     emit(sink, csid, CodeEvent::Error { message });
+                    let (kind, resets_at) = failure_kind(&e);
+                    emit(sink, csid, turn_failed(&msg, &kind, resets_at));
                     emit(sink, csid, CodeEvent::PromptDone { stop_reason: json!("error") });
                     break false;
                 }
@@ -2810,9 +2857,9 @@ mod tests {
     use super::{
         AgentCmd, AuthChoice, CodeEvent, ConfigIds, Delivery, Envelope, RewindPoint, SessionConfig, SpawnSpec, Steer,
         Steered, UserMessage, auth_choices, auth_metas, is_retriable_transport, is_session_lost, merge_config, pick_rewind_point,
-        steer_outcome, terminal_auth_command,
+        steer_outcome, terminal_auth_command, failure_kind, is_code_token,
     };
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -3132,6 +3179,11 @@ for line in sys.stdin:
         if t == "crash":
             send({"jsonrpc": "2.0", "id": i, "error": {"code": -32603, "message": "Internal error: boom",
                   "data": {"errorKind": "unknown"}}})
+            continue
+        if t == "usage-limit":
+            send({"jsonrpc": "2.0", "id": i, "error": {"code": -32603,
+                  "message": "Internal error: You hit your usage limit ACCOUNT-DETAIL-SECRET, try again at 9:52 PM.",
+                  "data": {"codex_error_info": "usage_limit_exceeded", "resets_at": 1794449520}}})
             continue
         if t == "always-flaky" or (t == "flaky" and flaky_left > 0):
             if t == "flaky":
@@ -4414,4 +4466,61 @@ for line in sys.stdin:
         assert!(matches!(steer_outcome(&json!({ "outcome": "failed" })), Steered::No));
         assert!(matches!(steer_outcome(&json!(null)), Steered::No));
     }
+
+    /// A provider's usage limit comes back as a JSON-RPC error whose `data` names it. The turn's
+    /// failure reaches the delivery log as codes only: the agent's text (it can name the account)
+    /// stays in the transcript's error and nowhere else.
+    #[test]
+    fn a_usage_limit_error_becomes_a_structured_turn_failed_event() {
+        let dir = std::env::temp_dir().join(format!("pb-limit-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent(&dir) else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        wait_for(&events, "authRequired", |evs| auth_events(evs) == 1);
+        authenticate(&tx, "api-key", Some("sk-test")).unwrap();
+        wait_for(&events, "sessionReady", |evs| evs.iter().any(|e| matches!(e, CodeEvent::SessionReady { .. })));
+        let msg = UserMessage {
+            id: "peer-limit".into(),
+            blocks: vec![json!({ "type": "text", "text": "usage-limit" })],
+            text: "usage-limit".into(),
+            origin: "agent:node-a:session-b".into(),
+            attachments: json!([]),
+        };
+        tx.send(AgentCmd::Prompt { msg, force: false, reply: None }).unwrap();
+        wait_for(&events, "promptDone", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 1);
+        let evs = events.lock().unwrap();
+        let at = evs.iter().position(|e| matches!(e, CodeEvent::TurnFailed { .. })).expect("a TurnFailed event");
+        match &evs[at] {
+            CodeEvent::TurnFailed { prompt_id, origin, kind, resets_at } => {
+                assert_eq!(prompt_id, "peer-limit");
+                assert_eq!(origin, "agent:node-a:session-b");
+                assert_eq!(kind, "usage_limit_exceeded");
+                assert_eq!(*resets_at, Some(1794449520));
+            }
+            _ => unreachable!(),
+        }
+        let shown = format!("{:?}", evs[at]);
+        assert!(!shown.contains("ACCOUNT-DETAIL-SECRET") && !shown.contains("9:52"), "{shown}");
+        assert!(
+            evs[at..].iter().any(|e| matches!(e, CodeEvent::PromptDone { stop_reason } if stop_reason == "error")),
+            "the failure is reported before the turn is marked done"
+        );
+        drop(evs);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn failure_kind_reads_codes_never_prose() {
+        let e = |data: Value| super::acp::Error::new(-32603, "Internal error: ACCOUNT-DETAIL-SECRET").data(data);
+        assert_eq!(failure_kind(&e(json!({ "errorKind": "authentication_failed" }))).0, "authentication_failed");
+        assert_eq!(failure_kind(&e(json!({ "codex_error_info": "usage_limit_exceeded", "resets_at": 5 }))), ("usage_limit_exceeded".to_owned(), Some(5)));
+        // Prose in a code field is not a code: fall back to the JSON-RPC code.
+        assert_eq!(failure_kind(&e(json!({ "errorKind": "You hit your limit, try 9:52 PM" }))).0, "rpc_-32603");
+        assert_eq!(failure_kind(&super::acp::Error::new(-32000, "x")), ("rpc_-32000".to_owned(), None));
+        assert!(!is_code_token("Has Spaces") && !is_code_token("") && !is_code_token(&"a".repeat(49)) && is_code_token("usage_limit_exceeded"));
+    }
+
 }
