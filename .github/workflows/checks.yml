@@ -1,6 +1,6 @@
 # Checks on every pull request (into staging and into release): static checks,
 # the frontend's typecheck, build, selftests and notices, the phone app's build,
-# and the Rust unit tests on Linux.
+# and the Rust unit tests on Linux (and, not yet required, on Windows).
 # No packages; build.yml does those for release PRs.
 #
 # A pull request that only touches docs skips the heavy jobs. They still report
@@ -209,6 +209,52 @@ jobs:
           (cd crates/patchbay-llm && cargo test --locked -- --ignored)
           (cd crates/patchbay-agent && cargo test --locked -- --ignored)
           (cd src-tauri && cargo test --lib --locked --features ipc-test smoke -- --ignored)
+
+  # pb-20261111-63: the Rust tests on Windows. Until this job, nothing ran cargo test on Windows
+  # (build.yml's windows job only builds), so a Windows fix was checked by hand on one machine.
+  # NOT a required check while scripts/ci/windows-test-baseline.txt has entries: the job is
+  # continue-on-error, but scripts/ci/windows_tests.py still fails it on any failure outside that
+  # baseline, on a leg that did not finish or ran no tests, and when the Common-Controls guard
+  # test or the test exes' side-by-side manifests (pb-20261111-58) are missing. When the baseline
+  # is empty, remove continue-on-error and add the job to the required checks.
+  # The tests run IN PLACE from the build directory: that manifest is a file beside each test
+  # exe, so never copy or archive the exes (nextest archives, artifact moves). The logs are
+  # uploaded as text only.
+  windows:
+    needs: changes
+    # Runs unless changes found docs only; if changes itself failed, this still runs.
+    if: ${{ !cancelled() && needs.changes.outputs.source != 'false' }}
+    runs-on: windows-latest
+    continue-on-error: true
+    # A cold build compiles Tauri, its plugins and every crate for Windows.
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+            crates/patchbay-mesh -> target
+            crates/patchbay-llm -> target
+            crates/patchbay-agent -> target
+          # A run that fails (known failures) must still save its build for the next one.
+          cache-on-failure: true
+      - name: The CI script's own tests
+        run: python -m unittest scripts/ci/test_windows_tests.py
+      - name: Cargo tests, in place, against the baseline
+        run: python scripts/ci/windows_tests.py
+      - name: Windows test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-logs
+          path: windows-test-logs/
+          if-no-files-found: warn
+          retention-days: 14
 
   # The phone app (remote/) on Linux: its frontend builds and its backend compiles. The APK
   # itself builds on release pull requests (build.yml).
