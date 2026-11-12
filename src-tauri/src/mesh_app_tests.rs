@@ -3559,6 +3559,8 @@ async fn hidden_agent_modes_are_refused_through_ipc_and_mesh() {
         }
     });
     crate::api::call(&a.state, "code_set_mode", json!({ "id": s.id, "modeId": "build" }), &chans).await.unwrap();
+}
+
 /// Team role instructions reach an agent without a prompt hook as a preamble block on a peer
 /// message, and an agent with a hook gets none (it already has them in its system prompt).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4255,4 +4257,3 @@ async fn restart_member_failure_rollback_leaves_one_live_session() {
     let all_sessions = a.state.db.list_code_sessions().unwrap();
     assert_eq!(all_sessions.len(), 2, "only coord and s1 exist");
 }
-
