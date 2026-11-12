@@ -3,6 +3,8 @@
 //! Every tool call is checked on the host against the caller's role capabilities in `teams.db`
 //! (`Caller::need`), never against what the role's instructions say.
 
+use std::path::Path;
+
 use serde_json::{Value, json};
 
 use super::*;
@@ -426,6 +428,22 @@ pub fn is_member(state: &AppState, session: &str) -> bool {
     TeamsDb::open(&state.data_dir).and_then(|t| t.membership(session)).map(|m| m.is_some()).unwrap_or(false)
 }
 
+/// Guidance when an active team member tries to spawn an ad-hoc session.
+pub const TEAM_MEMBER_CREATE_REFUSAL: &str = "Team members must dispatch workers through dispatch_item, not ad-hoc sessions. If work is blocked, raise the blocker with the user or advisor.";
+
+/// Refuse `create_agent_session` when `session` is an active team member. Non-members and
+/// environments without a teams database are unaffected.
+pub fn refuse_create_if_team_member(data_dir: &Path, session: &str) -> anyhow::Result<()> {
+    // No teams.db means no membership to enforce; don't create one just to look.
+    if !data_dir.join("teams.db").is_file() {
+        return Ok(());
+    }
+    if TeamsDb::open(data_dir)?.membership(session)?.is_some() {
+        anyhow::bail!("{TEAM_MEMBER_CREATE_REFUSAL}");
+    }
+    Ok(())
+}
+
 pub const TOOLS: &[&str] = &[
     "team_roster", "team_send", "item_add", "item_set", "item_note", "item_list", "item_get", "decision_open", "decision_answer",
     "dispatch_item", "member_release",
@@ -846,6 +864,24 @@ mod tests {
         let done = t.answer_user(&team.id, &d2.id, "A").unwrap();
         assert_eq!((done.status.as_str(), done.user_answer.as_deref()), ("resolved", Some("A")));
         assert!(t.answer_user(&team.id, &d2.id, "B").is_err());
+    }
+
+    #[test]
+    fn create_agent_session_refuses_active_team_members_only() {
+        let (d, t, team) = setup();
+        // No membership yet: non-members (and later, released members) may create sessions.
+        refuse_create_if_team_member(&d, "outsider").unwrap();
+        refuse_create_if_team_member(&d, "desk1").unwrap();
+
+        t.attach(&team.id, "desk1", "coordinator").unwrap();
+        let err = refuse_create_if_team_member(&d, "desk1").unwrap_err().to_string();
+        assert_eq!(err, TEAM_MEMBER_CREATE_REFUSAL);
+        assert!(err.contains("dispatch_item") && err.contains("raise the blocker"), "{err}");
+        // Unrelated sessions stay allowed while a teammate is blocked.
+        refuse_create_if_team_member(&d, "outsider").unwrap();
+
+        t.detach(&team.id, "desk1").unwrap();
+        refuse_create_if_team_member(&d, "desk1").unwrap();
     }
 
     #[test]

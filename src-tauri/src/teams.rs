@@ -27,7 +27,7 @@ pub fn dispatch_prompts() -> Vec<(String, String)> {
     dispatch::FAKE_PROMPTS.lock().unwrap().clone()
 }
 pub(crate) use items::{team_board, team_decision_answer};
-pub use items::{call_tool, is_member, is_tool, tool_defs};
+pub use items::{call_tool, is_member, is_tool, refuse_create_if_team_member, tool_defs};
 
 const MIGRATIONS: &[&str] = &[r#"
 CREATE TABLE roles (

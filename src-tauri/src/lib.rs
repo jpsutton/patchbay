@@ -2914,9 +2914,8 @@ pub(crate) async fn create_agent_session(
     if creator.host_node.as_deref() != Some(state.mesh.node_id()) || creator.archived_at.is_some() {
         anyhow::bail!("only a session running on this computer can create sessions");
     }
-    if teams::is_dispatched(state, creator_id) {
-        anyhow::bail!("a worker started by a team can't create sessions");
-    }
+    // Active team members must provision workers through dispatch_item, not ad-hoc creates.
+    teams::refuse_create_if_team_member(&state.data_dir, creator_id)?;
     // Auto mode trusts edits inside a session's own folder, so a child may not reach beyond its creator's.
     let root = std::fs::canonicalize(&creator.cwd)
         .map_err(|e| anyhow::anyhow!("the creating session's folder {} is not usable: {e}", creator.cwd))?;

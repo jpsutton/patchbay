@@ -4034,9 +4034,9 @@ async fn the_coordinator_fills_a_pool_and_releases_workers() {
     // The workers don't count toward the coordinator's 5-per-creator cap.
     assert_eq!(a.state.db.count_created_by(&coord.id).unwrap(), 2);
     assert_eq!(teams::dispatched_by(&a.state, &coord.id), 2);
-    // A dispatched worker can't create sessions.
+    // A dispatched worker (active team member) can't create ad-hoc sessions.
     let err = create_agent_session(&a.state, &s1, &cwd, "x", None, None, None).await.unwrap_err().to_string();
-    assert!(err.contains("started by a team"), "{err}");
+    assert!(err.contains("dispatch_item") && err.contains("raise the blocker"), "{err}");
 
     // Even if its role were widened, a dispatched worker can neither dispatch nor release.
     for (tool, args) in [("dispatch_item", json!({ "itemId": ids[2] })), ("member_release", json!({ "sessionId": s2 }))] {
