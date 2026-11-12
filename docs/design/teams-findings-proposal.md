@@ -7,6 +7,15 @@
 
 ---
 
+## David's Decisions (2026-11-12)
+
+1. **F5 ("Hard block for team members")**: `create_agent_session` refuses when the caller is an active team member, with a message pointing to `dispatch_item` and to raising the blocker with the user.
+2. **F6 ("Role text + dispatch-required guard")**: `builtin-desk` role text specifies that the coordinator never edits project files or implements items; `item_set` refuses `awaiting-review` and `done` unless the item has a dispatch row.
+3. **F7 ("Backend check + role text")**: `item_set` rejects `done` when the item's worktree is dirty or its branch has no commit ahead of base, unless a PR URL is set; desk role text requires checking the worktree and git log, never the worker's word.
+4. **F2 ("Opt-in, worktree-scoped commit")**: Per team template, off by default: workers may run `git add` and `git commit` without asking only inside their own `.trees` worktree; push, branch deletion and history rewrite stay blocked or prompted. Smallest mechanism fitting existing `teams/allow.rs` allow-list, exposed in the template editor with a plain warning.
+
+---
+
 ## 1. Finding F2: Worker Git Commit Approvals Inside Worktree
 
 ### Problem Description
