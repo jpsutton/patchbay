@@ -226,6 +226,23 @@ pub struct Team {
     pub archived_at: Option<i64>,
 }
 
+impl Team {
+    /// Worktree folder for dispatch and durable-done checks. An empty stored value means
+    /// `<team cwd>/.trees`, so teams created without an explicit folder are not stuck.
+    pub fn effective_worktree_root(&self) -> Result<PathBuf> {
+        let cwd = resolve(Path::new(&self.cwd));
+        let root = if self.worktree_root.trim().is_empty() {
+            cwd.join(".trees")
+        } else {
+            resolve(Path::new(&self.worktree_root))
+        };
+        if !root.starts_with(&cwd) {
+            bail!("the worktree folder must be inside the team folder {}", cwd.display());
+        }
+        Ok(root)
+    }
+}
+
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Member {
@@ -527,7 +544,9 @@ impl TeamsDb {
             None => String::new(),
         };
         if !export_dir.is_empty() {
-            check_export_dir(Path::new(&export_dir), &cwd, Path::new(&worktree_root))?;
+            // Match effective_worktree_root: empty stored root means <cwd>/.trees.
+            let worktree_check = if worktree_root.is_empty() { cwd.join(".trees") } else { PathBuf::from(&worktree_root) };
+            check_export_dir(Path::new(&export_dir), &cwd, &worktree_check)?;
         }
         let id = new_id();
         self.0.execute(
@@ -1080,7 +1099,7 @@ fn write_export(tdb: &TeamsDb, db: &Db, team_id: &str, event: &str) -> Result<()
         return Ok(());
     }
     let dir = PathBuf::from(&team.export_dir);
-    check_export_dir(&dir, &resolve(Path::new(&team.cwd)), Path::new(&team.worktree_root))?;
+    check_export_dir(&dir, &resolve(Path::new(&team.cwd)), &team.effective_worktree_root()?)?;
     std::fs::create_dir_all(&dir)?;
     let roles = tdb.roles()?;
     let mut roster = format!("{GENERATED}\n# Roster: {}\n\nFolder: {}\n\n| Role | Seat | Session | Agent |\n|---|---|---|---|\n", team.slug, team.cwd);
@@ -1599,6 +1618,20 @@ mod tests {
             project_rules: Some("set CARGO_TARGET_DIR".into()),
             export_dir: Some(export.to_string_lossy().into_owned()),
         }
+    }
+
+    #[test]
+    fn empty_worktree_root_resolves_to_dot_trees_inside_cwd() {
+        let d = dir();
+        let t = TeamsDb::open(&d).unwrap();
+        let team = t.create_team(new_team("emptywt", &proj(&d), &d.join("out"))).unwrap();
+        assert!(team.worktree_root.is_empty());
+        let root = team.effective_worktree_root().unwrap();
+        assert_eq!(root, resolve(Path::new(&team.cwd)).join(".trees"));
+        // Explicit outside path is still refused.
+        let mut escaped = team.clone();
+        escaped.worktree_root = d.to_string_lossy().into_owned();
+        assert!(escaped.effective_worktree_root().unwrap_err().to_string().contains("inside the team folder"));
     }
 
     #[test]

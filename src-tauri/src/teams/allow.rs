@@ -135,14 +135,11 @@ fn allow_worker_commit(data_dir: &Path, session: &str, tool_call: &Value, option
         return None;
     }
     let item_id = member.item_id.as_deref()?;
-    if team.worktree_root.trim().is_empty() {
-        return None;
-    }
     let tpl = tdb.template(&team.template_id).ok()?;
     if !tpl.allow_worker_commit {
         return None;
     }
-    let worktree = Path::new(&team.worktree_root).join(item_id.to_lowercase());
+    let worktree = team.effective_worktree_root().ok()?.join(item_id.to_lowercase());
     let call_cwd = tool_call["rawInput"]["cwd"].as_str().unwrap_or(session_cwd);
     if !paths_equal(Path::new(call_cwd), &worktree) {
         return None;

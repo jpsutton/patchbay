@@ -279,9 +279,8 @@ fn plan(state: &AppState, desk: &str, args: &Value) -> Result<Plan> {
     if mode == "always-approve" {
         bail!("workers don't start in always-approve mode; set the seat or the coordinator to a stricter mode");
     }
-    if c.team.worktree_root.trim().is_empty() {
-        bail!("the team has no worktree folder; set one when creating the team");
-    }
+    // Empty stored worktree_root defaults to <cwd>/.trees via Team::effective_worktree_root.
+    let _ = c.team.effective_worktree_root()?;
     let (place, dispatch_id) = tdb.reserve(&c.team, seat, &item.id, desk)?;
     Ok(Plan {
         team: c.team,
@@ -316,15 +315,11 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String> {
 /// `--` precedes every ref and path, and `pr_base` was checked when the team was made.
 fn make_worktree(team: &Team, item_id: &str) -> Result<(std::path::PathBuf, String)> {
     let cwd = Path::new(&team.cwd);
-    // Resolved again now: a symlink put in place of the folder since the team was made must not lead outside it.
-    let root = super::resolve(Path::new(&team.worktree_root));
-    let root = root.as_path();
-    if !root.starts_with(super::resolve(cwd)) {
-        bail!("the worktree folder is no longer inside the team folder");
-    }
+    // Resolved again now: empty → <cwd>/.trees; a symlink swapped in since create must not escape cwd.
+    let root = team.effective_worktree_root()?;
     let branch = item_id.to_lowercase();
     let path = root.join(&branch);
-    if !path.starts_with(root) || branch.contains('/') || branch.starts_with('-') {
+    if !path.starts_with(&root) || branch.contains('/') || branch.starts_with('-') {
         bail!("{item_id} is not usable as a worktree name");
     }
     let base = [format!("refs/heads/{}", team.pr_base), format!("refs/remotes/origin/{}", team.pr_base)]
@@ -644,10 +639,46 @@ mod tests {
         let mut linked = team.clone();
         linked.worktree_root = d.join("proj/swapped").to_string_lossy().into_owned();
         std::os::unix::fs::symlink(&outside, d.join("proj/swapped")).unwrap();
-        assert!(make_worktree(&linked, "DM-20261109-03").unwrap_err().to_string().contains("no longer inside"));
+        assert!(make_worktree(&linked, "DM-20261109-03").unwrap_err().to_string().contains("inside the team folder"));
         let mut bad = team.clone();
         bad.pr_base = "nope".into();
         assert!(make_worktree(&bad, "DM-20261109-02").unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn empty_worktree_root_defaults_to_dot_trees_and_can_dispatch() {
+        let d = std::env::temp_dir().join(format!("pb-disp-empty-{}", crate::db::new_id()));
+        std::fs::create_dir_all(d.join("proj")).unwrap();
+        let t = TeamsDb::open(&d).unwrap();
+        let team = t
+            .create_team(NewTeam {
+                template_id: "builtin-triage-desk".into(),
+                slug: "empty".into(),
+                cwd: d.join("proj").to_string_lossy().into_owned(),
+                id_prefix: Some("EM".into()),
+                pr_base: None,
+                worktree_root: None,
+                project_rules: None,
+                export_dir: Some(d.join("out").to_string_lossy().into_owned()),
+            })
+            .unwrap();
+        assert!(team.worktree_root.is_empty(), "stored root stays empty");
+        let root = team.effective_worktree_root().unwrap();
+        assert_eq!(root, super::super::resolve(Path::new(&team.cwd)).join(".trees"));
+
+        // Existing stuck row: empty string in SQLite still resolves and can host a worktree.
+        t.0.execute("UPDATE teams SET worktree_root = '' WHERE id = ?1", [&team.id]).unwrap();
+        let team = t.team(&team.id).unwrap();
+        assert!(team.worktree_root.is_empty());
+        let cwd = d.join("proj");
+        let run = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&cwd).args(args).output().unwrap().status.success(), "{args:?}");
+        run(&["init", "-q", "-b", "main"]);
+        run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]);
+        let (path, branch) = make_worktree(&team, "EM-20261112-01").unwrap();
+        assert_eq!(branch, "em-20261112-01");
+        assert!(path.join(".git").exists());
+        assert!(path.starts_with(&root), "{path:?} under {root:?}");
+        remove_worktree(&team, &path, &branch);
     }
 
     #[cfg(unix)]

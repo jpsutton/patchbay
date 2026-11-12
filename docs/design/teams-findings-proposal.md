@@ -1,4 +1,4 @@
-# Teams Lane Governance Proposals (F2, F5, F6, F7 & Cursor Gaps)
+# Teams Lane Governance Proposals (F2, F5, F6, F7, F8 & Cursor Gaps)
 
 **Author:** Teams Lane Coordinator (Antigravity)  
 **Date:** 2026-11-12  
@@ -120,7 +120,25 @@ An item cannot transition to `status = "done"` unless:
 
 ---
 
-## 5. Policy Note: Cursor Seat Acknowledgement & Approval Gaps
+## 5. Finding F8: Empty Worktree Root Permanently Blocks Dispatch
+
+### Problem Description
+When a team is created with the Worktree folder field left blank, `teams.db` stores `worktree_root = ""`. `dispatch_item` then refused with *"the team has no worktree folder; set one when creating the team"*. There is no `team_update` command, so the team could not be unstuck without editing the database by hand.
+
+### Relevant Code Paths
+- `src-tauri/src/teams.rs` (`create_team`): persisted an empty string when `worktreeRoot` was omitted.
+- `src-tauri/src/teams/dispatch.rs` (`plan` / `make_worktree`): bailed on empty `worktree_root` instead of defaulting.
+- `src/settings/TeamsPage.tsx`: placeholder suggested `.trees`, but the hint did not say leaving the field empty was valid.
+
+### Fix (implemented)
+- `Team::effective_worktree_root()` resolves an empty stored value to `<team cwd>/.trees`, still requiring the path to stay inside the team folder (symlink escape refused).
+- Dispatch, worker-commit allow, durable-done, and export-dir checks all read through that helper.
+- UI hint: *"Leave empty to use \<team folder\>/.trees. Needed to dispatch workers…"*. Submission still sends an omitted/empty value; the backend helper is the single source of truth.
+- Security scope unchanged: worktrees must remain under the team folder; empty root does not widen path escape.
+
+---
+
+## 6. Policy Note: Cursor Seat Acknowledgement & Approval Gaps
 
 ### Context
 `src-tauri/src/teams/dispatch.rs:231-237` checks `ApprovalSetup::for_agent(kind).gaps`. Because Cursor has known approval gaps, `dispatch_item` bails unless:

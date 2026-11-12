@@ -183,7 +183,7 @@ function TeamsPanel() {
                 <span className="text-[11px] text-danger">{fieldErrors.exportDir}</span>
               )}
             </Field>
-            <Field label="Worktree folder" hint="Needed to dispatch workers: each gets a git worktree here. Must be inside the team folder.">
+            <Field label="Worktree folder" hint="Leave empty to use <team folder>/.trees. Needed to dispatch workers: each gets a git worktree here. Must be inside the team folder.">
               <input
                 className={input}
                 placeholder={draft.cwd.trim() ? `${draft.cwd.trim().replace(/\/+$/, "")}/.trees` : "e.g. <team folder>/.trees"}

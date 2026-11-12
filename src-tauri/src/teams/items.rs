@@ -481,10 +481,7 @@ fn git_in(cwd: &Path, args: &[&str]) -> Result<String> {
 /// When marking done without a PR URL, the item's worktree must be clean and ahead of `pr_base`.
 /// Missing worktree folders are skipped (no local evidence to inspect).
 fn ensure_done_is_durable(team: &Team, item_id: &str) -> Result<()> {
-    if team.worktree_root.trim().is_empty() {
-        return Ok(());
-    }
-    let path = Path::new(&team.worktree_root).join(item_id.to_lowercase());
+    let path = team.effective_worktree_root()?.join(item_id.to_lowercase());
     if !path.is_dir() {
         return Ok(());
     }
