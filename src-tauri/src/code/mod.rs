@@ -330,6 +330,32 @@ impl CodeManager {
         rx.await.map_err(|_| anyhow!("agent stopped"))?
     }
 
+    /// Take every queued peer agent message out for drop notices (pb-20261107-30): the
+    /// caller tells each sender, so a stop/delete/archive/agent-switch never drops one
+    /// silently. User prompts in the queue are left alone.
+    pub async fn drain_queued_agent_messages(&self, code_session_id: &str) -> Result<Vec<acp::QueuedAgentMessage>> {
+        let (reply, rx) = oneshot::channel();
+        self.send(code_session_id, AgentCmd::DrainQueuedAgent { reply })?;
+        Ok(rx.await.map_err(|_| anyhow!("agent stopped"))?)
+    }
+
+    /// Queue a peer-message drain NOW and hand back its reply: the loop's channel is FIFO,
+    /// so a synchronous stop sent right after cannot overtake it (pb-20261107-30).
+    /// `None` when no loop is running — there is no queue to drain.
+    pub fn begin_drain_queued_agent(
+        &self,
+        code_session_id: &str,
+    ) -> Option<oneshot::Receiver<Vec<acp::QueuedAgentMessage>>> {
+        let (reply, rx) = oneshot::channel();
+        self.send(code_session_id, AgentCmd::DrainQueuedAgent { reply }).ok()?;
+        Some(rx)
+    }
+
+    /// The sessions whose agent loop is running — the only ones that can hold a queue.
+    pub fn running_sessions(&self) -> Vec<String> {
+        self.agents.lock().unwrap().keys().cloned().collect()
+    }
+
     /// Take one queued peer agent message out of the queue (MCP accept mid-turn).
     pub async fn accept_queued_agent_message(&self, code_session_id: &str, prompt_id: &str) -> Result<String> {
         let (reply, rx) = oneshot::channel();

@@ -291,8 +291,16 @@ pub enum AgentCmd {
         reply: Option<oneshot::Sender<Result<Delivery>>>,
     },
     /// Drop a queued prompt, or retract one steered into the running turn the agent has not
-    /// taken yet.
-    Unqueue { prompt_id: String },
+    /// taken yet. The reply reports whether a peer agent message was the one removed, so the
+    /// caller can tell the sender it was dropped (pb-20261107-30: never silently).
+    Unqueue {
+        prompt_id: String,
+        reply: Option<oneshot::Sender<bool>>,
+    },
+    /// Take every queued peer agent message out for delivery of drop notices (pb-20261107-30):
+    /// the caller notifies each sender, so a stop/delete/archive/agent-switch never drops one
+    /// silently. The queue keeps user prompts.
+    DrainQueuedAgent { reply: oneshot::Sender<Vec<QueuedAgentMessage>> },
     /// Send a queued prompt, or one steered into the running turn, now: cancel the running turn
     /// and send it next. Answers whether it did (`Ok`), or why it could not (`Err`), so the
     /// button never does nothing: the UI shows the error as a toast.
@@ -2018,7 +2026,18 @@ async fn run(
                 steered_in.clear();
                 let forced = std::mem::take(&mut forcing) && !auth_lost.get();
                 if !go_on && !forced {
-                    drop_queue(&turns, &mut queue);
+                    // pb-20261107-30: own prompts go back to the composer; agent-origin
+                    // entries KEEP their place (visible in the queue list, delivered by a
+                    // later turn, never auto-started from this branch).
+                    let own: Vec<String> = queue
+                        .iter()
+                        .filter(|(_, m)| !is_agent_message_origin(&m.origin))
+                        .map(|(_, m)| m.id.clone())
+                        .collect();
+                    queue.retain(|(_, m)| is_agent_message_origin(&m.origin));
+                    if !own.is_empty() {
+                        emit(&sink, &csid, CodeEvent::Unqueued { prompt_ids: own, restore: true });
+                    }
                 } else if let Some((_, next)) = queue.pop_front() {
                     match start_turn(&turns, next) {
                         Ok(_) => running = true,
@@ -2119,17 +2138,40 @@ async fn run(
                             answer(reply, Ok(enqueue(&turns, &mut queue, Rank::Normal, msg)));
                         }
                     }
-                    AgentCmd::Unqueue { prompt_id } => {
+                    AgentCmd::Unqueue { prompt_id, reply } => {
+                        let mut removed_peer = false;
                         if let Some(i) = queue.iter().position(|(_, m)| m.id == prompt_id) {
+                            removed_peer = is_agent_message_origin(&queue[i].1.origin);
                             queue.remove(i);
                             emit(&sink, &csid, CodeEvent::Unqueued { prompt_ids: vec![prompt_id], restore: false });
-                        } else if steered_in.remove(&prompt_id).is_some() {
+                        } else if let Some(msg) = steered_in.remove(&prompt_id) {
                             // Steered into the running turn and not taken yet: take it back.
                             // The steer has already gone to the agent, so its late reply is
                             // dropped here instead of coming back as a queued message.
+                            removed_peer = is_agent_message_origin(&msg.origin);
                             retracted.insert(prompt_id.clone());
                             emit(&sink, &csid, CodeEvent::Unqueued { prompt_ids: vec![prompt_id], restore: false });
                         }
+                        if let Some(reply) = reply {
+                            let _ = reply.send(removed_peer);
+                        }
+                    }
+                    AgentCmd::DrainQueuedAgent { reply } => {
+                        let drained: Vec<QueuedAgentMessage> = queue
+                            .iter()
+                            .filter(|(_, m)| is_agent_message_origin(&m.origin))
+                            .map(|(rank, m)| QueuedAgentMessage {
+                                message_id: m.id.clone(),
+                                preview: agent_message_preview(&m.text),
+                                origin: m.origin.clone(),
+                            })
+                            .collect();
+                        if !drained.is_empty() {
+                            let ids: Vec<String> = drained.iter().map(|d| d.message_id.clone()).collect();
+                            queue.retain(|(_, m)| !is_agent_message_origin(&m.origin));
+                            emit(&sink, &csid, CodeEvent::Unqueued { prompt_ids: ids, restore: false });
+                        }
+                        let _ = reply.send(drained);
                     }
                     AgentCmd::ListQueuedAgent { reply } => {
                         let list = queue
@@ -2238,7 +2280,10 @@ async fn run(
                     }
                     AgentCmd::Cancel => {
                         cancel_pending(&pending);
-                        drop_queue(&turns, &mut queue);
+                        // pb-20261107-30: a Stop KEEPS the queue. Agent-origin entries stay
+                        // visible and are delivered by a later turn; own prompts are handed
+                        // back to the composer when the cancelled turn reports done (the
+                        // `!go_on` branch below), never auto-started right after the Stop.
                         forcing = false;
                         force_armed = false;
                         cancel_turn(&conn, &session_id);
@@ -2439,6 +2484,9 @@ fn refuse_until_signed_in(cmd: AgentCmd) {
         }
         AgentCmd::AcceptQueuedAgent { reply, .. } => {
             let _ = reply.send(Err(anyhow!("the agent isn't signed in yet")));
+        }
+        AgentCmd::DrainQueuedAgent { reply } => {
+            let _ = reply.send(Vec::new());
         }
         AgentCmd::Unqueue { .. }
         | AgentCmd::SendNow { .. }
@@ -3857,7 +3905,7 @@ for line in sys.stdin:
         assert_eq!(prompt(&tx, "brief"), Delivery::Sent);
         assert_eq!(prompt(&tx, "second"), Delivery::Queued);
         assert_eq!(prompt(&tx, "third"), Delivery::Queued);
-        tx.send(AgentCmd::Unqueue { prompt_id: "third".into() }).unwrap();
+        tx.send(AgentCmd::Unqueue { reply: None, prompt_id: "third".into() }).unwrap();
         // The queued one goes out once the running turn ends, as a turn of its own.
         wait_for(&events, "two turns", |evs| evs.iter().filter(|e| prompt_done(e)).count() == 2);
 
@@ -3936,7 +3984,127 @@ for line in sys.stdin:
         let _ = std::fs::remove_dir_all(dir);
     }
 
+        /// pb-20261107-30: a Stop KEEPS peer messages — they stay listed (no Unqueued for them)
+    /// and the following turns deliver each one; only this window's own prompt goes back to
+    /// the composer. Restoring the old drain-on-Cancel turns this red (the List assertion).
     #[test]
+    fn stopping_keeps_peer_messages_and_the_next_turns_deliver_them() {
+        let dir = std::env::temp_dir().join(format!("pb-keep-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        // Three peer messages behind the running turn, plus one of our own.
+        for (i, text) in ["peer one", "peer two", "peer three"].into_iter().enumerate() {
+            let peer = UserMessage {
+                id: format!("peer-{i}"),
+                blocks: vec![json!({ "type": "text", "text": text })],
+                text: text.into(),
+                origin: "agent:node-a:session-b".into(),
+                attachments: json!([]),
+            };
+            let (reply, rx) = tokio::sync::oneshot::channel();
+            tx.send(AgentCmd::Prompt { msg: peer, force: false, reply: Some(reply) }).unwrap();
+            assert_eq!(rx.blocking_recv().unwrap().unwrap(), Delivery::Queued, "{text}");
+        }
+        assert_eq!(prompt(&tx, "mine"), Delivery::Queued);
+
+        // Stop: the own prompt is handed back; the peers are never unqueued.
+        let handed_back = |e: &CodeEvent| {
+            matches!(e, CodeEvent::Unqueued { prompt_ids, restore: true } if prompt_ids == &["mine"])
+        };
+        tx.send(AgentCmd::Cancel).unwrap();
+        wait_for(&events, "cancelled", |evs| {
+            evs.iter().any(|e| matches!(e, CodeEvent::PromptDone { stop_reason } if stop_reason == "cancelled"))
+        });
+        wait_for(&events, "own prompt handed back", |evs| evs.iter().any(handed_back));
+        assert_eq!(count(&events, handed_back), 1, "only the own prompt goes back to the composer");
+        let peer_unqueued = |e: &CodeEvent| {
+            matches!(e, CodeEvent::Unqueued { prompt_ids, .. } if prompt_ids.iter().any(|id| id.starts_with("peer-")))
+        };
+        assert_eq!(count(&events, peer_unqueued), 0, "a Stop never unqueues a peer");
+
+        // Peers still listed after the Stop.
+        let (list_reply, list_rx) = tokio::sync::oneshot::channel();
+        tx.send(AgentCmd::ListQueuedAgent { reply: list_reply }).unwrap();
+        let listed = list_rx.blocking_recv().unwrap().unwrap();
+        let mut ids: Vec<String> = listed.iter().map(|m| m.message_id.clone()).collect();
+        ids.sort();
+        assert_eq!(ids, ["peer-0", "peer-1", "peer-2"], "peers survive the Stop: {ids:?}");
+
+        // The NEXT turns deliver them: a fresh user prompt starts, and each turn end pops
+        // one peer until all three have been heard in the transcript.
+        assert_eq!(prompt(&tx, "fresh"), Delivery::Sent);
+        wait_for(&events, "all three peers delivered", |evs| {
+            let heard: Vec<String> = evs
+                .iter()
+                .filter_map(|e| match e {
+                    CodeEvent::UserPrompt { text, delivery: Delivery::Sent, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect();
+            ["peer one", "peer two", "peer three"].iter().all(|t| heard.iter().any(|h| h == t))
+        });
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// pb-20261107-30: the two removal mechanisms' loop side — Unqueue answers whether a
+    /// PEER was removed (so the caller can tell its sender), and DrainQueuedAgent hands the
+    /// peers over for pre-stop notices while leaving user prompts alone.
+    #[test]
+    fn unqueue_and_drain_report_peers_for_notices() {
+        let dir = std::env::temp_dir().join(format!("pb-drain-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
+        for (i, text) in ["peer a", "peer b"].into_iter().enumerate() {
+            let peer = UserMessage {
+                id: format!("peer-{i}"),
+                blocks: vec![json!({ "type": "text", "text": text })],
+                text: text.into(),
+                origin: "agent:node-a:session-b".into(),
+                attachments: json!([]),
+            };
+            let (reply, rx) = tokio::sync::oneshot::channel();
+            tx.send(AgentCmd::Prompt { msg: peer, force: false, reply: Some(reply) }).unwrap();
+            assert_eq!(rx.blocking_recv().unwrap().unwrap(), Delivery::Queued);
+        }
+        assert_eq!(prompt(&tx, "mine"), Delivery::Queued);
+
+        // Removing a PEER reports true (the caller tells its sender); an own prompt reports
+        // false (it goes back to the composer instead).
+        let (r1, rx1) = tokio::sync::oneshot::channel();
+        tx.send(AgentCmd::Unqueue { prompt_id: "peer-0".into(), reply: Some(r1) }).unwrap();
+        assert!(rx1.blocking_recv().unwrap(), "peer removal reports true");
+        let (r2, rx2) = tokio::sync::oneshot::channel();
+        tx.send(AgentCmd::Unqueue { prompt_id: "mine".into(), reply: Some(r2) }).unwrap();
+        assert!(!rx2.blocking_recv().unwrap(), "own removal reports false");
+
+        // Drain hands over exactly the remaining peer for notices (user prompts stay).
+        let (d, drx) = tokio::sync::oneshot::channel();
+        tx.send(AgentCmd::DrainQueuedAgent { reply: d }).unwrap();
+        let drained = drx.blocking_recv().unwrap();
+        let ids: Vec<&str> = drained.iter().map(|m| m.message_id.as_str()).collect();
+        assert_eq!(ids, ["peer-1"], "only peers drain: {ids:?}");
+        assert!(drained[0].origin.starts_with("agent:"), "the sender travels with it");
+        let (l, lrx) = tokio::sync::oneshot::channel();
+        tx.send(AgentCmd::ListQueuedAgent { reply: l }).unwrap();
+        assert!(lrx.blocking_recv().unwrap().unwrap().is_empty(), "the drained peer is gone");
+        no_errors(&events);
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+#[test]
     fn stopping_hands_back_the_queue() {
         let dir = std::env::temp_dir().join(format!("pb-steer-{}", crate::db::new_id()));
         let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods"], "") else {
@@ -4145,7 +4313,7 @@ for line in sys.stdin:
         ready(&events);
         assert_eq!(prompt(&tx, "hold"), Delivery::Sent);
         assert_eq!(prompt(&tx, "also this"), Delivery::Steered);
-        tx.send(AgentCmd::Unqueue { prompt_id: "also this".into() }).unwrap();
+        tx.send(AgentCmd::Unqueue { reply: None, prompt_id: "also this".into() }).unwrap();
         wait_for(&events, "the retraction", |evs| {
             evs.iter().any(|e| matches!(e, CodeEvent::Unqueued { prompt_ids, restore: false } if prompt_ids == &["also this"]))
         });
@@ -4187,7 +4355,7 @@ for line in sys.stdin:
             attachments: json!([]),
         };
         tx.send(AgentCmd::Prompt { msg, force: false, reply: None }).unwrap();
-        tx.send(AgentCmd::Unqueue { prompt_id: "slow".into() }).unwrap();
+        tx.send(AgentCmd::Unqueue { reply: None, prompt_id: "slow".into() }).unwrap();
         wait_for(&events, "the retraction", |evs| {
             evs.iter().any(|e| matches!(e, CodeEvent::Unqueued { prompt_ids, restore: false } if prompt_ids == &["slow"]))
         });

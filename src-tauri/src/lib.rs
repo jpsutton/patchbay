@@ -911,7 +911,7 @@ async fn update_code_session(
 }
 
 async fn delete_code_session(state: &AppState, id: String) -> CmdResult<()> {
-    state.code.stop(&id);
+    stop_with_notices(state, &id, "the session was deleted").await;
     state.code.titles.forget(&id);
     state.code.clear_turn_end(&id);
     // Must match the id `TerminalPane` opens with.
@@ -931,7 +931,7 @@ async fn archive_code_session(state: &AppState, id: &str, archived: bool) -> any
                 state.mesh.rpc(&host, "code.stop", serde_json::json!({ "id": id })).await?;
             }
             Some(_) => {}
-            None => state.code.stop(id),
+            None => stop_with_notices(state, id, "the session was archived").await,
         }
     }
     state.db.set_code_session_archived(id, archived)
@@ -2569,7 +2569,7 @@ async fn code_stop(state: &AppState, id: String) -> CmdResult<()> {
         state.mesh.rpc(&host, "code.stop", serde_json::json!({ "id": id })).await?;
         return Ok(());
     }
-    state.code.stop(&id);
+    stop_with_notices(state, &id, "the session was stopped").await;
     Ok(())
 }
 
@@ -3049,12 +3049,67 @@ async fn resume_apply(state: &AppState, checked: Vec<String>) -> CmdResult<Vec<s
     Ok(out)
 }
 
+/// Tell every sender whose peer message left a queue without being delivered — never silence
+/// (pb-20261107-30). Best-effort: a sender that is gone, or a send that fails, is simply
+/// skipped; the notice carries the messageId and the reason so the sender can correlate.
+/// Runs on the host that owns the queue (the loop only exists there).
+async fn notice_dropped_queued(state: &AppState, target_id: &str, reason: &str) {
+    let Ok(dropped) = state.code.drain_queued_agent_messages(target_id).await else {
+        return; // no running loop: no queue, nothing to tell
+    };
+    tell_senders_of_dropped(state, target_id, dropped, reason).await;
+}
+
+/// The send half of a drop notice: one correlated message per sender, best-effort.
+async fn tell_senders_of_dropped(
+    state: &AppState,
+    target_id: &str,
+    dropped: Vec<code::acp::QueuedAgentMessage>,
+    reason: &str,
+) {
+    let target_title = state
+        .db
+        .get_code_session(target_id)
+        .ok()
+        .flatten()
+        .map(|c| c.title)
+        .unwrap_or_else(|| target_id.to_owned());
+    for m in dropped {
+        let Some(sender) = m.origin.strip_prefix("agent:") else { continue };
+        let Some((_, session)) = sender.split_once(':') else { continue };
+        if session.is_empty() || session == target_id {
+            continue;
+        }
+        let text = format!(
+            "Patchbay dropped your queued message {} to session '{}' ({}): {}. It was never delivered.",
+            m.message_id, target_title, target_id, reason
+        );
+        // from_node is THIS node (the queue's host runs the notice); the target may be remote.
+        let _ = send_agent_message(state, state.mesh.node_id(), target_id, session, &text).await;
+    }
+}
+
+/// Stop a locally-hosted session's agent, telling the senders of its queued peer messages
+/// first (pb-20261107-30). For a session hosted elsewhere the queue lives there: its own
+/// stop path (`code.stop`) notices instead.
+async fn stop_with_notices(state: &AppState, id: &str, reason: &str) {
+    notice_dropped_queued(state, id, reason).await;
+    state.code.stop(id);
+}
+
 async fn code_unqueue(state: &AppState, id: String, prompt_id: String) -> CmdResult<()> {
     if let Some(host) = remote_host(state, &id)? {
         state.mesh.rpc(&host, "code.unqueue", serde_json::json!({ "id": id, "promptId": prompt_id })).await?;
         return Ok(());
     }
-    Ok(state.code.send(&id, AgentCmd::Unqueue { prompt_id })?)
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state.code.send(&id, AgentCmd::Unqueue { prompt_id: prompt_id.clone(), reply: Some(tx) })?;
+    let removed_peer = rx.await.unwrap_or(false);
+    if removed_peer {
+        // A user removal counts as a drop: the sender gets "removed by the user", never silence.
+        notice_dropped_queued(state, &id, "removed by the user").await;
+    }
+    Ok(())
 }
 
 /// Whether a `code.attach` answer shows a running agent on a host that can cancel a turn to send
@@ -3208,7 +3263,7 @@ async fn code_authenticate(
 
 /// Switch a session that hasn't started yet to another agent. The agent here stops; whoever asked
 /// starts the new one, as when opening the session.
-fn code_set_agent_local(state: &AppState, id: &str, agent: &str, model_ref: Option<&str>) -> anyhow::Result<()> {
+async fn code_set_agent_local(state: &AppState, id: &str, agent: &str, model_ref: Option<&str>) -> anyhow::Result<()> {
     ensure_local_host(state, id)?;
     let kind = code::agents::AgentKind::parse(agent).ok_or_else(|| anyhow::anyhow!("unknown coding agent {agent}"))?;
     let session = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("code session not found"))?;
@@ -3229,7 +3284,7 @@ fn code_set_agent_local(state: &AppState, id: &str, agent: &str, model_ref: Opti
         state.db.set_setting(&format!("mesh.handoff.{id}"), &handoff::switch_prompt(Some(&folded), from))?;
         state.db.set_code_transcript(id, &folded)?;
     }
-    state.code.stop(id);
+    stop_with_notices(state, id, "the session switched coding agent").await;
     state.db.set_code_session_agent(id, agent)?;
     // Grok runs on Patchbay's models: a session made for another agent may have none yet.
     if session.model_ref.is_none()
@@ -3246,7 +3301,7 @@ async fn code_set_agent(state: &AppState, id: String, agent: String, model_ref: 
         state.mesh.rpc(&host, "code.set_agent", p).await?;
         return Ok(());
     }
-    Ok(code_set_agent_local(state, &id, &agent, model_ref.as_deref())?)
+    Ok(code_set_agent_local(state, &id, &agent, model_ref.as_deref()).await?)
 }
 
 async fn code_set_mode(state: &AppState, id: String, mode_id: String) -> CmdResult<()> {
@@ -3450,7 +3505,9 @@ async fn package_local(state: &AppState, id: &str, kind: &str, have: Vec<String>
         anyhow::bail!("the agent is in the middle of a turn; move the session once it finishes");
     }
     state.code.set_moving(id, true);
-    // Let the agent flush its session files before they're copied.
+    // Tell the senders of queued peer messages, then let the agent flush its session files
+    // before they're copied (pb-20261107-30).
+    notice_dropped_queued(state, id, "the session was moved to another computer").await;
     let code = state.code.clone();
     let sid = id.to_owned();
     tokio::task::spawn_blocking(move || code.stop_and_wait(&sid, std::time::Duration::from_secs(5))).await?;
@@ -3627,7 +3684,8 @@ impl mesh::RpcHandler for MeshRpc {
                 Ok(code_resume_local(state, &id()?, point, &running))
             }
             "code.stop" => {
-                state.code.stop(&id()?);
+                let id = id()?;
+                stop_with_notices(state, &id, "the session was stopped").await;
                 Ok(Value::Null)
             }
             "code.prompt" => {
@@ -3669,7 +3727,15 @@ impl mesh::RpcHandler for MeshRpc {
             "code.unqueue" => {
                 ensure_local_host(state, &id()?)?;
                 let prompt_id = param(&p, "promptId")?.to_owned();
-                state.code.send(&id()?, AgentCmd::Unqueue { prompt_id }).map(|_| Value::Null)
+                {
+                    let id = id()?;
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    state.code.send(&id, AgentCmd::Unqueue { prompt_id, reply: Some(tx) })?;
+                    if rx.await.unwrap_or(false) {
+                        notice_dropped_queued(state, &id, "removed by the user").await;
+                    }
+                    Ok(Value::Null)
+                }
             }
             "code.send_now" => {
                 ensure_local_host(state, &id()?)?;
@@ -3689,7 +3755,7 @@ impl mesh::RpcHandler for MeshRpc {
                 state.code.authenticate(&id()?, method, key).await.map(|_| Value::Null)
             }
             "code.set_agent" => {
-                code_set_agent_local(state, &id()?, param(&p, "agent")?, p["modelRef"].as_str()).map(|_| Value::Null)
+                code_set_agent_local(state, &id()?, param(&p, "agent")?, p["modelRef"].as_str()).await.map(|_| Value::Null)
             }
             "code.set_mode" => {
                 ensure_local_host(state, &id()?)?;
@@ -3952,6 +4018,23 @@ impl mesh::RpcHandler for MeshRpc {
                 .flatten()
                 .is_some_and(|s| s.host_node.as_deref().is_none_or(|h| h == state.mesh.node_id()));
             if !here {
+                // Queue the drain ahead of Shutdown (FIFO) so the senders hear why before
+                // the loop dies; the tell runs from the spawned task (pb-20261107-30).
+                if let Some(rx) = state.code.begin_drain_queued_agent(pk) {
+                    let state = state.clone();
+                    let id = pk.clone();
+                    tokio::spawn(async move {
+                        if let Ok(dropped) = rx.await {
+                            tell_senders_of_dropped(
+                                &state,
+                                &id,
+                                dropped,
+                                "the session is no longer on this computer",
+                            )
+                            .await;
+                        }
+                    });
+                }
                 state.code.stop(pk);
             }
         }

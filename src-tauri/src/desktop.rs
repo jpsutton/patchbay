@@ -584,6 +584,13 @@ fn begin_quit(app: &AppHandle, after: QuitAfter) {
 /// Carry out a decided quit: latch first (our own ExitRequested must not re-enter the gate),
 /// then exit or restart. `RunEvent::Exit` still runs `state.shutdown()` on the way out, so a
 /// clean wait leaves no flags and Quit now leaves them set (the shutdown guard).
+fn finish_quit(app: &AppHandle, after: QuitAfter) {
+    match after {
+        QuitAfter::Exit => app.exit(0),
+        QuitAfter::Restart => app.request_restart(),
+    }
+}
+
 fn perform_quit(app: &AppHandle, after: QuitAfter) {
     {
         let flow = app.state::<QuitFlow>();
@@ -595,10 +602,39 @@ fn perform_quit(app: &AppHandle, after: QuitAfter) {
         g.showing = false;
         g.after = None;
     }
-    match after {
-        QuitAfter::Exit => app.exit(0),
-        QuitAfter::Restart => app.request_restart(),
+    let Some(state) = app.try_state::<crate::AppState>().map(|s| s.inner().clone()) else {
+        // Attached: no AppState here — the daemon owns its queues, nothing of ours to tell.
+        finish_quit(app, after);
+        return;
+    };
+    // Tell the senders of queued peer messages BEFORE the loops die with the app
+    // (pb-20261107-30). The drains are queued synchronously (FIFO ahead of the stop_all that
+    // shutdown() runs after this task finishes); the tell is BOUNDED — a hung notice must
+    // never keep the quit from happening.
+    let mut drains = Vec::new();
+    for id in state.code.running_sessions() {
+        if let Some(rx) = state.code.begin_drain_queued_agent(&id) {
+            drains.push((id, rx));
+        }
     }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let tell = async {
+            for (id, rx) in drains {
+                if let Ok(dropped) = rx.await {
+                    crate::tell_senders_of_dropped(
+                        &state,
+                        &id,
+                        dropped,
+                        "Patchbay quit before it could be sent",
+                    )
+                    .await;
+                }
+            }
+        };
+        let _ = tokio::time::timeout(Duration::from_secs(5), tell).await;
+        finish_quit(&app, after);
+    });
 }
 
 /// The wait dialog's "Quit now" (and its auto-quit when the list empties): carry out the

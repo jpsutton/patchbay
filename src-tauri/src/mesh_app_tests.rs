@@ -2923,6 +2923,90 @@ async fn resume_apply_checked_sends_exactly_one_fixed_continue_prompt() {
     );
 }
 
+/// pb-20261107-30: every drop tells the sender — one correlated message carrying the
+/// messageId and the reason arrives as a visible prompt on the SENDER session; the message
+/// body/preview never travels in the notice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropped_peer_messages_notify_each_sender_with_id_and_reason() {
+    let n = node("alpha-drop-notice");
+    let nid = n.state.mesh.node_id().to_owned();
+    let proj = n.dir.join("proj");
+    repo(&proj);
+    // The sender must be able to start to receive the notice (provider + model, as ever).
+    let prov = crate::db::Provider {
+        id: "mock".into(),
+        name: "Mock LLM".into(),
+        kind: crate::db::ProviderKind::OpenaiChat,
+        base_url: "http://127.0.0.1:8765/v1".into(),
+        has_key: true,
+        auth_mode: Default::default(),
+        claude_config_dir: None,
+        grok_home: None,
+    };
+    n.state.db.upsert_provider(&prov, Some("mock-key")).unwrap();
+    n.state
+        .db
+        .upsert_model(&crate::db::Model {
+            id: "test-model".into(),
+            provider_id: "mock".into(),
+            model_id: "test-model".into(),
+            display_name: "Test Model".into(),
+            vision: false,
+            context_window: None,
+            params: crate::db::ModelParams::default(),
+        })
+        .unwrap();
+    let src = n.state.db.create_code_session(&proj.to_string_lossy(), None, "patchbay", "default").unwrap();
+    let dst = n.state.db.create_code_session(&proj.to_string_lossy(), None, "patchbay", "default").unwrap();
+    let dropped = vec![code::acp::QueuedAgentMessage {
+        message_id: "m-drop-42".into(),
+        preview: "SECRET PREVIEW BODY".into(),
+        origin: format!("agent:{nid}:{}", src.id),
+    }];
+    crate::tell_senders_of_dropped(&n.state, &dst.id, dropped, "removed by the user").await;
+    let notices = || -> Vec<String> {
+        n.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, p)| *name == code::acp::EVENT && p["event"]["type"] == "userPrompt")
+            .map(|(_, p)| p["event"]["text"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    };
+    until("the notice reaches the sender", 60, || {
+        notices().iter().any(|t| t.contains("m-drop-42") && t.contains("removed by the user"))
+    })
+    .await;
+    let all = notices();
+    let hits: Vec<&String> = all.iter().filter(|t| t.contains("m-drop-42")).collect();
+    assert_eq!(hits.len(), 1, "exactly one notice per dropped message: {hits:?}");
+    assert!(
+        !hits[0].contains("SECRET PREVIEW BODY"),
+        "the notice carries the id and reason, never the body: {}",
+        hits[0]
+    );
+    assert!(hits[0].contains(&dst.id), "the notice names the session it was dropped from");
+}
+
+/// pb-20261107-30: a stop path on a session with no running loop has no queue to drain —
+/// the notice is a silent no-op, never a panic or a hang.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn notice_on_a_session_without_a_loop_is_a_silent_no_op() {
+    let n = node("alpha-drop-noloop");
+    let proj = n.dir.join("proj");
+    repo(&proj);
+    let s = n.state.db.create_code_session(&proj.to_string_lossy(), None, "grok", "default").unwrap();
+    crate::notice_dropped_queued(&n.state, &s.id, "the session was deleted").await;
+    let prompts = n
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(name, p)| *name == code::acp::EVENT && p["event"]["type"] == "userPrompt")
+        .count();
+    assert_eq!(prompts, 0, "no loop, no queue, no notice");
+}
+
 /// pb-20261111-22: the active-turn flag follows the turn continuously — set when a turn starts,
 /// cleared when it ends by done, error, or user Stop. Only a death MID-turn (no PromptDone ever
 /// arrives) leaves it set, which is exactly what the relaunch picker reads.
