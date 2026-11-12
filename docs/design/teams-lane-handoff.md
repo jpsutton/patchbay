@@ -76,6 +76,10 @@ Live-run seats: coordinator Codex (UI model "6 Luna"), worker Antigravity ("Gemi
 - **F3: release has a guard.** `member_release` refuses unless the item is done, dropped or awaiting-review. Briefs must set the item to awaiting-review first.
 - **F4 (gap): no account label.** Codex and Antigravity seats show no provider or account label.
 
+## Open product gap for David
+
+Workers may need a human to approve each `git add` and `git commit` inside their own team worktree. The rehearsal will use per-command approvals scoped to `/tmp/teams-sandbox/proj/.trees/<worker-worktree>` and will not add a global allow rule. A team whose workers cannot commit without a human approving every commit is not yet hands-off. A possible safe default is a team-scoped commit capability limited to the member's assigned worktree, with path validation and an explicit opt-in at team creation; it should permit only staging and committing, never push, branch deletion, or history rewriting. This remains an open product decision; do not implement it without David's decision.
+
 ## State at handoff (2026-11-12)
 
 - `feat/teams` HEAD is 6ea5a497 plus this docs commit. The worktree is `/Users/dfrazer/patchbay-teams` (not `~/patchbay`).
