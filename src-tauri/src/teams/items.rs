@@ -11,6 +11,10 @@ use super::*;
 
 pub const STATUSES: &[&str] = &["noticed", "triaged", "blocked", "dispatched", "in-progress", "awaiting-review", "done", "dropped"];
 
+/// Refused when `item_set` moves an item to awaiting-review or done with no dispatch row.
+pub const DISPATCH_REQUIRED_FOR_FINISH: &str =
+    "Cannot move item to awaiting-review or done without a worker dispatch. Coordinators do not implement items directly.";
+
 pub const MIGRATION: &str = r#"
 CREATE TABLE items (
     team_id TEXT NOT NULL REFERENCES teams(id),
@@ -195,6 +199,18 @@ impl TeamsDb {
     }
 
     /// Change named fields of an item; every change leaves an event. `patch` is a JSON object.
+    /// True when `item_id` has at least one `dispatches` row (any worker was started for it).
+    fn item_has_dispatch(&self, team_id: &str, item_id: &str) -> Result<bool> {
+        Ok(self
+            .0
+            .query_row(
+                "SELECT COUNT(*) FROM dispatches WHERE team_id = ?1 AND item_id = ?2",
+                params![team_id, item_id],
+                |r| r.get::<_, i64>(0),
+            )?
+            > 0)
+    }
+
     pub fn set_item(&self, team_id: &str, id: &str, actor: Option<&str>, patch: &Value) -> Result<Item> {
         let fields = patch.as_object().filter(|o| !o.is_empty()).ok_or_else(|| anyhow!("name at least one field to change"))?;
         let before = self.item(team_id, id)?;
@@ -227,6 +243,10 @@ impl TeamsDb {
             }
             if new == old {
                 continue;
+            }
+            // Coordinators own status, but cannot skip the worker path to finish an item.
+            if key == "status" && matches!(new.as_str(), "awaiting-review" | "done") && !self.item_has_dispatch(team_id, id)? {
+                bail!("{DISPATCH_REQUIRED_FOR_FINISH}");
             }
             let stored: Option<&str> = if matches!(column, "member_session" | "pr_url") && new.is_empty() { None } else { Some(new.as_str()) };
             self.0.execute(
@@ -864,6 +884,31 @@ mod tests {
         let done = t.answer_user(&team.id, &d2.id, "A").unwrap();
         assert_eq!((done.status.as_str(), done.user_answer.as_deref()), ("resolved", Some("A")));
         assert!(t.answer_user(&team.id, &d2.id, "B").is_err());
+    }
+
+    #[test]
+    fn awaiting_review_and_done_require_a_dispatch_row() {
+        let (_d, t, team) = setup();
+        let i = t.add_item(&team, Some("desk1"), "20261109", "Implement it", "task", "normal", "").unwrap();
+        assert_eq!(i.status, "noticed");
+
+        let err = t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "status": "awaiting-review" })).unwrap_err().to_string();
+        assert_eq!(err, DISPATCH_REQUIRED_FOR_FINISH);
+        let err = t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "status": "done" })).unwrap_err().to_string();
+        assert_eq!(err, DISPATCH_REQUIRED_FOR_FINISH);
+        assert_eq!(t.item(&team.id, &i.id).unwrap().status, "noticed");
+
+        // Earlier statuses still work without a dispatch.
+        t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "status": "triaged" })).unwrap();
+
+        t.0.execute(
+            "INSERT INTO dispatches(team_id, item_id, seat, desk_session, at) VALUES (?1, ?2, 'workers', 'desk1', 0)",
+            params![team.id, i.id],
+        )
+        .unwrap();
+        let reviewed = t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "status": "awaiting-review" })).unwrap();
+        assert_eq!(reviewed.status, "awaiting-review");
+        assert_eq!(t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "status": "done" })).unwrap().status, "done");
     }
 
     #[test]

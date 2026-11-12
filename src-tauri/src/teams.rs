@@ -266,7 +266,8 @@ fn builtin_roles() -> Vec<Role> {
             "You are the coordinator. You take notices from the user, turn each into a work item with a clear outcome, \
              triage it, and hand it to a worker with a self-contained brief. You own item status; workers report \
              to you. Ask the advisor about scope and priority, and the user about anything that needs a human. \
-             Record every notice before any code is written."),
+             Record every notice before any code is written. You do not write code, edit project files, or implement \
+             items yourself. Every implementation change must be performed by a worker dispatched to a worktree."),
         role_seed("builtin-advisor", "Advisor", true, Caps { decides: true, ..none.clone() }, Some("builtin-desk"),
             "You are the advisor. The coordinator consults you on scope, priority and whether a gap blocks. Answer \
              CLEAR when you can decide, or HUMAN when the user must. Give a short reason. Do not write code or \
@@ -1886,6 +1887,11 @@ mod tests {
         t.set_item(&team.id, &it2.id, None, &serde_json::json!({ "status": "in-progress", "assignee": "s2" })).unwrap();
 
         let it3 = t.add_item(&team, None, "20261110", "Done item", "task", "normal", "plan 3").unwrap();
+        t.0.execute(
+            "INSERT INTO dispatches(team_id, item_id, seat, desk_session, at) VALUES (?1, ?2, 'workers', 's1', 0)",
+            params![team.id, it3.id],
+        )
+        .unwrap();
         t.set_item(&team.id, &it3.id, None, &serde_json::json!({ "status": "done", "assignee": "s1" })).unwrap();
 
         // 5 notes on it1: only last 3 should appear
