@@ -14,6 +14,12 @@ const KEYRING_SERVICE: &str = "dev.patchbay.app";
 /// provider, MCP and web-search secrets. First one wins; the app and daemon open exactly one.
 static KEYRING_SCOPE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
+/// What `set_keyring_scope` was given: None until some state has been opened in this process.
+#[cfg(test)]
+pub fn keyring_scope_for_tests() -> Option<Option<String>> {
+    KEYRING_SCOPE.get().cloned()
+}
+
 pub fn set_keyring_scope(scope: Option<String>) {
     let _ = KEYRING_SCOPE.set(scope);
 }
