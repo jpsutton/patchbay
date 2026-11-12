@@ -218,3 +218,47 @@ mod tests {
         r.unwrap();
     }
 }
+
+// pb-20261111-58: the lib's test exe on Windows imports `TaskDialogIndirect` (through the dialog
+// plugin's `rfd`), which only comctl32 v6 exports. v6 is chosen by an application manifest, and
+// `tauri-build` embeds one for the binaries only (`cargo:rustc-link-arg-bins`): this exe has none,
+// Windows loads comctl32 v5.82 and the process dies with 0xc0000139 before `main`. A cargo
+// `rustc-link-arg-tests` would not reach it either (that is for `tests/` files), and a plain
+// `rustc-link-arg` would also hit the binaries, which already carry a manifest. So the dependency
+// is a linker directive inside the lib's own `cfg(test)` code: only this exe has it. The linker
+// writes the dependency to a manifest next to the exe (`<exe>.manifest`).
+#[cfg(all(windows, target_env = "msvc"))]
+const COMMON_CONTROLS_V6: &str = " /MANIFESTDEPENDENCY:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\" ";
+
+#[cfg(all(windows, target_env = "msvc"))]
+#[used]
+#[unsafe(link_section = ".drectve")]
+static COMMON_CONTROLS_V6_DIRECTIVE: [u8; COMMON_CONTROLS_V6.len()] = {
+    let mut bytes = [0u8; COMMON_CONTROLS_V6.len()];
+    let text = COMMON_CONTROLS_V6.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        bytes[i] = text[i];
+        i += 1;
+    }
+    bytes
+};
+
+/// With the directive gone this fails on the leg whose exe still starts (the `web` one), and the
+/// `ipc-test` exe does not start at all.
+#[cfg(all(windows, target_env = "msvc"))]
+#[test]
+fn the_test_exe_gets_common_controls_v6() {
+    use std::ffi::c_void;
+    unsafe extern "system" {
+        fn LoadLibraryA(name: *const u8) -> *mut c_void;
+        fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
+    }
+    // SAFETY: both names are NUL-terminated literals; the handle is only passed back to Windows.
+    let (module, export) = unsafe {
+        let module = LoadLibraryA(c"comctl32.dll".as_ptr().cast());
+        (module, GetProcAddress(module, c"TaskDialogIndirect".as_ptr().cast()))
+    };
+    assert!(!module.is_null(), "comctl32.dll did not load");
+    assert!(!export.is_null(), "comctl32 v5.82 is loaded: this exe has no Common-Controls v6 manifest");
+}
