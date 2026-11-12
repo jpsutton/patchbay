@@ -305,9 +305,8 @@ async fn set_provider_extras(
 }
 
 async fn delete_provider(state: &AppState, id: String) -> CmdResult<()> {
-    providers::delete_extras(&providers::Keyring, &id);
     providers::delete_key(&id);
-    state.db.delete_provider(&id)?;
+    providers::delete_provider_with(&state.db, &providers::Keyring, &id)?;
     state.mesh.secrets_changed();
     Ok(())
 }
@@ -335,7 +334,8 @@ async fn discover_models(
         }
         providers::Auth::Key => providers::load_key(&p.id, inline.as_deref()),
     };
-    Ok(providers::discover_models_for(&p.kind, &p.base_url, key.as_deref(), auth, grok_user.as_deref()).await?)
+    let extras = providers::load_extras(&providers::Keyring, &p.id);
+    Ok(providers::discover_models_for(&p.kind, &p.base_url, key.as_deref(), auth, grok_user.as_deref(), &extras).await?)
 }
 
 async fn list_models(state: &AppState) -> CmdResult<Vec<Model>> {

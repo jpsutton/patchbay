@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import { api, errorText, type AuthMode, type DiscoveredModel, type ProviderExtraEntry, type Provider, type ProviderKind } from "../lib/ipc";
+import { useEffect, useRef, useState } from "react";
+import { api, errorText, type AuthMode, type DiscoveredModel, type Provider, type ProviderKind } from "../lib/ipc";
+import { canSaveExtras, extraEntries, type ExtraRow, type ExtrasLoad } from "../lib/providerExtras";
 import { useStore } from "../lib/store";
 
 /** Where Grok Build's own sign-in is served from; a Grok login provider points here. */
@@ -246,8 +247,6 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
   );
 }
 
-type ExtraRow = { name: string; value: string; stored: boolean };
-
 /** Extra request headers or query parameters. Values are write-only: a stored value is never shown. */
 function ExtraList({
   title,
@@ -309,27 +308,44 @@ function ExtraList({
 function ProviderExtras({ provider }: { provider: Provider }) {
   const [headers, setHeaders] = useState<ExtraRow[]>([]);
   const [query, setQuery] = useState<ExtraRow[]>([]);
+  const [load, setLoad] = useState<ExtrasLoad>("loading");
   const [busy, setBusy] = useState(false);
   const setToast = useStore((s) => s.setToast);
-  const load = (n: { headers: string[]; query: string[] }) => {
+  // The provider this editor shows now; a save that finishes after a switch must not touch the new one.
+  const current = useRef(provider.id);
+  current.current = provider.id;
+  const show = (n: { headers: string[]; query: string[] }) => {
     const row = (name: string): ExtraRow => ({ name, value: "", stored: true });
     setHeaders(n.headers.map(row));
     setQuery(n.query.map(row));
+    setLoad("loaded");
   };
   useEffect(() => {
     let live = true;
     setHeaders([]);
     setQuery([]);
-    api.providerExtras(provider.id).then((n) => live && load(n), (e) => live && setToast(errorText(e)));
+    setLoad("loading");
+    setBusy(false);
+    api.providerExtras(provider.id).then(
+      (n) => live && show(n),
+      (e) => {
+        if (!live) return;
+        setLoad("failed");
+        setToast(errorText(e));
+      },
+    );
     return () => {
       live = false;
     };
   }, [provider.id]);
-  const entries = (rows: ExtraRow[]): ProviderExtraEntry[] =>
-    rows.map((r) => ({ name: r.name.trim(), value: r.value === "" ? undefined : r.value }));
   return (
     <div className="flex flex-col gap-3">
       <div className="text-sm font-medium">Extra headers and query parameters</div>
+      {load === "failed" && (
+        <p className="text-xs text-danger">
+          The stored names could not be loaded, so saving is off to protect them. Select the provider again to retry.
+        </p>
+      )}
       <ExtraList
         title="Headers"
         hint="Sent with every request, e.g. api-key for Azure or HTTP-Referer for OpenRouter."
@@ -344,19 +360,25 @@ function ProviderExtras({ provider }: { provider: Provider }) {
         onChange={setQuery}
         addLabel="Add query parameter"
       />
+      <p className="text-xs text-muted">
+        A row with a blank value keeps its stored value. Removing every row and saving clears them all.
+      </p>
       <div>
         <button
           className="rounded-md border border-border px-3 py-1.5 text-xs hover:border-accent disabled:opacity-50"
-          disabled={busy}
+          disabled={!canSaveExtras(load, busy)}
           onClick={async () => {
+            const id = provider.id;
             setBusy(true);
             try {
-              load(await api.setProviderExtras(provider.id, entries(headers), entries(query)));
+              const names = await api.setProviderExtras(id, extraEntries(headers), extraEntries(query));
+              if (current.current !== id) return;
+              show(names);
               setToast("Extras saved");
             } catch (e) {
-              setToast(errorText(e));
+              if (current.current === id) setToast(errorText(e));
             } finally {
-              setBusy(false);
+              if (current.current === id) setBusy(false);
             }
           }}
         >

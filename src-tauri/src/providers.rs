@@ -182,7 +182,17 @@ pub fn extras_account(provider_id: &str) -> String {
 }
 
 /// Headers the request itself depends on: a user entry must not replace them.
-const RESERVED_HEADERS: [&str; 6] = ["host", "content-length", "content-type", "accept", "transfer-encoding", "connection"];
+/// Headers Patchbay owns. The auth ones come from the provider's auth mode: a second `Authorization`
+/// or key header would reach the server next to the real one.
+const RESERVED_HEADERS: [&str; 9] = [
+    "host", "content-length", "content-type", "accept", "transfer-encoding", "connection",
+    "authorization", "x-api-key", "x-goog-api-key",
+];
+
+fn reserved_header(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    RESERVED_HEADERS.contains(&n.as_str()) || n.starts_with("anthropic-")
+}
 const MAX_NAME: usize = 128;
 const MAX_VALUE: usize = 4096;
 
@@ -203,7 +213,7 @@ fn merge(entries: &[ExtraEntry], old: &[(String, String)], what: &str, header: b
             if !valid_header_name(name) {
                 bail!("{name:?} is not a valid header name");
             }
-            if RESERVED_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {
+            if reserved_header(name) {
                 bail!("the {name} header is set by Patchbay and can't be replaced");
             }
         } else if name.is_empty() || name.len() > MAX_NAME || name.chars().any(|c| c.is_control()) {
@@ -276,6 +286,14 @@ pub fn set_extras(
 /// Remove a provider's extras (with the provider).
 pub fn delete_extras(keys: &dyn crate::mesh::keys::KeyStore, provider_id: &str) {
     keys.delete(&extras_account(provider_id));
+}
+
+/// Delete a provider: its extras leave the keyring first, then the row (and its names) go.
+/// A node that learns of the deletion by sync does not run this, so its keyring entry stays (known
+/// limit, no cross-node cleanup in v1).
+pub fn delete_provider_with(db: &crate::db::Db, keys: &dyn crate::mesh::keys::KeyStore, provider_id: &str) -> Result<()> {
+    delete_extras(keys, provider_id);
+    db.delete_provider(provider_id)
 }
 
 /// Resolved model + provider + key, ready to sample.
@@ -537,7 +555,7 @@ pub async fn discover_models(
     key: Option<&str>,
     auth: Auth,
 ) -> Result<Vec<DiscoveredModel>> {
-    discover_models_for(kind, base_url, key, auth, None).await
+    discover_models_for(kind, base_url, key, auth, None, &Extras::default()).await
 }
 
 /// `discover_models`, naming the signed-in Grok user (`Auth::GrokLogin` only).
@@ -547,6 +565,7 @@ pub async fn discover_models_for(
     key: Option<&str>,
     auth: Auth,
     grok_user: Option<&str>,
+    extras: &Extras,
 ) -> Result<Vec<DiscoveredModel>> {
     let mut url = format!("{}/models", normalize_base_url(base_url));
     if *kind == ProviderKind::Gemini {
@@ -585,7 +604,14 @@ pub async fn discover_models_for(
         (_, _, Some(k)) => req = req.bearer_auth(k),
         (_, _, None) => {}
     }
-    let resp = req.send().await.with_context(|| format!("GET {url}"))?;
+    for (name, value) in &extras.headers {
+        req = req.header(name, value);
+    }
+    if !extras.query.is_empty() {
+        req = req.query(&extras.query);
+    }
+    // `without_url`: reqwest prints the full URL, and an extra query value is a secret.
+    let resp = req.send().await.map_err(reqwest::Error::without_url).with_context(|| format!("GET {url}"))?;
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
@@ -925,11 +951,15 @@ mod tests {
         assert!(set(vec![entry("x-a", Some("v\r\nx-evil: 1"))], vec![]).is_err(), "header injection through a value");
         assert!(set(vec![entry("Content-Type", Some("text/plain"))], vec![]).is_err(), "a header Patchbay sets");
         assert!(set(vec![entry("host", Some("evil"))], vec![]).is_err());
+        for name in ["Authorization", "x-api-key", "X-Goog-Api-Key", "anthropic-beta", "Anthropic-Version"] {
+            assert!(set(vec![entry(name, Some("v"))], vec![]).is_err(), "{name} comes from the auth mode");
+        }
         assert!(set(vec![entry("x-a", Some("1")), entry("X-A", Some("2"))], vec![]).is_err(), "duplicate header, any case");
         assert!(set(vec![], vec![entry("", Some("v"))]).is_err(), "empty query name");
         assert!(set(vec![], vec![entry("k", Some("v")), entry("k", Some("w"))]).is_err(), "duplicate query name");
         assert!(set(vec![entry("x-a", Some(&"v".repeat(5000)))], vec![]).is_err(), "too long");
         assert_eq!(keys.get(&extras_account("azure")), None, "a refused save stores nothing");
+        assert!(set(vec![entry("api-key", Some("v"))], vec![]).is_ok(), "Azure's api-key is not reserved");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -969,4 +999,63 @@ mod tests {
         let none = Resolved { extras: Extras::default(), ..r };
         assert!(llm_config(&none).extra_headers.is_empty() && llm_config(&none).extra_query.is_empty());
     }
+
+    #[test]
+    fn deleting_a_provider_removes_its_extras_from_the_keyring() {
+        use super::*;
+        let (db, dir) = provider_in_temp_db();
+        let keys = MemKeyStore::default();
+        set_extras(&db, &keys, "azure", &[entry("api-key", Some(HEADER_SECRET))], &[]).unwrap();
+        assert!(keys.get(&extras_account("azure")).is_some());
+        delete_provider_with(&db, &keys, "azure").unwrap();
+        assert_eq!(keys.get(&extras_account("azure")), None, "the keyring entry is gone with the provider");
+        assert!(db.get_provider("azure").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn model_discovery_carries_the_extras() {
+        use super::*;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 16384];
+            let n = sock.read(&mut buf).await.unwrap();
+            let body = r#"{"data":[{"id":"gpt-x"}]}"#;
+            let _ = sock
+                .write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes())
+                .await;
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        });
+        let extras = Extras {
+            headers: vec![("api-key".into(), HEADER_SECRET.into())],
+            query: vec![("api-version".into(), "2024-10-21".into())],
+        };
+        let found = discover_models_for(&ProviderKind::OpenaiChat, &format!("http://127.0.0.1:{port}/openai"), None, Auth::Key, None, &extras)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        let seen = server.await.unwrap();
+        assert!(seen.starts_with("GET /openai/models?api-version=2024-10-21 "), "{seen}");
+        assert!(seen.to_ascii_lowercase().contains(&format!("api-key: {}", HEADER_SECRET.to_ascii_lowercase())), "{seen}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_discovery_does_not_print_the_extra_query_values() {
+        use super::*;
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let extras = Extras { headers: vec![], query: vec![("code".into(), QUERY_SECRET.into())] };
+        let err = discover_models_for(&ProviderKind::OpenaiChat, &format!("http://127.0.0.1:{port}/v1"), None, Auth::Key, None, &extras)
+            .await
+            .unwrap_err();
+        let shown = format!("{err:#} {err:?}");
+        assert!(!shown.contains(QUERY_SECRET) && !shown.contains("code="), "{shown}");
+        assert!(shown.contains("127.0.0.1"), "still names the host: {shown}");
+    }
+
 }

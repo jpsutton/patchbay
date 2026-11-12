@@ -239,11 +239,15 @@ impl Client {
                     retryable: true,
                     cancelled: false,
                 }),
-                Ok(r) => r.map_err(|e| Error {
-                    message: format!("request failed: {}", diag::chain(&e)),
-                    status: None,
-                    retryable: e.is_connect() || e.is_timeout() || e.is_request(),
-                    cancelled: false,
+                // `without_url`: reqwest prints the full URL, and the query may hold a secret.
+                Ok(r) => r.map_err(|e| {
+                    let retryable = e.is_connect() || e.is_timeout() || e.is_request();
+                    Error {
+                        message: format!("request failed: {}", diag::chain(&e.without_url())),
+                        status: None,
+                        retryable,
+                        cancelled: false,
+                    }
                 })?,
             },
         };
@@ -293,7 +297,7 @@ impl Client {
                 }
                 Some(Err(e)) => {
                     return Err(Error {
-                        message: watch.failure(&format!("stream error: {}", diag::chain(&e)), &sse.pending()),
+                        message: watch.failure(&format!("stream error: {}", diag::chain(&e.without_url())), &sse.pending()),
                         status: None,
                         retryable: true,
                         cancelled: false,
@@ -384,6 +388,61 @@ mod tests {
         let lower = seen.to_ascii_lowercase();
         assert!(lower.contains("api-key: azure-value"), "{seen}");
         assert!(lower.contains("authorization: bearer the-key"), "{seen}");
+    }
+
+    /// reqwest prints the full URL in "error sending request", and the query may hold a secret.
+    /// Every error string (the Retrying reason and the final message) must be URL-stripped, yet
+    /// still say which host failed.
+    #[tokio::test]
+    async fn a_refused_connection_does_not_leak_query_values_into_error_text() {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port() // dropped: nothing listens, the connect is refused
+        };
+        let mut cfg = Config::new(WireFormat::ChatCompletions, format!("http://127.0.0.1:{port}/openai/deployments/d"), "m");
+        cfg.max_retries = 1;
+        cfg.extra_query = vec![("code".into(), "SECRET-Q".into())];
+        let req = Request { messages: vec![Message::user("hi")], ..Default::default() };
+        let reasons = std::sync::Mutex::new(Vec::<String>::new());
+        let err = Client::new(cfg)
+            .complete(&req, &CancellationToken::new(), |e| {
+                if let Event::Retrying { reason, .. } = e {
+                    reasons.lock().unwrap().push(reason);
+                }
+            })
+            .await
+            .unwrap_err();
+        let reasons = reasons.into_inner().unwrap();
+        assert_eq!(reasons.len(), 1, "one retry was reported: {reasons:?}");
+        for text in reasons.iter().chain(std::iter::once(&err.message)) {
+            assert!(!text.contains("SECRET-Q"), "query value leaked: {text}");
+            assert!(!text.contains("code="), "query string leaked: {text}");
+        }
+        assert!(err.message.starts_with("request failed:"), "{}", err.message);
+        assert!(err.message.contains("127.0.0.1") || err.message.contains("connect"), "still says what failed: {}", err.message);
+    }
+
+    /// The same for a body that breaks after the headers: the stream error must not carry the URL.
+    #[tokio::test]
+    async fn a_broken_stream_does_not_leak_query_values_into_error_text() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 16384];
+            let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+            // A chunk that promises more bytes than it sends, then the connection drops.
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n20\r\ndata: {")
+                .await;
+        });
+        let mut cfg = Config::new(WireFormat::ChatCompletions, format!("http://127.0.0.1:{port}/v1"), "m");
+        cfg.max_retries = 0;
+        cfg.extra_query = vec![("code".into(), "SECRET-Q".into())];
+        let req = Request { messages: vec![Message::user("hi")], ..Default::default() };
+        let err = Client::new(cfg).complete(&req, &CancellationToken::new(), |_| {}).await.unwrap_err();
+        assert!(!err.message.contains("SECRET-Q") && !err.message.contains("code="), "{}", err.message);
     }
 
     /// Azure OpenAI through a query string on the base URL (the row's UNKNOWN, now measured): the path
