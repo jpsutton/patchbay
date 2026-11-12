@@ -912,6 +912,33 @@ mod tests {
         assert_eq!(b.list_ui_prefs().unwrap().len(), 1);
     }
 
+    /// pb-20261111-22: `active_turn_since` is the host's local liveness flag. It must never
+    /// cross the mesh — a synced copy would pop the resume picker on every other node.
+    #[test]
+    fn active_turn_flag_never_syncs() {
+        let (a, b) = (temp_db(), temp_db());
+        let id = a
+            .create_code_session("/work/proj", None, "grok", "default")
+            .unwrap()
+            .id;
+        sync(&a, &b);
+        assert!(b.get_code_session(&id).unwrap().is_some(), "the row itself syncs");
+        // The flag write on A produces no op at all (the sync triggers only watch the
+        // allow-listed code_sessions columns), and B never sees a value.
+        a.set_code_session_active_turn(&id, Some(1_700_000_000_000)).unwrap();
+        let back = sync(&a, &b);
+        assert!(back.rows.is_empty(), "a flag write must not become a sync op: {:?}", back.rows);
+        assert_eq!(
+            b.code_session_active_turn(&id).unwrap(),
+            None,
+            "the other node must never see the flag"
+        );
+        // And a cleared flag is equally invisible: no op, no value.
+        a.set_code_session_active_turn(&id, None).unwrap();
+        assert!(sync(&a, &b).rows.is_empty());
+        assert_eq!(b.code_sessions_with_active_turn().unwrap(), Vec::<String>::new());
+    }
+
     #[test]
     fn seeded_prefs_lose_to_changes_made_later() {
         use crate::prefs::{load, save, seed_synced};

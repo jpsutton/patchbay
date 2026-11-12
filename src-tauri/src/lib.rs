@@ -77,6 +77,10 @@ pub struct AppState {
     desktop: Arc<std::sync::OnceLock<Arc<dyn DesktopHooks>>>,
     /// Explicit, revocable, expiring HTTP shares of files on this host (see `shares.rs`).
     shares: Arc<shares::ShareRegistry>,
+    /// True from the first line of `shutdown()` on: the app is quitting, so the active-turn
+    /// flag must NOT be cleared by the death throes of `stop_all` (pb-20261111-22: Quit now
+    /// leaves flags set so the relaunch offers those sessions; only a real turn end clears).
+    shutting_down: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// What only the desktop app can do. Preferences for these save everywhere, but apply only
@@ -117,6 +121,7 @@ impl AppState {
             remote_terms: Arc::default(),
             desktop: Arc::default(),
             shares,
+            shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         // Nothing is in flight yet, so whatever a crashed or failed transfer left in the inbox is garbage.
         let _ = std::fs::remove_dir_all(handoff::inbox(&state.data_dir));
@@ -1084,11 +1089,19 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
         };
         if turn_over {
             state.code.set_busy(&env.code_session_id, false);
+            // pb-20261111-22: the turn ended (done, error, or user Stop) — clear the active flag;
+            // only a death MID-turn leaves it set for the relaunch picker. During a quit the
+            // death throes of stop_all are not a turn end: flags stay set (Quit now -> relaunch).
+            if !state.shutting_down.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = state.db.set_code_session_active_turn(&env.code_session_id, None);
+            }
             state.code.plan.turn_ended(&env.code_session_id);
             state.code.cursor_plan.turn_ended(&env.code_session_id);
         }
         if matches!(env.event, CodeEvent::UserPrompt { delivery: code::acp::Delivery::Sent, .. }) {
             state.code.set_busy(&env.code_session_id, true);
+            // pb-20261111-22: a turn is in flight — mark the continuous active set.
+            let _ = state.db.set_code_session_active_turn(&env.code_session_id, Some(crate::db::now_ms()));
             // A new turn is in flight: the last turn's outcome no longer says anything about
             // this session, and a fixed error must stop reading as `stuck` (pb-20261110-04).
             state.code.clear_turn_end(&env.code_session_id);
@@ -2904,6 +2917,65 @@ pub(crate) async fn create_agent_session(
     }))
 }
 
+/// The fixed continue prompt the relaunch picker sends for a checked session (pb-20261111-22):
+/// visible verbatim in that session's transcript, always these exact words.
+const RESUME_CONTINUE_TEXT: &str = "Continue from where you stopped (Patchbay was closed mid-turn).";
+
+/// What the relaunch picker offers: sessions whose active-turn flag is still set — the app died
+/// mid-turn (or was quit with Quit now), so this launch can offer to continue each one.
+async fn resume_candidates(state: &AppState) -> CmdResult<Vec<serde_json::Value>> {
+    let mut out = Vec::new();
+    for id in state.db.code_sessions_with_active_turn()? {
+        if let Some(s) = state.db.get_code_session(&id)? {
+            out.push(serde_json::json!({ "id": s.id, "title": s.title, "agent": s.agent, "cwd": s.cwd }));
+        }
+    }
+    Ok(out)
+}
+
+/// Apply the relaunch picker's choices. Each CHECKED session is re-attached exactly the way
+/// opening it does today, then sent exactly ONE user-attributed continue prompt (fixed text,
+/// through the normal send path); each UNCHECKED session only clears its flag — no reminder
+/// next launch. A resume or send failure returns that session's error with its flag still set
+/// (next launch offers it again): never silent, never lost.
+async fn resume_apply(state: &AppState, checked: Vec<String>) -> CmdResult<Vec<serde_json::Value>> {
+    let mut out = Vec::new();
+    for id in state.db.code_sessions_with_active_turn()? {
+        if !checked.contains(&id) {
+            let _ = state.db.set_code_session_active_turn(&id, None);
+            out.push(serde_json::json!({ "id": id, "action": "skipped" }));
+            continue;
+        }
+        // Re-attach/resume BEFORE sending, the same way opening the session does today:
+        // catch-up attach, then start the agent if it is not running (opening does both).
+        if let Err(e) = code_attach(&state, id.clone(), Some(true), Some(true)).await {
+            out.push(serde_json::json!({ "id": id, "action": "error", "error": e.0 }));
+            continue;
+        }
+        if !state.code.is_running(&id)
+            && let Err(e) = code_start_local(&state, id.clone()).await
+        {
+            out.push(serde_json::json!({ "id": id, "action": "error", "error": format!("{e:#}") }));
+            continue;
+        }
+        match code_prompt(
+            &state,
+            id.clone(),
+            RESUME_CONTINUE_TEXT.to_owned(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .await
+        {
+            Ok(()) => out.push(serde_json::json!({ "id": id, "action": "sent" })),
+            Err(e) => out.push(serde_json::json!({ "id": id, "action": "error", "error": e.0 })),
+        }
+    }
+    Ok(out)
+}
+
 async fn code_unqueue(state: &AppState, id: String, prompt_id: String) -> CmdResult<()> {
     if let Some(host) = remote_host(state, &id)? {
         state.mesh.rpc(&host, "code.unqueue", serde_json::json!({ "id": id, "promptId": prompt_id })).await?;
@@ -4326,6 +4398,9 @@ pub fn open_locked_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow:
 impl AppState {
     /// Stop everything this node runs: agents, terminals and the mesh.
     pub fn shutdown(&self) {
+        // First: a quit is not a mid-session death — the active-turn flags stay set so the
+        // relaunch offers those sessions (pb-20261111-22), and the bridge can tell the two apart.
+        self.shutting_down.store(true, std::sync::atomic::Ordering::Relaxed);
         // First, so the children that die with the app are told apart from mid-session deaths.
         if let Some(bridge) = self.agent_message_bridge.get() {
             bridge.begin_shutdown();

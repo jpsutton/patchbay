@@ -245,6 +245,14 @@ ALTER TABLE code_sessions ADD COLUMN created_by TEXT;
 -- Which Grok login a grok_login provider uses: a Grok home directory (`$GROK_HOME`), NULL for the
 -- default. Not synced: a path on one node means nothing on another.
 ALTER TABLE providers ADD COLUMN grok_home TEXT;
+"#, r#"
+-- When this session's current turn started (ms since epoch), NULL when no turn is running.
+-- The continuous active set behind the graceful-close resume picker (pb-20261111-22): set when
+-- a turn starts, cleared when it ends (done, error, user Stop), so a value left set means the
+-- app died mid-turn — SIGKILL, crash and Force Quit included.
+-- Not synced: turn liveness belongs to the node running the turn; a flag on one node means
+-- nothing on another (a synced copy would pop the picker on every other node).
+ALTER TABLE code_sessions ADD COLUMN active_turn_since INTEGER;
 "#];
 
 pub fn now_ms() -> i64 {
@@ -1218,6 +1226,39 @@ impl Db {
 
     /// A title someone typed (`manual`) pins it; an automatic one only lands while it isn't pinned.
     /// Returns whether it was written. Doesn't touch `updated_at`: naming isn't activity.
+    /// Set (Some) or clear (None) the active-turn flag: set when a turn starts, cleared when it
+    /// ends (done, error, user Stop). A value left set after a death means "was mid-turn".
+    pub fn set_code_session_active_turn(&self, id: &str, since: Option<i64>) -> Result<()> {
+        self.conn().execute(
+            "UPDATE code_sessions SET active_turn_since = ?2 WHERE id = ?1",
+            params![id, since],
+        )?;
+        Ok(())
+    }
+
+    /// The active-turn flag for one session (the resume picker reads it per row).
+    pub fn code_session_active_turn(&self, id: &str) -> Result<Option<i64>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT active_turn_since FROM code_sessions WHERE id = ?1")?;
+        let mut rows = stmt.query([id])?;
+        match rows.next()? {
+            Some(row) => Ok(row.get(0)?),
+            None => Ok(None),
+        }
+    }
+
+    /// Sessions whose active-turn flag is still set: the relaunch picker's list, in creation order.
+    pub fn code_sessions_with_active_turn(&self) -> Result<Vec<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM code_sessions WHERE active_turn_since IS NOT NULL AND archived_at IS NULL ORDER BY created_at",
+        )?;
+        let ids = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(ids)
+    }
+
     pub fn set_code_session_title(&self, id: &str, title: &str, manual: bool) -> Result<bool> {
         let n = self.conn().execute(
             "UPDATE code_sessions SET title = ?2, title_manual = ?3 WHERE id = ?1 AND (?3 OR NOT title_manual)",

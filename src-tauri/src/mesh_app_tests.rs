@@ -2647,6 +2647,209 @@ async fn remote_window_catches_up_and_saves_through_the_host() {
     assert_eq!(a.state.db.code_transcript(&s.id).unwrap().as_deref(), Some("{\"v\":1}"));
 }
 
+/// pb-20261111-22: SIGKILL on a TEST instance — the mid-turn flag outlives a hard kill of the
+/// process that wrote it, and a relaunch lists exactly the sessions that were mid-turn.
+#[test]
+fn sigkill_on_a_test_instance_leaves_mid_turn_flags_for_the_relaunch() {
+    use std::process::Command;
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("skipped: no python3");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("pb-resume-sigkill-{}", crate::db::new_id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("db.sqlite");
+    let mid = {
+        let db = crate::db::Db::open(&path).unwrap();
+        let mid = db.create_code_session("/w/mid-turn", None, "grok", "default").unwrap();
+        db.create_code_session("/w/idle", None, "grok", "default").unwrap();
+        mid
+    };
+    // The "app" (a real child process) sets the flag mid-turn, then holds the database open.
+    let script = dir.join("hold.py");
+    std::fs::write(
+        &script,
+        "import sqlite3, sys, time\nconn = sqlite3.connect(sys.argv[1], timeout=10)\nconn.execute(\"UPDATE code_sessions SET active_turn_since = CAST(strftime('%s','now') AS INTEGER)*1000 WHERE id = ?\", (sys.argv[2],))\nconn.commit()\nwhile True: time.sleep(1)\n",
+    )
+    .unwrap();
+    let mut child = Command::new("python3")
+        .arg(&script)
+        .arg(&path)
+        .arg(&mid.id.clone())
+        .spawn()
+        .expect("spawn holder");
+    let mut flagged = false;
+    for _ in 0..400 {
+        let db = crate::db::Db::open(&path).unwrap();
+        if db.code_session_active_turn(&mid.id).unwrap().is_some() {
+            flagged = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(flagged, "the child set the mid-turn flag");
+    // SIGKILL: no handler, no destructor, no chance to clear anything.
+    child.kill().expect("SIGKILL");
+    child.wait().expect("reap");
+    // Relaunch: a fresh handle reads whatever is still set.
+    let db = crate::db::Db::open(&path).unwrap();
+    assert_eq!(
+        db.code_sessions_with_active_turn().unwrap(),
+        vec![mid.id.clone()],
+        "exactly the mid-turn session is offered"
+    );
+    assert_eq!(db.code_session_active_turn(&mid.id).unwrap().is_some(), true);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// pb-20261111-22: an UNCHECKED candidate gets no prompt at all and only loses its flag —
+/// no reminder next launch, nothing sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_apply_unchecked_clears_the_flag_without_any_prompt() {
+    let a = node("alpha-resume-skipped");
+    let cwd = a.dir.join("proj");
+    repo(&cwd);
+    let s = a.state.db.create_code_session(&cwd.to_string_lossy(), None, "grok", "default").unwrap();
+    a.state.db.set_code_session_active_turn(&s.id, Some(crate::db::now_ms())).unwrap();
+    let chans: crate::api::ChanFactory = Arc::new(|_| None);
+    let r = crate::api::call(&a.state, "resume_apply", json!({ "checked": [] }), &chans)
+        .await
+        .unwrap();
+    assert_eq!(r, json!([{ "id": s.id, "action": "skipped" }]), "{r}");
+    assert_eq!(
+        a.state.db.code_session_active_turn(&s.id).unwrap(),
+        None,
+        "the flag is cleared: no reminder next launch"
+    );
+    assert!(
+        !a.state.code.is_running(&s.id),
+        "an unchecked session must not even start: no prompt was sent"
+    );
+    let prompts: Vec<Value> = a
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(n, p)| *n == code::acp::EVENT && p["event"]["type"] == "userPrompt")
+        .map(|(_, p)| p["event"].clone())
+        .collect();
+    assert!(prompts.is_empty(), "unchecked means zero prompts: {prompts:?}");
+}
+
+/// pb-20261111-22: a CHECKED candidate gets re-attached and exactly ONE user-attributed
+/// continue prompt with the fixed visible text — through the normal send path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_apply_checked_sends_exactly_one_fixed_continue_prompt() {
+    let a = node("alpha-resume-sent");
+    let cwd = a.dir.join("proj");
+    repo(&cwd);
+    let s = a.state.db.create_code_session(&cwd.to_string_lossy(), None, "patchbay", "default").unwrap();
+    a.state.db.set_code_session_active_turn(&s.id, Some(crate::db::now_ms())).unwrap();
+    // The agent will not launch without at least one provider + model (prepare_patchbay's check).
+    let prov = crate::db::Provider {
+        id: "mock".into(),
+        name: "Mock LLM".into(),
+        kind: crate::db::ProviderKind::OpenaiChat,
+        base_url: "http://127.0.0.1:8765/v1".into(),
+        has_key: true,
+        auth_mode: Default::default(),
+        claude_config_dir: None,
+        grok_home: None,
+    };
+    a.state.db.upsert_provider(&prov, Some("mock-key")).unwrap();
+    a.state
+        .db
+        .upsert_model(&crate::db::Model {
+            id: "test-model".into(),
+            provider_id: "mock".into(),
+            model_id: "test-model".into(),
+            display_name: "Test Model".into(),
+            vision: false,
+            context_window: None,
+            params: crate::db::ModelParams::default(),
+        })
+        .unwrap();
+    let chans: crate::api::ChanFactory = Arc::new(|_| None);
+    let r = crate::api::call(&a.state, "resume_apply", json!({ "checked": [s.id.clone()] }), &chans)
+        .await
+        .unwrap();
+    assert_eq!(r[0]["action"], json!("sent"), "{r}");
+    let prompts = || -> Vec<Value> {
+        a.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(n, p)| *n == code::acp::EVENT && p["event"]["type"] == "userPrompt")
+            .map(|(_, p)| p["event"].clone())
+            .collect()
+    };
+    until("the continue prompt reaches the transcript", 60, || {
+        prompts().iter().any(|p| p["text"] == json!(crate::RESUME_CONTINUE_TEXT))
+    })
+    .await;
+    let seen = prompts();
+    assert_eq!(seen.len(), 1, "exactly ONE prompt: {seen:?}");
+    assert_eq!(seen[0]["text"], json!(crate::RESUME_CONTINUE_TEXT), "fixed visible text");
+    assert_eq!(
+        seen[0]["origin"],
+        json!(a.state.mesh.node_id()),
+        "user-attributed (the normal send path's origin), not agent-originated"
+    );
+}
+
+/// pb-20261111-22: the active-turn flag follows the turn continuously — set when a turn starts,
+/// cleared when it ends by done, error, or user Stop. Only a death MID-turn (no PromptDone ever
+/// arrives) leaves it set, which is exactly what the relaunch picker reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn active_turn_flag_follows_the_turn_lifecycle() {
+    let a = node("alpha-active-flag");
+    let cwd = a.dir.join("proj");
+    repo(&cwd);
+    let s = a.state.db.create_code_session(&cwd.to_string_lossy(), None, "grok", "default").unwrap();
+    let ev = |e: code::acp::CodeEvent| {
+        on_code_event(&a.state, code::acp::Envelope { code_session_id: s.id.clone(), event: e })
+    };
+    let start = || {
+        code::acp::CodeEvent::UserPrompt {
+            prompt_id: "p1".into(),
+            text: "go".into(),
+            origin: "user".into(),
+            attachments: json!([]),
+            delivery: code::acp::Delivery::Sent,
+        }
+    };
+    let flag = || a.state.db.code_session_active_turn(&s.id).unwrap();
+
+    // Idle: no flag.
+    assert_eq!(flag(), None, "idle session carries no flag");
+    // A turn starts.
+    ev(start());
+    assert!(flag().is_some(), "flag set when the turn starts");
+    // Ends normally.
+    ev(code::acp::CodeEvent::PromptDone { stop_reason: json!("end_turn") });
+    assert_eq!(flag(), None, "cleared on a normal end");
+    // Ends in error.
+    ev(start());
+    assert!(flag().is_some());
+    ev(code::acp::CodeEvent::PromptDone { stop_reason: json!("error") });
+    assert_eq!(flag(), None, "cleared on error");
+    // User Stop.
+    ev(start());
+    assert!(flag().is_some());
+    ev(code::acp::CodeEvent::PromptDone { stop_reason: json!("cancelled") });
+    assert_eq!(flag(), None, "cleared on user Stop");
+    // The app dies mid-turn: no PromptDone ever arrives, the flag stays for the picker.
+    ev(start());
+    assert!(flag().is_some(), "stays set when the app dies mid-turn");
+    // The picker's list contains exactly this session.
+    assert_eq!(a.state.db.code_sessions_with_active_turn().unwrap(), vec![s.id.clone()]);
+    // Quit now (stop_all) while mid-turn: the flag STAYS set — the relaunch offers the session.
+    // (Without the shutdown guard the death throes of stop_all clear it and the picker is empty.)
+    a.state.shutdown();
+    assert!(flag().is_some(), "Quit now must leave the flag set for the relaunch");
+    assert_eq!(a.state.db.code_sessions_with_active_turn().unwrap(), vec![s.id.clone()]);
+}
+
 /// An agent's message to a session whose Claude account is over the limit is refused naming the
 /// RECIPIENT and its account; a target on no plan account (opencode) is never stopped by it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

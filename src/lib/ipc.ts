@@ -469,6 +469,21 @@ export interface MeshChatEvent {
     | { type: "snapshot"; userMessageId: string | null; assistantMessageId: string | null; text: string; reasoning: string };
 }
 
+/** A session the relaunch picker offers: its active-turn flag was still set at launch. */
+export interface ResumeCandidate {
+  id: string;
+  title: string;
+  agent: string;
+  cwd: string;
+}
+
+/** What happened to one candidate when the picker's choices were applied. */
+export interface ResumeResult {
+  id: string;
+  action: "sent" | "skipped" | "error";
+  error?: string;
+}
+
 export interface CodeAttach {
   running: boolean;
   busy: boolean;
@@ -1198,6 +1213,18 @@ export const api = {
     invoke<void>("code_prompt", { id, text, attachmentIds, mentions, promptId, force }),
   /** Drop a prompt queued behind the running turn. */
   codeUnqueue: (id: string, promptId: string) => invoke<void>("code_unqueue", { id, promptId }),
+  /** Sessions whose active-turn flag is still set: what the relaunch picker offers. */
+  resumeCandidates: () => invoke<ResumeCandidate[]>("resume_candidates"),
+  /**
+   * Apply the relaunch picker's choices: each checked session is re-attached like opening it and
+   * gets exactly one fixed continue prompt through the normal send path; each unchecked session
+   * only clears its flag. Per-session results, errors included (never silent).
+   */
+  resumeApply: (checked: string[]) => invoke<ResumeResult[]>("resume_apply", { checked }),
+  /** The wait dialog's "Quit now" (and its auto-quit when the list empties): do the pending quit. */
+  quitProceed: () => invoke<void>("quit_proceed"),
+  /** The wait dialog's "Keep Patchbay open": drop the pending quit; no flag is touched. */
+  quitCancel: () => invoke<void>("quit_cancel"),
   /** Cancel the running turn and send this queued prompt next. */
   codeSendNow: (id: string, promptId: string) => invoke<void>("code_send_now", { id, promptId }),
   getCodeTranscript: (id: string) => invoke<string | null>("get_code_transcript", { id }),

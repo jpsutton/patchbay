@@ -271,7 +271,7 @@ pub fn build_tray(app: &AppHandle) -> Result<()> {
                 }
             }
             "quick" => toggle_quick(app),
-            "quit" => app.exit(0),
+            "quit" => begin_quit(app, QuitAfter::Exit),
             _ => {}
         })
         .on_tray_icon_event(|tray, ev| {
@@ -456,7 +456,9 @@ async fn update_check(
 async fn update_install(app: AppHandle, pending: tauri::State<'_, PendingUpdate>) -> crate::CmdResult<()> {
     let update = pending.0.lock().await.take().ok_or_else(|| anyhow!("no update to install"))?;
     update.download_and_install(|_, _| {}, || {}).await?;
-    app.request_restart();
+    // pb-20261111-22: the updater restart goes through the same wait offer — the gate calls
+    // request_restart only when the list is empty (or Quit now was chosen).
+    begin_quit(&app, QuitAfter::Restart);
     Ok(())
 }
 
@@ -484,6 +486,118 @@ fn stop_native() {
 
 /// Serve an invoke from the window. Shared commands go through `api::call`, the same dispatcher
 /// the daemon's web clients use; the rest are the desktop-only commands above.
+/// What a finished quit does once the wait list empties (pb-20261111-22).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum QuitAfter {
+    Exit,
+    Restart,
+}
+
+/// The one gate every quit path funnels through: the pending action, whether the wait dialog
+/// is on screen, and a latch so our own exit/restart never re-enters the gate.
+#[derive(Default)]
+pub struct QuitFlow {
+    inner: Mutex<QuitFlowInner>,
+}
+
+#[derive(Default)]
+struct QuitFlowInner {
+    after: Option<QuitAfter>,
+    showing: bool,
+    performing: bool,
+}
+
+/// The decision every quit path makes. Attached (no AppState of its own) quits at once — the
+/// daemon keeps working, there is nothing to wait for (no false wait). The standalone owner
+/// offers the wait dialog only while turns are actually running; with nothing running there
+/// is nothing to wait for either. A quit already shown or under way is ignored.
+#[derive(PartialEq, Eq, Debug)]
+enum QuitPlan {
+    GoNow,
+    ShowWait,
+    Ignore,
+}
+
+fn plan_quit(owns_state: bool, active_turns: usize, showing: bool, performing: bool) -> QuitPlan {
+    if performing || showing {
+        QuitPlan::Ignore
+    } else if owns_state && active_turns > 0 {
+        QuitPlan::ShowWait
+    } else {
+        QuitPlan::GoNow
+    }
+}
+
+/// Every quit path calls this: tray Quit, the last window's close, Cmd-Q / the app menu
+/// (ExitRequested), and the updater's restart (gated before `request_restart`).
+fn begin_quit(app: &AppHandle, after: QuitAfter) {
+    let state = app.try_state::<crate::AppState>();
+    let active = state.as_ref().map(|s| s.code.busy_sessions().len()).unwrap_or(0);
+    let flow = app.state::<QuitFlow>();
+    let plan = {
+        let g = flow.inner.lock().unwrap_or_else(|e| e.into_inner());
+        plan_quit(state.is_some(), active, g.showing, g.performing)
+    };
+    match plan {
+        QuitPlan::Ignore => {}
+        QuitPlan::GoNow => perform_quit(app, after),
+        QuitPlan::ShowWait => {
+            if let Some(w) = active_normal_window(app) {
+                {
+                    let mut g = flow.inner.lock().unwrap_or_else(|e| e.into_inner());
+                    g.after = Some(after);
+                    g.showing = true;
+                }
+                let _ = w.emit("quit://wait", ());
+            } else {
+                // No window to ask in: nothing can show the dialog, so go now.
+                perform_quit(app, after);
+            }
+        }
+    }
+}
+
+/// Carry out a decided quit: latch first (our own ExitRequested must not re-enter the gate),
+/// then exit or restart. `RunEvent::Exit` still runs `state.shutdown()` on the way out, so a
+/// clean wait leaves no flags and Quit now leaves them set (the shutdown guard).
+fn perform_quit(app: &AppHandle, after: QuitAfter) {
+    {
+        let flow = app.state::<QuitFlow>();
+        let mut g = flow.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if g.performing {
+            return;
+        }
+        g.performing = true;
+        g.showing = false;
+        g.after = None;
+    }
+    match after {
+        QuitAfter::Exit => app.exit(0),
+        QuitAfter::Restart => app.request_restart(),
+    }
+}
+
+/// The wait dialog's "Quit now" (and its auto-quit when the list empties): carry out the
+/// pending quit. Quit now is today's stop_all behaviour — flags stay set, the relaunch offers
+/// those sessions (the shutdown guard keeps stop_all's death throes from clearing them).
+#[tauri::command]
+fn quit_proceed(app: AppHandle) {
+    let flow = app.state::<QuitFlow>();
+    let after = flow.inner.lock().unwrap_or_else(|e| e.into_inner()).after.unwrap_or(QuitAfter::Exit);
+    perform_quit(&app, after);
+}
+
+/// The wait dialog's "Keep Patchbay open": drop the pending quit; no flag is touched.
+#[tauri::command]
+fn quit_cancel(app: AppHandle) {
+    let flow = app.state::<QuitFlow>();
+    let mut g = flow.inner.lock().unwrap_or_else(|e| e.into_inner());
+    if !g.performing {
+        g.showing = false;
+        g.after = None;
+    }
+}
+
 fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     let desktop_only: Box<dyn Fn(tauri::ipc::Invoke) -> bool + Send + Sync> =
         Box::new(tauri::generate_handler![
@@ -495,6 +609,8 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'stat
             open_local_path,
             update_check,
             update_install,
+            quit_proceed,
+            quit_cancel,
             list_native_voices,
             speak_native,
             stop_native
@@ -593,6 +709,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(PendingUpdate::default())
+        .manage(QuitFlow::default())
         .setup(|app| {
             let handle = app.handle().clone();
             let (title_bar, quick_entry_shortcut) = match start_backend(&handle, app.path().app_data_dir()?) {
@@ -636,6 +753,29 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|w, ev| {
+            // The last normal window asks the quit gate instead of dying at once: a wait
+            // dialog while turns run, an immediate quit otherwise (pb-20261111-22). Other
+            // windows still close freely; a quit already under way lets closes through.
+            if w.label() != QUICK && matches!(ev, tauri::WindowEvent::CloseRequested { .. }) {
+                let app = w.app_handle();
+                let others = app
+                    .webview_windows()
+                    .into_iter()
+                    .filter(|(label, _)| *label != QUICK && *label != w.label())
+                    .count();
+                let performing = app
+                    .state::<QuitFlow>()
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .performing;
+                if others == 0 && !performing {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = ev {
+                        api.prevent_close();
+                    }
+                    begin_quit(app, QuitAfter::Exit);
+                }
+            }
             // The hidden quick-entry window must not keep the app alive after normal windows close.
             if w.label() != QUICK && matches!(ev, tauri::WindowEvent::Destroyed) {
                 let remaining = w
@@ -662,12 +802,29 @@ pub fn run() {
         .invoke_handler(invoke_handler())
         .build(tauri::generate_context!())
         .expect("error while building Patchbay")
-        .run(|app, event| {
-            if let tauri::RunEvent::Exit = event
-                && let Some(state) = app.try_state::<crate::AppState>()
-            {
-                state.shutdown();
+        .run(|app, event| match event {
+            // Cmd-Q, the app menu's Quit, and our own exit/restart all pass through here.
+            // Attached (no AppState): let it quit — the daemon keeps working, nothing to wait
+            // for. Standalone: offer the wait dialog first (pb-20261111-22). Our own performed
+            // quit/restart passes straight through (the latch above).
+            tauri::RunEvent::ExitRequested { api, .. } => {
+                let performing = app
+                    .state::<QuitFlow>()
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .performing;
+                if !performing && app.try_state::<crate::AppState>().is_some() {
+                    api.prevent_exit();
+                    begin_quit(app, QuitAfter::Exit);
+                }
             }
+            tauri::RunEvent::Exit => {
+                if let Some(state) = app.try_state::<crate::AppState>() {
+                    state.shutdown();
+                }
+            }
+            _ => {}
         });
 }
 
@@ -758,4 +915,17 @@ mod file_link_tests {
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
+}
+
+/// pb-20261111-22: the quit gate's decision table — attached quits at once (no dialog: the
+/// daemon keeps working), the standalone owner waits only while turns run, re-entry ignored.
+#[cfg(all(test, feature = "ipc-test"))]
+#[test]
+fn quit_gate_decides_wait_vs_go_now() {
+    assert_eq!(plan_quit(false, 3, false, false), QuitPlan::GoNow, "attached with turns: no dialog");
+    assert_eq!(plan_quit(false, 0, false, false), QuitPlan::GoNow, "attached idle");
+    assert_eq!(plan_quit(true, 2, false, false), QuitPlan::ShowWait, "standalone with turns: wait");
+    assert_eq!(plan_quit(true, 0, false, false), QuitPlan::GoNow, "standalone idle: nothing to wait for");
+    assert_eq!(plan_quit(true, 2, true, false), QuitPlan::Ignore, "dialog already up");
+    assert_eq!(plan_quit(true, 2, false, true), QuitPlan::Ignore, "already quitting");
 }
