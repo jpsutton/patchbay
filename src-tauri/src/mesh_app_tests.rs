@@ -3108,6 +3108,14 @@ async fn deliveries_to_a_closing_session_are_refused() {
 /// even when a delivery hangs — finish still runs, and the latency stays under a fixed bound.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn quit_tell_phase_is_bounded_even_when_a_delivery_hangs() {
+    // Change-detector on the RULED production bound: the behavioral budget below is a test
+    // value, so only this line catches someone stretching QUIT_NOTICE_BUDGET (a quit tell
+    // of 60s would keep the suite green while violating the advisor's 5s rule).
+    assert_eq!(
+        crate::QUIT_NOTICE_BUDGET,
+        std::time::Duration::from_secs(5),
+        "the ruled quit-notice budget is five seconds"
+    );
     let n = node("alpha-quit-latency");
     seed_mock_model(&n);
     let proj = n.dir.join("proj");
