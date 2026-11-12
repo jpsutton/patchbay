@@ -2761,6 +2761,107 @@ async fn resume_apply_unchecked_clears_the_flag_without_any_prompt() {
     assert!(prompts.is_empty(), "unchecked means zero prompts: {prompts:?}");
 }
 
+/// pb-20261111-22 (round 3): the resume guards themselves — a live session is never offered,
+/// a checked list of decoys sends exactly once, and checked:[] on a live session answers
+/// "running" with the flag STAYS set (a throwaway once got "skipped" there, which would have
+/// cleared a live turn's flag). With either guard planted out, this goes red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_guards_skip_live_sessions_and_send_each_checked_once() {
+    let a = node("alpha-resume-guards");
+    let cwd = a.dir.join("proj");
+    repo(&cwd);
+    let chans: crate::api::ChanFactory = Arc::new(|_| None);
+    // Provider + model so sessions can actually start (startable, as in the other resume tests).
+    let prov = crate::db::Provider {
+        id: "mock".into(),
+        name: "Mock LLM".into(),
+        kind: crate::db::ProviderKind::OpenaiChat,
+        base_url: "http://127.0.0.1:8765/v1".into(),
+        has_key: true,
+        auth_mode: Default::default(),
+        claude_config_dir: None,
+        grok_home: None,
+    };
+    a.state.db.upsert_provider(&prov, Some("mock-key")).unwrap();
+    a.state
+        .db
+        .upsert_model(&crate::db::Model {
+            id: "test-model".into(),
+            provider_id: "mock".into(),
+            model_id: "test-model".into(),
+            display_name: "Test Model".into(),
+            vision: false,
+            context_window: None,
+            params: crate::db::ModelParams::default(),
+        })
+        .unwrap();
+
+    // (ii) A live session — agent RUNNING with busy set (mid-turn) — is the ONLY flagged one:
+    // candidates must be []. (is_busy = is_running && busy, so the agent must really run.)
+    let live = a
+        .state
+        .db
+        .create_code_session(&cwd.to_string_lossy(), None, "patchbay", "default")
+        .unwrap();
+    crate::code_start_local(&a.state, live.id.clone()).await.unwrap();
+    a.state.db.set_code_session_active_turn(&live.id, Some(crate::db::now_ms())).unwrap();
+    a.state.code.set_busy(&live.id, true);
+    let cands = crate::api::call(&a.state, "resume_candidates", json!({}), &chans).await.unwrap();
+    assert_eq!(cands, json!([]), "a running session is never offered: {cands}");
+
+    // (iii) checked:[] on the live session -> "running", and the flag STAYS set.
+    let r = crate::api::call(&a.state, "resume_apply", json!({ "checked": [] }), &chans)
+        .await
+        .unwrap();
+    let row = r
+        .as_array()
+        .and_then(|rows| rows.iter().find(|x| x["id"] == json!(live.id)))
+        .unwrap_or_else(|| panic!("the live session has a row: {r}"));
+    assert_eq!(row["action"], json!("running"), "a live turn answers running, not skipped: {r}");
+    assert!(
+        a.state.db.code_session_active_turn(&live.id).unwrap().is_some(),
+        "a live turn's flag is never cleared"
+    );
+
+    // (i) A checked list of decoys + the target (listed twice) sends EXACTLY one prompt.
+    let target = a
+        .state
+        .db
+        .create_code_session(&cwd.to_string_lossy(), None, "patchbay", "default")
+        .unwrap();
+    a.state.db.set_code_session_active_turn(&target.id, Some(crate::db::now_ms())).unwrap();
+    let unflagged = a
+        .state
+        .db
+        .create_code_session(&cwd.to_string_lossy(), None, "patchbay", "default")
+        .unwrap();
+    let archived = a
+        .state
+        .db
+        .create_code_session(&cwd.to_string_lossy(), None, "patchbay", "default")
+        .unwrap();
+    a.state.db.set_code_session_active_turn(&archived.id, Some(crate::db::now_ms())).unwrap();
+    a.state.db.set_code_session_archived(&archived.id, true).unwrap();
+    let ghost = format!("ghost-{}", crate::db::new_id());
+    let r = crate::api::call(
+        &a.state,
+        "resume_apply",
+        json!({ "checked": [ghost, unflagged.id, archived.id, target.id.clone(), target.id] }),
+        &chans,
+    )
+    .await
+    .unwrap();
+    let rows = r.as_array().unwrap_or_else(|| panic!("array result: {r}"));
+    let sents: Vec<&Value> = rows.iter().filter(|x| x["action"] == json!("sent")).collect();
+    assert_eq!(sents.len(), 1, "exactly one prompt across the whole checked list: {r}");
+    assert_eq!(sents[0]["id"], json!(target.id), "and it is the target: {r}");
+    assert_eq!(
+        rows.iter().filter(|x| x["id"] == json!(target.id)).count(),
+        1,
+        "one row per candidate, no double-send for a duplicated id: {r}"
+    );
+}
+
 /// pb-20261111-22: a CHECKED candidate gets re-attached and exactly ONE user-attributed
 /// continue prompt with the fixed visible text — through the normal send path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

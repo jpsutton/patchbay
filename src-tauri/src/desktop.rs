@@ -530,6 +530,22 @@ fn plan_quit(owns_state: bool, active_turns: usize, performing: bool) -> QuitPla
     }
 }
 
+/// Whether a destroyed window may reset the quit gate: ONLY when no normal window remains
+/// (the dialog has nowhere to live). Closing a second window while the dialog is up in the
+/// first must not silently drop the pending quit (pb-20261111-22 round 3) — with a window
+/// left, the dialog continues there (every window polls `quit_wait_status`) or the next Quit
+/// re-raises it.
+fn destroyed_resets_gate(remaining_normal: usize) -> bool {
+    remaining_normal == 0
+}
+
+/// What `quit_wait_status` reports as "showing": a wait only counts while a quit is actually
+/// pending — a status response that raced a Keep-open cancel (showing, no `after`) must not
+/// re-open the dialog and proceed into an exit (pb-20261111-22 round 3).
+fn quit_status_pending(showing: bool, after: Option<QuitAfter>) -> bool {
+    showing && after.is_some()
+}
+
 /// Every quit path calls this: tray Quit, the last window's close, Cmd-Q / the app menu
 /// (ExitRequested), and the updater's restart (gated before `request_restart`).
 fn begin_quit(app: &AppHandle, after: QuitAfter) {
@@ -591,7 +607,10 @@ fn perform_quit(app: &AppHandle, after: QuitAfter) {
 #[tauri::command]
 fn quit_proceed(app: AppHandle) {
     let flow = app.state::<QuitFlow>();
-    let after = flow.inner.lock().unwrap_or_else(|e| e.into_inner()).after.unwrap_or(QuitAfter::Exit);
+    let after = flow.inner.lock().unwrap_or_else(|e| e.into_inner()).after;
+    // No pending quit (a Keep-open cancel won a race with an in-flight status response):
+    // proceeding must be a no-op, never an exit the user cancelled (pb-20261111-22 round 3).
+    let Some(after) = after else { return };
     perform_quit(&app, after);
 }
 
@@ -600,10 +619,18 @@ fn quit_proceed(app: AppHandle) {
 /// the frontend must not guess the list (a stale store could auto-quit an empty one).
 #[tauri::command]
 fn quit_wait_status(app: AppHandle) -> serde_json::Value {
-    let showing = {
+    let (showing, after) = {
         let flow = app.state::<QuitFlow>();
-        flow.inner.lock().unwrap_or_else(|e| e.into_inner()).showing
+        let g = flow.inner.lock().unwrap_or_else(|e| e.into_inner());
+        (g.showing, g.after)
     };
+    // A wait only counts while a quit is pending (see quit_status_pending): a stale response
+    // from before a Keep-open cancel must not re-open the dialog. And with no wait pending
+    // there is nothing to list — no busy_sessions walk at all (poll cost).
+    let showing = quit_status_pending(showing, after);
+    if !showing {
+        return serde_json::json!({ "showing": false, "active": [] });
+    }
     let active: Vec<serde_json::Value> = app
         .try_state::<crate::AppState>()
         .map(|s| {
@@ -825,18 +852,22 @@ pub fn run() {
             }
             // The hidden quick-entry window must not keep the app alive after normal windows close.
             if w.label() != QUICK && matches!(ev, tauri::WindowEvent::Destroyed) {
-                // A destroyed window cannot show a dialog: reset the gate so a later quit is
-                // never Ignored behind a showing flag with nothing on screen (pb-20261111-22).
-                if let Some(flow) = w.app_handle().try_state::<QuitFlow>() {
-                    let mut g = flow.inner.lock().unwrap_or_else(|e| e.into_inner());
-                    g.showing = false;
-                }
                 let remaining = w
                     .app_handle()
                     .webview_windows()
                     .into_iter()
                     .filter(|(label, _)| label != QUICK && label != w.label())
                     .count();
+                // Reset the gate ONLY when no normal window remains (pb-20261111-22 round 3):
+                // closing a second window while the dialog lives in the first must not drop
+                // the pending quit. With a window left the dialog continues there, and the
+                // next Quit re-raises it anyway.
+                if destroyed_resets_gate(remaining) {
+                    if let Some(flow) = w.app_handle().try_state::<QuitFlow>() {
+                        let mut g = flow.inner.lock().unwrap_or_else(|e| e.into_inner());
+                        g.showing = false;
+                    }
+                }
                 if remaining == 0 {
                     w.app_handle().exit(0);
                 }
@@ -983,4 +1014,12 @@ fn quit_gate_decides_wait_vs_go_now() {
     // plan no longer looks at `showing`), so the quit button can never be a dead one.
     assert_eq!(plan_quit(true, 2, false), QuitPlan::ShowWait, "second quit re-emits");
     assert_eq!(plan_quit(true, 2, true), QuitPlan::Ignore, "already quitting");
+    // Destroyed-window reset (round 3): only with no normal window left — closing a second
+    // window while the dialog lives in the first must not drop the pending quit.
+    assert!(destroyed_resets_gate(0), "no window left: the gate may reset");
+    assert!(!destroyed_resets_gate(1), "a window remains: the pending quit stays");
+    // Cancel-race status (round 3): showing without a pending quit reports nothing.
+    assert!(quit_status_pending(true, Some(QuitAfter::Exit)));
+    assert!(!quit_status_pending(true, None), "a cancelled wait must not report showing");
+    assert!(!quit_status_pending(false, Some(QuitAfter::Exit)));
 }
