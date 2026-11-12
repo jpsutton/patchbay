@@ -42,7 +42,7 @@ import { setIconSize } from "./iconSize";
 import { notifyInBackground } from "./notify";
 import { activityOf, strongest, type Activity } from "./activity";
 import { isRemoteApp } from "./platform";
-import { applyUnqueued } from "./queueMirror";
+import { applyUnqueued, handBack } from "./queueMirror";
 import type { CodeLive } from "./sessionLive";
 import { loadStringList, saveStringList } from "./manualOrder";
 import * as paneLogic from "./panes";
@@ -282,15 +282,6 @@ function setPrefs(next: Preferences) {
   }
 }
 
-/** Add the queued prompts `me` sent (live, not from a catch-up) to what its composer takes back. */
-function handBack(prev: ComposerRestore | null, dropped: QueuedPrompt[], me: string | undefined): ComposerRestore | null {
-  const mine = dropped.filter((q) => q.origin === me && !q.replayed);
-  if (mine.length === 0) return prev;
-  return {
-    text: [prev?.text, ...mine.map((q) => q.text)].filter((t) => t?.trim()).join("\n\n"),
-    attachments: [...(prev?.attachments ?? []), ...mine.flatMap((q) => q.attachments ?? [])],
-  };
-}
 
 /** Persist what the transcript shows, so the session renders before the agent replays it. */
 function saveTranscript(id: string, s: CodeState) {
@@ -1029,7 +1020,7 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
       next = {
         ...s,
         entries: s.entries.some(retracted) ? s.entries.filter((x) => !retracted(x)) : s.entries,
-        queued: applyUnqueued(s.queued, e, me),
+        queued: applyUnqueued(s.queued, e.promptIds),
         restore: e.restore ? handBack(s.restore, dropped, me) : s.restore,
       };
       break;
