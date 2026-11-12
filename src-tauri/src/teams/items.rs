@@ -305,7 +305,14 @@ impl TeamsDb {
 
     /// Open a decision. Routing by class: `human` waits for the user, `advisor_first` for the
     /// advisor, `coordinator` needs no gate and is recorded as resolved.
+    #[cfg(test)]
     pub fn open_decision(&self, team: &Team, actor: Option<&str>, item: Option<&str>, question: &str, options: &[String], recommendation: Option<&str>, class: &str) -> Result<Decision> {
+        self.open_decision_routed(team, actor, item, question, options, recommendation, class, true)
+    }
+
+    /// `advisor_available` is determined from live team membership before the decision is
+    /// inserted, so an advisor-first decision with no eligible decider waits for the user.
+    fn open_decision_routed(&self, team: &Team, actor: Option<&str>, item: Option<&str>, question: &str, options: &[String], recommendation: Option<&str>, class: &str, advisor_available: bool) -> Result<Decision> {
         if question.trim().is_empty() {
             bail!("a decision needs a question");
         }
@@ -318,7 +325,8 @@ impl TeamsDb {
         }
         let status = match class {
             "human" => "awaiting_user",
-            "advisor_first" => "awaiting_advisor",
+            "advisor_first" if advisor_available => "awaiting_advisor",
+            "advisor_first" => "awaiting_user",
             _ => "resolved",
         };
         let tx = self.0.unchecked_transaction()?;
@@ -542,14 +550,15 @@ fn run_tool(state: &AppState, session: &str, name: &str, args: &Value) -> Result
         "decision_open" => {
             c.need("writes_items", c.role.caps.writes_items, "open decisions")?;
             let options: Vec<String> = args["options"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect()).unwrap_or_default();
-            let d = tdb.open_decision(&c.team, Some(session), s("itemId"), need_s("question")?, &options, s("recommendation"), s("class").unwrap_or("advisor_first"))?;
+            let class = s("class").unwrap_or("advisor_first");
+            let advisors = if class == "advisor_first" { deciders(&tdb, &c.team.id)? } else { Vec::new() };
+            let d = tdb.open_decision_routed(&c.team, Some(session), s("itemId"), need_s("question")?, &options, s("recommendation"), class, class != "advisor_first" || !advisors.is_empty())?;
             changed(state, &tdb, &c.team.id, &format!("{} opened ({}): {}", d.id, d.class, d.question));
             let mut warning = None;
+            if class == "advisor_first" && advisors.is_empty() {
+                warning = Some("No team member has the `decides` capability, so this advisor-first decision is waiting for the user to answer in Patchbay.");
+            }
             if d.status == "awaiting_advisor" {
-                let advisors = deciders(&tdb, &c.team.id)?;
-                if advisors.is_empty() {
-                    warning = Some("no member of this team has the `decides` capability, so nobody can give the advisor verdict; the user can answer it in Patchbay");
-                }
                 let text = format!(
                     "Decision {} needs your verdict.\nQuestion: {}\nOptions: {}\nCoordinator recommends: {}\n\nAnswer with the decision_answer tool: verdict CLEAR (name your choice) or HUMAN (the user must decide), and a short reason.",
                     d.id, d.question, if d.options.is_empty() { "(open)".into() } else { d.options.join(" | ") }, d.recommendation.as_deref().unwrap_or("(none given)")
@@ -837,6 +846,22 @@ mod tests {
         let done = t.answer_user(&team.id, &d2.id, "A").unwrap();
         assert_eq!((done.status.as_str(), done.user_answer.as_deref()), ("resolved", Some("A")));
         assert!(t.answer_user(&team.id, &d2.id, "B").is_err());
+    }
+
+    #[test]
+    fn advisor_first_without_eligible_decider_waits_for_user() {
+        let (_d, t, team) = setup();
+        let no_deciders = deciders(&t, &team.id).unwrap();
+        assert!(no_deciders.is_empty());
+        let d = t.open_decision_routed(&team, Some("desk1"), None, "Choose?", &["A".into()], Some("A"), "advisor_first", !no_deciders.is_empty()).unwrap();
+        assert_eq!(d.status, "awaiting_user");
+        assert_eq!(t.decision(&team.id, &d.id).unwrap().status, "awaiting_user");
+
+        t.attach(&team.id, "advisor1", "advisor").unwrap();
+        let eligible_deciders = deciders(&t, &team.id).unwrap();
+        assert_eq!(eligible_deciders, ["advisor1"]);
+        let routed = t.open_decision_routed(&team, Some("desk1"), None, "Advisor?", &[], None, "advisor_first", !eligible_deciders.is_empty()).unwrap();
+        assert_eq!(routed.status, "awaiting_advisor");
     }
 
     #[test]

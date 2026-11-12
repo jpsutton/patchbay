@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, errorText, type TeamBoard as Board, type TeamDecision } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { input } from "./ProviderPage";
+import { splitTeamDecisions } from "./teamBoardDecisions";
 
 const STATUS_LABEL: Record<TeamDecision["status"], string> = {
   awaiting_advisor: "waiting for the advisor",
@@ -28,19 +29,19 @@ export function TeamBoard({ teamId }: { teamId: string }) {
   }, [teamId]);
   if (!board) return null;
 
-  const waiting = board.decisions.filter((d) => d.status === "awaiting_user");
-  const other = board.decisions.filter((d) => d.status !== "awaiting_user");
+  const { waiting, other } = splitTeamDecisions(board.decisions);
   const answer = (d: TeamDecision, text: string) =>
     api.teamDecisionAnswer(teamId, d.id, text).then(() => { setAnswers((a) => ({ ...a, [d.id]: "" })); return load(); }, (e) => setToast(errorText(e)));
 
   return (
     <div className="flex flex-col gap-3 text-xs">
       <div>
-        <div className="mb-1 font-medium">Decisions waiting for you · {waiting.length}</div>
+        <div className="mb-1 font-medium">Open decisions · {waiting.length}</div>
         {waiting.length === 0 && <div className="text-muted">Nothing waiting.</div>}
         {waiting.map((d) => (
           <div key={d.id} className={`mb-2 rounded-md border p-2 ${d.disagrees ? "border-yellow-500" : "border-border"}`}>
             <div className="font-medium">{d.id}{d.itemId ? ` · ${d.itemId}` : ""}: {d.question}</div>
+            <div className="text-muted">{STATUS_LABEL[d.status]}</div>
             {d.disagrees && <div className="my-1 rounded bg-yellow-500/20 px-1.5 py-0.5 font-medium">The advisor disagrees with the coordinator.</div>}
             <div className="mt-1 grid grid-cols-2 gap-2">
               <div className="rounded bg-panel-2 p-1.5">
