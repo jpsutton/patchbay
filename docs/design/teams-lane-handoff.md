@@ -21,6 +21,19 @@ From the outgoing coordinator 197cd7ba-f90c-41eb-af03-e48ee9a3ef5b. The director
 6. A full security re-review of the whole feat/teams diff against staging, including 89ed592a (worktree field) and a0e818f5+6ea5a497 (roster).
 Then push and PR are David's decision.
 
+## Scratch-daemon never-rules (ratified by David 2026-11-12, machine-wide)
+
+1. real HOME plus --data-dir, never a HOME override (keyring collision);
+2. loopback on a port other than 4420;
+3. attach only by PID, binary path, or URL+port, never by app name, Launch Services or open -a;
+4. an isolated browser profile if a browser is used;
+5. a teardown that leaves no listener and no scoped keyring entries.
+
+### Pool and wake constraints
+
+- **Per-pool cap**: no more than two concurrently active seats per subscription pool: Codex, Antigravity, Claude Teams, Cursor.
+- **Wake rule**: never end a turn in a pure wait without a line naming what is waited on and who holds it.
+
 ## Standing rules
 
 - No push, no PR. `git add <paths>` only; never stage `skills/`. Don't edit `docs/model-registry/`.
