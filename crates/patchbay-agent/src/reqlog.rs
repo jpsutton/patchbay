@@ -113,4 +113,27 @@ mod tests {
         let stopped = Err(patchbay_llm::Error::cancelled());
         assert_eq!(ReqTimer::start().finish(&cfg(), None, &stopped).outcome, ReqOutcome::Cancelled);
     }
+
+    /// A refused connection carries the request URL in reqwest's own text; the record the session
+    /// log keeps must not show an extra query value.
+    #[tokio::test]
+    async fn a_failed_call_logs_no_query_value() {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let mut cfg = Config::new(WireFormat::ChatCompletions, format!("http://127.0.0.1:{port}/v1"), "m");
+        cfg.max_retries = 0;
+        cfg.extra_query = vec![("code".into(), "SECRET-Q".into())];
+        let req = patchbay_llm::Request { messages: vec![Message::user("hi")], ..Default::default() };
+        let result = patchbay_llm::Client::new(cfg.clone())
+            .complete(&req, &tokio_util::sync::CancellationToken::new(), |_| {})
+            .await;
+        let rec = ReqTimer::start().finish(&cfg, None, &result);
+        assert_eq!(rec.outcome, ReqOutcome::Error);
+        let shown = format!("{rec:?}");
+        assert!(!shown.contains("SECRET-Q") && !shown.contains("code="), "{shown}");
+        assert!(rec.error.as_deref().unwrap_or("").contains("127.0.0.1"), "{shown}");
+    }
+
 }

@@ -181,17 +181,24 @@ pub fn extras_account(provider_id: &str) -> String {
     format!("extras:{provider_id}")
 }
 
-/// Headers the request itself depends on: a user entry must not replace them.
-/// Headers Patchbay owns. The auth ones come from the provider's auth mode: a second `Authorization`
-/// or key header would reach the server next to the real one.
-const RESERVED_HEADERS: [&str; 9] = [
-    "host", "content-length", "content-type", "accept", "transfer-encoding", "connection",
-    "authorization", "x-api-key", "x-goog-api-key",
-];
+/// Headers Patchbay sets itself, for every provider. `authorization` is the bearer the key goes
+/// out under (Claude login too): a second one would reach the server next to the real one.
+const RESERVED_HEADERS: [&str; 7] =
+    ["host", "content-length", "content-type", "accept", "transfer-encoding", "connection", "authorization"];
 
-fn reserved_header(name: &str) -> bool {
+/// Whether `name` (any case) is a header Patchbay sets for this kind of provider. The key header
+/// differs by kind (`AuthScheme` in `patchbay-llm` `Config::new`: Anthropic `x-api-key`, Gemini
+/// `x-goog-api-key`, everything else a bearer), so only that kind's own key header is reserved.
+/// OpenAI-compatible providers, Azure OpenAI included, get nothing but a bearer from their auth
+/// mode, so Azure's `api-key` (and `x-api-key` for a gateway) can only arrive through extras.
+fn reserved_header(kind: &ProviderKind, name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    RESERVED_HEADERS.contains(&n.as_str()) || n.starts_with("anthropic-")
+    RESERVED_HEADERS.contains(&n.as_str())
+        || match kind {
+            ProviderKind::Anthropic => n == "x-api-key" || n.starts_with("anthropic-"),
+            ProviderKind::Gemini => n == "x-goog-api-key",
+            _ => false,
+        }
 }
 const MAX_NAME: usize = 128;
 const MAX_VALUE: usize = 4096;
@@ -205,7 +212,7 @@ fn valid_value(v: &str) -> bool {
 }
 
 /// Merge typed entries with what is stored: a new value replaces, no value keeps.
-fn merge(entries: &[ExtraEntry], old: &[(String, String)], what: &str, header: bool) -> Result<Vec<(String, String)>> {
+fn merge(kind: &ProviderKind, entries: &[ExtraEntry], old: &[(String, String)], what: &str, header: bool) -> Result<Vec<(String, String)>> {
     let mut out: Vec<(String, String)> = Vec::new();
     for e in entries {
         let name = e.name.trim();
@@ -213,7 +220,7 @@ fn merge(entries: &[ExtraEntry], old: &[(String, String)], what: &str, header: b
             if !valid_header_name(name) {
                 bail!("{name:?} is not a valid header name");
             }
-            if reserved_header(name) {
+            if reserved_header(kind, name) {
                 bail!("the {name} header is set by Patchbay and can't be replaced");
             }
         } else if name.is_empty() || name.len() > MAX_NAME || name.chars().any(|c| c.is_control()) {
@@ -263,6 +270,18 @@ pub fn load_extras(keys: &dyn crate::mesh::keys::KeyStore, provider_id: &str) ->
     })
 }
 
+/// The extras a request needs. A provider with no stored names has none; one WITH names whose
+/// values cannot be read from the keyring is an error, never an empty set: the request would go out
+/// without its `api-key` and fail as a bare 401.
+pub fn required_extras(db: &Db, keys: &dyn crate::mesh::keys::KeyStore, provider_id: &str) -> Result<Extras> {
+    if db.provider_extra_names(provider_id)?.is_empty() {
+        return Ok(Extras::default());
+    }
+    keys.get(&extras_account(provider_id))
+        .and_then(|stored| serde_json::from_str(&stored).ok())
+        .ok_or_else(|| anyhow!("provider headers could not be read from keyring"))
+}
+
 /// Save a provider's extra headers and query parameters. Values go to the keyring ONLY: with no
 /// keyring this fails (unlike an API key there is no database fallback, since a header value in
 /// the database is what must never happen). The names go to the provider row.
@@ -273,8 +292,12 @@ pub fn set_extras(
     headers: &[ExtraEntry],
     query: &[ExtraEntry],
 ) -> Result<()> {
+    let (provider, _) = db.get_provider(provider_id)?.ok_or_else(|| anyhow!("provider not found"))?;
     let old = load_extras(keys, provider_id);
-    let next = Extras { headers: merge(headers, &old.headers, "header", true)?, query: merge(query, &old.query, "query parameter", false)? };
+    let next = Extras {
+        headers: merge(&provider.kind, headers, &old.headers, "header", true)?,
+        query: merge(&provider.kind, query, &old.query, "query parameter", false)?,
+    };
     if next == Extras::default() {
         keys.delete(&extras_account(provider_id));
     } else if !keys.set(&extras_account(provider_id), &serde_json::to_string(&next)?) {
@@ -326,7 +349,7 @@ pub fn resolve(db: &Db, model_ref: &str) -> Result<Resolved> {
         Auth::Key => load_key(&provider.id, inline.as_deref()),
     };
     // Only a provider that has extras touches the keyring for them.
-    let extras = if db.provider_extra_names(&provider.id)?.is_empty() { Extras::default() } else { load_extras(&Keyring, &provider.id) };
+    let extras = required_extras(db, &Keyring, &provider.id)?;
     Ok(Resolved {
         provider,
         model,
@@ -651,6 +674,7 @@ fn truncate(s: &str, n: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{context_window_of, parse_grok_version};
+    use super::{Extras, Resolved};
 
     #[test]
     fn reads_grok_s_version_from_its_banner() {
@@ -951,8 +975,8 @@ mod tests {
         assert!(set(vec![entry("x-a", Some("v\r\nx-evil: 1"))], vec![]).is_err(), "header injection through a value");
         assert!(set(vec![entry("Content-Type", Some("text/plain"))], vec![]).is_err(), "a header Patchbay sets");
         assert!(set(vec![entry("host", Some("evil"))], vec![]).is_err());
-        for name in ["Authorization", "x-api-key", "X-Goog-Api-Key", "anthropic-beta", "Anthropic-Version"] {
-            assert!(set(vec![entry(name, Some("v"))], vec![]).is_err(), "{name} comes from the auth mode");
+        for name in ["Authorization", "AUTHORIZATION", "Host", "content-TYPE"] {
+            assert!(set(vec![entry(name, Some("v"))], vec![]).is_err(), "{name} is set by Patchbay, in any case");
         }
         assert!(set(vec![entry("x-a", Some("1")), entry("X-A", Some("2"))], vec![]).is_err(), "duplicate header, any case");
         assert!(set(vec![], vec![entry("", Some("v"))]).is_err(), "empty query name");
@@ -1056,6 +1080,175 @@ mod tests {
         let shown = format!("{err:#} {err:?}");
         assert!(!shown.contains(QUERY_SECRET) && !shown.contains("code="), "{shown}");
         assert!(shown.contains("127.0.0.1"), "still names the host: {shown}");
+    }
+
+
+    #[test]
+    fn reserved_headers_follow_the_providers_kind() {
+        use super::*;
+        let (db, dir) = provider_in_temp_db();
+        for (id, kind) in [("anth", ProviderKind::Anthropic), ("gem", ProviderKind::Gemini)] {
+            let p = Provider {
+                id: id.into(),
+                name: id.into(),
+                kind,
+                base_url: "https://h/v1".into(),
+                has_key: false,
+                auth_mode: AuthMode::ApiKey,
+                claude_config_dir: None,
+                grok_home: None,
+            };
+            db.upsert_provider(&p, None).unwrap();
+        }
+        let keys = MemKeyStore::default();
+        let refused = |id: &str, name: &str| set_extras(&db, &keys, id, &[entry(name, Some("v"))], &[]).is_err();
+        // Anthropic sends x-api-key and anthropic-* itself.
+        for name in ["x-api-key", "X-API-KEY", "anthropic-beta", "Anthropic-Version", "authorization"] {
+            assert!(refused("anth", name), "{name} on an Anthropic provider");
+        }
+        // Gemini sends x-goog-api-key itself.
+        assert!(refused("gem", "X-Goog-Api-Key"));
+        assert!(refused("gem", "Authorization"));
+        // An OpenAI-compatible provider (Azure) gets only a bearer from its auth mode, so Azure's
+        // `api-key` and a gateway's `x-api-key` are usable, and are the only way they get sent.
+        assert!(!refused("azure", "api-key"), "Azure's api-key must stay possible");
+        assert!(!refused("azure", "x-api-key"));
+        assert!(refused("azure", "Authorization"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn extras_that_cannot_be_read_from_the_keyring_refuse_the_request() {
+        use super::*;
+        let (db, dir) = provider_in_temp_db();
+        let keys = MemKeyStore::default();
+        // No names stored: nothing to read, nothing required.
+        assert_eq!(required_extras(&db, &keys, "azure").unwrap(), Extras::default());
+        set_extras(&db, &keys, "azure", &[entry("api-key", Some(HEADER_SECRET))], &[]).unwrap();
+        assert_eq!(required_extras(&db, &keys, "azure").unwrap().headers.len(), 1);
+        // Names stored but the keyring holds nothing (unreadable, or another machine's keyring).
+        let empty = MemKeyStore::default();
+        let e = required_extras(&db, &empty, "azure").unwrap_err().to_string();
+        assert_eq!(e, "provider headers could not be read from keyring");
+        // Names stored and the keyring entry is garbage.
+        let garbled = MemKeyStore::default();
+        garbled.set(&extras_account("azure"), &format!("{{not json {HEADER_SECRET}"));
+        let e = required_extras(&db, &garbled, "azure").unwrap_err().to_string();
+        assert_eq!(e, "provider headers could not be read from keyring", "the stored text is never echoed");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[derive(Clone, Default)]
+    struct LogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for LogBuf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+        type Writer = LogBuf;
+        fn make_writer(&'a self) -> LogBuf {
+            self.clone()
+        }
+    }
+
+    fn azure_resolved(base_url: &str, extras: Extras) -> Resolved {
+        use super::*;
+        Resolved {
+            provider: Provider {
+                id: "azure".into(),
+                name: "Azure".into(),
+                kind: ProviderKind::OpenaiChat,
+                base_url: base_url.into(),
+                has_key: true,
+                auth_mode: AuthMode::ApiKey,
+                claude_config_dir: None,
+                grok_home: None,
+            },
+            model: Model {
+                id: "m".into(),
+                provider_id: "azure".into(),
+                model_id: "gpt-x".into(),
+                display_name: "GPT".into(),
+                vision: false,
+                context_window: None,
+                params: Default::default(),
+            },
+            key: Some("the-key".into()),
+            extras,
+            auth: Auth::Key,
+            grok_user: None,
+        }
+    }
+
+    /// The error text of a failed call goes to `messages.error` (a synced column: chat.rs stores
+    /// `e.to_string()`), to the session request log (`ReqRec.error` is `e.message`) and to tracing.
+    /// None of them may carry an extra query value, on a refused connection or on an HTTP error.
+    #[tokio::test]
+    async fn query_values_stay_out_of_error_text_and_tracing_on_a_refused_connection_and_a_401() {
+        use super::*;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let logs = LogBuf::default();
+        let subscriber = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).with_max_level(tracing::Level::TRACE).finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let refused_port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live_port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 16384];
+            let _ = sock.read(&mut buf).await;
+            let body = r#"{"error":{"message":"Access denied due to invalid subscription key."}}"#;
+            let _ = sock
+                .write_all(format!("HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes())
+                .await;
+        });
+
+        for (label, port, status) in [("refused", refused_port, None), ("401", live_port, Some(401u16))] {
+            let extras = Extras {
+                headers: vec![("api-key".into(), HEADER_SECRET.into())],
+                query: vec![("code".into(), QUERY_SECRET.into())],
+            };
+            let mut cfg = llm_config(&azure_resolved(&format!("http://127.0.0.1:{port}/openai/deployments/d"), extras));
+            cfg.max_retries = if status.is_none() { 1 } else { 0 };
+            let debug_of_config = format!("{cfg:?}");
+            let req = patchbay_llm::Request { messages: vec![patchbay_llm::Message::user("hi")], ..Default::default() };
+            let reasons = std::sync::Mutex::new(Vec::<String>::new());
+            let err = patchbay_llm::Client::new(cfg)
+                .complete(&req, &tokio_util::sync::CancellationToken::new(), |e| {
+                    if let patchbay_llm::Event::Retrying { reason, .. } = e {
+                        reasons.lock().unwrap().push(reason);
+                    }
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(err.status, status, "{label}: {err}");
+            let stored_in_messages_error = err.to_string();
+            tracing::warn!("title generation failed: {err}");
+            let mut texts = vec![stored_in_messages_error, err.message.clone(), format!("{err:?}"), debug_of_config];
+            texts.extend(reasons.into_inner().unwrap());
+            for t in &texts {
+                for secret in [QUERY_SECRET, HEADER_SECRET, "code="] {
+                    assert!(!t.contains(secret), "{label}: {secret} leaked into: {t}");
+                }
+            }
+            if status.is_none() {
+                assert!(texts[0].contains("127.0.0.1"), "still names the host: {}", texts[0]);
+            }
+        }
+        let logged = String::from_utf8_lossy(&logs.0.lock().unwrap()).into_owned();
+        assert!(logged.contains("title generation failed"), "the log capture works: {logged}");
+        for secret in [QUERY_SECRET, HEADER_SECRET, "code="] {
+            assert!(!logged.contains(secret), "{secret} reached tracing: {logged}");
+        }
     }
 
 }

@@ -334,7 +334,7 @@ async fn discover_models(
         }
         providers::Auth::Key => providers::load_key(&p.id, inline.as_deref()),
     };
-    let extras = providers::load_extras(&providers::Keyring, &p.id);
+    let extras = providers::required_extras(&state.db, &providers::Keyring, &p.id)?;
     Ok(providers::discover_models_for(&p.kind, &p.base_url, key.as_deref(), auth, grok_user.as_deref(), &extras).await?)
 }
 

@@ -239,11 +239,13 @@ impl Client {
                     retryable: true,
                     cancelled: false,
                 }),
-                // `without_url`: reqwest prints the full URL, and the query may hold a secret.
+                // `without_url`: reqwest prints the full URL, and the query may hold a secret. The
+                // host and path (no query) are put back, so the message still says where it failed.
                 Ok(r) => r.map_err(|e| {
                     let retryable = e.is_connect() || e.is_timeout() || e.is_request();
+                    let target = url.split('?').next().unwrap_or(url);
                     Error {
-                        message: format!("request failed: {}", diag::chain(&e.without_url())),
+                        message: format!("request failed: {} (POST {target})", diag::chain(&e.without_url())),
                         status: None,
                         retryable,
                         cancelled: false,
@@ -419,7 +421,9 @@ mod tests {
             assert!(!text.contains("code="), "query string leaked: {text}");
         }
         assert!(err.message.starts_with("request failed:"), "{}", err.message);
-        assert!(err.message.contains("127.0.0.1") || err.message.contains("connect"), "still says what failed: {}", err.message);
+        let target = format!("(POST http://127.0.0.1:{port}/openai/deployments/d/chat/completions)");
+        assert!(err.message.ends_with(&target), "still names the host and path: {}", err.message);
+        assert!(err.message.contains("Connection refused") || err.message.contains("connect"), "and the cause: {}", err.message);
     }
 
     /// The same for a body that breaks after the headers: the stream error must not carry the URL.
