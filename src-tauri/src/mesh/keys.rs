@@ -21,8 +21,7 @@ pub struct OsKeyStore {
 
 impl OsKeyStore {
     pub fn new(data_dir: &Path) -> Self {
-        let scope = crate::default_data_dir().ok().and_then(|d| keyring_scope(data_dir, &d));
-        Self { fallback: data_dir.join("mesh").join("secrets.json"), scope }
+        Self { fallback: data_dir.join("mesh").join("secrets.json"), scope: data_dir_scope(data_dir) }
     }
 
     /// The keyring account for `account`. Only the mesh's own secrets are scoped: provider and
@@ -48,6 +47,11 @@ impl OsKeyStore {
         }
         write_private(&self.fallback, serde_json::to_string(m).unwrap_or_default().as_bytes()).is_ok()
     }
+}
+
+/// The keyring scope of `data_dir` against the app's default folder (see `keyring_scope`).
+pub fn data_dir_scope(data_dir: &Path) -> Option<String> {
+    crate::default_data_dir().ok().and_then(|d| keyring_scope(data_dir, &d))
 }
 
 /// None for the default data folder, which keeps the unscoped names existing installs use;

@@ -1,0 +1,5 @@
+{
+  "productName": "Patchbay Scratch",
+  "identifier": "dev.patchbay.scratch",
+  "plugins": { "updater": { "endpoints": [] } }
+}
