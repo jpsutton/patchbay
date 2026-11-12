@@ -584,6 +584,13 @@ fn begin_quit(app: &AppHandle, after: QuitAfter) {
 /// Carry out a decided quit: latch first (our own ExitRequested must not re-enter the gate),
 /// then exit or restart. `RunEvent::Exit` still runs `state.shutdown()` on the way out, so a
 /// clean wait leaves no flags and Quit now leaves them set (the shutdown guard).
+fn finish_quit(app: &AppHandle, after: QuitAfter) {
+    match after {
+        QuitAfter::Exit => app.exit(0),
+        QuitAfter::Restart => app.request_restart(),
+    }
+}
+
 fn perform_quit(app: &AppHandle, after: QuitAfter) {
     {
         let flow = app.state::<QuitFlow>();
@@ -595,10 +602,19 @@ fn perform_quit(app: &AppHandle, after: QuitAfter) {
         g.showing = false;
         g.after = None;
     }
-    match after {
-        QuitAfter::Exit => app.exit(0),
-        QuitAfter::Restart => app.request_restart(),
-    }
+    let Some(state) = app.try_state::<crate::AppState>().map(|s| s.inner().clone()) else {
+        // Attached: no AppState here — the daemon owns its queues, nothing of ours to tell.
+        finish_quit(app, after);
+        return;
+    };
+    // Tell the senders of queued peer messages BEFORE the loops die with the app, bounded
+    // (pb-20261107-30): the drains are FIFO ahead of the stop_all that shutdown() runs after
+    // this task's finish, so a notice-woken sender is covered (no orphans) and a hung
+    // notice can never keep the quit from happening.
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        crate::tell_queued_senders_then(&state, move || finish_quit(&app, after)).await;
+    });
 }
 
 /// The wait dialog's "Quit now" (and its auto-quit when the list empties): carry out the

@@ -42,6 +42,7 @@ import { setIconSize } from "./iconSize";
 import { notifyInBackground } from "./notify";
 import { activityOf, strongest, type Activity } from "./activity";
 import { isRemoteApp } from "./platform";
+import { applyUnqueued, handBack } from "./queueMirror";
 import type { CodeLive } from "./sessionLive";
 import { loadStringList, saveStringList } from "./manualOrder";
 import * as paneLogic from "./panes";
@@ -198,7 +199,7 @@ export interface ChatStream {
   remote?: string | null;
 }
 
-const emptyCode = (): CodeState => ({
+export const emptyCode = (): CodeState => ({
   status: "idle",
   busy: false,
   partial: false,
@@ -281,15 +282,6 @@ function setPrefs(next: Preferences) {
   }
 }
 
-/** Add the queued prompts `me` sent (live, not from a catch-up) to what its composer takes back. */
-function handBack(prev: ComposerRestore | null, dropped: QueuedPrompt[], me: string | undefined): ComposerRestore | null {
-  const mine = dropped.filter((q) => q.origin === me && !q.replayed);
-  if (mine.length === 0) return prev;
-  return {
-    text: [prev?.text, ...mine.map((q) => q.text)].filter((t) => t?.trim()).join("\n\n"),
-    attachments: [...(prev?.attachments ?? []), ...mine.flatMap((q) => q.attachments ?? [])],
-  };
-}
 
 /** Persist what the transcript shows, so the session renders before the agent replays it. */
 function saveTranscript(id: string, s: CodeState) {
@@ -1020,11 +1012,16 @@ function stepCodeEvent(id: string, s: CodeState, e: Exclude<CodeEvent, { type: "
       // A steered message waiting under its bubble goes with its retraction; one the agent has
       // already read (no longer pending) stays in the transcript.
       const retracted = (x: Entry) => x.kind === "user" && x.pending && !!x.promptId && e.promptIds.includes(x.promptId);
+      const me = useStore.getState().mesh?.nodeId;
+      // pb-20261107-30: on a restore (stop/error) only THIS window's prompts leave the queue
+      // — agent-origin entries keep their place for the next turn. A hard drop (!restore:
+      // user removal, MCP accept, pre-stop drain) removes everything listed, each of those
+      // having already told its sender.
       next = {
         ...s,
         entries: s.entries.some(retracted) ? s.entries.filter((x) => !retracted(x)) : s.entries,
-        queued: s.queued.filter((q) => !e.promptIds.includes(q.promptId)),
-        restore: e.restore ? handBack(s.restore, dropped, useStore.getState().mesh?.nodeId) : s.restore,
+        queued: applyUnqueued(s.queued, e.promptIds),
+        restore: e.restore ? handBack(s.restore, dropped, me) : s.restore,
       };
       break;
     }
