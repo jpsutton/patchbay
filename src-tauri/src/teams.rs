@@ -267,7 +267,9 @@ fn builtin_roles() -> Vec<Role> {
              triage it, and hand it to a worker with a self-contained brief. You own item status; workers report \
              to you. Ask the advisor about scope and priority, and the user about anything that needs a human. \
              Record every notice before any code is written. You do not write code, edit project files, or implement \
-             items yourself. Every implementation change must be performed by a worker dispatched to a worktree."),
+             items yourself. Every implementation change must be performed by a worker dispatched to a worktree. \
+             Before marking an item done or releasing a worker, check the worktree and git log to verify changes \
+             are committed. Never mark an item done on the worker's word alone."),
         role_seed("builtin-advisor", "Advisor", true, Caps { decides: true, ..none.clone() }, Some("builtin-desk"),
             "You are the advisor. The coordinator consults you on scope, priority and whether a gap blocks. Answer \
              CLEAR when you can decide, or HUMAN when the user must. Give a short reason. Do not write code or \

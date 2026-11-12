@@ -4187,8 +4187,8 @@ async fn restart_member_checks_refuse_coordinator_with_live_dispatched_workers_a
     let err_coord = teams::team_restart_member(&a.state, team.id.clone(), coord.id.clone()).await.unwrap_err();
     assert!(err_coord.0.contains("release them first"), "{err_coord:?}");
 
-    // Release worker
-    teams::call_tool(&a.state, &coord.id, "item_set", &json!({ "itemId": item_id, "status": "done" })).await.unwrap();
+    // Release worker (PR URL satisfies the durable-done check without a local commit).
+    teams::call_tool(&a.state, &coord.id, "item_set", &json!({ "itemId": item_id, "status": "done", "prUrl": "https://example.test/pr/chk" })).await.unwrap();
     teams::call_tool(&a.state, &coord.id, "member_release", &json!({ "sessionId": s1 })).await.unwrap();
 
     // 2. Refuse if team is archived (L2)

@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use anyhow::Context;
 use serde_json::{Value, json};
 
 use super::*;
@@ -14,6 +15,14 @@ pub const STATUSES: &[&str] = &["noticed", "triaged", "blocked", "dispatched", "
 /// Refused when `item_set` moves an item to awaiting-review or done with no dispatch row.
 pub const DISPATCH_REQUIRED_FOR_FINISH: &str =
     "Cannot move item to awaiting-review or done without a worker dispatch. Coordinators do not implement items directly.";
+
+/// Refused when `item_set` marks done on a dirty worktree without a PR URL.
+pub const DONE_REQUIRES_CLEAN_WORKTREE: &str =
+    "Cannot mark item done: worktree has uncommitted changes. Worker must commit all changes.";
+
+/// Refused when `item_set` marks done with no commits ahead of the team base and no PR URL.
+pub const DONE_REQUIRES_COMMITS_AHEAD: &str =
+    "Cannot mark item done: branch has no new commits ahead of base branch. Worker must commit changes.";
 
 pub const MIGRATION: &str = r#"
 CREATE TABLE items (
@@ -198,7 +207,6 @@ impl TeamsDb {
         Ok(st.query_map(params![team_id, status], Self::item_from)?.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Change named fields of an item; every change leaves an event. `patch` is a JSON object.
     /// True when `item_id` has at least one `dispatches` row (any worker was started for it).
     fn item_has_dispatch(&self, team_id: &str, item_id: &str) -> Result<bool> {
         Ok(self
@@ -211,9 +219,17 @@ impl TeamsDb {
             > 0)
     }
 
+    /// Change named fields of an item; every change leaves an event. `patch` is a JSON object.
     pub fn set_item(&self, team_id: &str, id: &str, actor: Option<&str>, patch: &Value) -> Result<Item> {
         let fields = patch.as_object().filter(|o| !o.is_empty()).ok_or_else(|| anyhow!("name at least one field to change"))?;
         let before = self.item(team_id, id)?;
+        // Resolve PR URL from the whole patch up front: field order in the object is not stable.
+        let pr_url_after = match fields.get("prUrl") {
+            Some(Value::Null) => String::new(),
+            Some(Value::String(s)) => s.trim().to_owned(),
+            Some(_) => bail!("prUrl must be text (or null to clear it)"),
+            None => before.pr_url.clone().unwrap_or_default(),
+        };
         let tx = self.0.unchecked_transaction()?;
         let mut changed = 0;
         for (key, value) in fields {
@@ -247,6 +263,10 @@ impl TeamsDb {
             // Coordinators own status, but cannot skip the worker path to finish an item.
             if key == "status" && matches!(new.as_str(), "awaiting-review" | "done") && !self.item_has_dispatch(team_id, id)? {
                 bail!("{DISPATCH_REQUIRED_FOR_FINISH}");
+            }
+            // Done needs durable evidence: a PR URL, or a clean worktree with commits ahead of base.
+            if key == "status" && new == "done" && pr_url_after.is_empty() {
+                ensure_done_is_durable(&self.team(team_id)?, id)?;
             }
             let stored: Option<&str> = if matches!(column, "member_session" | "pr_url") && new.is_empty() { None } else { Some(new.as_str()) };
             self.0.execute(
@@ -441,6 +461,43 @@ impl Caller {
         }
         Ok(())
     }
+}
+
+/// Host-side git for durable-done checks. Mirrors dispatch's safe flags (no hooks / system config).
+fn git_in(cwd: &Path, args: &[&str]) -> Result<String> {
+    let out = std::process::Command::new("git")
+        .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C"])
+        .arg(cwd)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .context("running git")?;
+    if !out.status.success() {
+        bail!("git {} failed: {}", args.first().copied().unwrap_or(""), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// When marking done without a PR URL, the item's worktree must be clean and ahead of `pr_base`.
+/// Missing worktree folders are skipped (no local evidence to inspect).
+fn ensure_done_is_durable(team: &Team, item_id: &str) -> Result<()> {
+    if team.worktree_root.trim().is_empty() {
+        return Ok(());
+    }
+    let path = Path::new(&team.worktree_root).join(item_id.to_lowercase());
+    if !path.is_dir() {
+        return Ok(());
+    }
+    let status = git_in(&path, &["status", "--porcelain"])?;
+    if !status.is_empty() {
+        bail!("{DONE_REQUIRES_CLEAN_WORKTREE}");
+    }
+    let ahead = git_in(&path, &["rev-list", "--count", &format!("{}..HEAD", team.pr_base)])?;
+    let n: u64 = ahead.parse().unwrap_or(0);
+    if n == 0 {
+        bail!("{DONE_REQUIRES_COMMITS_AHEAD}");
+    }
+    Ok(())
 }
 
 /// True when `session` fills a seat on a live team (it then gets the team tools).
@@ -884,6 +941,94 @@ mod tests {
         let done = t.answer_user(&team.id, &d2.id, "A").unwrap();
         assert_eq!((done.status.as_str(), done.user_answer.as_deref()), ("resolved", Some("A")));
         assert!(t.answer_user(&team.id, &d2.id, "B").is_err());
+    }
+
+    fn setup_with_git_worktree() -> (PathBuf, TeamsDb, Team) {
+        let d = std::env::temp_dir().join(format!("pb-items-git-{}", new_id()));
+        let proj = d.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let t = TeamsDb::open(&d).unwrap();
+        let team = t
+            .create_team(NewTeam {
+                template_id: "builtin-triage-desk".into(),
+                slug: "demo".into(),
+                cwd: proj.to_string_lossy().into_owned(),
+                id_prefix: Some("DM".into()),
+                pr_base: None,
+                worktree_root: Some(proj.join("trees").to_string_lossy().into_owned()),
+                project_rules: None,
+                export_dir: Some(d.join("out").to_string_lossy().into_owned()),
+            })
+            .unwrap();
+        let run = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git").arg("-C").arg(&proj).args(args).output().unwrap().status.success(),
+                "{args:?}"
+            );
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]);
+        (d, t, team)
+    }
+
+    fn add_item_worktree(team: &Team, item_id: &str) -> PathBuf {
+        let branch = item_id.to_lowercase();
+        let path = Path::new(&team.worktree_root).join(&branch);
+        std::fs::create_dir_all(&team.worktree_root).unwrap();
+        let out = std::process::Command::new("git")
+            .args(["-C", &team.cwd, "worktree", "add", "-b", &branch, "--", path.to_str().unwrap(), &team.pr_base])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        path
+    }
+
+    fn seed_dispatch(t: &TeamsDb, team: &Team, item_id: &str) {
+        t.0.execute(
+            "INSERT INTO dispatches(team_id, item_id, seat, desk_session, at) VALUES (?1, ?2, 'workers', 'desk1', 0)",
+            params![team.id, item_id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn done_requires_clean_commits_ahead_or_pr_url() {
+        let (_d, t, team) = setup_with_git_worktree();
+        let i = t.add_item(&team, Some("desk1"), "20261109", "Ship it", "task", "normal", "").unwrap();
+        seed_dispatch(&t, &team, &i.id);
+        let wt = add_item_worktree(&team, &i.id);
+
+        // Clean worktree at base: no commit ahead.
+        let err = t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "status": "done" })).unwrap_err().to_string();
+        assert_eq!(err, DONE_REQUIRES_COMMITS_AHEAD);
+
+        // Dirty worktree (untracked file).
+        std::fs::write(wt.join("LICENSE"), "MIT").unwrap();
+        let err = t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "status": "done" })).unwrap_err().to_string();
+        assert_eq!(err, DONE_REQUIRES_CLEAN_WORKTREE);
+
+        // PR URL bypasses local branch evidence.
+        assert_eq!(
+            t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "status": "done", "prUrl": "https://example.test/pr/1" }))
+                .unwrap()
+                .status,
+            "done"
+        );
+
+        // Reset to triaged for the clean+ahead path on a second item.
+        let i2 = t.add_item(&team, Some("desk1"), "20261109", "Ship more", "task", "normal", "").unwrap();
+        seed_dispatch(&t, &team, &i2.id);
+        let wt2 = add_item_worktree(&team, &i2.id);
+        std::fs::write(wt2.join("README.md"), "done").unwrap();
+        let run = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git").arg("-C").arg(&wt2).args(args).output().unwrap().status.success(),
+                "{args:?}"
+            );
+        };
+        run(&["add", "README.md"]);
+        run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "work"]);
+        assert_eq!(t.set_item(&team.id, &i2.id, Some("desk1"), &json!({ "status": "done" })).unwrap().status, "done");
     }
 
     #[test]
