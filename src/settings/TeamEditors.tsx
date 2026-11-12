@@ -242,7 +242,13 @@ export function RolesEditor() {
   );
 }
 
-type TemplateDraft = { id?: string; name: string; seats: TeamSeat[]; routing: TeamTemplate["routing"] };
+type TemplateDraft = {
+  id?: string;
+  name: string;
+  seats: TeamSeat[];
+  routing: TeamTemplate["routing"];
+  allowWorkerCommit: boolean;
+};
 const blankSeat = (roleId: string): TeamSeat => ({ seat: "", roleId, agent: "claude-code", model: null, permissionMode: "default", count: 1 });
 
 /** Templates: seats of role, agent and model. The built-in one is copied to change it. */
@@ -251,7 +257,7 @@ export function TemplatesEditor() {
   const [templates, setTemplates] = useState<TeamTemplate[]>([]);
   const [roles, setRoles] = useState<TeamRole[]>([]);
   const [sel, setSel] = useState<string | "new" | null>(null);
-  const [draft, setDraft] = useState<TemplateDraft>({ name: "", seats: [], routing: [] });
+  const [draft, setDraft] = useState<TemplateDraft>({ name: "", seats: [], routing: [], allowWorkerCommit: false });
   const fail = (e: unknown) => setToast(errorText(e));
   const reload = () => Promise.all([api.listTeamTemplates(), api.listRoles()]).then(([t, r]) => { setTemplates(t); setRoles(r); }, fail);
   useEffect(() => {
@@ -260,14 +266,25 @@ export function TemplatesEditor() {
   }, []);
   const current = templates.find((t) => t.id === sel);
   useEffect(() => {
-    if (current) setDraft({ id: current.id, name: current.name, seats: current.seats, routing: current.routing });
+    if (current) {
+      setDraft({
+        id: current.id,
+        name: current.name,
+        seats: current.seats,
+        routing: current.routing,
+        allowWorkerCommit: !!current.allowWorkerCommit,
+      });
+    }
   }, [current]);
   const ro = !!current && current.id.startsWith("builtin-");
   const isDirty = !ro && (
     current
-      ? draft.name !== current.name || JSON.stringify(draft.seats) !== JSON.stringify(current.seats)
+      ? draft.name !== current.name
+        || JSON.stringify(draft.seats) !== JSON.stringify(current.seats)
+        || draft.allowWorkerCommit !== !!current.allowWorkerCommit
       : sel === "new" && (
         draft.name !== "" ||
+        draft.allowWorkerCommit ||
         draft.seats.length !== 1 ||
         draft.seats[0]?.seat !== "" ||
         draft.seats[0]?.agent !== "claude-code" ||
@@ -299,7 +316,7 @@ export function TemplatesEditor() {
             {t.id.startsWith("builtin-") && <span className="ml-1 text-muted">built-in</span>}
           </button>
         ))}
-        <button className="mt-2 rounded-md border border-dashed border-border px-2 py-1.5 text-left text-xs text-muted hover:border-accent hover:text-fg" onClick={() => { setDraft({ name: "", seats: [blankSeat(roles[0]?.id ?? "")], routing: [] }); setSel("new"); }}>
+        <button className="mt-2 rounded-md border border-dashed border-border px-2 py-1.5 text-left text-xs text-muted hover:border-accent hover:text-fg" onClick={() => { setDraft({ name: "", seats: [blankSeat(roles[0]?.id ?? "")], routing: [], allowWorkerCommit: false }); setSel("new"); }}>
           + New template
         </button>
       </div>
@@ -443,9 +460,24 @@ export function TemplatesEditor() {
             })}
             {!ro && <button className={`${btn} self-start`} onClick={() => setDraft({ ...draft, seats: [...draft.seats, blankSeat(roles[0]?.id ?? "")] })}>+ Add seat</button>}
             <div className="text-muted">Seat count: members of a standing seat, or the most workers alive at once.</div>
+            <label className="flex items-start gap-1.5 rounded border border-border p-1.5">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={draft.allowWorkerCommit}
+                disabled={ro}
+                onChange={(e) => setDraft({ ...draft, allowWorkerCommit: e.target.checked })}
+              />
+              <span>
+                Allow workers to run <code className="text-[10px]">git add</code> and <code className="text-[10px]">git commit</code> inside their assigned worktree without asking.
+                <span className="mt-1 block text-muted">
+                  Warning: permits git add and git commit inside the assigned worktree. Push, branch delete and rewrite remain blocked.
+                </span>
+              </span>
+            </label>
             <div className="flex gap-2">
               {ro ? (
-                <button className={primary} onClick={() => { setDraft({ ...draft, id: undefined, name: `Copy of ${draft.name}` }); setSel("new"); }}>Copy to edit</button>
+                <button className={primary} onClick={() => { setDraft({ ...draft, id: undefined, name: `Copy of ${draft.name}`, allowWorkerCommit: false }); setSel("new"); }}>Copy to edit</button>
               ) : (
                 <button
                   className={primary}

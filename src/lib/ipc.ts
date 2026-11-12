@@ -370,7 +370,14 @@ export interface TeamSeat {
   /** Read-only, from the backend: agents in the seat whose team-tool calls still wait on a prompt. */
   prompts?: string[];
 }
-export interface TeamTemplate { id: string; name: string; seats: TeamSeat[]; routing: { class: string; goesTo: string; examples: string }[] }
+export interface TeamTemplate {
+  id: string;
+  name: string;
+  seats: TeamSeat[];
+  routing: { class: string; goesTo: string; examples: string }[];
+  /** Opt-in: workers may git add/commit inside their assigned worktree without a prompt. */
+  allowWorkerCommit?: boolean;
+}
 export interface Team {
   id: string; slug: string; templateId: string; cwd: string; idPrefix: string; prBase: string;
   worktreeRoot: string; projectRules: string; exportDir: string; createdAt: number; archivedAt: number | null;
@@ -384,7 +391,13 @@ export interface TeamMemberRow {
   /** running / waiting / stalled / idle / stopped; null for a session on another computer. */
   activity: string | null;
 }
-export type TeamTemplateInput = { id?: string; name: string; seats: TeamSeat[]; routing: TeamTemplate["routing"] };
+export type TeamTemplateInput = {
+  id?: string;
+  name: string;
+  seats: TeamSeat[];
+  routing: TeamTemplate["routing"];
+  allowWorkerCommit?: boolean;
+};
 export type TeamRoleInput = Omit<TeamRole, "id" | "builtin"> & { id?: string };
 export interface TeamItem {
   teamId: string; id: string; title: string; type: string; severity: string; status: string;

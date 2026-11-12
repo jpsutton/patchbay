@@ -601,7 +601,13 @@ mod tests {
         assert!(seats.iter().all(|s| !s.allow_unasked), "built-ins never carry it");
         seats.iter_mut().find(|s| s.seat == "workers").unwrap().allow_unasked = true;
         let saved = t
-            .save_template(crate::teams::TemplateInput { id: None, name: "mine".into(), seats, routing: vec![] })
+            .save_template(crate::teams::TemplateInput {
+                id: None,
+                name: "mine".into(),
+                seats,
+                routing: vec![],
+                allow_worker_commit: false,
+            })
             .unwrap();
         let w = |t: &crate::teams::Template| t.seats.iter().find(|s| s.seat == "workers").unwrap().clone();
         assert!(w(&saved).allow_unasked && w(&saved).acknowledged());

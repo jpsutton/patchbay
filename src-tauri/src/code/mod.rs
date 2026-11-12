@@ -257,7 +257,7 @@ impl CodeManager {
                 Arc::new(move |tool_call, options| {
                     // A live team member's call to a team tool needs no prompt (teams/allow.rs).
                     if let Some(agent) = db.get_code_session(&csid).ok().flatten().map(|s| s.agent)
-                        && let Some(hit) = crate::teams::allow_team_tool(&data_dir, &csid, &agent, tool_call, options)
+                        && let Some(hit) = crate::teams::allow_team_tool(&data_dir, &csid, &agent, tool_call, options, &cwd)
                     {
                         return Some(hit);
                     }
