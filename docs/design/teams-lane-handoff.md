@@ -116,3 +116,23 @@ Workers may need a human to approve each `git add` and `git commit` inside their
   7. Report to the director, and tell it the moment 0e5ebc67 is free (it is needed for the test rig, pb-20261111-24).
 - Then steps 3-6 of the order above. Don't wait for the director between steps; report each one as it lands.
 - Coordinator account: this session runs as Codex on its own login. It must never use Claude Code or the Patchbay agent default, both of which bill to David's capped Claude Pro account. If Codex refuses on usage, tell the director; the fallback is OpenCode.
+
+## Director rules (2026-11-12 updates)
+
+### Real-data output rule
+- Any run that produces artifacts from David's real data must write outputs mode `0600`, remove them at task end, and keep any retained evidence in a named folder with titles only.
+
+### LIVE-DATA RUN GATE
+- One-line go from David, scope named, before any dev/test run reading his live `patchbay.sqlite`, transcripts, or the live API on `4420`.
+
+### Binding standing build rules (SSD write wear; David's go 2026-11-12)
+1. **Reuse, don't multiply:** one `CARGO_TARGET_DIR` per seat, reused across that seat's tasks, reviews and verifies. Never a fresh target per task or review; reviewers and verifiers reuse their own seat's target. No fresh targets under `/private/tmp`. Never `cargo clean` unless a test needs a cold build, and say so.
+2. **Build only what's checked:** verifiers run targeted test legs (`--lib` plus the features the change touches) and rely on CI for the full matrix. Full local builds only where CI cannot cover (desktop shell, LT01, the rig, and the Teams sandbox daemon binary in `~/patchbay/src-tauri/target-teams-live`, which is the one reused target for live runs).
+3. **Close-out deletes:** when a row's PR merges, that worktree's `src-tauri/target` is deleted at close-out (merged rows only) and the worktree removed once nothing references it.
+
+A task that needs a cold build says so in its report.
+
+### 49123440 rule (rebase / daemon rebuild)
+- `feat/teams` may be rebased, and the Teams sandbox daemon rebuilt or restarted, only on a tree that contains `49123440`. A tree that has `78563cd0` but not `49123440` is still forbidden.
+- Proof required before any rebase or build, quoted to director: `rtk proxy git merge-base --is-ancestor 49123440 <target>; echo $?` must print `0`.
+- When ordered, rebase target is `origin/staging 49123440` (not `14d812bf`). Not before STEP 1 fact report, live13 verdict, then rebase (per director order).
