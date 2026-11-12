@@ -2,7 +2,6 @@
 import os
 import sys
 import tempfile
-import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -46,8 +45,50 @@ class Parse(unittest.TestCase):
         self.assertEqual(p["failed"], ["x::y"])
 
     def test_several_test_binaries_add_up(self):
-        p = w.parse_leg(["test result: ok. 3 passed; 0 failed; 0 ignored", "test result: ok. 4 passed; 0 failed; 1 ignored"])
+        p = w.parse_leg([
+            "     Running unittests src\\lib.rs (target\\debug\\deps\\a.exe)", "running 3 tests",
+            "test result: ok. 3 passed; 0 failed; 0 ignored",
+            "   Doc-tests a", "running 4 tests", "test result: ok. 4 passed; 0 failed; 1 ignored",
+        ])
         self.assertEqual(p["totals"], {"passed": 7, "failed": 0, "ignored": 1})
+        self.assertTrue(p["finished"])
+
+    def test_a_child_test_run_inside_a_failure_is_not_counted(self):
+        # The shape of the real Windows log: a test that runs a child test process prints the
+        # child's own `running`, `test ... FAILED` and `test result:` lines in its captured output.
+        p = w.parse_leg([
+            "     Running unittests src\\lib.rs (target\\debug\\deps\\a.exe)",
+            "running 4 tests",
+            "test a::ok ... ok",
+            "test parent::spawns_child ... FAILED",
+            "test other::broken ... FAILED",
+            "",
+            "failures:",
+            "",
+            "---- parent::spawns_child stdout ----",
+            "running 2 tests",
+            "test child::one ... ok",
+            "test child::two ... FAILED",
+            "failures:",
+            "    child::two",
+            "test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 482 filtered out",
+            "---- other::broken stdout ----",
+            "failures:",
+            "    other::broken",
+            "    parent::spawns_child",
+            "",
+            "test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out",
+        ])
+        self.assertEqual(p["failed"], ["parent::spawns_child", "other::broken"])
+        self.assertEqual(p["passed"], ["a::ok"])
+        self.assertEqual(p["totals"], {"passed": 1, "failed": 2, "ignored": 0})
+
+    def test_a_test_binary_that_dies_mid_run_is_not_finished_even_if_another_finished(self):
+        p = w.parse_leg([
+            "     Running unittests src\\lib.rs (a.exe)", "running 5 tests", "test a ... ok",
+            "   Doc-tests a", "running 1 test", "test result: ok. 1 passed; 0 failed; 0 ignored",
+        ])
+        self.assertFalse(p["finished"])
 
 
 class NothingRan(unittest.TestCase):
@@ -105,24 +146,39 @@ class Judge(unittest.TestCase):
 
 
 class Manifests(unittest.TestCase):
-    def test_an_exe_without_its_manifest_is_a_problem_and_a_stale_one_is_ignored(self):
-        with tempfile.TemporaryDirectory() as d:
-            stale = os.path.join(d, "patchbay_lib-old.exe")
-            fresh = os.path.join(d, "patchbay_lib-new.exe")
-            for p in (stale, fresh):
-                open(p, "w").close()
-            os.utime(stale, (1, 1))
-            since = time.time() - 60
-            self.assertEqual(
-                w.manifest_problems(d, since),
-                ["patchbay_lib-new.exe has no patchbay_lib-new.exe.manifest beside it"],
-            )
-            open(fresh + ".manifest", "w").close()
-            self.assertEqual(w.manifest_problems(d, since), [])
+    def test_the_exe_path_comes_from_cargos_running_line_in_either_layout(self):
+        # The real runner log: newer cargo keeps the test exe under target\\debug\\build\\...\\out.
+        p = w.parse_leg([
+            "     Running unittests src\\lib.rs (target\\debug\\build\\patchbay/286fd76e35d800d2\\out\\patchbay_lib-286fd76e35d800d2.exe)",
+            "   Doc-tests a",
+            "     Running unittests src/lib.rs (target/debug/deps/patchbay_lib-abc.exe)",
+        ])
+        self.assertEqual(p["exes"], [
+            "target\\debug\\build\\patchbay/286fd76e35d800d2\\out\\patchbay_lib-286fd76e35d800d2.exe",
+            "target/debug/deps/patchbay_lib-abc.exe",
+        ])
 
-    def test_no_test_exe_at_all_is_a_problem(self):
+    def test_an_exe_without_its_manifest_is_a_problem(self):
         with tempfile.TemporaryDirectory() as d:
-            self.assertEqual(len(w.manifest_problems(d, 0)), 1)
+            os.makedirs(os.path.join(d, "t", "out"))
+            exe = os.path.join("t", "out", "patchbay_lib-1.exe")
+            open(os.path.join(d, exe), "w").close()
+            self.assertEqual(
+                w.manifest_problems("src-tauri default", [exe], d),
+                ["src-tauri default: patchbay_lib-1.exe has no patchbay_lib-1.exe.manifest beside it"],
+            )
+            open(os.path.join(d, exe + ".manifest"), "w").close()
+            self.assertEqual(w.manifest_problems("src-tauri default", [exe], d), [])
+
+    def test_an_exe_cargo_names_but_that_is_not_there_is_a_problem(self):
+        with tempfile.TemporaryDirectory() as d:
+            problems = w.manifest_problems("src-tauri web", ["t/patchbay_lib-2.exe"], d)
+            self.assertEqual(len(problems), 1)
+            self.assertIn("does not exist", problems[0])
+
+    def test_no_lib_test_exe_named_at_all_is_a_problem_not_a_pass(self):
+        self.assertEqual(len(w.manifest_problems("src-tauri default", [], ".")), 1)
+        self.assertEqual(len(w.manifest_problems("src-tauri default", ["target/debug/other-1.exe"], ".")), 1)
 
 
 class Baseline(unittest.TestCase):

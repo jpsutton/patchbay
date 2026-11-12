@@ -3,3 +3,57 @@
 # format" list), not copied from anyone's machine: runner images differ. A failure outside this
 # file fails the job. When a test is fixed, delete its line (the job says which now pass). While
 # this file has entries the job is not a required check; when it is empty, make it required.
+# First windows-latest run of the job: checks run 43302656372 (PR #440 head 9fd9f5cc).
+patchbay-agent: claude::tests::mcp_servers_convert_and_merge
+patchbay-agent: session::tests::may_read_keeps_the_session_readable_and_the_symlink_escape_out
+patchbay-agent: tools::search::tests::globs_by_extension_anywhere
+patchbay-agent: tools::search::tests::greps_in_three_modes
+patchbay-agent: tools::tests::insideness_folds_dotdot
+src-tauri default: claude_auth::tests::keychain_resolver_matrix
+src-tauri default: claude_auth::tests::keychain_service_matches_claude_code
+src-tauri default: claude_auth::tests::path_account_key_detects_config_dir_fallbacks
+src-tauri default: claude_auth::tests::tier_and_token_lookups_pick_the_same_item
+src-tauri default: code::import_claude::tests::converts_the_main_branch
+src-tauri default: desktop::file_link_tests::resolves_mentioned_paths
+src-tauri default: mesh_app_tests::live_path_upgrade_and_session_config_dir_keep_accounts_apart
+src-tauri default: mesh_app_tests::load_folds_foreign_path_accounts_into_the_default
+src-tauri default: mesh_app_tests::move_take_over_and_orphaned_work
+src-tauri default: mesh_app_tests::pinned_tests_ignore_an_exported_account_directory
+src-tauri default: mesh_app_tests::plan_limits_reach_every_member
+src-tauri default: mesh_app_tests::remote_session_commands_and_terminal
+src-tauri default: mesh_app_tests::usage_limit_stops_claude_turns
+src-tauri default: terminal::tests::a_shell_that_exited_opens_again_under_its_id
+src-tauri default: terminal::tests::respawning_over_a_live_shell_hides_its_exit
+src-tauri default: test_support::tests::the_real_home_hatch_lets_children_inherit_home
+src-tauri ipc-test: claude_auth::tests::keychain_resolver_matrix
+src-tauri ipc-test: claude_auth::tests::keychain_service_matches_claude_code
+src-tauri ipc-test: claude_auth::tests::path_account_key_detects_config_dir_fallbacks
+src-tauri ipc-test: claude_auth::tests::tier_and_token_lookups_pick_the_same_item
+src-tauri ipc-test: code::import_claude::tests::converts_the_main_branch
+src-tauri ipc-test: desktop::file_link_tests::resolves_mentioned_paths
+src-tauri ipc-test: desktop::ipc_tests::window_commands_go_through_the_dispatcher
+src-tauri ipc-test: mesh_app_tests::live_path_upgrade_and_session_config_dir_keep_accounts_apart
+src-tauri ipc-test: mesh_app_tests::load_folds_foreign_path_accounts_into_the_default
+src-tauri ipc-test: mesh_app_tests::move_take_over_and_orphaned_work
+src-tauri ipc-test: mesh_app_tests::pinned_tests_ignore_an_exported_account_directory
+src-tauri ipc-test: mesh_app_tests::plan_limits_reach_every_member
+src-tauri ipc-test: mesh_app_tests::remote_session_commands_and_terminal
+src-tauri ipc-test: mesh_app_tests::usage_limit_stops_claude_turns
+src-tauri ipc-test: terminal::tests::a_shell_that_exited_opens_again_under_its_id
+src-tauri ipc-test: terminal::tests::respawning_over_a_live_shell_hides_its_exit
+src-tauri ipc-test: test_support::tests::the_real_home_hatch_lets_children_inherit_home
+src-tauri web: claude_auth::tests::keychain_resolver_matrix
+src-tauri web: claude_auth::tests::keychain_service_matches_claude_code
+src-tauri web: claude_auth::tests::path_account_key_detects_config_dir_fallbacks
+src-tauri web: claude_auth::tests::tier_and_token_lookups_pick_the_same_item
+src-tauri web: code::import_claude::tests::converts_the_main_branch
+src-tauri web: mesh_app_tests::live_path_upgrade_and_session_config_dir_keep_accounts_apart
+src-tauri web: mesh_app_tests::load_folds_foreign_path_accounts_into_the_default
+src-tauri web: mesh_app_tests::move_take_over_and_orphaned_work
+src-tauri web: mesh_app_tests::pinned_tests_ignore_an_exported_account_directory
+src-tauri web: mesh_app_tests::plan_limits_reach_every_member
+src-tauri web: mesh_app_tests::remote_session_commands_and_terminal
+src-tauri web: mesh_app_tests::usage_limit_stops_claude_turns
+src-tauri web: terminal::tests::a_shell_that_exited_opens_again_under_its_id
+src-tauri web: terminal::tests::respawning_over_a_live_shell_hides_its_exit
+src-tauri web: test_support::tests::the_real_home_hatch_lets_children_inherit_home

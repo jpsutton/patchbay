@@ -19,12 +19,10 @@ required check while the baseline has entries; when it is empty, make it require
 
 Usage: python scripts/ci/windows_tests.py   (from anywhere; paths are relative to the repo)
 """
-import glob
 import os
 import re
 import subprocess
 import sys
-import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BASELINE = os.path.join(ROOT, "scripts", "ci", "windows-test-baseline.txt")
@@ -52,28 +50,58 @@ DID_NOT_FINISH = "<leg did not finish>"
 RAN_NO_TESTS = "<leg ran no tests>"
 
 
+BLOCK_START = re.compile(r"^\s*(Running|Doc-tests)\b")
+RUNNING = re.compile(r"^running \d+ tests?$")
+# cargo names each test exe on its header line. Newer cargo keeps it under target\debug\build\...,
+# older under target\debug\deps, so the path is read from the output rather than guessed.
+EXE_PATH = re.compile(r"\((?P<exe>[^()]+\.exe)\)\s*$")
+
+
 def parse_leg(lines):
-    """What one `cargo test` run printed: failing and passing test names, the `test result:`
-    totals, and whether any test binary finished (printed a result line)."""
-    failed, passed = [], []
-    totals = {"passed": 0, "failed": 0, "ignored": 0}
-    results = 0
+    """What one `cargo test` run printed, per test binary (cargo's `Running ...` / `Doc-tests ...`
+    header starts each one): the failing and passing test names, the `test result:` totals, and
+    whether every binary that started also finished.
+
+    A test name is only taken from the lines before the binary's first `failures:`: after it comes
+    the captured output of the failed tests, and a test that runs a child test process (for example
+    the_real_home_hatch) prints that child's own `test ... FAILED` and `test result:` lines there.
+    A binary's result is its LAST `test result:` line, which is its own."""
+    blocks = [{"started": False, "result": None}]  # the implicit first block holds the preamble
+    failed, passed, exes = [], [], []
+    in_names = True
     for raw in lines:
         line = ANSI.sub("", raw).rstrip()
-        m = TEST_LINE.match(line)
-        if m:
-            if m.group(2) == "FAILED":
-                failed.append(m.group(1))
-            elif m.group(2) == "ok":
-                passed.append(m.group(1))
+        if BLOCK_START.match(line):
+            blocks.append({"started": False, "result": None})
+            in_names = True
+            m = EXE_PATH.search(line)
+            if m:
+                exes.append(m.group("exe"))
             continue
+        block = blocks[-1]
+        if line == "failures:":
+            in_names = False
+        if in_names:
+            if RUNNING.match(line):
+                block["started"] = True
+            m = TEST_LINE.match(line)
+            if m:
+                if m.group(2) == "FAILED":
+                    failed.append(m.group(1))
+                elif m.group(2) == "ok":
+                    passed.append(m.group(1))
         m = RESULT_LINE.match(line)
         if m:
-            results += 1
-            totals["passed"] += int(m.group(2))
-            totals["failed"] += int(m.group(3))
-            totals["ignored"] += int(m.group(4))
-    return {"failed": failed, "passed": passed, "totals": totals, "finished": results > 0}
+            block["result"] = (int(m.group(2)), int(m.group(3)), int(m.group(4)))
+    done = [blk["result"] for blk in blocks if blk["result"]]
+    totals = {
+        "passed": sum(r[0] for r in done),
+        "failed": sum(r[1] for r in done),
+        "ignored": sum(r[2] for r in done),
+    }
+    # Finished: something reported a result, and no binary that started is missing its result.
+    finished = bool(done) and all(blk["result"] for blk in blocks if blk["started"])
+    return {"failed": failed, "passed": passed, "totals": totals, "finished": finished, "exes": exes}
 
 
 def leg_failures(label, parsed):
@@ -96,16 +124,20 @@ def read_baseline(path):
     return keys
 
 
-def manifest_problems(deps_dir, since):
-    """Every `patchbay_lib-*.exe` built at or after `since` must have `<exe>.manifest` beside it."""
-    exes = [p for p in glob.glob(os.path.join(deps_dir, "patchbay_lib-*.exe")) if os.path.getmtime(p) >= since]
-    if not exes:
-        return [f"no patchbay_lib test exe was built under {deps_dir} in this run"]
-    return [
-        f"{os.path.basename(exe)} has no {os.path.basename(exe)}.manifest beside it"
-        for exe in exes
-        if not os.path.exists(exe + ".manifest")
-    ]
+def manifest_problems(label, exes, folder):
+    """Every test exe a src-tauri leg ran (the paths in cargo's own output, relative to `folder`)
+    must have `<exe>.manifest` beside it: that file is what gives the exe Common-Controls v6."""
+    lib_exes = [e for e in exes if os.path.basename(e).startswith("patchbay_lib-")]
+    if not lib_exes:
+        return [f"{label}: cargo's output names no patchbay_lib test exe, so its manifest cannot be checked"]
+    out = []
+    for exe in lib_exes:
+        path = os.path.join(folder, exe)
+        if not os.path.exists(path):
+            out.append(f"{label}: {os.path.basename(exe)} (named by cargo) does not exist at {path}")
+        elif not os.path.exists(path + ".manifest"):
+            out.append(f"{label}: {os.path.basename(exe)} has no {os.path.basename(exe)}.manifest beside it")
+    return out
 
 
 def judge(parsed_by_leg, baseline, manifest_issues):
@@ -166,13 +198,15 @@ def summary(parsed_by_leg, codes, new, fixed, problems, baseline):
 def main():
     # The runner's console is not UTF-8: a test name must never crash the report.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    since = time.time()
     baseline = read_baseline(BASELINE)
     parsed_by_leg, codes = {}, {}
     for label, folder, args in LEGS:
         parsed_by_leg[label], codes[label] = run_leg(label, folder, args)
-    deps = os.path.join(ROOT, "src-tauri", "target", "debug", "deps")
-    new, fixed, problems = judge(parsed_by_leg, baseline, manifest_problems(deps, since))
+    manifests = []
+    for label, folder, _ in LEGS:
+        if label.startswith("src-tauri"):
+            manifests += manifest_problems(label, parsed_by_leg[label]["exes"], os.path.join(ROOT, folder))
+    new, fixed, problems = judge(parsed_by_leg, baseline, manifests)
     text = summary(parsed_by_leg, codes, new, fixed, problems, baseline)
     print(text, flush=True)
     path = os.environ.get("GITHUB_STEP_SUMMARY")
