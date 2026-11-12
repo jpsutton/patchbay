@@ -3007,6 +3007,129 @@ async fn notice_on_a_session_without_a_loop_is_a_silent_no_op() {
     assert_eq!(prompts, 0, "no loop, no queue, no notice");
 }
 
+/// Provider + model so a session can actually start (pb-20261107-30 tests: the notice/quit
+/// paths only need launchability; nothing here waits on a real answer).
+fn seed_mock_model(n: &Node) {
+    let prov = crate::db::Provider {
+        id: "mock".into(),
+        name: "Mock LLM".into(),
+        kind: crate::db::ProviderKind::OpenaiChat,
+        base_url: "http://127.0.0.1:8765/v1".into(),
+        has_key: true,
+        auth_mode: Default::default(),
+        claude_config_dir: None,
+        grok_home: None,
+    };
+    n.state.db.upsert_provider(&prov, Some("mock-key")).unwrap();
+    n.state
+        .db
+        .upsert_model(&crate::db::Model {
+            id: "test-model".into(),
+            provider_id: "mock".into(),
+            model_id: "test-model".into(),
+            display_name: "Test Model".into(),
+            vision: false,
+            context_window: None,
+            params: crate::db::ModelParams::default(),
+        })
+        .unwrap();
+}
+
+/// One fabricated drained queue entry whose sender is `sender` on this node.
+fn drained_entry(n: &Node, target_id: &str, sender_id: &str, message_id: &str) -> (String, Vec<code::acp::QueuedAgentMessage>) {
+    (
+        target_id.to_owned(),
+        vec![code::acp::QueuedAgentMessage {
+            message_id: message_id.into(),
+            preview: "p".into(),
+            origin: format!("agent:{}:{}", n.state.mesh.node_id(), sender_id),
+        }],
+    )
+}
+
+/// pb-20261107-30 (advisor condition 1, NO ORPHANS): a quit notice to a COLD local sender
+/// wakes it — and the shutdown that follows must cover it: zero agents remain afterwards.
+/// Planted red: run the tell after shutdown (swap in tell_drained_then) and the delivery
+/// assertion fails (the refusal makes the orphan itself impossible — belt and braces).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quit_notices_leave_no_orphan_agents() {
+    let n = node("alpha-quit-orphan");
+    seed_mock_model(&n);
+    let proj = n.dir.join("proj");
+    repo(&proj);
+    let sender = n
+        .state
+        .db
+        .create_code_session(&proj.to_string_lossy(), None, "patchbay", "default")
+        .unwrap(); // COLD: never started
+    let target = n.state.db.create_code_session(&proj.to_string_lossy(), None, "patchbay", "default").unwrap();
+    let drained = vec![drained_entry(&n, &target.id, &sender.id, "m-orphan-1")];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    crate::tell_drained_then(&n.state, drained, deadline, || n.state.shutdown()).await;
+    // The notice really woke the cold sender (the orphan risk is real)…
+    let woke = n.events.lock().unwrap().iter().any(|(name, p)| {
+        *name == code::acp::EVENT
+            && p["codeSessionId"].as_str() == Some(sender.id.as_str())
+            && p["event"]["type"] == "userPrompt"
+            && p["event"]["text"].as_str().is_some_and(|t| t.contains("dropped your queued message"))
+    });
+    assert!(woke, "the notice was delivered to the cold sender");
+    // …and the shutdown that followed covered it: zero agents remain.
+    assert!(
+        n.state.code.running_sessions().is_empty(),
+        "no orphan agents after the quit sequence"
+    );
+    assert!(!n.state.code.is_running(&sender.id), "the woken sender was stopped with the rest");
+}
+
+/// pb-20261107-30 (advisor condition 2, NO LOOP): once the quit guard is set, deliveries to
+/// a session being stopped are refused and the SENDER is told — a woken sender replying into
+/// the shutdown must not start work that extends it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deliveries_to_a_closing_session_are_refused() {
+    let n = node("alpha-closing-refuse");
+    seed_mock_model(&n);
+    let proj = n.dir.join("proj");
+    repo(&proj);
+    let sender = n.state.db.create_code_session(&proj.to_string_lossy(), None, "patchbay", "default").unwrap();
+    let target = n.state.db.create_code_session(&proj.to_string_lossy(), None, "patchbay", "default").unwrap();
+    n.state.shutdown(); // the quit guard is set
+    let err = crate::deliver_agent_message_local(&n.state, n.state.mesh.node_id(), &target.id, &sender.id, "reply into the shutdown")
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("closing"),
+        "the sender is told the target is closing: {err}"
+    );
+    assert!(!n.state.code.is_running(&sender.id), "no agent is woken during shutdown");
+}
+
+/// pb-20261107-30 (advisor condition 3, BOUNDED): the quit tell phase keeps its deadline
+/// even when a delivery hangs — finish still runs, and the latency stays under a fixed bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quit_tell_phase_is_bounded_even_when_a_delivery_hangs() {
+    let n = node("alpha-quit-latency");
+    seed_mock_model(&n);
+    let proj = n.dir.join("proj");
+    repo(&proj);
+    let sender = n.state.db.create_code_session(&proj.to_string_lossy(), None, "patchbay", "default").unwrap();
+    // A live agent whose Prompt is never answered: the notice's delivery hangs on it.
+    let _stub = n.state.code.attach_test_agent(&sender.id);
+    let target = n.state.db.create_code_session(&proj.to_string_lossy(), None, "patchbay", "default").unwrap();
+    let drained = vec![drained_entry(&n, &target.id, &sender.id, "m-hang-1")];
+    let finished = std::sync::atomic::AtomicBool::new(false);
+    let t0 = std::time::Instant::now();
+    let budget = std::time::Duration::from_millis(750);
+    crate::tell_drained_then(&n.state, drained, t0 + budget, || {
+        finished.store(true, std::sync::atomic::Ordering::Relaxed)
+    })
+    .await;
+    let elapsed = t0.elapsed();
+    assert!(finished.load(std::sync::atomic::Ordering::Relaxed), "finish ran after the tell phase");
+    assert!(elapsed >= budget, "the budget was actually spent on the hang: {elapsed:?}");
+    assert!(elapsed < std::time::Duration::from_secs(2), "quit latency stays under the fixed bound: {elapsed:?}");
+}
+
 /// pb-20261111-22: the active-turn flag follows the turn continuously — set when a turn starts,
 /// cleared when it ends by done, error, or user Stop. Only a death MID-turn (no PromptDone ever
 /// arrives) leaves it set, which is exactly what the relaunch picker reads.

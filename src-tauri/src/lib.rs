@@ -2787,6 +2787,12 @@ async fn deliver_agent_message_local(
     target_session_id: &str,
     message: &str,
 ) -> anyhow::Result<serde_json::Value> {
+    // pb-20261107-30 (advisor condition 2): once the quit guard is set, deliveries TO a
+    // session being stopped are REFUSED and the sender is told so — a woken sender replying
+    // into the shutdown must not start work that extends it.
+    if state.shutting_down.load(std::sync::atomic::Ordering::Relaxed) {
+        anyhow::bail!("the target session is closing; send again after Patchbay reopens it");
+    }
     let source = state
         .db
         .get_code_session(source_session_id)?
@@ -3047,6 +3053,55 @@ async fn resume_apply(state: &AppState, checked: Vec<String>) -> CmdResult<Vec<s
         }
     }
     Ok(out)
+}
+
+/// How long a quit may spend telling senders before it proceeds regardless (advisor
+/// condition 3: Quit now stays immediate apart from the notice sends, WITH a timeout).
+const QUIT_NOTICE_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The bounded tell-then-finish order (advisor conditions 1+3): every sender of `drained`
+/// is told — a hang is cut at `deadline` — and ONLY THEN does `finish` run. Production's
+/// finish exits the app, whose Exit handler runs stop_all, whose snapshot therefore
+/// includes any sender a notice woke (no orphan agents); the tests finish with shutdown
+/// itself. The order is the invariant: swapping it is the planted red.
+pub(crate) async fn tell_drained_then<F: FnOnce()>(
+    state: &AppState,
+    drained: Vec<(String, Vec<code::acp::QueuedAgentMessage>)>,
+    deadline: std::time::Instant,
+    finish: F,
+) {
+    let tell = async {
+        for (id, entries) in drained {
+            tell_senders_of_dropped(state, &id, entries, "Patchbay quit before it could be sent").await;
+        }
+    };
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    let _ = tokio::time::timeout(left, tell).await;
+    finish();
+}
+
+/// Gather every running loop's queued peers (their drain replies are FIFO ahead of the
+/// later stop) within the quit budget, then run the bounded tell-then-finish sequence.
+pub(crate) async fn tell_queued_senders_then<F: FnOnce()>(state: &AppState, finish: F) {
+    let mut pending = Vec::new();
+    for id in state.code.running_sessions() {
+        if let Some(rx) = state.code.begin_drain_queued_agent(&id) {
+            pending.push((id, rx));
+        }
+    }
+    let deadline = std::time::Instant::now() + QUIT_NOTICE_BUDGET;
+    let mut drained = Vec::new();
+    for (id, rx) in pending {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(left, rx).await {
+            Ok(Ok(entries)) => drained.push((id, entries)),
+            _ => break, // budget spent, or the loop is already gone: stop gathering
+        }
+    }
+    tell_drained_then(state, drained, deadline, finish).await;
 }
 
 /// Tell every sender whose peer message left a queue without being delivered — never silence

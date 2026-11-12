@@ -607,33 +607,13 @@ fn perform_quit(app: &AppHandle, after: QuitAfter) {
         finish_quit(app, after);
         return;
     };
-    // Tell the senders of queued peer messages BEFORE the loops die with the app
-    // (pb-20261107-30). The drains are queued synchronously (FIFO ahead of the stop_all that
-    // shutdown() runs after this task finishes); the tell is BOUNDED — a hung notice must
-    // never keep the quit from happening.
-    let mut drains = Vec::new();
-    for id in state.code.running_sessions() {
-        if let Some(rx) = state.code.begin_drain_queued_agent(&id) {
-            drains.push((id, rx));
-        }
-    }
+    // Tell the senders of queued peer messages BEFORE the loops die with the app, bounded
+    // (pb-20261107-30): the drains are FIFO ahead of the stop_all that shutdown() runs after
+    // this task's finish, so a notice-woken sender is covered (no orphans) and a hung
+    // notice can never keep the quit from happening.
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let tell = async {
-            for (id, rx) in drains {
-                if let Ok(dropped) = rx.await {
-                    crate::tell_senders_of_dropped(
-                        &state,
-                        &id,
-                        dropped,
-                        "Patchbay quit before it could be sent",
-                    )
-                    .await;
-                }
-            }
-        };
-        let _ = tokio::time::timeout(Duration::from_secs(5), tell).await;
-        finish_quit(&app, after);
+        crate::tell_queued_senders_then(&state, move || finish_quit(&app, after)).await;
     });
 }
 
