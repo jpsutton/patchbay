@@ -2904,3 +2904,167 @@ async fn hidden_agent_modes_are_refused_through_ipc_and_mesh() {
     });
     crate::api::call(&a.state, "code_set_mode", json!({ "id": s.id, "modeId": "build" }), &chans).await.unwrap();
 }
+
+
+// --- The delivery log (pb-20261111-46) -------------------------------------------------------
+
+/// A node whose agent-messaging bridge logs to a file in its folder.
+fn logging_node(name: &str) -> (Node, PathBuf) {
+    let n = node(name);
+    let log = n.dir.join("logs").join("agent-messaging-mcp.log");
+    let (bridge, _listener) = agent_messaging::AgentMessagingBridge::bind(Some(log.clone())).unwrap();
+    let _ = n.state.agent_message_bridge.set(bridge);
+    (n, log)
+}
+
+fn log_text(log: &Path) -> String {
+    std::fs::read_to_string(log).unwrap_or_default()
+}
+
+fn lines_with(log: &Path, event: &str) -> Vec<String> {
+    log_text(log).lines().filter(|l| l.contains(&format!("event={event} "))).map(str::to_owned).collect()
+}
+
+/// Two sessions on one node, and the target's stand-in agent.
+fn delivery_pair(n: &Node) -> (db::CodeSession, db::CodeSession, tokio::sync::mpsc::UnboundedReceiver<code::acp::AgentCmd>) {
+    let proj = n.dir.join("proj");
+    repo(&proj);
+    let source = n.state.db.create_code_session(&proj.to_string_lossy(), None, "grok", "default").unwrap();
+    let target = n.state.db.create_code_session(&proj.to_string_lossy(), None, "grok", "default").unwrap();
+    let _keep = n.state.code.attach_test_agent(&source.id);
+    let rx = n.state.code.attach_test_agent(&target.id);
+    (source, target, rx)
+}
+
+async fn answer(rx: &mut tokio::sync::mpsc::UnboundedReceiver<code::acp::AgentCmd>, how: code::acp::Delivery) {
+    match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("message arrives").expect("agent open") {
+        code::acp::AgentCmd::Prompt { reply, .. } => reply.unwrap().send(Ok(how)).unwrap(),
+        _ => panic!("expected an agent message"),
+    }
+}
+
+fn envelope(session: &str, event: code::acp::CodeEvent) -> code::acp::Envelope {
+    code::acp::Envelope { code_session_id: session.to_owned(), event }
+}
+
+fn user_prompt(id: &str, origin: &str, delivery: code::acp::Delivery) -> code::acp::CodeEvent {
+    code::acp::CodeEvent::UserPrompt { prompt_id: id.into(), text: "BODY-TEXT".into(), origin: origin.into(), attachments: json!([]), delivery }
+}
+
+/// (1) A message handed to an idle agent writes `msg_sent`, with ids and nothing else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sent_peer_message_logs_msg_sent_with_ids_only() {
+    let (n, log) = logging_node("log-sent");
+    let nid = n.state.mesh.node_id().to_owned();
+    let (s, t, mut rx) = delivery_pair(&n);
+    let (r, _) = tokio::join!(send_agent_message(&n.state, &nid, &s.id, &t.id, "SECRET-BODY ping"), answer(&mut rx, code::acp::Delivery::Sent));
+    let message_id = r.unwrap()["messageId"].as_str().unwrap().to_owned();
+    let lines = lines_with(&log, "msg_sent");
+    assert_eq!(lines.len(), 1, "{}", log_text(&log));
+    let l = &lines[0];
+    for want in [format!("message_id={message_id}"), format!("source={}", s.id), format!("target={}", t.id), "delivery=sent".to_owned(), "src=delivery".to_owned()] {
+        assert!(l.contains(&want), "{want} missing: {l}");
+    }
+    assert!(l.starts_with("ts="), "{l}");
+    assert!(lines_with(&log, "msg_queued").is_empty());
+    let all = log_text(&log);
+    assert!(!all.contains("SECRET-BODY") && !all.contains("ping"), "a message body reached the log: {all}");
+}
+
+/// (2) A message held behind a running turn writes `msg_queued`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queued_peer_message_logs_msg_queued() {
+    let (n, log) = logging_node("log-queued");
+    let nid = n.state.mesh.node_id().to_owned();
+    let (s, t, mut rx) = delivery_pair(&n);
+    let (r, _) = tokio::join!(send_agent_message(&n.state, &nid, &s.id, &t.id, "later"), answer(&mut rx, code::acp::Delivery::Queued));
+    let message_id = r.unwrap()["messageId"].as_str().unwrap().to_owned();
+    let lines = lines_with(&log, "msg_queued");
+    assert_eq!(lines.len(), 1, "{}", log_text(&log));
+    for want in [format!("message_id={message_id}"), format!("source={}", s.id), format!("target={}", t.id), "delivery=queued".to_owned()] {
+        assert!(lines[0].contains(&want), "{want} missing: {}", lines[0]);
+    }
+    assert!(lines_with(&log, "msg_sent").is_empty(), "a queued message is not also logged as sent");
+}
+
+/// (3) The turn for a peer message starting writes `msg_turn_started`: when a queued one comes
+/// again as `Sent`, not when it is queued, and never for a person's own prompt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peer_message_turn_starting_logs_msg_turn_started() {
+    let (n, log) = logging_node("log-started");
+    let origin = "agent:node-a:session-src";
+    on_code_event(&n.state, envelope("session-tgt", user_prompt("m1", origin, code::acp::Delivery::Queued)));
+    on_code_event(&n.state, envelope("session-tgt", user_prompt("m2", "me", code::acp::Delivery::Sent)));
+    assert!(lines_with(&log, "msg_turn_started").is_empty(), "{}", log_text(&log));
+    on_code_event(&n.state, envelope("session-tgt", user_prompt("m1", origin, code::acp::Delivery::Sent)));
+    let lines = lines_with(&log, "msg_turn_started");
+    assert_eq!(lines.len(), 1, "{}", log_text(&log));
+    for want in ["message_id=m1", "source=session-src", "target=session-tgt", "src=delivery"] {
+        assert!(lines[0].contains(want), "{want} missing: {}", lines[0]);
+    }
+    assert!(!log_text(&log).contains("BODY-TEXT"));
+}
+
+/// (4) A peer message's turn ending in an error writes `msg_turn_failed` with the structured
+/// code and, when the agent gave one, the reset time; never text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_peer_message_turn_logs_msg_turn_failed_with_a_code() {
+    let (n, log) = logging_node("log-failed");
+    let failed = |id: &str, origin: &str, resets_at| {
+        code::acp::CodeEvent::TurnFailed { prompt_id: id.into(), origin: origin.into(), kind: "usage_limit_exceeded".into(), resets_at }
+    };
+    on_code_event(&n.state, envelope("session-tgt", failed("m1", "agent:node-a:session-src", Some(1794449520))));
+    on_code_event(&n.state, envelope("session-tgt", failed("m2", "me", None)));
+    let lines = lines_with(&log, "msg_turn_failed");
+    assert_eq!(lines.len(), 1, "only a peer message's turn is logged: {}", log_text(&log));
+    for want in ["message_id=m1", "source=session-src", "target=session-tgt", "error_kind=usage_limit_exceeded", "resets_at=1794449520"] {
+        assert!(lines[0].contains(want), "{want} missing: {}", lines[0]);
+    }
+    on_code_event(&n.state, envelope("session-tgt", failed("m3", "agent:node-a:session-src", None)));
+    let last = lines_with(&log, "msg_turn_failed").pop().unwrap();
+    assert!(last.contains("message_id=m3") && !last.contains("resets_at"), "no reset time, no field: {last}");
+    // It is a log-only event: nothing was emitted to a window or the mesh for it.
+    assert!(n.events.lock().unwrap().iter().all(|(name, _)| !name.contains("turn")), "{:?}", n.events.lock().unwrap());
+}
+
+/// The last night's stall, as one grep: a message that was delivered and whose turn failed (the
+/// quota) reads differently from one that started, and from one never delivered.
+fn delivery_state(log: &str, message_id: &str) -> &'static str {
+    let mine: Vec<&str> = log.lines().filter(|l| l.contains(&format!("message_id={message_id} "))).collect();
+    let has = |event: &str| mine.iter().any(|l| l.contains(&format!("event={event} ")));
+    match (has("msg_sent") || has("msg_queued"), has("msg_turn_started"), has("msg_turn_failed")) {
+        (false, ..) => "never delivered",
+        (true, _, true) => "delivered, turn failed",
+        (true, true, false) => "delivered, turn started",
+        (true, false, false) => "delivered, no turn yet",
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_four_lines_make_a_delivered_but_failed_stall_readable_in_one_grep() {
+    let (n, log) = logging_node("log-stall");
+    let nid = n.state.mesh.node_id().to_owned();
+    let (s, t, mut rx) = delivery_pair(&n);
+    let origin = format!("agent:{nid}:{}", s.id);
+
+    // Healthy: sent, then its turn starts.
+    let (r, _) = tokio::join!(send_agent_message(&n.state, &nid, &s.id, &t.id, "one"), answer(&mut rx, code::acp::Delivery::Sent));
+    let ok_id = r.unwrap()["messageId"].as_str().unwrap().to_owned();
+    on_code_event(&n.state, envelope(&t.id, user_prompt(&ok_id, &origin, code::acp::Delivery::Sent)));
+    // The stall: sent, its turn starts, then fails on the quota at once.
+    let (r, _) = tokio::join!(send_agent_message(&n.state, &nid, &s.id, &t.id, "two"), answer(&mut rx, code::acp::Delivery::Sent));
+    let bad_id = r.unwrap()["messageId"].as_str().unwrap().to_owned();
+    on_code_event(&n.state, envelope(&t.id, user_prompt(&bad_id, &origin, code::acp::Delivery::Sent)));
+    on_code_event(&n.state, envelope(&t.id, code::acp::CodeEvent::TurnFailed { prompt_id: bad_id.clone(), origin: origin.clone(), kind: "usage_limit_exceeded".into(), resets_at: Some(1794449520) }));
+    // Held behind a turn, and never started.
+    let (r, _) = tokio::join!(send_agent_message(&n.state, &nid, &s.id, &t.id, "three"), answer(&mut rx, code::acp::Delivery::Queued));
+    let held_id = r.unwrap()["messageId"].as_str().unwrap().to_owned();
+
+    let text = log_text(&log);
+    assert_eq!(delivery_state(&text, &ok_id), "delivered, turn started", "{text}");
+    assert_eq!(delivery_state(&text, &bad_id), "delivered, turn failed", "{text}");
+    assert_eq!(delivery_state(&text, &held_id), "delivered, no turn yet", "{text}");
+    assert_eq!(delivery_state(&text, "never-sent"), "never delivered");
+    let grep_bad: Vec<&str> = text.lines().filter(|l| l.contains(&format!("message_id={bad_id} "))).collect();
+    assert!(grep_bad.last().unwrap().contains("error_kind=usage_limit_exceeded"), "{grep_bad:?}");
+}
