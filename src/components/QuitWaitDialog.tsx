@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useStore } from "../lib/store";
 import { api } from "../lib/ipc";
+import { isDesktopApp } from "../lib/platform";
+import { shouldPollQuitWait } from "../lib/quitWaitPoll";
 
 interface ActiveSession {
   id: string;
@@ -15,7 +17,8 @@ interface ActiveSession {
  * "Quit now" is always available (today's stop_all: flags stay set, the relaunch offers them);
  * "Keep Patchbay open" + Escape cancel. No timeout: the user decides.
  *
- * The list comes from the BACKEND's own busy_sessions via quit_wait_status (polled), never
+ * The list comes from the BACKEND's own busy_sessions via quit_wait_status (polled only on
+ * the desktop shell and only while this dialog is showing — pb-20261111-66), never
  * from this window's store — a stale store could auto-quit an empty list on a reload. Every
  * mount re-queries too, so a reload (or a second window) re-shows a pending wait instead of
  * leaving the gate stuck with nothing on screen. The backend raises/focuses the window before
@@ -26,7 +29,31 @@ export function QuitWaitDialog() {
   const [active, setActive] = useState<ActiveSession[]>([]);
   const sessions = useStore((s) => s.codeSessions);
 
+  const desktop = isDesktopApp();
+
+  // One-shot on mount: a reload while a wait is pending re-shows the dialog. Desktop shell
+  // only — a patchbayd web UI window makes ZERO quit_wait_status calls (pb-20261111-66).
   useEffect(() => {
+    if (!desktop) return;
+    let dead = false;
+    api
+      .quitWaitStatus()
+      .then((st) => {
+        if (dead || !st.showing) return;
+        setWaiting(true);
+        setActive(st.active);
+      })
+      .catch(() => {});
+    return () => {
+      dead = true;
+    };
+  }, [desktop]);
+
+  // The poll exists ONLY while the dialog is showing on the desktop shell: it starts when
+  // `waiting` flips on and its cleanup clears the interval the moment the dialog closes or
+  // the quit is cancelled — never forever, never on the web UI (pb-20261111-66).
+  useEffect(() => {
+    if (!shouldPollQuitWait({ desktop, showing: waiting })) return;
     let dead = false;
     const sync = () => {
       api
@@ -43,10 +70,16 @@ export function QuitWaitDialog() {
     };
     sync();
     const iv = setInterval(sync, 500);
-    const un = listen("quit://wait", sync);
     return () => {
       dead = true;
       clearInterval(iv);
+    };
+  }, [desktop, waiting]);
+
+  // Push event (no round-trip): only this app's backend windows ever receive it.
+  useEffect(() => {
+    const un = listen("quit://wait", () => setWaiting(true));
+    return () => {
       un.then((f) => f(), () => {});
     };
   }, []);
