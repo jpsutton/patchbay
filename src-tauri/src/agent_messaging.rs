@@ -1541,6 +1541,36 @@ time.sleep(3600)
         assert!(!names(true).iter().any(|n| n == TOOL_ACCEPT_QUEUED));
     }
 
+    #[tokio::test]
+    async fn team_tools_are_listed_only_for_team_members() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let bridge = tokio::spawn(async move {
+            for (source_session_id, member) in [("outside", false), ("inside", true)] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(read).read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["action"], "team_member");
+                assert_eq!(request["sourceSessionId"], source_session_id);
+                write.write_all(json!({ "ok": member }).to_string().as_bytes()).await.unwrap();
+                write.write_all(b"\n").await.unwrap();
+            }
+        });
+
+        let nonmember = tools_list_with_team(&addr, "test-token", "outside").await.unwrap();
+        let is_team_tool = |tool: &Value| {
+            tool["name"].as_str().is_some_and(crate::teams::is_tool)
+        };
+        assert!(nonmember["tools"].as_array().unwrap().iter().all(|tool| !is_team_tool(tool)));
+
+        let member = tools_list_with_team(&addr, "test-token", "inside").await.unwrap();
+        let listed = member["tools"].as_array().unwrap().iter().filter(|tool| is_team_tool(tool)).count();
+        assert_eq!(listed, crate::teams::tool_defs().len());
+        bridge.await.unwrap();
+    }
+
     #[test]
     fn tools_list_offers_create_agent_session_in_both_modes() {
         for can_steer in [true, false] {
