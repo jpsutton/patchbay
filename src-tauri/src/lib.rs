@@ -4424,7 +4424,7 @@ pub fn data_dir_busy(data_dir: &std::path::Path) -> String {
 /// `open_state` for a caller that already holds the folder's lock (`lock_data_dir`).
 pub fn open_locked_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow::Result<AppState> {
     let db = Arc::new(Db::open(&data_dir.join("patchbay.sqlite"))?);
-    providers::set_keyring_scope(mesh::keys::data_dir_scope(&data_dir));
+    providers::set_keyring_scope(mesh::keys::data_dir_scope(&data_dir))?;
     // Tests open many states against the real keychain; the copy has its own tests with a fake one.
     #[cfg(not(test))]
     providers::copy_unscoped_keys(&db);
