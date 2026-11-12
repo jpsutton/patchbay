@@ -253,8 +253,9 @@ impl Step {
 /// and every symlink followed before the next step — `..` in particular — is applied, so
 /// `link/..` moves to where the link points rather than to the directory holding it.
 /// Steps that do not exist yet stay as they are, so a file about to be written is judged
-/// by the path it will have; a path that exists ends up canonicalized, which settles
-/// case on a case-insensitive filesystem.
+/// by the path it will have; the part that exists ends up canonicalized ([`canonical_prefix`]),
+/// which settles case on a case-insensitive filesystem and, on Windows, the `\\?\` form and
+/// the 8.3 short names, so a path and the root it sits in are spelled alike.
 fn resolve(p: &Path) -> PathBuf {
     // A relative path means "from here", and `..` may climb out of here.
     let mut real = if p.is_absolute() {
@@ -298,7 +299,32 @@ fn resolve(p: &Path) -> PathBuf {
             }
         }
     }
-    real.canonicalize().unwrap_or(real)
+    canonical_prefix(real)
+}
+
+/// `real` with its longest EXISTING ancestor canonicalized and the rest (not there yet, so no
+/// link in it to follow) appended as written. A path that exists is canonicalized whole, as
+/// before. The old code gave up on a path that did not exist and returned it uncanonicalized:
+/// on Windows that left a short-name, non-verbatim spelling to be compared with the root's
+/// canonical verbatim long-name one, so a file about to be written inside the root read as
+/// outside it.
+fn canonical_prefix(real: PathBuf) -> PathBuf {
+    let mut tail = Vec::new();
+    let mut head = real.as_path();
+    loop {
+        if let Ok(mut done) = head.canonicalize() {
+            done.extend(tail.iter().rev());
+            return done;
+        }
+        match (head.parent(), head.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name.to_owned());
+                head = parent;
+            }
+            // Nothing of it exists (or it ends in `..`, which `resolve` has already applied).
+            _ => return real,
+        }
+    }
 }
 
 /// `p` relative to `root` when inside it, for short display.
@@ -561,6 +587,85 @@ mod tests {
         assert!(inside(&root, &short_root.join("in.txt")));
         assert!(inside(&short_root, &root.join("in.txt")));
         assert!(inside(&short_root, &short_root.join("in.txt")));
+    }
+
+
+    // --- pb-20261111-71: a path that does not exist yet --------------------------------------
+
+    /// A file about to be written inside the root is inside it. Before, a path that did not exist
+    /// was compared as written with a root that was canonicalized: on Windows the two spellings
+    /// (`\\?\` and short names) never matched.
+    #[test]
+    fn a_new_file_in_the_root_is_inside() {
+        let base = scratch("newfile");
+        let root = base.join("work");
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        assert!(inside(&root, &root.join("new.txt")));
+        assert!(inside(&root, &root.join("a/new.txt")));
+        assert!(inside(&root, &root.join("a/b/c/new.txt")), "several missing levels");
+        assert!(inside(&root, &root.join("a/../a/new.txt")));
+        // The same file with the escape asserts beside it, so "inside" is not just "everything".
+        assert!(!inside(&root, &root.join("../new.txt")));
+        assert!(!inside(&root, &root.join("a/../../new.txt")));
+        assert!(!inside(&root, &base.join("work-evil/new.txt")));
+        assert!(!inside(&root, &base.join("elsewhere/new.txt")));
+    }
+
+    /// The existing part of a path is spelled the way the filesystem spells it, so a root written
+    /// in another case still holds a new file (a case-insensitive filesystem: Windows, macOS).
+    #[test]
+    #[cfg(any(windows, target_os = "macos"))]
+    fn a_new_file_in_the_root_is_inside_whatever_the_case() {
+        let base = scratch("newcase");
+        let root = base.join("work");
+        std::fs::create_dir_all(&root).unwrap();
+        let upper = base.join("WORK");
+        if !upper.exists() {
+            eprintln!("skipped: this volume is case-sensitive");
+            return;
+        }
+        assert!(inside(&root, &upper.join("new.txt")));
+        assert!(inside(&upper, &root.join("new.txt")));
+        assert!(!inside(&upper, &base.join("WORK-evil/new.txt")));
+    }
+
+    /// New files behind a junction are outside FOR THE RIGHT REASON: the same junction path with a
+    /// real directory in its place is inside, so a refusal below is the link being followed, not the
+    /// blanket "a path that does not exist is outside" that used to hide it.
+    #[test]
+    #[cfg(windows)]
+    fn a_new_file_behind_a_junction_is_outside_and_one_in_a_real_directory_is_inside() {
+        let base = scratch("newjunction");
+        let root = base.join("work");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        junction(&root.join("link"), &outside);
+        assert!(inside(&root, &root.join("real/nope/new.txt")), "control: a new file in a real directory");
+        assert!(!inside(&root, &root.join("link/nope/new.txt")), "a new file behind a junction");
+        assert!(!inside(&root, &root.join("link/new.txt")));
+    }
+
+    /// The same on Windows with the 8.3 spellings: a new file in the root reached by the root's short
+    /// name is inside; a new file outside it by its short name is not.
+    #[test]
+    #[cfg(windows)]
+    fn a_new_file_is_judged_the_same_in_short_and_long_spellings() {
+        let base = scratch("newshort");
+        let root = base.join("work_directory_with_a_long_name");
+        let outside = base.join("outside_directory_with_a_long_name");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let (short_root, short_outside) = (short_path(&root), short_path(&outside));
+        if short_root == root || short_outside == outside {
+            skip("this volume does not make 8.3 short names");
+            return;
+        }
+        assert!(inside(&root, &short_root.join("new.txt")));
+        assert!(inside(&short_root, &root.join("new.txt")));
+        assert!(inside(&short_root, &short_root.join("new.txt")));
+        assert!(!inside(&root, &short_outside.join("new.txt")));
+        assert!(!inside(&short_root, &outside.join("new.txt")));
     }
 
 }
