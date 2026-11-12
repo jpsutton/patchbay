@@ -271,7 +271,7 @@ pub fn build_tray(app: &AppHandle) -> Result<()> {
                 }
             }
             "quick" => toggle_quick(app),
-            "quit" => app.exit(0),
+            "quit" => begin_quit(app, QuitAfter::Exit),
             _ => {}
         })
         .on_tray_icon_event(|tray, ev| {
@@ -456,7 +456,9 @@ async fn update_check(
 async fn update_install(app: AppHandle, pending: tauri::State<'_, PendingUpdate>) -> crate::CmdResult<()> {
     let update = pending.0.lock().await.take().ok_or_else(|| anyhow!("no update to install"))?;
     update.download_and_install(|_, _| {}, || {}).await?;
-    app.request_restart();
+    // pb-20261111-22: the updater restart goes through the same wait offer — the gate calls
+    // request_restart only when the list is empty (or Quit now was chosen).
+    begin_quit(&app, QuitAfter::Restart);
     Ok(())
 }
 
@@ -484,6 +486,191 @@ fn stop_native() {
 
 /// Serve an invoke from the window. Shared commands go through `api::call`, the same dispatcher
 /// the daemon's web clients use; the rest are the desktop-only commands above.
+/// What a finished quit does once the wait list empties (pb-20261111-22).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum QuitAfter {
+    Exit,
+    Restart,
+}
+
+/// The one gate every quit path funnels through: the pending action, whether the wait dialog
+/// is on screen, and a latch so our own exit/restart never re-enters the gate.
+#[derive(Default)]
+pub struct QuitFlow {
+    inner: Mutex<QuitFlowInner>,
+}
+
+#[derive(Default)]
+struct QuitFlowInner {
+    after: Option<QuitAfter>,
+    showing: bool,
+    performing: bool,
+}
+
+/// The decision every quit path makes. Attached (no AppState of its own) quits at once — the
+/// daemon keeps working, there is nothing to wait for (no false wait). The standalone owner
+/// offers the wait dialog while turns are actually running; with nothing running there is
+/// nothing to wait for either. A quit already under way is ignored; a quit while the dialog
+/// is already up RE-EMITS (re-raised window, fresh event) instead of being swallowed, so a
+/// second Quit can never be a dead button.
+#[derive(PartialEq, Eq, Debug)]
+enum QuitPlan {
+    GoNow,
+    ShowWait,
+    Ignore,
+}
+
+fn plan_quit(owns_state: bool, active_turns: usize, performing: bool) -> QuitPlan {
+    if performing {
+        QuitPlan::Ignore
+    } else if owns_state && active_turns > 0 {
+        QuitPlan::ShowWait
+    } else {
+        QuitPlan::GoNow
+    }
+}
+
+/// Whether a destroyed window may reset the quit gate: ONLY when no normal window remains
+/// (the dialog has nowhere to live). Closing a second window while the dialog is up in the
+/// first must not silently drop the pending quit (pb-20261111-22 round 3) — with a window
+/// left, the dialog continues there (every window polls `quit_wait_status`) or the next Quit
+/// re-raises it.
+fn destroyed_resets_gate(remaining_normal: usize) -> bool {
+    remaining_normal == 0
+}
+
+/// What `quit_wait_status` reports as "showing": a wait only counts while a quit is actually
+/// pending — a status response that raced a Keep-open cancel (showing, no `after`) must not
+/// re-open the dialog and proceed into an exit (pb-20261111-22 round 3).
+fn quit_status_pending(showing: bool, after: Option<QuitAfter>) -> bool {
+    showing && after.is_some()
+}
+
+/// Every quit path calls this: tray Quit, the last window's close, Cmd-Q / the app menu
+/// (ExitRequested), and the updater's restart (gated before `request_restart`).
+fn begin_quit(app: &AppHandle, after: QuitAfter) {
+    let state = app.try_state::<crate::AppState>();
+    let active = state.as_ref().map(|s| s.code.busy_sessions().len()).unwrap_or(0);
+    let flow = app.state::<QuitFlow>();
+    let plan = {
+        let g = flow.inner.lock().unwrap_or_else(|e| e.into_inner());
+        plan_quit(state.is_some(), active, g.performing)
+    };
+    match plan {
+        QuitPlan::Ignore => {}
+        QuitPlan::GoNow => perform_quit(app, after),
+        QuitPlan::ShowWait => {
+            if active_normal_window(app).is_some() {
+                {
+                    let mut g = flow.inner.lock().unwrap_or_else(|e| e.into_inner());
+                    g.after = Some(after);
+                    g.showing = true;
+                }
+                // Raise/unminimize/show/focus FIRST (the house routine: it also restores a
+                // hidden-to-tray window and spawns one if none is left), so a hidden, minimized
+                // or other-Space window can never make Quit look dead while showing sticks.
+                show_main(app);
+                if let Some(w) = active_normal_window(app) {
+                    let _ = w.emit("quit://wait", ());
+                }
+            } else {
+                // No window to ask in: nothing can show the dialog, so go now.
+                perform_quit(app, after);
+            }
+        }
+    }
+}
+
+/// Carry out a decided quit: latch first (our own ExitRequested must not re-enter the gate),
+/// then exit or restart. `RunEvent::Exit` still runs `state.shutdown()` on the way out, so a
+/// clean wait leaves no flags and Quit now leaves them set (the shutdown guard).
+fn perform_quit(app: &AppHandle, after: QuitAfter) {
+    {
+        let flow = app.state::<QuitFlow>();
+        let mut g = flow.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if g.performing {
+            return;
+        }
+        g.performing = true;
+        g.showing = false;
+        g.after = None;
+    }
+    match after {
+        QuitAfter::Exit => app.exit(0),
+        QuitAfter::Restart => app.request_restart(),
+    }
+}
+
+/// The wait dialog's "Quit now" (and its auto-quit when the list empties): carry out the
+/// pending quit. Quit now is today's stop_all behaviour — flags stay set, the relaunch offers
+/// those sessions (the shutdown guard keeps stop_all's death throes from clearing them).
+#[tauri::command]
+fn quit_proceed(app: AppHandle) {
+    let flow = app.state::<QuitFlow>();
+    let after = flow.inner.lock().unwrap_or_else(|e| e.into_inner()).after;
+    // No pending quit (a Keep-open cancel won a race with an in-flight status response):
+    // proceeding must be a no-op, never an exit the user cancelled (pb-20261111-22 round 3).
+    let Some(after) = after else { return };
+    perform_quit(&app, after);
+}
+
+/// What the wait dialog needs to (re)draw itself after a reload, a second window, or a poll:
+/// whether a quit is waiting, and the sessions still working FROM THE BACKEND'S OWN VIEW —
+/// the frontend must not guess the list (a stale store could auto-quit an empty one).
+#[tauri::command]
+fn quit_wait_status(app: AppHandle) -> serde_json::Value {
+    let (showing, after) = {
+        let flow = app.state::<QuitFlow>();
+        let g = flow.inner.lock().unwrap_or_else(|e| e.into_inner());
+        (g.showing, g.after)
+    };
+    // A wait only counts while a quit is pending (see quit_status_pending): a stale response
+    // from before a Keep-open cancel must not re-open the dialog. And with no wait pending
+    // there is nothing to list — no busy_sessions walk at all (poll cost).
+    let showing = quit_status_pending(showing, after);
+    if !showing {
+        return serde_json::json!({ "showing": false, "active": [] });
+    }
+    let active: Vec<serde_json::Value> = app
+        .try_state::<crate::AppState>()
+        .map(|s| {
+            s.code
+                .busy_sessions()
+                .into_iter()
+                .map(|id| {
+                    let title = s
+                        .db
+                        .get_code_session(&id)
+                        .ok()
+                        .flatten()
+                        .map(|c| c.title)
+                        .unwrap_or_else(|| id.clone());
+                    let waiting = crate::waiting_on_person(&s, &id);
+                    serde_json::json!({ "id": id, "title": title, "waiting": waiting })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    serde_json::json!({ "showing": showing, "active": active })
+}
+
+/// The wait dialog's "Keep Patchbay open": drop the pending quit; no flag is touched.
+#[tauri::command]
+fn quit_cancel(app: AppHandle) {
+    {
+        let flow = app.state::<QuitFlow>();
+        let mut g = flow.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if g.performing {
+            return;
+        }
+        g.showing = false;
+        g.after = None;
+    }
+    // Anything the quit flow parked while it was up (a pending update's installing flag)
+    // resets here: cancelling must leave every button retryable (pb-20261111-22).
+    let _ = app.emit("quit://cancelled", ());
+}
+
 fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     let desktop_only: Box<dyn Fn(tauri::ipc::Invoke) -> bool + Send + Sync> =
         Box::new(tauri::generate_handler![
@@ -495,6 +682,9 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'stat
             open_local_path,
             update_check,
             update_install,
+            quit_proceed,
+            quit_cancel,
+            quit_wait_status,
             list_native_voices,
             speak_native,
             stop_native
@@ -593,6 +783,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(PendingUpdate::default())
+        .manage(QuitFlow::default())
         .setup(|app| {
             let handle = app.handle().clone();
             let (title_bar, quick_entry_shortcut) = match start_backend(&handle, app.path().app_data_dir()?) {
@@ -636,6 +827,29 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|w, ev| {
+            // The last normal window asks the quit gate instead of dying at once: a wait
+            // dialog while turns run, an immediate quit otherwise (pb-20261111-22). Other
+            // windows still close freely; a quit already under way lets closes through.
+            if w.label() != QUICK && matches!(ev, tauri::WindowEvent::CloseRequested { .. }) {
+                let app = w.app_handle();
+                let others = app
+                    .webview_windows()
+                    .into_iter()
+                    .filter(|(label, _)| *label != QUICK && *label != w.label())
+                    .count();
+                let performing = app
+                    .state::<QuitFlow>()
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .performing;
+                if others == 0 && !performing {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = ev {
+                        api.prevent_close();
+                    }
+                    begin_quit(app, QuitAfter::Exit);
+                }
+            }
             // The hidden quick-entry window must not keep the app alive after normal windows close.
             if w.label() != QUICK && matches!(ev, tauri::WindowEvent::Destroyed) {
                 let remaining = w
@@ -644,6 +858,16 @@ pub fn run() {
                     .into_iter()
                     .filter(|(label, _)| label != QUICK && label != w.label())
                     .count();
+                // Reset the gate ONLY when no normal window remains (pb-20261111-22 round 3):
+                // closing a second window while the dialog lives in the first must not drop
+                // the pending quit. With a window left the dialog continues there, and the
+                // next Quit re-raises it anyway.
+                if destroyed_resets_gate(remaining) {
+                    if let Some(flow) = w.app_handle().try_state::<QuitFlow>() {
+                        let mut g = flow.inner.lock().unwrap_or_else(|e| e.into_inner());
+                        g.showing = false;
+                    }
+                }
                 if remaining == 0 {
                     w.app_handle().exit(0);
                 }
@@ -662,12 +886,29 @@ pub fn run() {
         .invoke_handler(invoke_handler())
         .build(tauri::generate_context!())
         .expect("error while building Patchbay")
-        .run(|app, event| {
-            if let tauri::RunEvent::Exit = event
-                && let Some(state) = app.try_state::<crate::AppState>()
-            {
-                state.shutdown();
+        .run(|app, event| match event {
+            // Cmd-Q, the app menu's Quit, and our own exit/restart all pass through here.
+            // Attached (no AppState): let it quit — the daemon keeps working, nothing to wait
+            // for. Standalone: offer the wait dialog first (pb-20261111-22). Our own performed
+            // quit/restart passes straight through (the latch above).
+            tauri::RunEvent::ExitRequested { api, .. } => {
+                let performing = app
+                    .state::<QuitFlow>()
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .performing;
+                if !performing && app.try_state::<crate::AppState>().is_some() {
+                    api.prevent_exit();
+                    begin_quit(app, QuitAfter::Exit);
+                }
             }
+            tauri::RunEvent::Exit => {
+                if let Some(state) = app.try_state::<crate::AppState>() {
+                    state.shutdown();
+                }
+            }
+            _ => {}
         });
 }
 
@@ -758,4 +999,27 @@ mod file_link_tests {
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
+}
+
+/// pb-20261111-22: the quit gate's decision table — attached quits at once (no dialog: the
+/// daemon keeps working), the standalone owner waits only while turns run, re-entry ignored.
+#[cfg(all(test, feature = "ipc-test"))]
+#[test]
+fn quit_gate_decides_wait_vs_go_now() {
+    assert_eq!(plan_quit(false, 3, false), QuitPlan::GoNow, "attached with turns: no dialog");
+    assert_eq!(plan_quit(false, 0, false), QuitPlan::GoNow, "attached idle");
+    assert_eq!(plan_quit(true, 2, false), QuitPlan::ShowWait, "standalone with turns: wait");
+    assert_eq!(plan_quit(true, 0, false), QuitPlan::GoNow, "standalone idle: nothing to wait for");
+    // A second Quit while the dialog is up is NOT ignored: it re-raises and re-emits (the
+    // plan no longer looks at `showing`), so the quit button can never be a dead one.
+    assert_eq!(plan_quit(true, 2, false), QuitPlan::ShowWait, "second quit re-emits");
+    assert_eq!(plan_quit(true, 2, true), QuitPlan::Ignore, "already quitting");
+    // Destroyed-window reset (round 3): only with no normal window left — closing a second
+    // window while the dialog lives in the first must not drop the pending quit.
+    assert!(destroyed_resets_gate(0), "no window left: the gate may reset");
+    assert!(!destroyed_resets_gate(1), "a window remains: the pending quit stays");
+    // Cancel-race status (round 3): showing without a pending quit reports nothing.
+    assert!(quit_status_pending(true, Some(QuitAfter::Exit)));
+    assert!(!quit_status_pending(true, None), "a cancelled wait must not report showing");
+    assert!(!quit_status_pending(false, Some(QuitAfter::Exit)));
 }

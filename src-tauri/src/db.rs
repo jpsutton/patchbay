@@ -249,6 +249,14 @@ ALTER TABLE providers ADD COLUMN grok_home TEXT;
 -- The NAMES of a provider's extra request headers and query parameters (JSON, `ExtraNames`), so
 -- Settings can list them. The values are secrets and live only in the keyring. Not synced.
 ALTER TABLE providers ADD COLUMN extra_names TEXT;
+"#, r#"
+-- When this session's current turn started (ms since epoch), NULL when no turn is running.
+-- The continuous active set behind the graceful-close resume picker (pb-20261111-22): set when
+-- a turn starts, cleared when it ends (done, error, user Stop), so a value left set means the
+-- app died mid-turn — SIGKILL, crash and Force Quit included.
+-- Not synced: turn liveness belongs to the node running the turn; a flag on one node means
+-- nothing on another (a synced copy would pop the picker on every other node).
+ALTER TABLE code_sessions ADD COLUMN active_turn_since INTEGER;
 "#];
 
 pub fn now_ms() -> i64 {
@@ -1253,6 +1261,39 @@ impl Db {
 
     /// A title someone typed (`manual`) pins it; an automatic one only lands while it isn't pinned.
     /// Returns whether it was written. Doesn't touch `updated_at`: naming isn't activity.
+    /// Set (Some) or clear (None) the active-turn flag: set when a turn starts, cleared when it
+    /// ends (done, error, user Stop). A value left set after a death means "was mid-turn".
+    pub fn set_code_session_active_turn(&self, id: &str, since: Option<i64>) -> Result<()> {
+        self.conn().execute(
+            "UPDATE code_sessions SET active_turn_since = ?2 WHERE id = ?1",
+            params![id, since],
+        )?;
+        Ok(())
+    }
+
+    /// The active-turn flag for one session (the resume picker reads it per row).
+    pub fn code_session_active_turn(&self, id: &str) -> Result<Option<i64>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT active_turn_since FROM code_sessions WHERE id = ?1")?;
+        let mut rows = stmt.query([id])?;
+        match rows.next()? {
+            Some(row) => Ok(row.get(0)?),
+            None => Ok(None),
+        }
+    }
+
+    /// Sessions whose active-turn flag is still set: the relaunch picker's list, in creation order.
+    pub fn code_sessions_with_active_turn(&self) -> Result<Vec<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM code_sessions WHERE active_turn_since IS NOT NULL AND archived_at IS NULL ORDER BY created_at",
+        )?;
+        let ids = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(ids)
+    }
+
     pub fn set_code_session_title(&self, id: &str, title: &str, manual: bool) -> Result<bool> {
         let n = self.conn().execute(
             "UPDATE code_sessions SET title = ?2, title_manual = ?3 WHERE id = ?1 AND (?3 OR NOT title_manual)",
@@ -1705,6 +1746,76 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("db.sqlite");
         (Db::open(&path).unwrap(), path)
+    }
+
+    /// pb-20261111-22: migrations apply BY INDEX — a DB already migrated through #434's
+    /// `extra_names` (user_version 19) must gain `active_turn_since` LAST (user_version 20),
+    /// keep the provider's ExtraNames data, and not re-migrate on reopen. The migration-swap
+    /// plant (mine before #434's) turns this red while the rest of the suite stays green.
+    #[test]
+    fn upgrade_from_extra_names_adds_active_turn_since_last() {
+        let dir = std::env::temp_dir().join(format!("pb-migrate-upgrade-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db.sqlite");
+        let idx = MIGRATIONS.iter().position(|m| m.contains("extra_names")).expect("#434 migration present");
+        let mine = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("active_turn_since"))
+            .expect("active_turn_since migration present");
+        assert_eq!(idx + 1, 19, "extra_names ends the staging era at user_version 19");
+        assert!(mine > idx, "active_turn_since must be APPENDED after extra_names (index order)");
+        {
+            // A DB exactly as David's staging build has it: through extra_names, with data.
+            let conn = Connection::open(&path).unwrap();
+            for (i, sql) in MIGRATIONS.iter().enumerate().take(idx + 1) {
+                conn.execute_batch(sql).unwrap();
+                conn.pragma_update(None, "user_version", (i + 1) as i64).unwrap();
+            }
+            conn.execute(
+                "INSERT INTO providers (id, name, kind, base_url, created_at, extra_names) VALUES ('p1', 'P', 'openai-chat', 'http://x', 1, '[\"X-Api-Key\"]')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO code_sessions (id, cwd, title, created_at, updated_at) VALUES ('s1', '/w', 'T', 1, 1)",
+                [],
+            )
+            .unwrap();
+        }
+        // The upgrade: Db::open applies whatever is left (from index 19 on).
+        let db = Db::open(&path).unwrap();
+        assert_eq!(
+            db.with_conn(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))).unwrap(),
+            MIGRATIONS.len() as i64,
+            "the remaining migrations ran"
+        );
+        db.with_conn(|c| {
+            let cols: Vec<String> = c
+                .prepare("SELECT name FROM pragma_table_info('code_sessions')")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert!(cols.iter().any(|c| c == "active_turn_since"), "the column exists: {cols:?}");
+            let names: String = c
+                .query_row("SELECT extra_names FROM providers WHERE id = 'p1'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(names, r#"["X-Api-Key"]"#, "ExtraNames data intact");
+        });
+        db.set_code_session_active_turn("s1", Some(7)).unwrap();
+        assert_eq!(db.code_sessions_with_active_turn().unwrap(), vec!["s1".to_string()]);
+        // Reopen: re-running a migration would fail on a duplicate column — opening twice and
+        // staying at the same version proves it does not re-migrate.
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        assert_eq!(
+            db.with_conn(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))).unwrap(),
+            MIGRATIONS.len() as i64,
+            "reopen does not re-migrate"
+        );
+        assert_eq!(db.code_session_active_turn("s1").unwrap(), Some(7));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

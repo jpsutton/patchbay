@@ -30,6 +30,8 @@ import { ImportClaudeDialog } from "./code/ImportClaudeDialog";
 import { Settings } from "./settings/Settings";
 import { CodeSidebar } from "./code/CodeSidebar";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { ResumePickerDialog } from "./components/ResumePickerDialog";
+import { QuitWaitDialog } from "./components/QuitWaitDialog";
 import { SessionInfoDialog } from "./code/SessionInfoDialog";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { CommandPalette } from "./components/CommandPalette";
@@ -758,6 +760,7 @@ export default function App() {
     useStore.getState().refreshSidebarLayout().catch(() => {});
     useStore.getState().refreshMesh();
     api.planAccounts().then((a) => useStore.getState().setPlanAccounts(a), () => {});
+    useStore.getState().initResumePicker().catch(() => {});
     api.cursorPlanLimits().then((l) => useStore.getState().setCursorPlanLimits(l), () => {});
     api.antigravityPlanLimits().then((l) => useStore.getState().setAntigravityPlanLimits(l), () => {});
     const unlisteners = [
@@ -918,6 +921,8 @@ export default function App() {
       </main>
       {settingsOpen && <Settings />}
       <ConfirmDialog />
+      <ResumePickerDialog />
+      <QuitWaitDialog />
       <SessionInfoDialog />
       <ShortcutsDialog />
       <NewSessionDialog />

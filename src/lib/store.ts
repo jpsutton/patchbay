@@ -34,6 +34,8 @@ import {
   type MeshStatus,
   type MeshChatEvent,
   defaultPreferences,
+  ResumeCandidate,
+  ResumeResult,
 } from "./ipc";
 
 import { setIconSize } from "./iconSize";
@@ -486,8 +488,16 @@ interface Store {
   /** Persist a change; resolves to an error message when the backend rejects it. */
   updatePrefs: (patch: Partial<Preferences>) => Promise<string | null>;
   confirm: (ConfirmRequest & { resolve: (r: ConfirmResult) => void }) | null;
+  /** The relaunch resume picker (pb-20261111-22): candidates with still-set active-turn flags. */
+  resumePicker: { candidates: ResumeCandidate[]; results: ResumeResult[] | null; busy: boolean } | null;
 
   askConfirm: (req: ConfirmRequest) => Promise<ConfirmResult>;
+  /** Probe for sessions mid-turn when the app died; opens the picker when there are any. */
+  initResumePicker: () => Promise<void>;
+  /** Apply the picker's choices (checked = resume with one continue prompt; unchecked = clear). */
+  applyResume: (checked: string[]) => Promise<void>;
+  /** Dismiss the picker without changing any flag (the sessions are offered again next launch). */
+  closeResumePicker: () => void;
   truncateCode: (id: string, entryIndex: number) => void;
   setMode: (m: Mode) => void;
   setSettingsOpen: (o: boolean) => void;
@@ -1222,6 +1232,7 @@ export const useStore = create<Store>((set, get) => ({
   antigravityPlanOpen: false,
   sessionUsageOpen: false,
   confirm: null,
+  resumePicker: null,
   prefs: defaultPreferences,
   loadPrefs: async () => {
     const prefs = withDefaults(await api.getPreferences());
@@ -1253,6 +1264,38 @@ export const useStore = create<Store>((set, get) => ({
         },
       }),
     ),
+  initResumePicker: async () => {
+    try {
+      const candidates = (await api.resumeCandidates()).filter(
+        // A session working right now (reload, second window) is never re-offered: checking
+        // it would send a duplicate continue prompt (pb-20261111-22).
+        (c) => !useStore.getState().code[c.id]?.busy,
+      );
+      if (candidates.length > 0) set({ resumePicker: { candidates, results: null, busy: false } });
+    } catch {
+      // A failed probe must never break startup; the picker simply does not appear.
+    }
+  },
+  applyResume: async (checked) => {
+    const cur = get().resumePicker;
+    if (!cur || cur.busy) return;
+    set({ resumePicker: { ...cur, busy: true } });
+    try {
+      const results = await api.resumeApply(checked);
+      set({ resumePicker: { ...cur, results, busy: false } });
+    } catch (e) {
+      // The backend failed as a whole: say so for every candidate (never silent).
+      const error = e instanceof Error ? e.message : String(e);
+      set({
+        resumePicker: {
+          ...cur,
+          busy: false,
+          results: cur.candidates.map((c) => ({ id: c.id, action: "error" as const, error })),
+        },
+      });
+    }
+  },
+  closeResumePicker: () => set({ resumePicker: null }),
   truncateCode: (id, entryIndex) => {
     flushCodeEvents(id);
     set((st) => {

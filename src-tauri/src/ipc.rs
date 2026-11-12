@@ -478,6 +478,13 @@ pub mod client {
         /// Run `cmd` on the daemon. Channel arguments are opened through `chans`, as `api::call`
         /// would, and the daemon's messages for them are passed on.
         pub async fn call(&self, cmd: &str, mut args: Value, chans: &ChanFactory) -> Result<Value, String> {
+            // pb-20261111-22(b): an attached window never reads or clears the daemon's turn
+            // flags — the resume picker belongs to whoever owns the AppState (the daemon
+            // itself, or a standalone app after the daemon is gone). Answer "nothing to
+            // offer" without asking: an attached relaunch shows no picker and changes no flag.
+            if matches!(cmd, "resume_candidates" | "resume_apply") {
+                return Ok(Value::Array(Vec::new()));
+            }
             for key in CHANNEL_ARGS {
                 let Some(id) = args.get(*key).and_then(Value::as_str).map(str::to_owned) else { continue };
                 let send = chans(&id).ok_or_else(|| format!("invalid argument {key}: invalid channel"))?;
@@ -544,6 +551,95 @@ mod tests {
         assert_ne!(p, proof("t", "client", "n"));
         assert_ne!(p, proof("u", "server", "n"));
         assert_ne!(p, proof("t", "server", "m"));
+    }
+
+    /// Shared setup for the attached-window tests: a daemon-owned state on a temp folder with
+    /// its socket server up, and the app's client attached to it — the same split
+    /// `start_backend` makes (lock -> standalone AppState, else DaemonLink::attach).
+    #[cfg(feature = "daemon")]
+    async fn attached_setup(tag: &str) -> (crate::AppState, server::Events, std::sync::Arc<client::Conn>) {
+        crate::test_support::raise_fd_limit();
+        let dir = crate::test_support::short_dir(tag);
+        let events: server::Events = tokio::sync::broadcast::channel(64).0;
+        let state = crate::open_state(dir.clone(), server::ui_sink(events.clone())).unwrap();
+        server::start(state.clone(), events.clone(), &dir).unwrap();
+        let on_event: client::EventSink = std::sync::Arc::new(|_, _| {});
+        let conn = client::Conn::open(&dir, on_event, || {}).await.unwrap();
+        (state, events, conn)
+    }
+
+    /// pb-20261111-22(a): an attached window's quit leaves the daemon's turns running —
+    /// dropping the client (all an attached quit is) changes nothing on the daemon side.
+    #[cfg(feature = "daemon")]
+    #[tokio::test]
+    async fn attached_quit_leaves_the_daemons_turns_running() {
+        let (state, _events, conn) = attached_setup("attach-quit").await;
+        let id = state
+            .db
+            .create_code_session("/w/quit", None, "patchbay", "default")
+            .unwrap()
+            .id;
+        // A real running turn: the agent must launch (provider + model first, as ever).
+        let prov = crate::db::Provider {
+            id: "mock".into(),
+            name: "Mock LLM".into(),
+            kind: crate::db::ProviderKind::OpenaiChat,
+            base_url: "http://127.0.0.1:8765/v1".into(),
+            has_key: true,
+            auth_mode: Default::default(),
+            claude_config_dir: None,
+            grok_home: None,
+        };
+        state.db.upsert_provider(&prov, Some("mock-key")).unwrap();
+        state
+            .db
+            .upsert_model(&crate::db::Model {
+                id: "test-model".into(),
+                provider_id: "mock".into(),
+                model_id: "test-model".into(),
+                display_name: "Test Model".into(),
+                vision: false,
+                context_window: None,
+                params: crate::db::ModelParams::default(),
+            })
+            .unwrap();
+        crate::code_start_local(&state, id.clone()).await.unwrap();
+        state.code.set_busy(&id, true);
+        state.db.set_code_session_active_turn(&id, Some(1)).unwrap();
+        drop(conn); // the attached app quits: no shutdown runs over here
+        assert!(state.code.is_busy(&id), "the daemon's turn is still running after the app quit");
+        assert_eq!(
+            state.db.code_session_active_turn(&id).unwrap(),
+            Some(1),
+            "the daemon's flags are untouched by an attached quit"
+        );
+    }
+
+    /// pb-20261111-22(b): the attached window never reads or clears the daemon's flags — an
+    /// attached relaunch is offered nothing and applies nothing (no picker misfire).
+    #[cfg(feature = "daemon")]
+    #[tokio::test]
+    async fn attached_window_never_reads_or_clears_the_daemons_flags() {
+        let (state, _events, conn) = attached_setup("attach-picker").await;
+        let id = state
+            .db
+            .create_code_session("/w/pick", None, "grok", "default")
+            .unwrap()
+            .id;
+        state.db.set_code_session_active_turn(&id, Some(2)).unwrap();
+        let no_chans: crate::api::ChanFactory = std::sync::Arc::new(|_| None);
+        let candidates = conn.call("resume_candidates", json!({}), &no_chans).await.unwrap();
+        assert_eq!(candidates, json!([]), "the attached window is offered nothing");
+        let applied = conn
+            .call("resume_apply", json!({ "checked": [id.clone()] }), &no_chans)
+            .await
+            .unwrap();
+        assert_eq!(applied, json!([]), "the attached window applies nothing");
+        assert_eq!(
+            state.db.code_session_active_turn(&id).unwrap(),
+            Some(2),
+            "the flag is unchanged"
+        );
     }
 
     /// The daemon's socket with the app's client on it: sign-in, commands, errors and events.
