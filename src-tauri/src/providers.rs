@@ -1,6 +1,6 @@
 //! Provider configuration: secrets, model discovery, mapping to `patchbay_llm`'s `Config`.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use patchbay_llm::{AuthScheme, SystemBlock, WireFormat};
 use serde::{Deserialize, Serialize};
 
@@ -142,11 +142,149 @@ pub enum Auth {
     GrokLogin,
 }
 
+/// A provider's extra request headers and query parameters, with their values. The values are
+/// secrets (an `api-key`, a gateway token): they live only in the keyring (`extras_account`), never
+/// in the database, the mesh sync or a log line, and `Debug` shows names only.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Extras {
+    pub headers: Vec<(String, String)>,
+    pub query: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for Extras {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names = |l: &[(String, String)]| l.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+        f.debug_struct("Extras").field("headers", &names(&self.headers)).field("query", &names(&self.query)).finish()
+    }
+}
+
+impl Extras {
+    pub fn names(&self) -> crate::db::ExtraNames {
+        crate::db::ExtraNames {
+            headers: self.headers.iter().map(|(n, _)| n.clone()).collect(),
+            query: self.query.iter().map(|(n, _)| n.clone()).collect(),
+        }
+    }
+}
+
+/// One entry typed in Settings. `value` `None` (or empty) keeps the value already stored under the
+/// same name, so a provider can be edited without typing its secrets again.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExtraEntry {
+    pub name: String,
+    #[serde(default)]
+    pub value: Option<String>,
+}
+
+/// The keyring account that holds a provider's extras (JSON). Not an account `reseal` syncs.
+pub fn extras_account(provider_id: &str) -> String {
+    format!("extras:{provider_id}")
+}
+
+/// Headers the request itself depends on: a user entry must not replace them.
+const RESERVED_HEADERS: [&str; 6] = ["host", "content-length", "content-type", "accept", "transfer-encoding", "connection"];
+const MAX_NAME: usize = 128;
+const MAX_VALUE: usize = 4096;
+
+fn valid_header_name(n: &str) -> bool {
+    !n.is_empty() && n.len() <= MAX_NAME && n.chars().all(|c| c.is_ascii_alphanumeric() || "!#$%&'*+.^_`|~-".contains(c))
+}
+
+fn valid_value(v: &str) -> bool {
+    v.len() <= MAX_VALUE && !v.chars().any(|c| c.is_control())
+}
+
+/// Merge typed entries with what is stored: a new value replaces, no value keeps.
+fn merge(entries: &[ExtraEntry], old: &[(String, String)], what: &str, header: bool) -> Result<Vec<(String, String)>> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for e in entries {
+        let name = e.name.trim();
+        if header {
+            if !valid_header_name(name) {
+                bail!("{name:?} is not a valid header name");
+            }
+            if RESERVED_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {
+                bail!("the {name} header is set by Patchbay and can't be replaced");
+            }
+        } else if name.is_empty() || name.len() > MAX_NAME || name.chars().any(|c| c.is_control()) {
+            bail!("{name:?} is not a valid query parameter name");
+        }
+        if out.iter().any(|(n, _)| if header { n.eq_ignore_ascii_case(name) } else { n == name }) {
+            bail!("the {what} {name} is listed twice");
+        }
+        let value = match e.value.as_deref().filter(|v| !v.is_empty()) {
+            Some(v) => v.to_owned(),
+            None => old
+                .iter()
+                .find(|(n, _)| if header { n.eq_ignore_ascii_case(name) } else { n == name })
+                .map(|(_, v)| v.clone())
+                .ok_or_else(|| anyhow!("the {what} {name} has no value yet"))?,
+        };
+        if !valid_value(&value) {
+            bail!("the value of the {what} {name} is too long or has control characters");
+        }
+        out.push((name.to_owned(), value));
+    }
+    Ok(out)
+}
+
+/// A keyring with no mesh scoping: provider keys and extras are named by their (synced) provider id.
+pub struct Keyring;
+
+impl crate::mesh::keys::KeyStore for Keyring {
+    fn get(&self, account: &str) -> Option<String> {
+        keyring_get(account)
+    }
+    fn set(&self, account: &str, value: &str) -> bool {
+        keyring_set(account, value)
+    }
+    fn delete(&self, account: &str) {
+        keyring_delete(account)
+    }
+}
+
+/// A provider's extras with values, from the keyring; empty when none are stored or readable.
+pub fn load_extras(keys: &dyn crate::mesh::keys::KeyStore, provider_id: &str) -> Extras {
+    let Some(json) = keys.get(&extras_account(provider_id)) else { return Extras::default() };
+    serde_json::from_str(&json).unwrap_or_else(|_| {
+        // Never print the stored text: it is the secret.
+        tracing::warn!(provider = %provider_id, "the stored extra headers could not be read");
+        Extras::default()
+    })
+}
+
+/// Save a provider's extra headers and query parameters. Values go to the keyring ONLY: with no
+/// keyring this fails (unlike an API key there is no database fallback, since a header value in
+/// the database is what must never happen). The names go to the provider row.
+pub fn set_extras(
+    db: &Db,
+    keys: &dyn crate::mesh::keys::KeyStore,
+    provider_id: &str,
+    headers: &[ExtraEntry],
+    query: &[ExtraEntry],
+) -> Result<()> {
+    let old = load_extras(keys, provider_id);
+    let next = Extras { headers: merge(headers, &old.headers, "header", true)?, query: merge(query, &old.query, "query parameter", false)? };
+    if next == Extras::default() {
+        keys.delete(&extras_account(provider_id));
+    } else if !keys.set(&extras_account(provider_id), &serde_json::to_string(&next)?) {
+        bail!("no keyring is available, and header values are never stored in the database");
+    }
+    db.set_provider_extra_names(provider_id, &next.names())
+}
+
+/// Remove a provider's extras (with the provider).
+pub fn delete_extras(keys: &dyn crate::mesh::keys::KeyStore, provider_id: &str) {
+    keys.delete(&extras_account(provider_id));
+}
+
 /// Resolved model + provider + key, ready to sample.
 pub struct Resolved {
     pub provider: Provider,
     pub model: Model,
     pub key: Option<String>,
+    /// The provider's extra headers and query parameters (values from the keyring).
+    pub extras: Extras,
     pub auth: Auth,
     /// For `Auth::GrokLogin`: the signed-in user, whom Grok's proxy wants named on every request.
     /// Filled by `ensure_token`.
@@ -169,10 +307,13 @@ pub fn resolve(db: &Db, model_ref: &str) -> Result<Resolved> {
         Auth::ClaudeLogin | Auth::GrokLogin => None,
         Auth::Key => load_key(&provider.id, inline.as_deref()),
     };
+    // Only a provider that has extras touches the keyring for them.
+    let extras = if db.provider_extra_names(&provider.id)?.is_empty() { Extras::default() } else { load_extras(&Keyring, &provider.id) };
     Ok(Resolved {
         provider,
         model,
         key,
+        extras,
         auth,
         grok_user: None,
     })
@@ -307,6 +448,9 @@ pub fn llm_config(r: &Resolved) -> patchbay_llm::Config {
         cfg.session_headers = vec!["x-grok-conv-id".into(), "x-grok-session-id".into()];
         cfg.request_id_header = Some("x-grok-req-id".into());
     }
+    // The user's own headers come after Patchbay's, so an `api-key` for Azure sits beside the bearer.
+    cfg.extra_headers.extend(r.extras.headers.iter().cloned());
+    cfg.extra_query = r.extras.query.clone();
     let p = &r.model.params;
     cfg.max_output_tokens = p.max_output_tokens;
     cfg.temperature = p.temperature;
@@ -515,6 +659,7 @@ mod tests {
                 params: Default::default(),
             },
             key: Some("tok".into()),
+            extras: Extras::default(),
             auth: Auth::GrokLogin,
             grok_user: Some("user-1".into()),
         };
@@ -567,6 +712,7 @@ mod tests {
     fn claude_login_leads_with_claude_code_identity() {
         use super::*;
         let resolved = |auth| Resolved {
+            extras: Extras::default(),
             provider: Provider {
                 id: "p".into(),
                 name: "Anthropic".into(),
@@ -612,6 +758,7 @@ mod tests {
     fn only_vendor_endpoints_have_native_search() {
         use super::*;
         let on = |kind, url: &str, auth| Resolved {
+            extras: Extras::default(),
             provider: Provider { id: "p".into(), name: "n".into(), kind, base_url: url.into(), has_key: false, auth_mode: Default::default(), claude_config_dir: None, grok_home: None },
             model: Model {
                 id: "m".into(),
@@ -633,5 +780,193 @@ mod tests {
         assert!(!native_web_search(&on(ProviderKind::Anthropic, "http://localhost:4000/v1", Auth::Key)));
         assert!(!native_web_search(&on(ProviderKind::OpenaiResponses, "http://localhost:11434/v1", Auth::Key)));
         assert!(!native_web_search(&on(ProviderKind::OpenaiChat, "https://api.openai.com/v1", Auth::Key)));
+    }
+
+    // --- extra headers and query parameters (pb-20261111-34) ---
+
+    use crate::mesh::keys::{KeyStore, MemKeyStore};
+
+    const HEADER_SECRET: &str = "HDR-SECRET-9f3a";
+    const QUERY_SECRET: &str = "QRY-SECRET-77c1";
+
+    fn provider_in_temp_db() -> (crate::db::Db, std::path::PathBuf) {
+        use super::*;
+        let dir = crate::test_support::short_dir("extras");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::Db::open(&dir.join("db.sqlite")).unwrap();
+        let p = Provider {
+            id: "azure".into(),
+            name: "Azure".into(),
+            kind: ProviderKind::OpenaiChat,
+            base_url: "https://x.openai.azure.com/openai/deployments/d".into(),
+            has_key: false,
+            auth_mode: AuthMode::ApiKey,
+            claude_config_dir: None,
+            grok_home: None,
+        };
+        db.upsert_provider(&p, None).unwrap();
+        (db, dir)
+    }
+
+    fn entry(name: &str, value: Option<&str>) -> super::ExtraEntry {
+        super::ExtraEntry { name: name.into(), value: value.map(str::to_owned) }
+    }
+
+    /// Everything in every table of the database, plus the raw files (the write-ahead log can hold
+    /// what the tables no longer do), as one string, for "the secret is nowhere in it".
+    fn dump(db: &crate::db::Db, dir: &std::path::Path) -> String {
+        let mut out = String::new();
+        db.with_conn(|c| -> anyhow::Result<()> {
+            let tables: Vec<String> = c
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")?
+                .query_map([], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            for t in tables {
+                let mut st = c.prepare(&format!("SELECT * FROM \"{t}\""))?;
+                let n = st.column_count();
+                let rows = st.query_map([], |r| Ok((0..n).map(|i| format!("{:?}", r.get_ref(i))).collect::<Vec<_>>().join("|")))?;
+                for row in rows {
+                    out.push_str(&format!("{t}: {}\n", row?));
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        for f in std::fs::read_dir(dir).unwrap().flatten() {
+            out.push_str(&String::from_utf8_lossy(&std::fs::read(f.path()).unwrap_or_default()));
+        }
+        out
+    }
+
+    #[test]
+    fn extras_values_go_to_the_keyring_and_nowhere_else() {
+        use super::*;
+        let (db, dir) = provider_in_temp_db();
+        let keys = MemKeyStore::default();
+        set_extras(&db, &keys, "azure", &[entry("api-key", Some(HEADER_SECRET))], &[entry("api-version", Some("2024-10-21")), entry("code", Some(QUERY_SECRET))]).unwrap();
+        let loaded = load_extras(&keys, "azure");
+        assert_eq!(loaded.headers, vec![("api-key".to_owned(), HEADER_SECRET.to_owned())]);
+        assert_eq!(loaded.query.len(), 2);
+        assert_eq!(
+            db.provider_extra_names("azure").unwrap(),
+            crate::db::ExtraNames { headers: vec!["api-key".into()], query: vec!["api-version".into(), "code".into()] }
+        );
+        let everything = dump(&db, &dir);
+        for secret in [HEADER_SECRET, QUERY_SECRET, "2024-10-21"] {
+            assert!(!everything.contains(secret), "{secret} is in the database files");
+        }
+        assert!(everything.contains("api-key"), "the NAME is what Settings lists");
+        let shown = format!("{loaded:?}");
+        assert!(!shown.contains(HEADER_SECRET) && !shown.contains(QUERY_SECRET), "{shown}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn extras_are_not_synced_to_the_mesh() {
+        use super::*;
+        let (db, dir) = provider_in_temp_db();
+        let keys = MemKeyStore::default();
+        set_extras(&db, &keys, "azure", &[entry("api-key", Some(HEADER_SECRET))], &[]).unwrap();
+        let table = crate::mesh::sync::TABLES.iter().find(|t| t.name == "providers").unwrap();
+        assert!(!table.cols.iter().any(|c| c.contains("extra")), "{:?}", table.cols);
+        let secrets = crate::mesh::secrets::local_secrets(&db, &keys).unwrap();
+        assert!(!secrets.contains_key(&extras_account("azure")), "{:?}", secrets.keys().collect::<Vec<_>>());
+        assert!(!secrets.values().any(|v| v.contains(HEADER_SECRET)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A store whose keyring is unavailable (headless Linux without a Secret Service).
+    struct NoKeyring;
+    impl KeyStore for NoKeyring {
+        fn get(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn set(&self, _: &str, _: &str) -> bool {
+            false
+        }
+        fn delete(&self, _: &str) {}
+    }
+
+    #[test]
+    fn without_a_keyring_extras_fail_loudly_and_store_nothing() {
+        use super::*;
+        let (db, dir) = provider_in_temp_db();
+        let e = set_extras(&db, &NoKeyring, "azure", &[entry("api-key", Some(HEADER_SECRET))], &[]).unwrap_err().to_string();
+        assert!(e.contains("keyring"), "{e}");
+        assert!(db.provider_extra_names("azure").unwrap().is_empty(), "no names saved for values that were not");
+        assert!(!dump(&db, &dir).contains(HEADER_SECRET), "no database fallback for a header value");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_blank_value_keeps_the_stored_one_and_an_empty_list_clears() {
+        use super::*;
+        let (db, dir) = provider_in_temp_db();
+        let keys = MemKeyStore::default();
+        set_extras(&db, &keys, "azure", &[entry("api-key", Some(HEADER_SECRET))], &[entry("api-version", Some("v1"))]).unwrap();
+        set_extras(&db, &keys, "azure", &[entry("API-KEY", None), entry("x-team", Some("t"))], &[entry("api-version", Some("v2"))]).unwrap();
+        let l = load_extras(&keys, "azure");
+        assert_eq!(l.headers, vec![("API-KEY".to_owned(), HEADER_SECRET.to_owned()), ("x-team".to_owned(), "t".to_owned())]);
+        assert_eq!(l.query, vec![("api-version".to_owned(), "v2".to_owned())]);
+        assert!(set_extras(&db, &keys, "azure", &[entry("new", None)], &[]).is_err(), "no value stored under that name");
+        set_extras(&db, &keys, "azure", &[], &[]).unwrap();
+        assert_eq!(keys.get(&extras_account("azure")), None);
+        assert!(db.provider_extra_names("azure").unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bad_names_and_values_are_refused() {
+        use super::*;
+        let (db, dir) = provider_in_temp_db();
+        let keys = MemKeyStore::default();
+        let set = |h: Vec<ExtraEntry>, q: Vec<ExtraEntry>| set_extras(&db, &keys, "azure", &h, &q);
+        assert!(set(vec![entry("bad name", Some("v"))], vec![]).is_err(), "space in a header name");
+        assert!(set(vec![entry("x-a", Some("v\r\nx-evil: 1"))], vec![]).is_err(), "header injection through a value");
+        assert!(set(vec![entry("Content-Type", Some("text/plain"))], vec![]).is_err(), "a header Patchbay sets");
+        assert!(set(vec![entry("host", Some("evil"))], vec![]).is_err());
+        assert!(set(vec![entry("x-a", Some("1")), entry("X-A", Some("2"))], vec![]).is_err(), "duplicate header, any case");
+        assert!(set(vec![], vec![entry("", Some("v"))]).is_err(), "empty query name");
+        assert!(set(vec![], vec![entry("k", Some("v")), entry("k", Some("w"))]).is_err(), "duplicate query name");
+        assert!(set(vec![entry("x-a", Some(&"v".repeat(5000)))], vec![]).is_err(), "too long");
+        assert_eq!(keys.get(&extras_account("azure")), None, "a refused save stores nothing");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn extras_reach_the_request_config() {
+        use super::*;
+        let r = Resolved {
+            provider: Provider {
+                id: "azure".into(),
+                name: "Azure".into(),
+                kind: ProviderKind::OpenaiChat,
+                base_url: "https://x.openai.azure.com/openai/deployments/d".into(),
+                has_key: true,
+                auth_mode: AuthMode::ApiKey,
+                claude_config_dir: None,
+                grok_home: None,
+            },
+            model: Model {
+                id: "m".into(),
+                provider_id: "azure".into(),
+                model_id: "gpt-x".into(),
+                display_name: "GPT".into(),
+                vision: false,
+                context_window: None,
+                params: Default::default(),
+            },
+            key: Some("the-key".into()),
+            extras: Extras { headers: vec![("api-key".into(), HEADER_SECRET.into())], query: vec![("api-version".into(), "2024-10-21".into())] },
+            auth: Auth::Key,
+            grok_user: None,
+        };
+        let cfg = llm_config(&r);
+        assert_eq!(cfg.extra_headers, vec![("api-key".to_owned(), HEADER_SECRET.to_owned())]);
+        assert_eq!(cfg.extra_query, vec![("api-version".to_owned(), "2024-10-21".to_owned())]);
+        let shown = format!("{cfg:?}");
+        assert!(!shown.contains(HEADER_SECRET) && !shown.contains("2024-10-21") && !shown.contains("the-key"), "{shown}");
+        let none = Resolved { extras: Extras::default(), ..r };
+        assert!(llm_config(&none).extra_headers.is_empty() && llm_config(&none).extra_query.is_empty());
     }
 }

@@ -104,6 +104,8 @@ commands! {
     list_providers();
     save_provider(input);
     delete_provider(id);
+    provider_extras(id);
+    set_provider_extras(id, headers, query);
     discover_models(provider_id);
     list_models();
     save_model(input);

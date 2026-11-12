@@ -285,7 +285,27 @@ async fn save_provider(state: &AppState, input: ProviderInput) -> CmdResult<Prov
     Ok(saved)
 }
 
+/// The names of a provider's extra headers and query parameters; the values never leave Rust.
+async fn provider_extras(state: &AppState, id: String) -> CmdResult<db::ExtraNames> {
+    Ok(state.db.provider_extra_names(&id)?)
+}
+
+/// Save a provider's extra headers and query parameters (values to the keyring only).
+async fn set_provider_extras(
+    state: &AppState,
+    id: String,
+    headers: Vec<providers::ExtraEntry>,
+    query: Vec<providers::ExtraEntry>,
+) -> CmdResult<db::ExtraNames> {
+    if state.db.get_provider(&id)?.is_none() {
+        return Err(CmdError("provider not found".into()));
+    }
+    providers::set_extras(&state.db, &providers::Keyring, &id, &headers, &query)?;
+    Ok(state.db.provider_extra_names(&id)?)
+}
+
 async fn delete_provider(state: &AppState, id: String) -> CmdResult<()> {
+    providers::delete_extras(&providers::Keyring, &id);
     providers::delete_key(&id);
     state.db.delete_provider(&id)?;
     state.mesh.secrets_changed();

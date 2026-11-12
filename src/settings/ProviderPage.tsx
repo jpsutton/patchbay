@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, errorText, type AuthMode, type DiscoveredModel, type Provider, type ProviderKind } from "../lib/ipc";
+import { api, errorText, type AuthMode, type DiscoveredModel, type ProviderExtraEntry, type Provider, type ProviderKind } from "../lib/ipc";
 import { useStore } from "../lib/store";
 
 /** Where Grok Build's own sign-in is served from; a Grok login provider points here. */
@@ -246,6 +246,130 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
   );
 }
 
+type ExtraRow = { name: string; value: string; stored: boolean };
+
+/** Extra request headers or query parameters. Values are write-only: a stored value is never shown. */
+function ExtraList({
+  title,
+  hint,
+  rows,
+  onChange,
+  addLabel,
+}: {
+  title: string;
+  hint: string;
+  rows: ExtraRow[];
+  onChange: (rows: ExtraRow[]) => void;
+  addLabel: string;
+}) {
+  const set = (i: number, patch: Partial<ExtraRow>) => onChange(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="text-xs text-muted">{title}</div>
+      {rows.map((r, i) => (
+        <div key={i} className="flex gap-2">
+          <input
+            className={`${input} flex-1 font-mono`}
+            aria-label={`${title} name ${i + 1}`}
+            value={r.name}
+            disabled={r.stored}
+            onChange={(e) => set(i, { name: e.target.value })}
+            placeholder="name"
+            autoComplete="off"
+          />
+          <input
+            className={`${input} flex-1 font-mono`}
+            aria-label={`${title} value ${i + 1}`}
+            type="password"
+            value={r.value}
+            onChange={(e) => set(i, { value: e.target.value })}
+            placeholder={r.stored ? "•••••••• (stored — blank keeps)" : "value"}
+            autoComplete="off"
+          />
+          <button
+            className="rounded-md px-2 text-xs text-muted hover:text-danger"
+            aria-label={`Remove ${title} ${i + 1}`}
+            onClick={() => onChange(rows.filter((_, j) => j !== i))}
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+      <button
+        className="self-start rounded-md border border-border px-2 py-1 text-xs hover:border-accent"
+        onClick={() => onChange([...rows, { name: "", value: "", stored: false }])}
+      >
+        {addLabel}
+      </button>
+      <span className="text-xs text-muted">{hint}</span>
+    </div>
+  );
+}
+
+function ProviderExtras({ provider }: { provider: Provider }) {
+  const [headers, setHeaders] = useState<ExtraRow[]>([]);
+  const [query, setQuery] = useState<ExtraRow[]>([]);
+  const [busy, setBusy] = useState(false);
+  const setToast = useStore((s) => s.setToast);
+  const load = (n: { headers: string[]; query: string[] }) => {
+    const row = (name: string): ExtraRow => ({ name, value: "", stored: true });
+    setHeaders(n.headers.map(row));
+    setQuery(n.query.map(row));
+  };
+  useEffect(() => {
+    let live = true;
+    setHeaders([]);
+    setQuery([]);
+    api.providerExtras(provider.id).then((n) => live && load(n), (e) => live && setToast(errorText(e)));
+    return () => {
+      live = false;
+    };
+  }, [provider.id]);
+  const entries = (rows: ExtraRow[]): ProviderExtraEntry[] =>
+    rows.map((r) => ({ name: r.name.trim(), value: r.value === "" ? undefined : r.value }));
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="text-sm font-medium">Extra headers and query parameters</div>
+      <ExtraList
+        title="Headers"
+        hint="Sent with every request, e.g. api-key for Azure or HTTP-Referer for OpenRouter."
+        rows={headers}
+        onChange={setHeaders}
+        addLabel="Add header"
+      />
+      <ExtraList
+        title="Query parameters"
+        hint="Added to the request URL, e.g. api-version. Put them here, not in the base URL."
+        rows={query}
+        onChange={setQuery}
+        addLabel="Add query parameter"
+      />
+      <div>
+        <button
+          className="rounded-md border border-border px-3 py-1.5 text-xs hover:border-accent disabled:opacity-50"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              load(await api.setProviderExtras(provider.id, entries(headers), entries(query)));
+              setToast("Extras saved");
+            } catch (e) {
+              setToast(errorText(e));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          Save extras
+        </button>
+      </div>
+      <p className="text-xs text-muted">
+        Values are stored in the OS keychain only, never in the database, and are not synced to other devices.
+        Without a keychain they cannot be saved.
+      </p>
+    </div>
+  );
+}
 
 /** Fetch the provider's model list, or add a model by id. */
 function AddModels({ provider, onAdded }: { provider: Provider; onAdded: (modelRef: string) => void }) {
@@ -356,6 +480,7 @@ export function ProviderPage({
   return (
     <div className="flex max-w-xl flex-col gap-6">
       <ProviderEditor provider={provider} onSaved={onSaved} />
+      {provider && <ProviderExtras provider={provider} />}
       {provider && <AddModels provider={provider} onAdded={onOpenModel} />}
       <p className="text-xs text-muted">
         Keys are stored in the OS keychain when available. Chat and Patchbay's coding agent call the

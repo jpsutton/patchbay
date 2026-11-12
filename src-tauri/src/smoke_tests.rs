@@ -15,6 +15,7 @@ fn mock_url() -> String {
 
 fn mock_resolved(kind: ProviderKind) -> Resolved {
     Resolved {
+        extras: crate::providers::Extras::default(),
         provider: Provider {
             id: "p".into(),
             name: "mock".into(),

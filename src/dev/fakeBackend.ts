@@ -126,6 +126,7 @@ const now = () => Date.now();
 
 const db = {
   providers: [] as (Provider & { key?: string })[],
+  providerExtras: {} as Record<string, { headers: string[]; query: string[] }>,
   models: [] as Model[],
   settings: {} as Record<string, string>,
   conversations: [] as Conversation[],
@@ -1241,6 +1242,16 @@ export function install() {
           if (authMode === "claude_login" || authMode === "grok_login") x.hasKey = false;
           else if (i.apiKey !== undefined) x.hasKey = i.apiKey !== "";
           return { ...x };
+        }
+        case "provider_extras":
+          return db.providerExtras[a.id as string] ?? { headers: [], query: [] };
+        case "set_provider_extras": {
+          const names = {
+            headers: (a.headers as { name: string }[]).map((e) => e.name),
+            query: (a.query as { name: string }[]).map((e) => e.name),
+          };
+          db.providerExtras[a.id as string] = names;
+          return names;
         }
         case "delete_provider":
           db.providers = db.providers.filter((x) => x.id !== a.id);

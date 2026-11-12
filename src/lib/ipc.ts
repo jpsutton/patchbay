@@ -8,6 +8,18 @@ import type { CodeLive } from "./sessionLive";
 export type ProviderKind = "openai_chat" | "openai_responses" | "anthropic" | "gemini";
 export type AuthMode = "api_key" | "claude_login" | "grok_login";
 
+/** Names of a provider's extra headers and query parameters. Values never leave the backend. */
+export interface ProviderExtraNames {
+  headers: string[];
+  query: string[];
+}
+
+/** One extra header or query parameter to save. A missing or blank value keeps the stored one. */
+export interface ProviderExtraEntry {
+  name: string;
+  value?: string;
+}
+
 export interface Provider {
   id: string;
   name: string;
@@ -1121,6 +1133,9 @@ export const api = {
     grokHome?: string;
   }) => invoke<Provider>("save_provider", { input }),
   deleteProvider: (id: string) => invoke<void>("delete_provider", { id }),
+  providerExtras: (id: string) => invoke<ProviderExtraNames>("provider_extras", { id }),
+  setProviderExtras: (id: string, headers: ProviderExtraEntry[], query: ProviderExtraEntry[]) =>
+    invoke<ProviderExtraNames>("set_provider_extras", { id, headers, query }),
   discoverModels: (providerId: string) => invoke<DiscoveredModel[]>("discover_models", { providerId }),
   listModels: () => invoke<Model[]>("list_models"),
   saveModel: (input: {
