@@ -460,6 +460,15 @@ mod tests {
         assert!(inside(&root, Path::new(&format!("{r}\\a/../a\\in.txt"))));
     }
 
+    /// A skip is not a pass. On a developer's machine it says so and returns; in CI
+    /// (`GITHUB_ACTIONS`) it fails, so a step the runner could not run shows up as unverified
+    /// instead of as an `ok`, which a passing test's captured output would hide.
+    #[cfg(windows)]
+    fn skip(reason: &str) {
+        assert!(std::env::var_os("GITHUB_ACTIONS").is_none(), "SKIPPED, this step is unverified here: {reason}");
+        eprintln!("skipped: {reason}");
+    }
+
     #[cfg(windows)]
     fn junction(link: &Path, target: &Path) {
         // `mklink /J` makes a directory junction and needs no privilege.
@@ -505,7 +514,7 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("secret.txt"), "s").unwrap();
         if let Err(e) = std::os::windows::fs::symlink_dir(&outside, root.join("link")) {
-            eprintln!("skipped: cannot create a directory symlink here ({e})");
+            skip(&format!("cannot create a directory symlink here ({e})"));
             return;
         }
         assert!(!inside(&root, &root.join("link/secret.txt")));
@@ -541,7 +550,7 @@ mod tests {
         std::fs::write(root.join("in.txt"), "x").unwrap();
         let (short_outside, short_root) = (short_path(&outside), short_path(&root));
         if short_outside == outside || short_root == root {
-            eprintln!("skipped: this volume does not make 8.3 short names");
+            skip("this volume does not make 8.3 short names");
             return;
         }
         // Outside, by its short name: an existing file and one about to be written.
