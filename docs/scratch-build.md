@@ -19,6 +19,10 @@ What the product code does for a non-default data folder (the app's default is
 
 - Provider, MCP and web-search keychain accounts get a `#<scope>` suffix, as the mesh secrets
   already did (`providers::set_keyring_scope`, called from `open_locked_state`).
+- On the first start of a non-default folder, the unscoped entries its own database refers to
+  (provider keys and extras, MCP secrets, the web-search key) are COPIED to the scoped names, once
+  (`keyring.unscoped_copied` in its settings). Originals are never deleted, since the default app
+  may own them; removing old unscoped entries is the user's choice. Writes are scoped from the start.
 - The artifact share server takes a port of its own (47000-47999, derived from the folder) instead
   of 4420, so it cannot take the port from the live app if that one is down.
 

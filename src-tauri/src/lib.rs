@@ -4393,6 +4393,9 @@ pub fn data_dir_busy(data_dir: &std::path::Path) -> String {
 pub fn open_locked_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow::Result<AppState> {
     let db = Arc::new(Db::open(&data_dir.join("patchbay.sqlite"))?);
     providers::set_keyring_scope(mesh::keys::data_dir_scope(&data_dir));
+    // Tests open many states against the real keychain; the copy has its own tests with a fake one.
+    #[cfg(not(test))]
+    providers::copy_unscoped_keys(&db);
     let keys = Arc::new(mesh::keys::OsKeyStore::new(&data_dir));
     let mesh = Mesh::new(db.clone(), data_dir.clone(), keys)?;
     let mcp_log_path = data_dir.join("logs").join("agent-messaging-mcp.log");

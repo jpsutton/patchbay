@@ -18,6 +18,81 @@ pub fn set_keyring_scope(scope: Option<String>) {
     let _ = KEYRING_SCOPE.set(scope);
 }
 
+const COPIED_SETTING: &str = "keyring.unscoped_copied";
+
+/// Every keyring account this instance's database refers to: each provider's key and extras, each
+/// MCP secret, and the web-search key. The only accounts a migration may look at.
+fn referenced_accounts(db: &Db) -> Vec<String> {
+    let mut out = Vec::new();
+    // `set_web_search_key` always writes the inline setting (blank when the key is in the keychain),
+    // so its presence is this database saying it has a web-search key.
+    if db.get_setting(WEB_SEARCH_INLINE).ok().flatten().is_some() {
+        out.push(WEB_SEARCH_ACCOUNT.to_owned());
+    }
+    for (p, _) in db.list_providers().unwrap_or_default() {
+        out.push(extras_account(&p.id));
+        out.push(p.id);
+    }
+    for s in db.list_mcp_servers().unwrap_or_default() {
+        let Ok(cfg) = serde_json::from_value::<crate::code::mcp::McpConfig>(s.config) else { continue };
+        for (section, list) in [("env", &cfg.env), ("header", &cfg.headers)] {
+            out.extend(list.iter().filter(|kv| kv.secret).map(|kv| crate::code::mcp::secret_account(&s.id, section, &kv.name)));
+        }
+    }
+    out
+}
+
+/// One-time COPY of the unscoped keychain entries a non-default data folder stored before keychain
+/// accounts were scoped (`patchbayd --data-dir` next to the app). For each account this database
+/// refers to that has no scoped entry yet, the unscoped one is copied to the scoped name. Never
+/// deletes the original (the default app may own it, and synced provider ids can share it), never
+/// reads an account the database does not refer to, never writes an unscoped name. Runs once per
+/// instance: recorded in its settings only when every needed copy worked. `io` takes raw account
+/// names. Returns how many entries were copied.
+fn copy_unscoped_with(
+    db: &Db,
+    scope: Option<&str>,
+    get: &dyn Fn(&str) -> Option<String>,
+    set: &dyn Fn(&str, &str) -> bool,
+) -> usize {
+    let Some(scope) = scope else { return 0 };
+    if db.get_setting(COPIED_SETTING).ok().flatten().is_some() {
+        return 0;
+    }
+    let (mut copied, mut failed) = (0, false);
+    for account in referenced_accounts(db) {
+        let scoped = scoped_with(Some(scope), &account);
+        if get(&scoped).is_some() {
+            continue;
+        }
+        let Some(value) = get(&account) else { continue };
+        if set(&scoped, &value) {
+            copied += 1;
+        } else {
+            failed = true;
+        }
+    }
+    if !failed {
+        let _ = db.set_setting(COPIED_SETTING, "1");
+    }
+    copied
+}
+
+/// `copy_unscoped_with` against the OS keychain, for this process's scope. Called once at startup
+/// (not in tests, which open states against the real keychain).
+#[cfg_attr(test, allow(dead_code))]
+pub fn copy_unscoped_keys(db: &Db) {
+    let raw_get = |a: &str| {
+        keyring::Entry::new(KEYRING_SERVICE, a).and_then(|e| e.get_password()).ok().filter(|v| !v.is_empty())
+    };
+    let raw_set = |a: &str, v: &str| keyring::Entry::new(KEYRING_SERVICE, a).and_then(|e| e.set_password(v)).is_ok();
+    let scope = KEYRING_SCOPE.get().and_then(|s| s.as_deref());
+    let n = copy_unscoped_with(db, scope, &raw_get, &raw_set);
+    if n > 0 {
+        tracing::info!("copied {n} keychain entries from the unscoped names to this data folder's; the originals stay");
+    }
+}
+
 /// The keyring account for `account` under this process's scope. `mesh:` accounts arrive already
 /// scoped by `OsKeyStore`, so they pass through (scoping twice would orphan existing daemons' keys).
 fn scoped(account: &str) -> String {
@@ -1319,5 +1394,106 @@ mod tests {
         assert!(!unscoped_there, "the unscoped account (the live app's name) was NOT written");
         assert_eq!(read_back.as_deref(), Some("probe-value"));
         assert!(gone, "deleting removed the scoped entry");
+    }
+
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    /// A fake keychain keyed by raw account name, counting reads.
+    struct Fake {
+        map: RefCell<HashMap<String, String>>,
+        reads: RefCell<Vec<String>>,
+    }
+    impl Fake {
+        fn with(entries: &[(&str, &str)]) -> Self {
+            Self {
+                map: RefCell::new(entries.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()),
+                reads: RefCell::default(),
+            }
+        }
+        fn get(&self, a: &str) -> Option<String> {
+            self.reads.borrow_mut().push(a.to_owned());
+            self.map.borrow().get(a).cloned()
+        }
+        fn set(&self, a: &str, v: &str) -> bool {
+            self.map.borrow_mut().insert(a.to_owned(), v.to_owned());
+            true
+        }
+        fn copy(&self, db: &crate::db::Db, scope: Option<&str>) -> usize {
+            super::copy_unscoped_with(db, scope, &|a| self.get(a), &|a, v| self.set(a, v))
+        }
+    }
+
+    fn db_with_provider(id: &str) -> (crate::db::Db, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("pb-copy-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::Db::open(&dir.join("db.sqlite")).unwrap();
+        let p = crate::db::Provider {
+            id: id.to_owned(),
+            name: "p".into(),
+            kind: crate::db::ProviderKind::Anthropic,
+            base_url: "https://example.invalid".into(),
+            has_key: false,
+            auth_mode: Default::default(),
+            claude_config_dir: None,
+            grok_home: None,
+        };
+        db.upsert_provider(&p, None).unwrap();
+        (db, dir)
+    }
+
+    #[test]
+    fn a_referenced_unscoped_key_is_copied_to_the_scoped_name_and_the_original_stays() {
+        let (db, dir) = db_with_provider("prov-1");
+        let kc = Fake::with(&[("prov-1", "sk-old"), ("extras:prov-1", "{\"api-key\":\"x\"}")]);
+        assert_eq!(kc.copy(&db, Some("s1")), 2);
+        assert_eq!(kc.get("prov-1#s1").as_deref(), Some("sk-old"), "found under the scoped name");
+        assert_eq!(kc.get("extras:prov-1#s1").as_deref(), Some("{\"api-key\":\"x\"}"));
+        assert_eq!(kc.get("prov-1").as_deref(), Some("sk-old"), "the original is never deleted");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_unreferenced_unscoped_entry_is_never_read_and_a_scoped_one_is_never_overwritten() {
+        let (db, dir) = db_with_provider("prov-1");
+        let kc = Fake::with(&[("other-app-id", "secret"), ("prov-1", "sk-old"), ("prov-1#s1", "sk-new")]);
+        kc.copy(&db, Some("s1"));
+        let reads = kc.reads.borrow().clone();
+        assert!(!reads.iter().any(|r| r.starts_with("other-app-id")), "read an account this database does not refer to: {reads:?}");
+        assert_eq!(kc.map.borrow()["prov-1#s1"], "sk-new", "an existing scoped entry wins");
+        assert!(!reads.contains(&"prov-1".to_owned()), "no unscoped read when the scoped entry exists");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_copy_runs_once_per_instance() {
+        let (db, dir) = db_with_provider("prov-1");
+        let kc = Fake::with(&[("prov-1", "sk-old")]);
+        assert_eq!(kc.copy(&db, Some("s1")), 1);
+        kc.map.borrow_mut().remove("prov-1#s1");
+        kc.reads.borrow_mut().clear();
+        assert_eq!(kc.copy(&db, Some("s1")), 0, "a second start does not copy again");
+        assert!(kc.reads.borrow().is_empty(), "and does not touch the keychain");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_default_folder_is_untouched() {
+        let (db, dir) = db_with_provider("prov-1");
+        let kc = Fake::with(&[("prov-1", "sk-old")]);
+        assert_eq!(kc.copy(&db, None), 0);
+        assert!(kc.reads.borrow().is_empty());
+        assert_eq!(kc.map.borrow().len(), 1, "nothing written");
+        assert!(db.get_setting(super::COPIED_SETTING).unwrap().is_none(), "and nothing recorded");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_copy_is_retried_at_the_next_start() {
+        let (db, dir) = db_with_provider("prov-1");
+        let kc = Fake::with(&[("prov-1", "sk-old")]);
+        assert_eq!(super::copy_unscoped_with(&db, Some("s1"), &|a| kc.get(a), &|_, _| false), 0);
+        assert_eq!(kc.copy(&db, Some("s1")), 1, "not recorded after a failure");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
