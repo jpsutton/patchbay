@@ -1,0 +1,5 @@
+# Known failing Rust tests on the Windows runner (pb-20261111-63): one per line, `<leg>: <test>`.
+# Written from the first windows-latest run of the job (windows_tests.py prints its "baseline
+# format" list), not copied from anyone's machine: runner images differ. A failure outside this
+# file fails the job. When a test is fixed, delete its line (the job says which now pass). While
+# this file has entries the job is not a required check; when it is empty, make it required.
