@@ -36,6 +36,7 @@ Then push and PR are David's decision.
 - **Permission prompt responses as human**: `code_permission_respond` over WebSocket with web-token is allowed ONLY inside the Teams sandbox on 127.0.0.1:4531, ONLY for a command that runs entirely inside the item's own `.trees` worktree, and ONLY where run pass criteria do not require zero approvals. Every approval must be listed in the run report (request id, exact command, who approved, why). NEVER against 127.0.0.1:4420, NEVER with live app token, NEVER for sessions outside sandbox, and NEVER to grant a seat acknowledgement or setting.
 - **Zero-approval runs (live13+)**: nobody approves anything. If a prompt appears, record it and that criterion fails mid-run.
 - **Credential files**: NEVER read credential or account files (for example `~/.claude.json`).
+- **Database read-only**: Sandbox databases (`teams.db`, `patchbay.sqlite`) are read-only to lane seats; no direct writes/edits by anyone in any run. State changes must go through the product's UI or tools only. A run requiring a database edit has discovered a defect and must stop and report it.
 
 ## Standing rules
 
