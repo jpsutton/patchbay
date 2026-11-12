@@ -285,9 +285,28 @@ async fn save_provider(state: &AppState, input: ProviderInput) -> CmdResult<Prov
     Ok(saved)
 }
 
+/// The names of a provider's extra headers and query parameters; the values never leave Rust.
+async fn provider_extras(state: &AppState, id: String) -> CmdResult<db::ExtraNames> {
+    Ok(state.db.provider_extra_names(&id)?)
+}
+
+/// Save a provider's extra headers and query parameters (values to the keyring only).
+async fn set_provider_extras(
+    state: &AppState,
+    id: String,
+    headers: Vec<providers::ExtraEntry>,
+    query: Vec<providers::ExtraEntry>,
+) -> CmdResult<db::ExtraNames> {
+    if state.db.get_provider(&id)?.is_none() {
+        return Err(CmdError("provider not found".into()));
+    }
+    providers::set_extras(&state.db, &providers::Keyring, &id, &headers, &query)?;
+    Ok(state.db.provider_extra_names(&id)?)
+}
+
 async fn delete_provider(state: &AppState, id: String) -> CmdResult<()> {
     providers::delete_key(&id);
-    state.db.delete_provider(&id)?;
+    providers::delete_provider_with(&state.db, &providers::Keyring, &id)?;
     state.mesh.secrets_changed();
     Ok(())
 }
@@ -315,7 +334,8 @@ async fn discover_models(
         }
         providers::Auth::Key => providers::load_key(&p.id, inline.as_deref()),
     };
-    Ok(providers::discover_models_for(&p.kind, &p.base_url, key.as_deref(), auth, grok_user.as_deref()).await?)
+    let extras = providers::required_extras(&state.db, &providers::Keyring, &p.id)?;
+    Ok(providers::discover_models_for(&p.kind, &p.base_url, key.as_deref(), auth, grok_user.as_deref(), &extras).await?)
 }
 
 async fn list_models(state: &AppState) -> CmdResult<Vec<Model>> {
