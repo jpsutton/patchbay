@@ -50,6 +50,24 @@ use tokio_util::io::ReaderStream;
 pub const BASE_URL_SETTING: &str = "artifacts.baseUrl";
 /// Used when the setting is absent. Also the loopback address the standalone server binds to.
 pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:4420";
+
+/// The base URL a node uses until its `artifacts.baseUrl` setting says otherwise. The desktop app
+/// on a non-default data folder (a scratch build) must not take 4420 from the app that owns it, so
+/// it gets a port of its own derived from the folder's keyring scope; a bind clash only warns.
+pub fn default_base_url(data_dir: &Path) -> String {
+    #[cfg(feature = "desktop")]
+    if let Some(scope) = crate::mesh::keys::data_dir_scope(data_dir) {
+        return scoped_base_url(&scope);
+    }
+    let _ = data_dir;
+    DEFAULT_BASE_URL.to_owned()
+}
+
+#[cfg(any(feature = "desktop", test))]
+fn scoped_base_url(scope: &str) -> String {
+    let n = u16::from_str_radix(scope.get(..4).unwrap_or("0"), 16).unwrap_or(0);
+    format!("http://127.0.0.1:{}", 47000 + n % 1000)
+}
 const SHARES_FILE: &str = "shares.json";
 /// Default lifetime of a share. Callers may pass a shorter one.
 const DEFAULT_TTL_SECS: i64 = 24 * 60 * 60;
@@ -698,6 +716,22 @@ pub(crate) fn app_router(registry: Arc<ShareRegistry>, state: crate::AppState, t
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_scoped_instance_never_defaults_to_the_live_apps_port() {
+        let u = scoped_base_url("9e659b6fccdfaf24");
+        assert_ne!(u, DEFAULT_BASE_URL);
+        assert!(matches!(listen_addr(&u).port(), 47000..=47999), "{u}");
+        assert_eq!(scoped_base_url("9e659b6fccdfaf24"), u, "stable per folder");
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn only_the_default_folder_keeps_4420() {
+        let other = std::env::temp_dir().join("pb-scratch-port");
+        assert_ne!(default_base_url(&other), DEFAULT_BASE_URL);
+        assert_eq!(default_base_url(&crate::default_data_dir().unwrap()), DEFAULT_BASE_URL);
+    }
     use axum::body::to_bytes;
 
     const NODE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

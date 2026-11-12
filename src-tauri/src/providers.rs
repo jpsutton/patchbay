@@ -7,13 +7,36 @@ use serde::{Deserialize, Serialize};
 use crate::db::{AuthMode, Db, Model, Provider, ProviderKind};
 
 const KEYRING_SERVICE: &str = "dev.patchbay.app";
+
+/// Set once per process from the data folder (`open_locked_state`): None for the app's default
+/// folder, which keeps the unscoped names existing installs use; otherwise a tag so another
+/// instance (`patchbayd --data-dir`, a scratch build) cannot read or overwrite this computer's
+/// provider, MCP and web-search secrets. First one wins; the app and daemon open exactly one.
+static KEYRING_SCOPE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+pub fn set_keyring_scope(scope: Option<String>) {
+    let _ = KEYRING_SCOPE.set(scope);
+}
+
+/// The keyring account for `account` under this process's scope. `mesh:` accounts arrive already
+/// scoped by `OsKeyStore`, so they pass through (scoping twice would orphan existing daemons' keys).
+fn scoped(account: &str) -> String {
+    scoped_with(KEYRING_SCOPE.get().and_then(|s| s.as_deref()), account)
+}
+
+fn scoped_with(scope: Option<&str>, account: &str) -> String {
+    match scope {
+        Some(s) if !account.starts_with("mesh:") => format!("{account}#{s}"),
+        _ => account.to_owned(),
+    }
+}
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 pub const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
 
 /// Store a provider API key in the OS keyring. Falls back to the DB when no keyring service is
 /// available (e.g. headless Linux without a Secret Service daemon).
 pub fn store_key(db: &Db, provider: &Provider, key: &str) -> Result<()> {
-    let stored = keyring::Entry::new(KEYRING_SERVICE, &provider.id)
+    let stored = keyring::Entry::new(KEYRING_SERVICE, &scoped(&provider.id))
         .and_then(|e| e.set_password(key))
         .is_ok();
     if stored {
@@ -27,7 +50,7 @@ pub fn store_key(db: &Db, provider: &Provider, key: &str) -> Result<()> {
 }
 
 pub fn delete_key(provider_id: &str) {
-    if let Ok(e) = keyring::Entry::new(KEYRING_SERVICE, provider_id) {
+    if let Ok(e) = keyring::Entry::new(KEYRING_SERVICE, &scoped(provider_id)) {
         let _ = e.delete_credential();
     }
 }
@@ -36,7 +59,7 @@ pub fn load_key(provider_id: &str, inline: Option<&str>) -> Option<String> {
     if let Some(k) = inline.filter(|k| !k.is_empty()) {
         return Some(k.to_owned());
     }
-    keyring::Entry::new(KEYRING_SERVICE, provider_id)
+    keyring::Entry::new(KEYRING_SERVICE, &scoped(provider_id))
         .and_then(|e| e.get_password())
         .ok()
         .filter(|k| !k.is_empty())
@@ -44,20 +67,20 @@ pub fn load_key(provider_id: &str, inline: Option<&str>) -> Option<String> {
 
 /// Store a secret under `account`; false when no keyring is available.
 pub fn keyring_set(account: &str, value: &str) -> bool {
-    keyring::Entry::new(KEYRING_SERVICE, account)
+    keyring::Entry::new(KEYRING_SERVICE, &scoped(account))
         .and_then(|e| e.set_password(value))
         .is_ok()
 }
 
 pub fn keyring_get(account: &str) -> Option<String> {
-    keyring::Entry::new(KEYRING_SERVICE, account)
+    keyring::Entry::new(KEYRING_SERVICE, &scoped(account))
         .and_then(|e| e.get_password())
         .ok()
         .filter(|v| !v.is_empty())
 }
 
 pub fn keyring_delete(account: &str) {
-    if let Ok(e) = keyring::Entry::new(KEYRING_SERVICE, account) {
+    if let Ok(e) = keyring::Entry::new(KEYRING_SERVICE, &scoped(account)) {
         let _ = e.delete_credential();
     }
 }
@@ -673,7 +696,7 @@ fn truncate(s: &str, n: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{context_window_of, parse_grok_version};
+    use super::{context_window_of, parse_grok_version, scoped_with};
     use super::{Extras, Resolved};
 
     #[test]
@@ -1251,4 +1274,50 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn a_scoped_instance_gets_its_own_provider_names_but_the_default_keeps_the_old_ones() {
+        // The default folder (no scope) keeps the names existing installs use.
+        assert_eq!(scoped_with(None, "prov-1"), "prov-1");
+        // Any other folder (a scratch build, `patchbayd --data-dir`) never reads or overwrites them.
+        let a = scoped_with(Some("aa11"), "prov-1");
+        assert_eq!(a, "prov-1#aa11");
+        assert_ne!(a, scoped_with(Some("bb22"), "prov-1"));
+        // MCP and web-search secrets are scoped the same way.
+        assert_eq!(scoped_with(Some("aa11"), super::WEB_SEARCH_ACCOUNT), "web-search.brave#aa11");
+        // `mesh:` accounts arrive already scoped by OsKeyStore; scoping twice would orphan them.
+        assert_eq!(scoped_with(Some("aa11"), "mesh:passphrase#aa11"), "mesh:passphrase#aa11");
+    }
+
+    /// Against the real macOS keychain (hence ignored): a process that opened a non-default data
+    /// folder writes ONLY the scoped account, reads it back, and leaves nothing when it deletes it.
+    /// Run by hand or from `scripts/scratch_rig.py`: `cargo test --lib -- --ignored scoped_keychain`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "writes the real OS keychain under a unique probe name"]
+    fn scoped_keychain_entry_is_the_only_one_written() {
+        let dir = std::env::temp_dir().join(format!("pb-scope-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let scope = crate::mesh::keys::data_dir_scope(&dir).expect("a temp folder is not the default folder");
+        super::set_keyring_scope(Some(scope.clone()));
+        let id = format!("pb67-probe-{}", crate::db::new_id());
+        let exists = |account: &str| {
+            std::process::Command::new("security")
+                .args(["find-generic-password", "-s", "dev.patchbay.app", "-a", account])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        assert!(super::keyring_set(&id, "probe-value"), "the keychain accepted the write");
+        let (scoped_there, unscoped_there) = (exists(&format!("{id}#{scope}")), exists(&id));
+        let read_back = super::keyring_get(&id);
+        super::keyring_delete(&id);
+        let gone = !exists(&format!("{id}#{scope}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(scoped_there, "the scoped account was written");
+        assert!(!unscoped_there, "the unscoped account (the live app's name) was NOT written");
+        assert_eq!(read_back.as_deref(), Some("probe-value"));
+        assert!(gone, "deleting removed the scoped entry");
+    }
 }

@@ -106,7 +106,7 @@ impl AppState {
             .ok()
             .flatten()
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| shares::DEFAULT_BASE_URL.to_owned());
+            .unwrap_or_else(|| shares::default_base_url(&data_dir));
         let shares = Arc::new(shares::ShareRegistry::load(&data_dir, base_url, mesh.node_id().to_owned()));
         let state = AppState {
             db,
@@ -4392,6 +4392,7 @@ pub fn data_dir_busy(data_dir: &std::path::Path) -> String {
 /// `open_state` for a caller that already holds the folder's lock (`lock_data_dir`).
 pub fn open_locked_state(data_dir: PathBuf, emit: mesh::node::UiSink) -> anyhow::Result<AppState> {
     let db = Arc::new(Db::open(&data_dir.join("patchbay.sqlite"))?);
+    providers::set_keyring_scope(mesh::keys::data_dir_scope(&data_dir));
     let keys = Arc::new(mesh::keys::OsKeyStore::new(&data_dir));
     let mesh = Mesh::new(db.clone(), data_dir.clone(), keys)?;
     let mcp_log_path = data_dir.join("logs").join("agent-messaging-mcp.log");
