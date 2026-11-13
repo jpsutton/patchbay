@@ -1466,7 +1466,7 @@ export function install() {
         case "open_local_path":
           console.info("fake backend: open path", a.path, "in", a.cwd);
           (window as unknown as Record<string, unknown>).__lastOpenedPath = { path: a.path, cwd: a.cwd };
-          return null;
+          return "opened";
         // Artifact shares (shares.rs). The share button is desktop-only, so these are only hit
         // by dev tooling; return a plausible capability without pretending to serve bytes.
         case "create_share": {

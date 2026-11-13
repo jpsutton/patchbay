@@ -428,9 +428,11 @@ fn path_exists_with(path: &str, cwd: Option<&str>, exists: impl Fn(&std::path::P
 enum ClickPlan {
     /// A path on this computer: look at it (it may run) and open it.
     Open(std::path::PathBuf),
-    /// Another machine's share or a device path: nothing touches it until the user confirms,
-    /// because looking at a UNC path makes Windows connect to it and send it the user's credentials.
-    Confirm(std::path::PathBuf),
+    /// Another machine's share or a device path (the text as written): never opened from the app.
+    /// Looking at a UNC path makes Windows connect to it and send it the user's credentials, and no
+    /// dialog can ask safely (which key an Esc, an Enter or a close presses is the OS's to decide), so
+    /// the path is copied for the user to paste into the file manager themselves.
+    Copy(String),
 }
 
 /// Decide what a click does, from the text of the path alone: no filesystem call. The raw text and
@@ -440,85 +442,69 @@ fn plan_open(path: &str, cwd: Option<&str>) -> Option<ClickPlan> {
     let home = std::path::Path::new(cwd.unwrap_or(""));
     // The raw text first: `\??\UNC\...` is not "absolute" to std, so it may not resolve at all.
     if patchbay_agent::foreign_location(home, std::path::Path::new(path)) {
-        return Some(ClickPlan::Confirm(std::path::PathBuf::from(path)));
+        return Some(ClickPlan::Copy(path.to_string()));
     }
     let p = resolve_mentioned(path, cwd)?;
-    Some(if patchbay_agent::foreign_location(home, &p) { ClickPlan::Confirm(p) } else { ClickPlan::Open(p) })
+    Some(if patchbay_agent::foreign_location(home, &p) { ClickPlan::Copy(path.to_string()) } else { ClickPlan::Open(p) })
 }
 
-/// The label of the one button that opens a network location (never a plain "OK").
-const OPEN_NETWORK_LABEL: &str = "Open network location";
-
-/// Whether a dialog result means "open". ONLY a click on the button labelled
-/// [`OPEN_NETWORK_LABEL`] does: Cancel, Esc, closing the window and anything unexpected do not.
-fn opens(result: &tauri_plugin_dialog::MessageDialogResult) -> bool {
-    matches!(result, tauri_plugin_dialog::MessageDialogResult::Custom(label) if label == OPEN_NETWORK_LABEL)
+/// What a click did, for the toast the page shows.
+#[derive(Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ClickDone {
+    Opened,
+    Copied,
 }
 
-/// The two button labels `(ok slot, cancel slot)` of the confirm dialog. The plugin maps what the
-/// OS dialog returns to these labels by SLOT: a click on the OK button is `Custom(ok slot)`, and
-/// Esc, the window's X, and a dialog that failed to show all come back as the OS's Cancel, which
-/// the plugin turns into `Custom(cancel slot)` (tauri-plugin-dialog `show_message_dialog`). So the
-/// label that opens must be in the OK slot: put it in the cancel slot and Esc opens the location.
-fn network_buttons() -> (&'static str, &'static str) {
-    (OPEN_NETWORK_LABEL, "Cancel")
+/// The two effects a click can have, so a test can see which one ran.
+trait ClickOps {
+    /// Put the text on the clipboard.
+    fn copy(&mut self, text: &str) -> anyhow::Result<()>;
+    /// Look at the path (it may run) and open it, or reveal it in the file manager.
+    fn open(&mut self, p: &std::path::Path) -> anyhow::Result<()>;
 }
 
-/// What the plugin hands back for a result of the OS dialog, given the `(ok, cancel)` labels:
-/// the same mapping as the plugin's, written out so a test can see what Esc does.
-#[cfg(test)]
-fn plugin_result(os: tauri_plugin_dialog::MessageDialogResult, (ok, cancel): (&str, &str)) -> tauri_plugin_dialog::MessageDialogResult {
-    use tauri_plugin_dialog::MessageDialogResult as R;
-    match os {
-        R::Ok => R::Custom(ok.into()),
-        R::Cancel => R::Custom(cancel.into()),
-        other => other,
+/// The click: a network location or device path is copied as written (no filesystem or network
+/// call, nothing opened), anything on this computer is opened as before.
+fn click(path: &str, cwd: Option<&str>, ops: &mut impl ClickOps) -> anyhow::Result<ClickDone> {
+    match plan_open(path, cwd).ok_or_else(|| anyhow!("{path} is relative and has no folder"))? {
+        ClickPlan::Open(p) => {
+            ops.open(&p)?;
+            Ok(ClickDone::Opened)
+        }
+        ClickPlan::Copy(text) => {
+            ops.copy(&text)?;
+            Ok(ClickDone::Copied)
+        }
     }
 }
 
-/// Ask whether to open a network location, showing the path exactly as it was written. Only a click
-/// on the button labelled for what it does opens; Esc, close and an error are Cancel.
-fn confirm_network_open(app: &tauri::AppHandle, raw: &str) -> bool {
-    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-    opens(
-        &app.dialog()
-            .message(format!(
-                "This is a network location:\n\n{raw}\n\nOpening it makes this computer connect to it and send it your sign-in. Only open it if you know where it leads."
-            ))
-            .title("Open a network location?")
-            .kind(MessageDialogKind::Warning)
-            .buttons({
-                let (ok, cancel) = network_buttons();
-                MessageDialogButtons::OkCancelCustom(ok.into(), cancel.into())
-            })
-            .blocking_show_with_result(),
-    )
+struct RealClick<'a>(&'a tauri::AppHandle);
+
+impl ClickOps for RealClick<'_> {
+    fn copy(&mut self, text: &str) -> anyhow::Result<()> {
+        use tauri_plugin_clipboard_manager::ClipboardExt;
+        self.0.clipboard().write_text(text.to_string())?;
+        Ok(())
+    }
+
+    fn open(&mut self, p: &std::path::Path) -> anyhow::Result<()> {
+        let meta = std::fs::metadata(p).map_err(|e| anyhow!("{}: {e}", p.display()))?;
+        if runs_when_opened(p, &meta) {
+            tauri_plugin_opener::reveal_item_in_dir(p)?;
+        } else {
+            tauri_plugin_opener::open_path(p, None::<&str>)?;
+        }
+        Ok(())
+    }
 }
 
 /// Open a mentioned file or folder in the OS's default app. Anything that would run is shown in
-/// the file manager instead.
+/// the file manager instead. A network location or device path is copied to the clipboard instead
+/// (`Copied`), never opened.
 #[tauri::command]
-async fn open_local_path(app: tauri::AppHandle, path: String, cwd: Option<String>) -> crate::CmdResult<()> {
-    let plan = plan_open(&path, cwd.as_deref()).ok_or_else(|| anyhow!("{path} is relative and has no folder"))?;
-    let p = match plan {
-        ClickPlan::Open(p) => p,
-        ClickPlan::Confirm(p) => {
-            // Nothing has touched the path yet. It is shown as written, and only a click on Open goes on.
-            let (dialog_app, shown) = (app.clone(), path.clone());
-            let open = tauri::async_runtime::spawn_blocking(move || confirm_network_open(&dialog_app, &shown)).await.unwrap_or(false);
-            if !open {
-                return Ok(());
-            }
-            p
-        }
-    };
-    let meta = std::fs::metadata(&p).map_err(|e| anyhow!("{}: {e}", p.display()))?;
-    if runs_when_opened(&p, &meta) {
-        tauri_plugin_opener::reveal_item_in_dir(&p)?;
-    } else {
-        tauri_plugin_opener::open_path(&p, None::<&str>)?;
-    }
-    Ok(())
+async fn open_local_path(app: tauri::AppHandle, path: String, cwd: Option<String>) -> crate::CmdResult<ClickDone> {
+    Ok(click(&path, cwd.as_deref(), &mut RealClick(&app))?)
 }
 
 // ---------------- updates ----------------
@@ -1093,17 +1079,47 @@ mod file_link_tests {
         }
     }
 
-    /// A network location in an agent's text is not looked at to draw its link and not looked at on a
-    /// click until the user confirms: both decisions are made on the text, with no filesystem call, so
-    /// they cannot connect to anything (203.0.113.1 is a documentation address nobody answers: a
-    /// connection attempt would take far more than a second). Windows only; type-checked everywhere.
+    /// A network location in an agent's text is not looked at to draw its link, and a click on it
+    /// does not open it: it is copied (the text as written), with no filesystem call and nothing
+    /// handed to the opener. All three effects are mocked here. Decided on the text, so nothing can
+    /// connect (203.0.113.1 is a documentation address nobody answers: a connection attempt would
+    /// take far more than a second). Windows only for the foreign half; type-checked everywhere.
     #[test]
-    fn a_network_location_is_confirmed_before_anything_touches_it() {
+    fn a_network_location_is_copied_never_opened_or_looked_at() {
+        #[derive(Default)]
+        struct Mock {
+            copied: Vec<String>,
+            opened: Vec<std::path::PathBuf>,
+        }
+        impl ClickOps for Mock {
+            fn copy(&mut self, text: &str) -> anyhow::Result<()> {
+                self.copied.push(text.to_string());
+                Ok(())
+            }
+            fn open(&mut self, p: &std::path::Path) -> anyhow::Result<()> {
+                self.opened.push(p.to_path_buf());
+                Ok(())
+            }
+        }
         if cfg!(windows) {
             let started = std::time::Instant::now();
-            for spelling in [r"\\203.0.113.1\s\x.txt", "//203.0.113.1/s/x.txt", r"\??\UNC\203.0.113.1\s\x", r"\\.\PhysicalDrive0", r"\\203.0.113.1"] {
-                assert!(matches!(plan_open(spelling, None), Some(ClickPlan::Confirm(_))), "{spelling} would be opened without asking");
-                assert!(matches!(plan_open(spelling, Some(r"C:\Users\x\proj")), Some(ClickPlan::Confirm(_))), "{spelling} with a folder");
+            for spelling in [
+                r"\\203.0.113.1\s\x.txt",
+                "//203.0.113.1/s/x.txt",
+                r"\/203.0.113.1/s/x",
+                r"\??\UNC\203.0.113.1\s\x",
+                r"\\?\UNC\203.0.113.1\s\x",
+                r"\\.\UNC\203.0.113.1\s\x",
+                r"\\.\PhysicalDrive0",
+                r"\\203.0.113.1",
+                r"\\localhost\C$\Users\x",
+            ] {
+                for cwd in [None, Some(r"C:\Users\x\proj")] {
+                    let mut ops = Mock::default();
+                    assert_eq!(click(spelling, cwd, &mut ops).unwrap(), ClickDone::Copied, "{spelling} was not copied");
+                    assert_eq!(ops.copied, vec![spelling.to_string()], "the clipboard gets the text as written: {spelling}");
+                    assert!(ops.opened.is_empty(), "{spelling} was handed to the opener");
+                }
                 // Rendering: the existence probe is mocked and must NEVER be called for any spelling.
                 let probes = std::cell::Cell::new(0);
                 for cwd in [None, Some(r"C:\Users\x\proj")] {
@@ -1118,35 +1134,17 @@ mod file_link_tests {
         let here = std::env::temp_dir().join("a-local-file.txt");
         assert!(!path_exists_with(&here.display().to_string(), None, |_| { probes.set(probes.get() + 1); false }));
         assert_eq!(probes.get(), 1, "a local path is probed");
-        // Everywhere: a path on this computer is looked at and opened as before.
-        let local = std::env::temp_dir().join("a-local-file.txt");
-        assert_eq!(plan_open(&local.display().to_string(), None), Some(ClickPlan::Open(local)));
-    }
-
-    /// What the OS dialog returns goes through the plugin's slot mapping before `opens` sees it:
-    /// only a click on the OK slot may open, and Esc, X and a failed dialog (all the OS's Cancel)
-    /// must not. Fed the OS results, not the plugin's: the plugin never returns `Cancel` for
-    /// custom labels, so a test of `opens(Cancel)` alone could not see Esc opening.
-    #[test]
-    fn escape_close_and_a_dialog_error_never_open_a_network_location() {
-        use tauri_plugin_dialog::MessageDialogResult as R;
-        let buttons = network_buttons();
-        assert_ne!(buttons.1, OPEN_NETWORK_LABEL, "the cancel slot must never carry the opening label");
-        assert!(opens(&plugin_result(R::Ok, buttons)), "a click on the open button opens");
-        for os in [R::Cancel, R::No, R::Yes, R::Custom(String::new())] {
-            assert!(!opens(&plugin_result(os.clone(), buttons)), "{os:?} (Esc, X, or an error) must not open");
-        }
-    }
-
-    /// Only the "Open network location" button opens; Cancel, Esc and closing do not (the plugin
-    /// reports those as Cancel, or as another label, so anything else is a no).
-    #[test]
-    fn only_the_open_button_opens_a_network_location() {
-        use tauri_plugin_dialog::MessageDialogResult as R;
-        assert!(opens(&R::Custom("Open network location".into())));
-        for no in [R::Cancel, R::Ok, R::Yes, R::No, R::Custom("Cancel".into()), R::Custom("Open".into()), R::Custom("OK".into()), R::Custom(String::new())] {
-            assert!(!opens(&no), "{no:?} must not open a network location");
-        }
+        // Everywhere: a path on this computer is opened as before, and nothing is copied.
+        let mut ops = Mock::default();
+        assert_eq!(click(&here.display().to_string(), None, &mut ops).unwrap(), ClickDone::Opened);
+        assert_eq!(ops.opened, vec![here.clone()]);
+        assert!(ops.copied.is_empty());
+        // A relative path inside the folder opens as before too.
+        let mut ops = Mock::default();
+        let dir = std::env::temp_dir();
+        assert_eq!(click("sub/a.txt", Some(&dir.display().to_string()), &mut ops).unwrap(), ClickDone::Opened);
+        assert_eq!(ops.opened, vec![dir.join("sub/a.txt")]);
+        assert!(ops.copied.is_empty());
     }
 
     #[test]
