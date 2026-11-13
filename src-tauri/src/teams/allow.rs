@@ -1,9 +1,10 @@
 //! The standing allow for team tools: a live team member's call to `send_agent_message` or a team
 //! tool on Patchbay's own messaging server is approved once, without a prompt.
 //!
-//! Also (opt-in per template): a dispatched worker may `git add` / `git commit` (and read-only
-//! `git status` / `git diff`) inside its assigned worktree without a prompt. Push, branch delete,
-//! force, and history rewrite stay prompted.
+//! Also (opt-in per template): a dispatched worker may `git add` / `git commit`, and read-only
+//! `ls` / `cat` / `git status` / `git diff` / `git log`, inside its assigned worktree without a
+//! prompt. Path args must resolve inside that worktree (no `..`, absolute escape, or symlink out).
+//! Push, branch delete, force, history rewrite, and write/exec git options stay prompted.
 //!
 //! Not a `permission_rules` row: those match a tool kind and a command prefix, and MCP calls are
 //! kind `other`, so a rule would approve every MCP tool of every server. This runs in the
@@ -106,32 +107,163 @@ fn has_forbidden_git_override(tokens: &[&str]) -> bool {
     })
 }
 
-/// True when `cmd` is a single safe git verb (add/commit/status/diff) with no rewrite/push/force.
-fn is_safe_worker_git(cmd: &str) -> bool {
+/// Git log/diff options that write output or enable external filters/commands.
+fn has_forbidden_git_write_or_exec(tokens: &[&str]) -> bool {
+    tokens.iter().any(|t| {
+        matches!(*t, "--output" | "--output-directory" | "--ext-diff" | "--textconv")
+            || t.starts_with("--output=")
+            || t.starts_with("--output-directory=")
+            // `=`-carried command/filter payloads (e.g. `--ext-diff=…`, custom helpers).
+            || (t.starts_with("--ext-diff=") || t.starts_with("--textconv="))
+    })
+}
+
+/// Force / amend / soft-hard reset style flags — never auto-approve.
+fn has_forbidden_git_force(tokens: &[&str]) -> bool {
+    tokens.iter().any(|t| matches!(*t, "-f" | "--force" | "--amend" | "--soft" | "--hard" | "--mixed"))
+}
+
+/// `p` absolute against `root`, resolving symlinks through the longest existing prefix.
+fn resolve_against(root: &Path, p: &str) -> Option<std::path::PathBuf> {
+    use std::path::{Component, PathBuf};
+    let joined = if Path::new(p).is_absolute() { PathBuf::from(p) } else { root.join(p) };
+    let comps: Vec<Component> = joined.components().collect();
+    for i in (1..=comps.len()).rev() {
+        let Ok(mut real) = comps[..i].iter().collect::<PathBuf>().canonicalize() else {
+            continue;
+        };
+        for c in &comps[i..] {
+            match c {
+                Component::ParentDir => {
+                    real.pop();
+                }
+                Component::CurDir => {}
+                c => real.push(c),
+            }
+        }
+        return Some(real);
+    }
+    None
+}
+
+fn path_inside_worktree(worktree: &Path, p: &str) -> bool {
+    let Ok(root) = worktree.canonicalize() else {
+        return false;
+    };
+    match resolve_against(&root, p) {
+        Some(real) => real.strip_prefix(&root).is_ok(),
+        None => false,
+    }
+}
+
+/// Git options whose next token is a value, not a path (so we don't treat `-m msg` as a path).
+fn git_opt_takes_value(tok: &str) -> bool {
+    matches!(
+        tok,
+        "-m" | "--message"
+            | "-F"
+            | "--file"
+            | "--author"
+            | "--date"
+            | "--cleanup"
+            | "--fix"
+            | "-t"
+            | "--template"
+            | "-n"
+            | "--max-count"
+            | "--skip"
+            | "--since"
+            | "--until"
+            | "--after"
+            | "--before"
+            | "--grep"
+            | "-S"
+            | "-G"
+            | "--diff-filter"
+            | "--pretty"
+            | "--format"
+            | "--relative"
+            | "--output"
+            | "--output-directory"
+    )
+}
+
+/// Positional path args after the program (and git verb), skipping options and their values.
+fn path_args_after<'a>(tokens: &'a [&str], skip: usize) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    let mut i = skip;
+    let mut seen_double_dash = false;
+    while i < tokens.len() {
+        let t = tokens[i];
+        if !seen_double_dash && t == "--" {
+            seen_double_dash = true;
+            i += 1;
+            continue;
+        }
+        if !seen_double_dash && t.starts_with('-') && t.contains('=') {
+            // `--opt=value` — value attached; not a path arg.
+            i += 1;
+            continue;
+        }
+        if !seen_double_dash && t.starts_with('-') {
+            if git_opt_takes_value(t) {
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        out.push(t);
+        i += 1;
+    }
+    out
+}
+
+/// True when every path argument resolves inside `worktree` (symlinks followed).
+fn paths_stay_in_worktree(worktree: &Path, paths: &[&str]) -> bool {
+    paths.iter().all(|p| path_inside_worktree(worktree, p))
+}
+
+/// Single safe worker command: git add/commit/status/diff/log, or ls/cat, with path containment.
+fn is_safe_worker_command(cmd: &str, worktree: &Path) -> bool {
     let cmd = cmd.trim();
     if cmd.is_empty() || is_compound(cmd) {
         return false;
     }
     let tokens: Vec<&str> = cmd.split_whitespace().collect();
-    // Env prefixes and config/path overrides can run planted hooks or aim elsewhere.
-    if has_env_assignment_prefix(&tokens) || tokens.first().copied() != Some("git") {
+    if has_env_assignment_prefix(&tokens) {
         return false;
     }
-    if has_forbidden_git_override(&tokens) {
-        return false;
-    }
-    let Some(verb) = tokens.get(1).copied() else {
+    let Some(prog) = tokens.first().copied() else {
         return false;
     };
-    if !matches!(verb, "add" | "commit" | "status" | "diff") {
-        return false;
+    match prog {
+        "git" => {
+            if has_forbidden_git_override(&tokens)
+                || has_forbidden_git_write_or_exec(&tokens)
+                || has_forbidden_git_force(&tokens)
+            {
+                return false;
+            }
+            let Some(verb) = tokens.get(1).copied() else {
+                return false;
+            };
+            if !matches!(verb, "add" | "commit" | "status" | "diff" | "log") {
+                return false;
+            }
+            let paths = path_args_after(&tokens, 2);
+            paths_stay_in_worktree(worktree, &paths)
+        }
+        "ls" | "cat" => {
+            let paths = path_args_after(&tokens, 1);
+            paths_stay_in_worktree(worktree, &paths)
+        }
+        _ => false,
     }
-    // Force, amend, and rewrite stay prompted even when the verb looks safe.
-    !tokens.iter().any(|t| matches!(*t, "-f" | "--force" | "--amend" | "--soft" | "--hard" | "--mixed"))
 }
 
-/// Opt-in worktree git allow: active worker on an assigned item, template opted in, cwd is the
-/// assigned worktree, command is a safe git verb.
+/// Opt-in worktree allow: active worker on an assigned item, template opted in, cwd is the
+/// assigned worktree, command is a safe git / ls / cat form.
 fn allow_worker_commit(data_dir: &Path, session: &str, tool_call: &Value, options: &Value, session_cwd: &str) -> Option<(String, String)> {
     if tool_call["kind"].as_str() != Some("execute") {
         return None;
@@ -155,7 +287,7 @@ fn allow_worker_commit(data_dir: &Path, session: &str, tool_call: &Value, option
         return None;
     }
     let cmd = command_of(tool_call)?;
-    if !is_safe_worker_git(&cmd) {
+    if !is_safe_worker_command(&cmd, &worktree) {
         return None;
     }
     Some((allow_option(options)?, "Auto-approved: worker commit in worktree".into()))
@@ -305,12 +437,59 @@ mod tests {
     #[test]
     fn worker_commit_inside_own_worktree_when_template_opts_in() {
         let (d, wt, _proj, _item) = worker_commit_fixture(true);
+        std::fs::write(std::path::Path::new(&wt).join("LICENSE"), "x").unwrap();
         let hit = allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).unwrap();
         assert_eq!(hit.0, "once");
         assert!(hit.1.contains("worker commit"));
         assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git add LICENSE"), &options(), &wt).is_some());
         assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git status"), &options(), &wt).is_some());
         assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git diff"), &options(), &wt).is_some());
+    }
+
+    #[test]
+    fn worker_readonly_ls_cat_git_log_accepted_when_paths_stay_inside() {
+        let (d, wt, _proj, _item) = worker_commit_fixture(true);
+        let root = std::path::Path::new(&wt);
+        std::fs::write(root.join("README"), "hi").unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let accept = ["ls", "ls src", "cat README", "git log", "git log -1", "git status", "git diff"];
+        for cmd in accept {
+            assert!(
+                allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, cmd), &options(), &wt).is_some(),
+                "should allow: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_readonly_path_escapes_and_write_exec_opts_rejected() {
+        let (d, wt, proj, _item) = worker_commit_fixture(true);
+        let root = std::path::Path::new(&wt);
+        std::fs::write(root.join("README"), "hi").unwrap();
+        let outside = std::path::Path::new(&proj).join("outside.txt");
+        std::fs::write(&outside, "secret").unwrap();
+        let link = root.join("leak");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let refuse = [
+            "cat /etc/passwd",
+            "cat ../../outside.txt",
+            "cat leak",
+            "ls /tmp",
+            "ls ..",
+            "git log --output=/tmp/out",
+            "git log --output /tmp/out",
+            "git log --ext-diff",
+            "git log --textconv",
+            "git log --ext-diff=/bin/true",
+            "git log --textconv=/bin/true",
+        ];
+        for cmd in refuse {
+            assert!(
+                allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, cmd), &options(), &wt).is_none(),
+                "should refuse: {cmd}"
+            );
+        }
     }
 
     #[test]

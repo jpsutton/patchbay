@@ -469,9 +469,13 @@ export function TemplatesEditor() {
                 onChange={(e) => setDraft({ ...draft, allowWorkerCommit: e.target.checked })}
               />
               <span>
-                Allow workers to run <code className="text-[10px]">git add</code> and <code className="text-[10px]">git commit</code> inside their assigned worktree without asking.
+                Allow workers to run <code className="text-[10px]">git add</code>, <code className="text-[10px]">git commit</code>, and read-only{" "}
+                <code className="text-[10px]">ls</code> / <code className="text-[10px]">cat</code> /{" "}
+                <code className="text-[10px]">git status</code> / <code className="text-[10px]">git diff</code> /{" "}
+                <code className="text-[10px]">git log</code> inside their assigned worktree without asking.
                 <span className="mt-1 block text-muted">
-                  Warning: permits git add and git commit inside the assigned worktree. Push, branch delete and rewrite remain blocked.
+                  Path arguments must resolve inside that worktree (no absolute escapes, <code className="text-[10px]">..</code>, or symlinks out).
+                  Push, branch delete, rewrite, and write/exec options (for example <code className="text-[10px]">git log --output</code>) remain prompted.
                 </span>
               </span>
             </label>

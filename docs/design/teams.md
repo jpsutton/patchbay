@@ -101,6 +101,19 @@ The template also holds the decision routing:
 
 The class list and the examples are editable text; Patchbay only routes by class.
 
+Templates may also set `allow_worker_commit` (off by default; built-ins never carry it). When on,
+a dispatched worker whose cwd is its assigned item worktree may run, without a prompt, a single
+non-compound command that is one of:
+
+- `git add` / `git commit` (no force, amend, soft/hard/mixed reset);
+- read-only `ls`, `cat`, `git status`, `git diff`, `git log`.
+
+Every path argument must resolve inside that worktree after symlink resolution; absolute paths
+outside, `..` escapes, and symlinks that leave the worktree stay prompted. Git config/path
+overrides (`-c`, `--config-env`, `--exec-path`, `--git-dir`, `--work-tree`, `-C`, `--namespace`),
+env-assignment prefixes (`FOO=bar git …`), and write/exec options (e.g. `git log --output`,
+`--ext-diff`, `--textconv`) stay prompted. Push, branch delete, and history rewrite stay prompted.
+
 ## Team
 
 A team binds a template to a folder (the creator's folder rules for `create_agent_session` still
