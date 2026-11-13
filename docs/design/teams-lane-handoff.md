@@ -40,10 +40,11 @@ Then push and PR are David's decision.
 
 ## Standing rules
 
-- No push, no PR. `git add <paths>` only; never stage `skills/`. Don't edit `docs/model-registry/`.
+- No push, no PR. `git add <paths>` only; never stage `skills/` or `target-review/`. Don't edit `docs/model-registry/`.
 - Sandbox only: `patchbayd --data-dir ~/patchbay-teams-data`, team folder `/tmp/teams-sandbox/proj`, worktrees `/tmp/teams-sandbox/proj/.trees`.
   - Build the daemon with `--no-default-features --features web` into `CARGO_TARGET_DIR=/Users/dfrazer/patchbay/src-tauri/target-teams-live`.
   - Serve it on 127.0.0.1:4531 with `--ui-dir <worktree>/dist`.
+- **`lsregister -u` after any local `dev.patchbay.app` bundle:** any locally built or copied `.app` whose bundle id is `dev.patchbay.app` must be unregistered with `lsregister -u` immediately after (scratch_rig already does this for its launches). As of 2026-11-13: no `.app` under `target-teams-live` or `target-teams-web` (only `debug/` cargo outputs).
 - Never touch David's live app (4420, 9797), his test site 4521 (`~/patchbay-teams-ui`, `/tmp/pb-teams-ui`), or the old `/tmp/pb-live` (a Nov 10 run).
 - Stop on any Patchbay usage refusal, release the workers and report. Never run on credits or API keys, and nothing on David's Claude Pro account (the "Claude Code login") while its 5-hour window is capped.
 - Verify every worker report yourself:
@@ -99,6 +100,11 @@ Live-run seats: coordinator Codex (UI model "6 Luna"), worker Antigravity ("Gemi
 ## Open product gap for David
 
 Workers may need a human to approve each `git add` and `git commit` inside their own team worktree. The rehearsal will use per-command approvals scoped to `/tmp/teams-sandbox/proj/.trees/<worker-worktree>` and will not add a global allow rule. A team whose workers cannot commit without a human approving every commit is not yet hands-off. A possible safe default is a team-scoped commit capability limited to the member's assigned worktree, with path validation and an explicit opt-in at team creation; it should permit only staging and committing, never push, branch deletion, or history rewriting. This remains an open product decision; do not implement it without David's decision.
+
+## State at handoff (2026-11-13 W/G)
+
+- Director brief W+G landed on `feat/teams`: Windows Codex Auto stays read-only; `\\?\` fail-closed except drive/UNC; omitted cwd → read-only for `codex_mode_for`; worker git auto-approve requires the Patchbay `-c core.hooksPath=…` sequence + `--no-verify` on commit (planted-red covered). See `teams.md` / `approval-modes.md`.
+- Any local `dev.patchbay.app` bundle: `lsregister -u` immediately after. No `.app` currently under `target-teams-live` or `target-teams-web`.
 
 ## State at handoff (2026-11-12)
 

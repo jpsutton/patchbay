@@ -105,13 +105,23 @@ The class list and the examples are editable text; Patchbay only routes by class
 Templates may also set `allow_worker_commit` (off by default; built-ins never carry it). When on,
 a dispatched worker whose **request** `rawInput.cwd` is its assigned item worktree may run, without
 a prompt, a single command that passes a fail-closed tokenizer (no shell metacharacters; plain tokens
-match `[A-Za-z0-9._/@:+,=-]+`; quotes only for `git commit -m` / `--message` values) and a per-verb
-option allow-list. Missing or empty `cwd` on the request is fail-closed (no fallback to the session's
-recorded start cwd — that only proves launch directory, not the shell's actual cwd). Agents that do
-not report cwd on execute requests (Cursor today) therefore always prompt for worker git commands
-under this rule:
+match `[A-Za-z0-9._/@:+,=-]+`; quotes for `git commit -m` / `--message` values and for `-c` values
+that need spaces) and a per-verb option allow-list. Missing or empty `cwd` on the request is
+fail-closed (no fallback to the session's recorded start cwd — that only proves launch directory,
+not the shell's actual cwd). Agents that do not report cwd on execute requests (Cursor today)
+therefore always prompt for worker git commands under this rule.
 
-- `git commit`: only `-m` / `--message` (required; no `-q`/`-v`/`--no-verify`/`-F`/`--template`).
+**Git auto-approve requires an exact command prefix** (David, #449): at dispatch Patchbay creates a
+team-scoped empty read-only hooks directory under `data_dir/teams-safe/<team_id>/hooks` (outside
+worktrees), and the worker brief / role text give the real path. Every auto-approved `git` command
+must carry, in this fixed order before the verb:
+
+`-c core.hooksPath=<that dir> -c core.fsmonitor=false -c core.sshCommand= -c protocol.ext.allow=never`
+
+Any other `-c`, missing piece, or different value → normal prompt (no auto-approve). `git commit`
+also requires `--no-verify` (plus `-m` / `--message`). `ls` / `cat` do not need the prefix.
+
+- `git commit`: `--no-verify` and `-m` / `--message` (required; no `-q`/`-v`/`-F`/`--template`/amend).
 - `git add`: paths and/or `-A` / `--all` / `-u` / `--update` / `--` (no `-f`, no `--pathspec-from-file`).
 - `git status`: `-s` / `--short` / `-b` / `--branch` / `--porcelain` / `--long`, plus relative paths.
 - `git diff`: `--stat` / `--name-only` / `--name-status` / `--cached` / `--staged` / `--no-ext-diff` /
@@ -123,20 +133,26 @@ under this rule:
 - `cat`: one or more relative paths required (no bare `cat`, no `-`).
 
 Path args must be relative (no `..` component), resolve inside the worktree after following
-symlinks, and name a regular file or directory. Before any `git` verb auto-approves, Patchbay
-reads `core.fsmonitor` and the effective hooks directory (`core.hooksPath` if set, else
-`rev-parse --git-path hooks`), wherever it is. Auto-approve falls to a prompt if `fsmonitor` is
-set to anything but false/empty; if the hooks dir cannot be determined; or if an **executable**
-hook that git would run for that verb is present (githooks(5)): for `commit` —
+symlinks, and name a regular file or directory. As defense in depth, before any `git` verb
+auto-approves Patchbay still reads `core.fsmonitor` and the effective hooks directory
+(`core.hooksPath` if set, else `rev-parse --git-path hooks`). Auto-approve falls to a prompt if
+`fsmonitor` is set to anything but false/empty; if the hooks dir cannot be determined; or if an
+**executable** hook that git would run for that verb is present (githooks(5)): for `commit` —
 `pre-commit`, `prepare-commit-msg`, `commit-msg`, `post-commit`, `pre-merge-commit`,
 `post-index-change`, `reference-transaction`, `pre-auto-gc`; for `add` / `status` / `diff` / `log` —
 `post-index-change` only. Hooks not run by these verbs (`pre-push`, `post-checkout`, …) do not
-block, so a templateDir that only installs `pre-push` still allows the opt-in. In a repo with
-commit hooks (husky/lint-staged `pre-commit`, etc.), worker commits always prompt. Non-executable
-hook files are ignored; a missing hooks directory is allowed.
+block. Non-executable hook files are ignored; a missing hooks directory is allowed.
 
-Residual: config-defined clean/smudge filters, textconv, and external diff helpers; check-then-exec
-TOCTOU on the hooks directory; unbounded `ls -R` is not capped here.
+Residual: config-defined clean/smudge filters, textconv, and external diff helpers; unbounded
+`ls -R` is not capped here. The required `-c` prefix closes the auto-approve check-then-exec race
+for opt-in worker git (planted-red: hook+fsmonitor planted after the check do not run under the
+forced flags, and do run without them). Human-approved bare git commands stay racy.
+`GIT_CONFIG_NOSYSTEM` / scrubbed `GIT_*` cannot be forced into the agent shell — cover env-beats-
+config (`GIT_SSH_COMMAND`, `GIT_EXTERNAL_DIFF`, `GIT_PAGER`/`PAGER`, `GIT_EDITOR`, `GIT_ASKPASS`,
+`GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`, `GIT_CONFIG_COUNT`/`KEY`/`VALUE`, `GIT_CONFIG_GLOBAL`): whether
+a worker can set any without a prompt (does the agent shell persist between commands), and whether
+any allowed verb consults it. This does not cover Codex workers under the user's `~/.codex` prefix
+rules (pb-20261111-83).
 
 ## Team
 
@@ -259,16 +275,18 @@ Members report progress with `item_note`; the coordinator keeps sole ownership o
   - **Mode.** The stricter of the seat's mode and the coordinator's current mode; always-approve is
     refused. Workers have `created_by` = the coordinator, so lowering the coordinator's mode lowers theirs.
     A **current** active dispatched Codex worker whose effective mode is Auto launches in Codex
-    `workspace-write` (network off; worktree plus `/tmp` and `$TMPDIR` writable) only when
-    `codex_worker_workspace_write_blocked` is clear: a linked item worktree whose common git dir is
-    outside the worktree and, while F1 temp excludes are not confirmed, not under `/tmp` /
-    `$TMPDIR`. **F1 (upstream limit):** `@agentclientprotocol/codex-acp@2.2.2` hardcodes
-    `excludeSlashTmp` / `excludeTmpdirEnvVar` (`exclude_slash_tmp` / `exclude_tmpdir_env_var`) to
-    false on every turn, so a `CODEX_CONFIG` / `[sandbox_workspace_write]` exclude cannot stick;
-    Patchbay keeps `CODEX_WORKER_TEMP_EXCLUDES_CONFIRMED = false` until an adapter (or Patchbay)
-    can confirm those excludes in effect. Otherwise F2 keeps the worker `read-only` (temp teams,
-    main-checkout cwd, unprobeable git) and `dispatch_item`'s `note` includes
-    `CODEX_WORKER_TEMP_READONLY_HINT` ("project is under a temp directory"). Default stays
+    `workspace-write` (network off; worktree plus `/tmp` and `$TMPDIR` writable) only when `cwd` is
+    set and `codex_worker_workspace_write_blocked` is clear: a linked item worktree whose common git
+    dir is outside the worktree and, while F1 temp excludes are not confirmed, not under `/tmp` /
+    `$TMPDIR`. Omitted cwd maps to `read-only` for the mode (consent gaps may still describe the
+    allowed case). On Windows Auto→workspace-write always refuses until codex-acp sandboxing there
+    is proven (`CODEX_WORKER_WINDOWS_READONLY_HINT`). **F1 (upstream limit):**
+    `@agentclientprotocol/codex-acp@2.2.2` hardcodes `excludeSlashTmp` / `excludeTmpdirEnvVar`
+    (`exclude_slash_tmp` / `exclude_tmpdir_env_var`) to false on every turn, so a `CODEX_CONFIG` /
+    `[sandbox_workspace_write]` exclude cannot stick; Patchbay keeps
+    `CODEX_WORKER_TEMP_EXCLUDES_CONFIRMED = false` until an adapter (or Patchbay) can confirm those
+    excludes in effect. Otherwise F2 keeps the worker `read-only` (temp teams, main-checkout cwd,
+    unprobeable git, Windows) and `dispatch_item`'s `note` includes the matching hint. Default stays
     `read-only`. The `dispatches` row must match the membership's `team_id` and `item_id`.
     Released, restored-after-release, swapped-out, or item-`done`/`dropped` sessions stay
     `read-only` on the next launch even if a `dispatches` history row remains. Standing seats and
