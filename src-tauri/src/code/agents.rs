@@ -2942,6 +2942,187 @@ time.sleep(60)
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    /// macOS often case-folds `/TMP` ↔ `/tmp`; canonicalize should still classify as temp and refuse.
+    #[test]
+    fn codex_worker_workspace_write_blocked_tmp_case_spelling() {
+        let id = crate::db::new_id();
+        let under_tmp = PathBuf::from(format!("/tmp/pb-f2-case-{id}"));
+        let _ = std::fs::remove_dir_all(&under_tmp);
+        std::fs::create_dir_all(&under_tmp).unwrap();
+        f2_git_init_commit(&under_tmp, "f", "x");
+        assert_eq!(
+            codex_worker_workspace_write_blocked(&under_tmp),
+            Some(CODEX_WORKER_TEMP_READONLY_HINT),
+            "/tmp path => blocked"
+        );
+        // Differently-cased spelling: on case-insensitive volumes this is the same inode; after
+        // canonicalize it still sits under the temp root. If the volume is case-sensitive and
+        // `/TMP` does not resolve, path_key / git probe fails closed → still refuse.
+        let weird = PathBuf::from(format!("/TMP/pb-f2-case-{id}"));
+        assert_eq!(
+            codex_worker_workspace_write_blocked(&weird),
+            Some(CODEX_WORKER_TEMP_READONLY_HINT),
+            "/TMP case spelling => blocked (canonicalize or fail-closed)"
+        );
+        let _ = std::fs::remove_dir_all(&under_tmp);
+    }
+
+    #[test]
+    fn codex_worker_workspace_write_blocked_separate_git_dir() {
+        let id = crate::db::new_id();
+        let base = f2_non_temp_fixture(&format!("sep-{id}"));
+        let main = base.join("main");
+        let gitdir = base.join("gitdir");
+        std::fs::create_dir_all(&main).unwrap();
+        let gitdir_s = gitdir.to_string_lossy().into_owned();
+        assert!(
+            std::process::Command::new("git")
+                .args(["-c", "init.defaultBranch=main", "init", "--separate-git-dir", &gitdir_s])
+                .current_dir(&main)
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(main.join("f"), "x").unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["-c", "core.hooksPath=/dev/null", "add", "f"])
+                .current_dir(&main)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["-c", "core.hooksPath=/dev/null", "commit", "-m", "t"])
+                .current_dir(&main)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .status()
+                .unwrap()
+                .success()
+        );
+        // Separate git dir outside cwd must not allow workspace-write on the main checkout.
+        assert_eq!(
+            codex_worker_workspace_write_blocked(&main),
+            Some(CODEX_WORKER_TEMP_READONLY_HINT),
+            "separate-git-dir main checkout => blocked"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn codex_worker_workspace_write_blocked_submodule() {
+        let id = crate::db::new_id();
+        let base = f2_non_temp_fixture(&format!("submod-{id}"));
+        let super_repo = base.join("super");
+        let other = base.join("other");
+        std::fs::create_dir_all(&super_repo).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        f2_git_init_commit(&other, "f", "sub");
+        f2_git_init_commit(&super_repo, "README", "super");
+        let other_s = other.to_string_lossy().into_owned();
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "protocol.file.allow=always",
+                    "submodule",
+                    "add",
+                    "--",
+                    &other_s,
+                    "sub",
+                ])
+                .current_dir(&super_repo)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .status()
+                .unwrap()
+                .success()
+        );
+        let sub = super_repo.join("sub");
+        assert_eq!(
+            codex_worker_workspace_write_blocked(&sub),
+            Some(CODEX_WORKER_TEMP_READONLY_HINT),
+            "submodule cwd => blocked"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn codex_worker_workspace_write_blocked_bare_worktree() {
+        let id = crate::db::new_id();
+        let base = f2_non_temp_fixture(&format!("bare-{id}"));
+        let seed = base.join("seed");
+        let bare = base.join("bare.git");
+        let wt = base.join("wt");
+        std::fs::create_dir_all(&seed).unwrap();
+        f2_git_init_commit(&seed, "f", "x");
+        let bare_s = bare.to_string_lossy().into_owned();
+        assert!(
+            std::process::Command::new("git")
+                .args(["clone", "--bare", "--", &seed.to_string_lossy(), &bare_s])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let wt_s = wt.to_string_lossy().into_owned();
+        assert!(
+            std::process::Command::new("git")
+                .args(["worktree", "add", "-b", "w1", "--", &wt_s, "main"])
+                .current_dir(&bare)
+                .status()
+                .unwrap()
+                .success()
+        );
+        // Linked worktree of a non-temp bare: common/main live outside the worktree cwd.
+        assert_eq!(
+            codex_worker_workspace_write_blocked(&wt),
+            None,
+            "bare+linked worktree outside temp => allowed"
+        );
+        let _ = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force", "--", &wt_s])
+            .current_dir(&bare)
+            .status();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn codex_worker_workspace_write_blocked_probe_failure() {
+        let id = crate::db::new_id();
+        let not_repo = f2_non_temp_fixture(&format!("norepo-{id}"));
+        assert_eq!(
+            codex_worker_workspace_write_blocked(&not_repo),
+            Some(CODEX_WORKER_TEMP_READONLY_HINT),
+            "not a git repo => refuse"
+        );
+
+        // Real linked worktree, but git binary missing => probe fails closed.
+        let repo = f2_non_temp_fixture(&format!("nogit-{id}"));
+        f2_git_init_commit(&repo, "f", "x");
+        let wt = repo.join("trees/w");
+        f2_add_worktree(&repo, "w", &wt);
+        F2_GIT_PROGRAM_OVERRIDE.with(|c| {
+            *c.borrow_mut() = Some(PathBuf::from("/nonexistent/git-for-f2-probe"))
+        });
+        let blocked = codex_worker_workspace_write_blocked(&wt);
+        F2_GIT_PROGRAM_OVERRIDE.with(|c| *c.borrow_mut() = None);
+        assert_eq!(
+            blocked,
+            Some(CODEX_WORKER_TEMP_READONLY_HINT),
+            "git missing => refuse"
+        );
+        let _ = std::fs::remove_dir_all(&not_repo);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
     /// A team member's role instructions reach the prompt hook of each agent that has one, and
     /// no launch for an agent without one (those get a preamble, see `teams::preamble_for`).
     #[test]
