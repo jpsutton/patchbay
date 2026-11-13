@@ -938,8 +938,14 @@ mod tests {
         let root = root_on_the_current_drive("unc");
         let root_text = root.display().to_string();
         let tail = &root_text[2..];
+        let admin = format!("{}$", &root_text[..1]);
         let started = std::time::Instant::now();
         for spelling in [
+            // The bypass shape: the share is the root's own drive (`C$`), so dropping the UNC prefix
+            // leaves exactly the root's tail on the current drive. Old `Step::Root` read these INSIDE.
+            format!(r"\\localhost\{admin}{tail}\in.txt"),
+            format!(r"\\localhost\{admin}{tail}\new.txt"),
+            format!(r"\\?\UNC\localhost\{admin}{tail}\in.txt"),
             format!(r"\\localhost\pb71_no_such_share{tail}\in.txt"),
             format!(r"\\localhost\pb71_no_such_share{tail}\new.txt"),
             format!(r"\\?\UNC\localhost\pb71_no_such_share{tail}\in.txt"),

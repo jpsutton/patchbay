@@ -437,10 +437,13 @@ enum ClickPlan {
 /// the resolved path are both judged, so `\\host` alone (not absolute, so joined to the folder) is
 /// still caught.
 fn plan_open(path: &str, cwd: Option<&str>) -> Option<ClickPlan> {
-    let p = resolve_mentioned(path, cwd)?;
     let home = std::path::Path::new(cwd.unwrap_or(""));
-    let foreign = patchbay_agent::foreign_location(home, std::path::Path::new(path)) || patchbay_agent::foreign_location(home, &p);
-    Some(if foreign { ClickPlan::Confirm(p) } else { ClickPlan::Open(p) })
+    // The raw text first: `\??\UNC\...` is not "absolute" to std, so it may not resolve at all.
+    if patchbay_agent::foreign_location(home, std::path::Path::new(path)) {
+        return Some(ClickPlan::Confirm(std::path::PathBuf::from(path)));
+    }
+    let p = resolve_mentioned(path, cwd)?;
+    Some(if patchbay_agent::foreign_location(home, &p) { ClickPlan::Confirm(p) } else { ClickPlan::Open(p) })
 }
 
 /// The label of the one button that opens a network location (never a plain "OK").
