@@ -668,4 +668,102 @@ mod tests {
         assert!(!inside(&short_root, &outside.join("new.txt")));
     }
 
+
+    // --- pb-20261111-71, the security bar on the new-file change ---------------------------------
+    // Judging a path that does not exist yet by its canonical existing ancestor turns the new-file
+    // paths from "always outside" into "decided by where they really are". These pin the escapes
+    // that must stay outside (each one is a NEW file, so a lexical shortcut for new files would let
+    // it through) and the verbatim spellings both sides must agree on.
+
+    /// A new file behind a junction, a directory symlink, an 8.3 alias OF a junction, and `..`
+    /// written with mixed separators: every one is outside. The 8.3 alias of a junction names the
+    /// junction by its short name, so it lies lexically inside the root and only resolving it shows
+    /// it is not.
+    #[test]
+    #[cfg(windows)]
+    fn new_files_behind_every_kind_of_link_are_outside() {
+        let base = scratch("newlinks");
+        let root = base.join("work_directory_with_a_long_name");
+        let outside = base.join("outside_directory_with_a_long_name");
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "s").unwrap();
+
+        // junction
+        let long_junction = root.join("a_junction_with_a_long_name");
+        junction(&long_junction, &outside);
+        assert!(!inside(&root, &long_junction.join("new.txt")), "new file behind a junction");
+        assert!(!inside(&root, &long_junction.join("x/y/new.txt")), "new file, several missing levels, behind a junction");
+        // the junction reached by its 8.3 short name: lexically inside the root
+        let short_junction = short_path(&long_junction);
+        if short_junction == long_junction {
+            skip("this volume does not make 8.3 short names");
+        } else {
+            assert!(!inside(&root, &short_junction.join("new.txt")), "new file behind a junction named by its 8.3 alias");
+            assert!(!inside(&root, &short_junction.join("secret.txt")), "existing file behind a junction named by its 8.3 alias");
+        }
+        // directory symlink (needs a privilege on a developer's machine: skip says so; CI fails a skip)
+        match std::os::windows::fs::symlink_dir(&outside, root.join("symlink_dir")) {
+            Ok(()) => {
+                assert!(!inside(&root, &root.join("symlink_dir/new.txt")), "new file behind a directory symlink");
+                assert!(!inside(&root, &root.join("symlink_dir/x/new.txt")));
+            }
+            Err(e) => skip(&format!("cannot create a directory symlink here ({e})")),
+        }
+        // `..` with mixed separators, to a file that is not there yet
+        let r = root.display();
+        for escape in [format!("{r}\\a/..\\..\\new.txt"), format!("{r}/a\\../..\\new.txt"), format!("{r}\\..\\new.txt")] {
+            assert!(!inside(&root, Path::new(&escape)), "mixed separators, new file: {escape}");
+        }
+        // the controls: the same shapes, kept inside
+        assert!(inside(&root, &root.join("a").join("new.txt")));
+        assert!(inside(&root, Path::new(&format!("{r}\\a/..\\a\\new.txt"))));
+    }
+
+    /// `std::fs::canonicalize` returns `\\?\C:\...`; a path written that way must be judged like the
+    /// plain spelling, on both sides: an escaping one is outside, an in-root one is inside.
+    #[test]
+    #[cfg(windows)]
+    fn verbatim_paths_are_judged_like_plain_ones() {
+        let base = scratch("verbatim");
+        let root = base.join("work");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("in.txt"), "x").unwrap();
+        std::fs::write(outside.join("secret.txt"), "s").unwrap();
+        let verbatim = |p: &Path| PathBuf::from(format!(r"\\?\{}", p.display()));
+        let (v_root, v_outside) = (verbatim(&root), verbatim(&outside));
+        // outside, as an existing file and as a new one
+        assert!(!inside(&root, &v_outside.join("secret.txt")), "verbatim, outside, existing");
+        assert!(!inside(&root, &v_outside.join("new.txt")), "verbatim, outside, new");
+        assert!(!inside(&root, &v_root.join("..").join("outside").join("new.txt")), "verbatim, `..` out of the root");
+        assert!(!inside(&v_root, &outside.join("secret.txt")), "verbatim ROOT, plain outside path");
+        // inside, existing and new, on either side
+        assert!(inside(&root, &v_root.join("in.txt")), "verbatim, inside, existing");
+        assert!(inside(&root, &v_root.join("new.txt")), "verbatim, inside, new");
+        assert!(inside(&v_root, &root.join("in.txt")), "verbatim ROOT, plain inside path");
+        assert!(inside(&v_root, &root.join("new.txt")), "verbatim ROOT, plain new inside path");
+        assert!(inside(&v_root, &v_root.join("new.txt")));
+    }
+
+    /// A UNC path names another machine's share: outside, whatever it is called, and judging it must
+    /// not hang. `localhost` and a share that does not exist answer at once.
+    #[test]
+    #[cfg(windows)]
+    fn a_unc_path_is_outside() {
+        let base = scratch("unc");
+        let root = base.join("work");
+        std::fs::create_dir_all(&root).unwrap();
+        let started = std::time::Instant::now();
+        assert!(!inside(&root, Path::new(r"\\localhost\pb71_no_such_share\x.txt")));
+        assert!(!inside(&root, Path::new(r"\\?\UNC\localhost\pb71_no_such_share\x.txt")));
+        // The drive's own administrative share is the root's own place, spelled as UNC: it is not
+        // judged inside (a different spelling is not trusted), so it asks first.
+        let drive = base.display().to_string();
+        let admin = format!(r"\\localhost\{}$\{}", &drive[..1], drive[3..].replace('/', "\\"));
+        assert!(!inside(&root, &Path::new(&admin).join("work").join("x.txt")), "UNC to the root's own place: {admin}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "judging a UNC path took {:?}", started.elapsed());
+    }
+
 }
