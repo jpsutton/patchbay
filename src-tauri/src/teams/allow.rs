@@ -448,6 +448,8 @@ const HOOKS_BLOCKING_COMMIT: &[&str] = &[
     "pre-merge-commit",
     "post-index-change",
     "reference-transaction",
+    // git commit may run auto-maintenance, which invokes pre-auto-gc (githooks(5)).
+    "pre-auto-gc",
 ];
 
 fn hooks_dir_has_executable(hooks_dir: &Path, names: &[&str]) -> bool {
@@ -819,6 +821,13 @@ mod tests {
         // add is not blocked by commit-msg.
         assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git add LICENSE"), &options(), &wt).is_some());
         std::fs::remove_file(hooks.join("commit-msg")).unwrap();
+        write_hook(&hooks, "pre-auto-gc", true);
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_none(),
+            "executable pre-auto-gc refuses (commit may run auto-maintenance)"
+        );
+        std::fs::remove_file(hooks.join("pre-auto-gc")).unwrap();
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some());
 
         // Main .git/hooks with pre-commit after unsetting hooksPath.
         assert!(

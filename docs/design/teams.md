@@ -126,7 +126,7 @@ reads `core.fsmonitor` and the effective hooks directory (`core.hooksPath` if se
 set to anything but false/empty; if the hooks dir cannot be determined; or if an **executable**
 hook that git would run for that verb is present (githooks(5)): for `commit` —
 `pre-commit`, `prepare-commit-msg`, `commit-msg`, `post-commit`, `pre-merge-commit`,
-`post-index-change`, `reference-transaction`; for `add` / `status` / `diff` / `log` —
+`post-index-change`, `reference-transaction`, `pre-auto-gc`; for `add` / `status` / `diff` / `log` —
 `post-index-change` only. Hooks not run by these verbs (`pre-push`, `post-checkout`, …) do not
 block, so a templateDir that only installs `pre-push` still allows the opt-in. In a repo with
 commit hooks (husky/lint-staged `pre-commit`, etc.), worker commits always prompt. Non-executable
