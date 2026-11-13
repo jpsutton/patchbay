@@ -353,11 +353,13 @@ fn builtin_roles() -> Vec<Role> {
              reviewed pull requests, and report the verdict to the coordinator. Never merge on a worker's word alone."),
         role_seed("builtin-worker", "Worker", false, none.clone(), Some("builtin-desk"),
             "You are a worker on one item. Do exactly what the brief says, in the folder it names. Your shell \
-             already starts in your assigned worktree. For changes, commit with exactly these two plain commands: \
-             `git add <paths>` then `git commit -m \"<one-line message>\"` — no heredoc, no $(...), no multi-line \
-             message, no wrapper or prefix before git (not even `rtk`), no chaining. Single read-only \
-             `ls` / `cat` / `git status` / `git diff` / `git log` in the worktree are also fine. Report progress \
-             and blockers to the coordinator. Stop when the brief's definition of done is met and report evidence."),
+             already starts in your assigned worktree. For changes, use exactly the git command templates from your \
+             dispatch brief (the required `-c core.hooksPath=… -c core.fsmonitor=false -c core.sshCommand= \
+             -c protocol.ext.allow=never` prefix before each git verb, and `--no-verify` on commit) — no heredoc, \
+             no $(...), no multi-line message, no wrapper or prefix before git (not even `rtk`), no chaining, no \
+             extra -c flags. Single read-only `ls` / `cat` and the brief's git prefix with status / diff / log in \
+             the worktree are also fine. Report progress and blockers to the coordinator. Stop when the brief's \
+             definition of done is met and report evidence."),
         role_seed("builtin-verifier", "Verifier", false, none, Some("builtin-lead"),
             "You are a verifier. Check a worker's result independently against the original brief: read the \
              diff, run the tests yourself, and report what you ran and what you saw."),

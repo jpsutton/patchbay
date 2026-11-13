@@ -5,11 +5,17 @@
 //! `git commit`, and read-only `ls` / `cat` / `git status` / `git diff` / `git log`, inside its
 //! assigned worktree without a prompt. Tokenization is fail-closed (shell metacharacters rejected;
 //! option allow-lists per verb; paths relative, no `..`, symlink-resolved inside the worktree).
-//! Before any git verb auto-approves, effective hooks dir + `core.fsmonitor` are checked
-//! (`worker_git_repo_blocks_auto`). Only executable hooks that git would run for that verb block
-//! (see `HOOKS_BLOCKING_COMMIT` / add / status); `pre-push` and other unrelated hooks do not.
 //!
-//! Residual: config-defined filters / textconv / external diff; check-then-exec TOCTOU on hooks.
+//! Auto-approved **git** commands must carry this exact `-c` prefix (fixed order) before the verb,
+//! with `core.hooksPath` equal to the Patchbay-created empty read-only hooks dir for the team:
+//! `-c core.hooksPath=<dir> -c core.fsmonitor=false -c core.sshCommand= -c protocol.ext.allow=never`.
+//! `git commit` also requires `--no-verify`. Any other `-c`, missing piece, or different value falls
+//! through to a normal prompt. Repo hooks/fsmonitor/config gates remain as defense in depth.
+//!
+//! Residual: config-defined filters / textconv / external diff; human-approved bare git stays
+//! check-then-exec racy; scrubbed `GIT_*` / `GIT_CONFIG_NOSYSTEM` cannot be forced into the agent
+//! shell (env-beats-config). This does not cover Codex workers under the user's `~/.codex` prefix
+//! rules (pb-20261111-83).
 //!
 //! Not a `permission_rules` row: those match a tool kind and a command prefix, and MCP calls are
 //! kind `other`, so a rule would approve every MCP tool of every server. This runs in the
@@ -22,10 +28,106 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::TeamsDb;
 use crate::code::permissions::{allow_option, command_of};
+
+/// Patchbay-owned empty hooks directory for this team (outside worktrees and temp roots).
+pub(crate) fn worker_safe_hooks_dir(data_dir: &Path, team_id: &str) -> PathBuf {
+    data_dir.join("teams-safe").join(team_id).join("hooks")
+}
+
+/// Forward-slash form for `git -c core.hooksPath=` (works on Windows git too; avoids `\\` tokens).
+pub(crate) fn path_for_git_c_flag(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+/// `core.hooksPath=…` argument as it should appear in a brief / command (quoted if it has spaces).
+pub(crate) fn hooks_path_c_arg(hooks_path: &Path) -> String {
+    let inner = format!("core.hooksPath={}", path_for_git_c_flag(hooks_path));
+    if inner.contains(' ') || inner.contains('\t') {
+        format!("\"{inner}\"")
+    } else {
+        inner
+    }
+}
+
+/// Create/verify the empty read-only hooks dir used in the required `-c core.hooksPath=` prefix.
+pub(crate) fn ensure_worker_safe_hooks_dir(data_dir: &Path, team_id: &str) -> Result<PathBuf> {
+    let dir = worker_safe_hooks_dir(data_dir, team_id);
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+    }
+    // Ensure we can clear leftovers: temporarily writable if it already exists.
+    #[cfg(unix)]
+    if dir.is_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755));
+    }
+    #[cfg(windows)]
+    if dir.is_dir() {
+        let mut p = std::fs::metadata(&dir)?.permissions();
+        p.set_readonly(false);
+        let _ = std::fs::set_permissions(&dir, p);
+    }
+    std::fs::create_dir_all(&dir).with_context(|| format!("mkdir {}", dir.display()))?;
+    for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry?;
+        let p = entry.path();
+        if p.is_dir() {
+            std::fs::remove_dir_all(&p)?;
+        } else {
+            std::fs::remove_file(&p)?;
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555))
+            .with_context(|| format!("chmod {}", dir.display()))?;
+    }
+    #[cfg(windows)]
+    {
+        let mut p = std::fs::metadata(&dir)?.permissions();
+        p.set_readonly(true);
+        std::fs::set_permissions(&dir, p).with_context(|| format!("readonly {}", dir.display()))?;
+    }
+    // Lives under data_dir/teams-safe — outside every team worktree and export tree by construction.
+    Ok(dir)
+}
+
+/// Exact `-c` sequence tokens after `git` and before the verb (unquoted form).
+fn git_hardening_prefix_tokens(hooks_path: &Path) -> [String; 8] {
+    [
+        "-c".into(),
+        format!("core.hooksPath={}", path_for_git_c_flag(hooks_path)),
+        "-c".into(),
+        "core.fsmonitor=false".into(),
+        "-c".into(),
+        "core.sshCommand=".into(),
+        "-c".into(),
+        "protocol.ext.allow=never".into(),
+    ]
+}
+
+/// When `tokens` is `git` + exact hardening prefix + rest, return the rest (`verb` …).
+fn split_git_hardening<'a>(tokens: &'a [String], hooks_path: &Path) -> Option<&'a [String]> {
+    if tokens.first().map(String::as_str) != Some("git") {
+        return None;
+    }
+    let prefix = git_hardening_prefix_tokens(hooks_path);
+    if tokens.len() < 1 + prefix.len() + 1 {
+        return None;
+    }
+    for (i, want) in prefix.iter().enumerate() {
+        if tokens.get(i + 1) != Some(want) {
+            return None;
+        }
+    }
+    Some(&tokens[1 + prefix.len()..])
+}
 
 const SERVER: &str = "patchbay-agent-messaging";
 
@@ -107,7 +209,12 @@ fn is_forbidden_inside_message_quote(c: char) -> bool {
     matches!(c, '$' | '`' | '\\' | '!' | '\n' | '\r' | '\0') || !c.is_ascii() || c.is_control()
 }
 
-/// Fail-closed tokenizer. Quotes only for the value of `git commit -m` / `--message`.
+/// Quotes for `-c` values (may contain spaces in `core.hooksPath=…`); still no shell expansion.
+fn is_forbidden_inside_c_quote(c: char) -> bool {
+    matches!(c, '$' | '`' | '!' | '\n' | '\r' | '\0') || !c.is_ascii() || c.is_control()
+}
+
+/// Fail-closed tokenizer. Quotes for `git commit -m` / `--message` values and for `-c` values.
 fn tokenize_worker_command(cmd: &str) -> Option<Vec<String>> {
     let cmd = cmd.trim();
     if cmd.is_empty() {
@@ -116,6 +223,7 @@ fn tokenize_worker_command(cmd: &str) -> Option<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     let mut chars = cmd.chars().peekable();
     let mut expect_message = false;
+    let mut expect_c_value = false;
 
     while let Some(&c) = chars.peek() {
         if c == ' ' || c == '\t' {
@@ -143,6 +251,27 @@ fn tokenize_worker_command(cmd: &str) -> Option<Vec<String>> {
             expect_message = false;
             continue;
         }
+        if expect_c_value && (c == '"' || c == '\'') {
+            let quote = c;
+            chars.next();
+            let mut val = String::new();
+            loop {
+                let ch = chars.next()?;
+                if ch == quote {
+                    break;
+                }
+                if is_forbidden_inside_c_quote(ch) {
+                    return None;
+                }
+                val.push(ch);
+            }
+            if val.is_empty() {
+                return None;
+            }
+            out.push(val);
+            expect_c_value = false;
+            continue;
+        }
 
         let mut tok = String::new();
         while let Some(&ch) = chars.peek() {
@@ -159,14 +288,19 @@ fn tokenize_worker_command(cmd: &str) -> Option<Vec<String>> {
             return None;
         }
         let is_msg_flag = tok == "-m" || tok == "--message";
+        let is_c_flag = tok == "-c";
         out.push(tok);
         if expect_message {
             expect_message = false;
+        } else if expect_c_value {
+            expect_c_value = false;
         } else if is_msg_flag {
             expect_message = true;
+        } else if is_c_flag {
+            expect_c_value = true;
         }
     }
-    if expect_message {
+    if expect_message || expect_c_value {
         return None;
     }
     Some(out)
@@ -251,10 +385,11 @@ fn is_opt(tok: &str) -> bool {
     tok.starts_with('-')
 }
 
-/// Parse `git <verb> …` under per-verb option allow-lists; collect path args.
-fn parse_git_verb(tokens: &[String], worktree: &Path) -> bool {
-    let verb = tokens.get(1).map(String::as_str).unwrap_or("");
-    let rest = &tokens[2..];
+/// Parse `git` args starting at the verb (hardening `-c` prefix already stripped) under per-verb
+/// option allow-lists; collect path args. `commit` requires `--no-verify` and `-m`/`--message`.
+fn parse_git_verb(verb_and_rest: &[String], worktree: &Path) -> bool {
+    let verb = verb_and_rest.first().map(String::as_str).unwrap_or("");
+    let rest = if verb_and_rest.len() > 1 { &verb_and_rest[1..] } else { &[][..] };
     match verb {
         "add" => {
             let mut paths = Vec::new();
@@ -285,11 +420,17 @@ fn parse_git_verb(tokens: &[String], worktree: &Path) -> bool {
             all_path_args_ok(worktree, &paths)
         }
         "commit" => {
-            // Only -m/--message (required). No -q/-v/--no-verify/amend/file/template.
+            // Require -m/--message and --no-verify. No -q/-v/amend/-F/--template.
             let mut saw_message = false;
+            let mut saw_no_verify = false;
             let mut i = 0;
             while i < rest.len() {
                 let t = &rest[i];
+                if t == "--no-verify" {
+                    saw_no_verify = true;
+                    i += 1;
+                    continue;
+                }
                 if t == "-m" || t == "--message" {
                     let Some(msg) = rest.get(i + 1) else {
                         return false;
@@ -303,7 +444,7 @@ fn parse_git_verb(tokens: &[String], worktree: &Path) -> bool {
                 }
                 return false;
             }
-            saw_message
+            saw_message && saw_no_verify
         }
         "status" => {
             let mut paths = Vec::new();
@@ -368,7 +509,7 @@ fn parse_ls_cat(tokens: &[String], worktree: &Path) -> bool {
     }
 }
 
-fn is_safe_worker_command(cmd: &str, worktree: &Path) -> bool {
+fn is_safe_worker_command(cmd: &str, worktree: &Path, hooks_path: &Path) -> bool {
     let Some(tokens) = tokenize_worker_command(cmd) else {
         return false;
     };
@@ -376,7 +517,12 @@ fn is_safe_worker_command(cmd: &str, worktree: &Path) -> bool {
         return false;
     };
     match prog {
-        "git" => tokens.len() >= 2 && parse_git_verb(&tokens, worktree),
+        "git" => {
+            let Some(verb_rest) = split_git_hardening(&tokens, hooks_path) else {
+                return false;
+            };
+            !verb_rest.is_empty() && parse_git_verb(verb_rest, worktree)
+        }
         "ls" | "cat" => parse_ls_cat(&tokens, worktree),
         _ => false,
     }
@@ -522,15 +668,24 @@ fn allow_worker_commit(data_dir: &Path, session: &str, tool_call: &Value, option
     if !paths_equal(Path::new(call_cwd), &worktree) {
         return None;
     }
+    let hooks_path = worker_safe_hooks_dir(data_dir, &team.id);
+    // Fail closed if the Patchbay hooks dir was never created/verified for this team.
+    if !hooks_path.is_dir() {
+        return None;
+    }
     let cmd = command_of(tool_call)?;
-    if !is_safe_worker_command(&cmd, &worktree) {
+    if !is_safe_worker_command(&cmd, &worktree, &hooks_path) {
         return None;
     }
     let Some(tokens) = tokenize_worker_command(&cmd) else {
         return None;
     };
     if tokens.first().map(String::as_str) == Some("git") {
-        let verb = tokens.get(1).map(String::as_str).unwrap_or("");
+        let Some(verb_rest) = split_git_hardening(&tokens, &hooks_path) else {
+            return None;
+        };
+        let verb = verb_rest.first().map(String::as_str).unwrap_or("");
+        // Defense in depth: still refuse when the repo's own hooks/fsmonitor look hostile.
         if worker_git_repo_blocks_auto(&worktree, verb) {
             return None;
         }
@@ -637,7 +792,7 @@ mod tests {
         assert!(allow_team_tool(&d, "s1", "claude-code", &tc, &options, "/tmp").is_none(), "released");
     }
 
-    fn worker_commit_fixture(opt_in: bool) -> (std::path::PathBuf, String, String, String) {
+    fn worker_commit_fixture(opt_in: bool) -> (std::path::PathBuf, String, String, String, PathBuf) {
         let d = std::env::temp_dir().join(format!("pb-allow-git-{}", crate::db::new_id()));
         let proj = d.join("proj");
         let trees = proj.join("trees");
@@ -665,6 +820,7 @@ mod tests {
                 export_dir: Some(d.join("out").to_string_lossy().into_owned()),
             })
             .unwrap();
+        let hooks = ensure_worker_safe_hooks_dir(&d, &team.id).unwrap();
         let item_id = "G-20261112-01";
         let worktree = trees.join(item_id.to_lowercase());
         std::fs::create_dir_all(&worktree).unwrap();
@@ -689,7 +845,19 @@ mod tests {
         );
         t.attach(&team.id, "w1", "workers").unwrap();
         t.0.execute("UPDATE members SET item_id = ?1 WHERE session_id = 'w1'", [item_id]).unwrap();
-        (d, worktree.to_string_lossy().into_owned(), proj.to_string_lossy().into_owned(), item_id.to_owned())
+        (d, worktree.to_string_lossy().into_owned(), proj.to_string_lossy().into_owned(), item_id.to_owned(), hooks)
+    }
+
+    /// Exact auto-approve prefix for git verbs (hooks path from fixture).
+    fn git_pfx(hooks: &Path) -> String {
+        format!(
+            "git -c {} -c core.fsmonitor=false -c core.sshCommand= -c protocol.ext.allow=never",
+            hooks_path_c_arg(hooks)
+        )
+    }
+
+    fn git_cmd(hooks: &Path, rest: &str) -> String {
+        format!("{} {rest}", git_pfx(hooks))
     }
 
     fn git_exec(cwd: &str, command: &str) -> Value {
@@ -706,27 +874,53 @@ mod tests {
 
     #[test]
     fn worker_commit_inside_own_worktree_when_template_opts_in() {
-        let (d, wt, _proj, _item) = worker_commit_fixture(true);
+        let (d, wt, _proj, _item, safe) = worker_commit_fixture(true);
         std::fs::write(std::path::Path::new(&wt).join("LICENSE"), "x").unwrap();
-        let hit = allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).unwrap();
+        let hit = allow_team_tool(
+            &d,
+            "w1",
+            "claude-code",
+            &git_exec(&wt, &git_cmd(&safe, "commit --no-verify -m work")),
+            &options(),
+            &wt,
+        )
+        .unwrap();
         assert_eq!(hit.0, "once");
         assert!(hit.1.contains("worker commit"));
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git add LICENSE"), &options(), &wt).is_some());
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git status"), &options(), &wt).is_some());
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git diff"), &options(), &wt).is_some());
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m \"hello world\""), &options(), &wt).is_some());
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &git_cmd(&safe, "add LICENSE")), &options(), &wt).is_some());
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &git_cmd(&safe, "status")), &options(), &wt).is_some());
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &git_cmd(&safe, "diff")), &options(), &wt).is_some());
+        assert!(allow_team_tool(
+            &d,
+            "w1",
+            "claude-code",
+            &git_exec(&wt, &git_cmd(&safe, "commit --no-verify -m \"hello world\"")),
+            &options(),
+            &wt
+        )
+        .is_some());
+        // Bare git without the required -c prefix prompts.
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit --no-verify -m work"), &options(), &wt).is_none());
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &git_cmd(&safe, "commit -m work")), &options(), &wt).is_none());
     }
 
     #[test]
     fn worker_readonly_ls_cat_git_log_accepted_when_paths_stay_inside() {
-        let (d, wt, _proj, _item) = worker_commit_fixture(true);
+        let (d, wt, _proj, _item, safe) = worker_commit_fixture(true);
         let root = std::path::Path::new(&wt);
         std::fs::write(root.join("README"), "hi").unwrap();
         std::fs::create_dir_all(root.join("src")).unwrap();
-        let accept = ["ls", "ls src", "ls -la src", "cat README", "git log", "git log -1", "git status", "git diff", "git status -s -b"];
-        for cmd in accept {
+        let accept_plain = ["ls", "ls src", "ls -la src", "cat README"];
+        for cmd in accept_plain {
             assert!(
                 allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, cmd), &options(), &wt).is_some(),
+                "should allow: {cmd}"
+            );
+        }
+        for rest in ["log", "log -1", "status", "diff", "status -s -b"] {
+            let cmd = git_cmd(&safe, rest);
+            assert!(
+                allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &cmd), &options(), &wt).is_some(),
                 "should allow: {cmd}"
             );
         }
@@ -734,7 +928,7 @@ mod tests {
 
     #[test]
     fn worker_shell_metachar_and_message_file_bypasses_rejected() {
-        let (d, wt, proj, _item) = worker_commit_fixture(true);
+        let (d, wt, proj, _item, safe) = worker_commit_fixture(true);
         let root = std::path::Path::new(&wt);
         std::fs::write(root.join("README"), "hi").unwrap();
         std::fs::write(std::path::Path::new(&proj).join("outside.txt"), "secret").unwrap();
@@ -770,6 +964,12 @@ mod tests {
                 "should refuse: {cmd}"
             );
         }
+        // Wrong hooksPath value with otherwise-valid sequence still refuses.
+        let wrong = format!(
+            "git -c core.hooksPath=/tmp/evil -c core.fsmonitor=false -c core.sshCommand= -c protocol.ext.allow=never commit --no-verify -m x"
+        );
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &wrong), &options(), &wt).is_none());
+        let _ = safe;
     }
 
     fn write_hook(dir: &std::path::Path, name: &str, executable: bool) {
@@ -788,7 +988,7 @@ mod tests {
 
     #[test]
     fn worker_symlink_escape_and_fsmonitor_block_auto() {
-        let (d, wt, proj, _item) = worker_commit_fixture(true);
+        let (d, wt, proj, _item, safe) = worker_commit_fixture(true);
         let root = std::path::Path::new(&wt);
         std::fs::write(root.join("README"), "hi").unwrap();
         // Symlink escape needs unix create; product path resolve refuses escapes on all OSes.
@@ -811,51 +1011,54 @@ mod tests {
                 .success()
         );
         assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git status"), &options(), &wt).is_none(),
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &git_cmd(&safe, "status")), &options(), &wt).is_none(),
             "fsmonitor set"
         );
     }
 
     #[test]
     fn worker_verb_relevant_executable_hooks_block_not_pre_push() {
-        let (d, wt, _proj, _item) = worker_commit_fixture(true);
+        let (d, wt, _proj, _item, safe) = worker_commit_fixture(true);
         std::fs::write(std::path::Path::new(&wt).join("LICENSE"), "x").unwrap();
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some());
+        let commit = git_cmd(&safe, "commit --no-verify -m work");
+        let add = git_cmd(&safe, "add LICENSE");
+        let status = git_cmd(&safe, "status");
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &commit), &options(), &wt).is_some());
 
-        let hooks = resolve_hooks_dir(std::path::Path::new(&wt)).expect("hooks dir");
+        let repo_hooks = resolve_hooks_dir(std::path::Path::new(&wt)).expect("hooks dir");
         // pre-push alone (David's templateDir) does not block commit/add.
-        write_hook(&hooks, "pre-push", true);
+        write_hook(&repo_hooks, "pre-push", true);
         assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some(),
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &commit), &options(), &wt).is_some(),
             "executable pre-push alone still auto-approves commit"
         );
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git add LICENSE"), &options(), &wt).is_some());
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &add), &options(), &wt).is_some());
 
         // Non-executable commit-msg ignored on unix; on Windows any hook file fails closed
         // (`is_executable_file` treats existing files as executable — no reliable exec bit).
-        write_hook(&hooks, "commit-msg", false);
+        write_hook(&repo_hooks, "commit-msg", false);
         #[cfg(unix)]
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some());
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &commit), &options(), &wt).is_some());
         #[cfg(not(unix))]
         assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_none(),
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &commit), &options(), &wt).is_none(),
             "Windows: hook file present fails closed"
         );
-        write_hook(&hooks, "commit-msg", true);
+        write_hook(&repo_hooks, "commit-msg", true);
         assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_none(),
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &commit), &options(), &wt).is_none(),
             "executable commit-msg refuses"
         );
         // add is not blocked by commit-msg.
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git add LICENSE"), &options(), &wt).is_some());
-        std::fs::remove_file(hooks.join("commit-msg")).unwrap();
-        write_hook(&hooks, "pre-auto-gc", true);
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &add), &options(), &wt).is_some());
+        std::fs::remove_file(repo_hooks.join("commit-msg")).unwrap();
+        write_hook(&repo_hooks, "pre-auto-gc", true);
         assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_none(),
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &commit), &options(), &wt).is_none(),
             "executable pre-auto-gc refuses (commit may run auto-maintenance)"
         );
-        std::fs::remove_file(hooks.join("pre-auto-gc")).unwrap();
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some());
+        std::fs::remove_file(repo_hooks.join("pre-auto-gc")).unwrap();
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &commit), &options(), &wt).is_some());
 
         // Main .git/hooks with pre-commit after unsetting hooksPath.
         assert!(
@@ -877,12 +1080,12 @@ mod tests {
         }
         write_hook(&main_hooks, "pre-push", true);
         assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some(),
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &commit), &options(), &wt).is_some(),
             "pre-push in .git/hooks does not block"
         );
         write_hook(&main_hooks, "pre-commit", true);
         assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_none(),
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &commit), &options(), &wt).is_none(),
             "executable pre-commit in .git/hooks"
         );
 
@@ -896,18 +1099,18 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some());
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &commit), &options(), &wt).is_some());
         write_hook(&external, "commit-msg", true);
         assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_none(),
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &commit), &options(), &wt).is_none(),
             "external hooksPath commit-msg"
         );
 
         // post-index-change blocks add and status.
         std::fs::remove_file(external.join("commit-msg")).unwrap();
         write_hook(&external, "post-index-change", true);
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git add LICENSE"), &options(), &wt).is_none());
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git status"), &options(), &wt).is_none());
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &add), &options(), &wt).is_none());
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &status), &options(), &wt).is_none());
 
         // Empty / missing hooks dir → allow.
         let empty2 = std::path::Path::new(&wt).join("empty-hooks-2");
@@ -919,7 +1122,7 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some());
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &commit), &options(), &wt).is_some());
         let missing = std::path::Path::new(&wt).join("missing-hooks-dir");
         assert!(
             std::process::Command::new("git")
@@ -928,28 +1131,45 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some());
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &commit), &options(), &wt).is_some());
     }
 
     #[test]
     fn worker_commit_prompts_when_opt_in_is_off_by_default() {
-        let (d, wt, _proj, _item) = worker_commit_fixture(false);
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_none());
+        let (d, wt, _proj, _item, safe) = worker_commit_fixture(false);
+        assert!(allow_team_tool(
+            &d,
+            "w1",
+            "claude-code",
+            &git_exec(&wt, &git_cmd(&safe, "commit --no-verify -m work")),
+            &options(),
+            &wt
+        )
+        .is_none());
     }
 
     #[test]
     fn worker_commit_outside_worktree_or_forbidden_git_prompts() {
-        let (d, wt, proj, _item) = worker_commit_fixture(true);
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&proj, "git commit -m work"), &options(), &proj).is_none());
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec("/", "git commit -m work"), &options(), "/").is_none());
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git push origin HEAD"), &options(), &wt).is_none());
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit --amend -m x"), &options(), &wt).is_none());
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git add -f secret"), &options(), &wt).is_none());
+        let (d, wt, proj, _item, safe) = worker_commit_fixture(true);
+        let commit = git_cmd(&safe, "commit --no-verify -m work");
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&proj, &commit), &options(), &proj).is_none());
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec("/", &commit), &options(), "/").is_none());
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &git_cmd(&safe, "push origin HEAD")), &options(), &wt).is_none());
+        assert!(allow_team_tool(
+            &d,
+            "w1",
+            "claude-code",
+            &git_exec(&wt, &git_cmd(&safe, "commit --amend --no-verify -m x")),
+            &options(),
+            &wt
+        )
+        .is_none());
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &git_cmd(&safe, "add -f secret")), &options(), &wt).is_none());
     }
 
     #[test]
     fn worker_git_config_and_path_overrides_are_never_auto_approved() {
-        let (d, wt, _proj, _item) = worker_commit_fixture(true);
+        let (d, wt, _proj, _item, safe) = worker_commit_fixture(true);
         std::fs::write(std::path::Path::new(&wt).join("LICENSE"), "x").unwrap();
         let refuse = [
             "git -c core.hooksPath=/tmp/hooks commit -m x",
@@ -970,9 +1190,10 @@ mod tests {
                 "should refuse: {cmd}"
             );
         }
-        for cmd in ["git commit -m work", "git add LICENSE", "git status", "git diff"] {
+        for rest in ["commit --no-verify -m work", "add LICENSE", "status", "diff"] {
+            let cmd = git_cmd(&safe, rest);
             assert!(
-                allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, cmd), &options(), &wt).is_some(),
+                allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &cmd), &options(), &wt).is_some(),
                 "should allow: {cmd}"
             );
         }
@@ -981,31 +1202,33 @@ mod tests {
     /// Missing/empty request cwd is fail-closed even when the session cwd is the worktree.
     #[test]
     fn worker_commit_missing_cwd_refuses_even_with_session_cwd() {
-        let (d, wt, _proj, _item) = worker_commit_fixture(true);
+        let (d, wt, _proj, _item, safe) = worker_commit_fixture(true);
         std::fs::write(std::path::Path::new(&wt).join("LICENSE"), "x").unwrap();
+        let commit = git_cmd(&safe, "commit --no-verify -m work");
         assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec_no_cwd("git commit -m work"), &options(), &wt).is_none(),
+            allow_team_tool(&d, "w1", "claude-code", &git_exec_no_cwd(&commit), &options(), &wt).is_none(),
             "omitted cwd must refuse"
         );
         assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec_empty_cwd("git commit -m work"), &options(), &wt).is_none(),
+            allow_team_tool(&d, "w1", "claude-code", &git_exec_empty_cwd(&commit), &options(), &wt).is_none(),
             "empty-string cwd must refuse (Cursor)"
         );
         assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec_empty_cwd("git add LICENSE"), &options(), &wt).is_none(),
+            allow_team_tool(&d, "w1", "claude-code", &git_exec_empty_cwd(&git_cmd(&safe, "add LICENSE")), &options(), &wt).is_none(),
             "empty cwd git add must refuse"
         );
     }
 
     #[test]
     fn worker_commit_missing_cwd_without_session_record_refuses() {
-        let (d, wt, _proj, _item) = worker_commit_fixture(true);
+        let (d, wt, _proj, _item, safe) = worker_commit_fixture(true);
+        let commit = git_cmd(&safe, "commit --no-verify -m work");
         assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec_no_cwd("git commit -m work"), &options(), "").is_none(),
+            allow_team_tool(&d, "w1", "claude-code", &git_exec_no_cwd(&commit), &options(), "").is_none(),
             "no request cwd and empty session cwd"
         );
         assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec_empty_cwd("git commit -m work"), &options(), "   ").is_none(),
+            allow_team_tool(&d, "w1", "claude-code", &git_exec_empty_cwd(&commit), &options(), "   ").is_none(),
             "whitespace-only session cwd"
         );
         let _ = wt;
@@ -1013,14 +1236,186 @@ mod tests {
 
     #[test]
     fn worker_commit_supplied_cwd_mismatch_refuses() {
-        let (d, wt, proj, _item) = worker_commit_fixture(true);
+        let (d, wt, proj, _item, safe) = worker_commit_fixture(true);
+        let commit = git_cmd(&safe, "commit --no-verify -m work");
         assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec(&proj, "git commit -m work"), &options(), &wt).is_none(),
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&proj, &commit), &options(), &wt).is_none(),
             "request cwd is project root, not worktree — even when session_cwd is worktree"
         );
         assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec("/tmp", "git commit -m work"), &options(), &wt).is_none(),
+            allow_team_tool(&d, "w1", "claude-code", &git_exec("/tmp", &commit), &options(), &wt).is_none(),
             "request cwd elsewhere"
         );
+    }
+
+    /// PLANTED-RED: hooks + fsmonitor planted after the approval check must not run when the
+    /// approved command carries the forced `-c` prefix; without those flags the marker appears.
+    #[cfg(unix)]
+    #[test]
+    fn worker_git_planted_red_hooks_after_approve_do_not_run_with_forced_c() {
+        let (d, wt, _proj, _item, safe) = worker_commit_fixture(true);
+        let root = std::path::Path::new(&wt);
+        std::fs::write(root.join("tracked.txt"), "body").unwrap();
+        // Identity + initial commit so later commits can succeed.
+        for args in [
+            ["-C", wt.as_str(), "config", "user.name", "t"] as [&str; 5],
+            ["-C", wt.as_str(), "config", "user.email", "t@t"],
+        ] {
+            assert!(std::process::Command::new("git").args(args).status().unwrap().success());
+        }
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "-C",
+                    &wt,
+                    "-c",
+                    &format!("core.hooksPath={}", path_for_git_c_flag(&safe)),
+                    "-c",
+                    "core.fsmonitor=false",
+                    "add",
+                    "tracked.txt",
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "-C",
+                    &wt,
+                    "-c",
+                    &format!("core.hooksPath={}", path_for_git_c_flag(&safe)),
+                    "-c",
+                    "core.fsmonitor=false",
+                    "commit",
+                    "--no-verify",
+                    "-m",
+                    "base",
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let marker = d.join("PLANTED_RED_MARKER");
+        let _ = std::fs::remove_file(&marker);
+        let approved = git_cmd(&safe, "commit --no-verify -m planted-red");
+        // Approval check while repo hooks are still empty / clean.
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &approved), &options(), &wt).is_some(),
+            "must auto-approve before planting"
+        );
+
+        // AFTER approval: plant executable pre-commit + fsmonitor that write the marker.
+        let planted_hooks = root.join(".planted-hooks");
+        std::fs::create_dir_all(&planted_hooks).unwrap();
+        let hook = planted_hooks.join("pre-commit");
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\necho planted-red-hook >> {}\nexit 0\n", marker.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let fsmon = d.join("planted-fsmon.sh");
+        std::fs::write(
+            &fsmon,
+            format!("#!/bin/sh\necho planted-red-fsmon >> {}\nexit 0\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fsmon, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", &wt, "config", "core.hooksPath", planted_hooks.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", &wt, "config", "core.fsmonitor", fsmon.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        // Touch a file so commit has something to do.
+        std::fs::write(root.join("tracked.txt"), "changed").unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "-C",
+                    &wt,
+                    "-c",
+                    &format!("core.hooksPath={}", path_for_git_c_flag(&safe)),
+                    "-c",
+                    "core.fsmonitor=false",
+                    "-c",
+                    "core.sshCommand=",
+                    "-c",
+                    "protocol.ext.allow=never",
+                    "add",
+                    "tracked.txt",
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        // Run the approved hardened command — marker must NOT appear.
+        let with_c = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&approved)
+            .current_dir(&wt)
+            .output()
+            .unwrap();
+        let with_c_raw = format!(
+            "status={:?}\nstdout={}\nstderr={}",
+            with_c.status.code(),
+            String::from_utf8_lossy(&with_c.stdout),
+            String::from_utf8_lossy(&with_c.stderr)
+        );
+        let marker_after_c = std::fs::read_to_string(&marker).unwrap_or_default();
+        assert!(
+            marker_after_c.is_empty(),
+            "marker must not appear with forced -c; marker={marker_after_c:?}; raw={with_c_raw}"
+        );
+        assert!(with_c.status.success(), "hardened commit should succeed: {with_c_raw}");
+
+        // Same commit without forced -c — marker MUST appear (hooks/fsmonitor from config).
+        let _ = std::fs::remove_file(&marker);
+        std::fs::write(root.join("tracked.txt"), "changed-again").unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", &wt, "add", "tracked.txt"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let without_c = std::process::Command::new("git")
+            .args(["-C", &wt, "commit", "-m", "no-hardening"])
+            .output()
+            .unwrap();
+        let without_c_raw = format!(
+            "status={:?}\nstdout={}\nstderr={}",
+            without_c.status.code(),
+            String::from_utf8_lossy(&without_c.stdout),
+            String::from_utf8_lossy(&without_c.stderr)
+        );
+        let marker_after_bare = std::fs::read_to_string(&marker).unwrap_or_default();
+        let doc = format!(
+            "PLANTED-RED with forced -c flags raw output:\n{with_c_raw}\n\n\
+             PLANTED-RED without forced -c flags raw output:\n{without_c_raw}\n\n\
+             marker_after_c={marker_after_c:?}\nmarker_after_bare={marker_after_bare:?}\n"
+        );
+        let doc_path = std::path::PathBuf::from("/tmp/pb-planted-red-raws.txt");
+        std::fs::write(&doc_path, &doc).unwrap();
+        eprintln!("{doc}");
+        assert!(
+            marker_after_bare.contains("planted-red"),
+            "marker must appear without forced -c; marker={marker_after_bare:?}; raw={without_c_raw}"
+        );
+        assert!(doc_path.is_file(), "planted-red raws written to {}", doc_path.display());
     }
 }
