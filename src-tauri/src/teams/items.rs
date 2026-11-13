@@ -485,19 +485,35 @@ fn git_in(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
-/// Format-only check: non-empty `prUrl` must be `https://<host>/<path…>` with no whitespace.
+/// Format-only check via the `url` crate (already locked via reqwest; declared direct in Cargo.toml).
+/// Requires scheme `https`, no userinfo, dotted host, and after normalisation at least one
+/// non-empty path segment that is not `.` or `..`. Query/fragment alone do not count.
 /// Does not verify that the PR exists.
 fn is_well_formed_https_pr_url(s: &str) -> bool {
     if s.is_empty() || s.chars().any(char::is_whitespace) {
         return false;
     }
-    let Some(rest) = s.strip_prefix("https://") else {
+    let Ok(u) = url::Url::parse(s) else {
         return false;
     };
-    let Some((host, path)) = rest.split_once('/') else {
+    if u.scheme() != "https" {
+        return false;
+    }
+    if !u.username().is_empty() || u.password().is_some() {
+        return false;
+    }
+    let Some(host) = u.host_str() else {
         return false;
     };
-    !host.is_empty() && host.contains('.') && !host.contains('@') && !path.is_empty()
+    if host.is_empty() || !host.contains('.') {
+        return false;
+    }
+    // Normalised path segments: reject empty-only (`/`), `.`, `..`.
+    let mut segs = u.path_segments().into_iter().flatten().filter(|s| !s.is_empty());
+    match segs.next() {
+        Some(s) if s != "." && s != ".." => true,
+        _ => false,
+    }
 }
 
 /// When marking done without a PR URL, the item's worktree must be clean and ahead of `pr_base`.
@@ -1025,7 +1041,19 @@ mod tests {
         let (_d, t, team) = setup();
         let i = t.add_item(&team, Some("desk1"), "20261109", "x", "bug", "low", "").unwrap();
         seed_dispatch(&t, &team, &i.id);
-        for bad in ["x", "http://example.test/pr/1", "https://example.test", "https://example.test/", "https://example.test/pr 1", "ftp://example.test/pr/1"] {
+        for bad in [
+            "x",
+            "http://example.test/pr/1",
+            "https://example.test",
+            "https://example.test/",
+            "https://example.test/pr 1",
+            "ftp://example.test/pr/1",
+            "https://user:pass@example.test/pr/1",
+            "https://example.test/?q=1",
+            "https://example.test/#frag",
+            "https://example.test/.",
+            "https://example.test/..",
+        ] {
             let err = t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "prUrl": bad })).unwrap_err().to_string();
             assert!(err.contains("https URL"), "bad={bad:?} err={err}");
             let err = t

@@ -101,6 +101,8 @@ unicode-normalization = "0.1"
 rand = "0.8"
 tar = "0.4"
 urlencoding = "2"
+# Already in the lockfile via reqwest; direct dep for prUrl format checks (teams items).
+url = "2.5"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws", "query"] }
 zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
 # Lists this computer's addresses, so a wildcard listen address binds only private ones (`net_bind`).
