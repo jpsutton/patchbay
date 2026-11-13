@@ -4266,3 +4266,122 @@ async fn restart_member_failure_rollback_leaves_one_live_session() {
     let all_sessions = a.state.db.list_code_sessions().unwrap();
     assert_eq!(all_sessions.len(), 2, "only coord and s1 exist");
 }
+
+/// F2 + dispatch_item: a Codex Auto worker for a project under `/tmp` (→ `/private/tmp` on macOS)
+/// stays read-only and the dispatch note carries `CODEX_WORKER_TEMP_READONLY_HINT`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatch_item_temp_project_keeps_codex_worker_read_only_with_hint_note() {
+    let id = db::new_id();
+    // Prefer the real macOS temp root; `/tmp` canonicalizes to `/private/tmp`.
+    let proj = PathBuf::from(format!("/tmp/pb-f2-dispatch-{id}"));
+    let _ = std::fs::remove_dir_all(&proj);
+    repo(&proj);
+    let canon = proj.canonicalize().unwrap();
+    assert!(
+        canon.starts_with("/private/tmp") || canon.starts_with("/tmp"),
+        "expected /tmp or /private/tmp project, got {}",
+        canon.display()
+    );
+
+    let a = node("f2-temp-dispatch");
+    let cwd = canon.to_string_lossy().into_owned();
+    let coord = a.state.db.create_code_session(&cwd, None, "codex", "auto").unwrap();
+
+    let builtin = teams::list_team_templates(&a.state)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|t| t.id == "builtin-triage-desk")
+        .unwrap();
+    let mut value = serde_json::to_value(&builtin).unwrap();
+    for s in value["seats"].as_array_mut().unwrap() {
+        if s["seat"] == "coordinator" {
+            s["agent"] = json!("codex");
+            s["permissionMode"] = json!("auto");
+            s["allowUnasked"] = json!(true);
+        }
+        if s["seat"] == "workers" {
+            s["count"] = json!(1);
+            s["agent"] = json!("codex");
+            s["model"] = json!(null);
+            s["choices"] = json!([]);
+            s["permissionMode"] = json!("auto");
+            s["allowUnasked"] = json!(true);
+        }
+    }
+    value["id"] = json!(null);
+    value["name"] = json!("f2-temp-codex");
+    value["allowWorkerCommit"] = json!(true);
+    let tpl = teams::save_template(&a.state, serde_json::from_value(value).unwrap())
+        .await
+        .unwrap();
+    let team = teams::create_team(
+        &a.state,
+        serde_json::from_value(json!({
+            "templateId": tpl.id,
+            "slug": format!("f2t{}", &id[..8]),
+            "idPrefix": "F2",
+            "cwd": cwd,
+            "worktreeRoot": "",
+            "exportDir": a.dir.join("out").to_string_lossy(),
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    teams::team_attach(&a.state, team.id.clone(), coord.id.clone(), "coordinator".into())
+        .await
+        .unwrap();
+
+    let it = teams::call_tool(
+        &a.state,
+        &coord.id,
+        "item_add",
+        &json!({ "title": "temp chore", "plan": "one line under temp" }),
+    )
+    .await
+    .unwrap();
+    let item_id = it["id"].as_str().unwrap().to_owned();
+    let w = teams::call_tool(
+        &a.state,
+        &coord.id,
+        "dispatch_item",
+        &json!({ "itemId": item_id }),
+    )
+    .await
+    .unwrap();
+
+    let note = w["note"].as_str().unwrap_or("");
+    assert!(
+        note.contains(code::agents::CODEX_WORKER_TEMP_READONLY_HINT)
+            || note.contains("project is under a temp directory"),
+        "dispatch note must carry temp-readonly hint, got: {note}"
+    );
+    assert_eq!(
+        w["codexSandbox"].as_str(),
+        Some("read-only"),
+        "temp project => codexSandbox read-only, got {w}"
+    );
+
+    let sid = w["sessionId"].as_str().unwrap();
+    let sess = a.state.db.get_code_session(sid).unwrap().unwrap();
+    assert_eq!(sess.agent, "codex");
+    assert_eq!(sess.permission_mode, "auto");
+    let launch = code::agents::prepare(&a.state.db, &a.state.data_dir, &sess).unwrap();
+    assert_eq!(
+        launch
+            .env
+            .iter()
+            .find(|(n, _)| n == "INITIAL_AGENT_MODE")
+            .map(|(_, v)| v.as_str()),
+        Some("read-only"),
+        "worker Auto under /tmp stays read-only at prepare"
+    );
+    assert!(launch
+        .approvals
+        .gaps
+        .iter()
+        .any(|g| *g == code::agents::CODEX_WORKER_TEMP_READONLY_HINT || g.contains("temp directory")));
+
+    let _ = std::fs::remove_dir_all(&proj);
+}
