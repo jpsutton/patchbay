@@ -84,7 +84,26 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
 
 /// Commands that chain, substitute or redirect can't be judged by their verb alone.
 fn is_compound(cmd: &str) -> bool {
-    cmd.contains(['\n', ';', '&', '|', '`', '>', '<']) || cmd.contains("$(")
+    cmd.contains(['\n', ';', '&', '|', '`', '>', '<']) || cmd.contains("$(") || cmd.contains("&&") || cmd.contains("||")
+}
+
+/// `VAR=value` prefix before the program (e.g. `FOO=bar git …`).
+fn has_env_assignment_prefix(tokens: &[&str]) -> bool {
+    tokens.first().is_some_and(|t| t.contains('=') && !t.starts_with('-'))
+}
+
+/// Git switches that retarget the repo or inject config/hooks/exec — never auto-approve.
+fn has_forbidden_git_override(tokens: &[&str]) -> bool {
+    tokens.iter().any(|t| {
+        matches!(
+            *t,
+            "-c" | "-C" | "--config-env" | "--exec-path" | "--namespace" | "--git-dir" | "--work-tree"
+        ) || t.starts_with("--config-env=")
+            || t.starts_with("--exec-path=")
+            || t.starts_with("--namespace=")
+            || t.starts_with("--git-dir=")
+            || t.starts_with("--work-tree=")
+    })
 }
 
 /// True when `cmd` is a single safe git verb (add/commit/status/diff) with no rewrite/push/force.
@@ -94,23 +113,14 @@ fn is_safe_worker_git(cmd: &str) -> bool {
         return false;
     }
     let tokens: Vec<&str> = cmd.split_whitespace().collect();
-    if tokens.first().copied() != Some("git") {
+    // Env prefixes and config/path overrides can run planted hooks or aim elsewhere.
+    if has_env_assignment_prefix(&tokens) || tokens.first().copied() != Some("git") {
         return false;
     }
-    // No directory / git-dir overrides that could aim the command elsewhere.
-    if tokens.iter().any(|t| *t == "-C" || t.starts_with("--git-dir") || t.starts_with("--work-tree")) {
+    if has_forbidden_git_override(&tokens) {
         return false;
     }
-    // Skip `git -c key=val` pairs to find the subcommand.
-    let mut i = 1;
-    while i < tokens.len() {
-        if tokens[i] == "-c" {
-            i += 2;
-            continue;
-        }
-        break;
-    }
-    let Some(verb) = tokens.get(i).copied() else {
+    let Some(verb) = tokens.get(1).copied() else {
         return false;
     };
     if !matches!(verb, "add" | "commit" | "status" | "diff") {
@@ -321,5 +331,41 @@ mod tests {
         assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git reset --hard HEAD~1"), &options(), &wt).is_none());
         assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit --amend -m x"), &options(), &wt).is_none());
         assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git add -f secret"), &options(), &wt).is_none());
+    }
+
+    #[test]
+    fn worker_git_config_and_path_overrides_are_never_auto_approved() {
+        let (d, wt, _proj, _item) = worker_commit_fixture(true);
+        let refuse = [
+            "git -c core.hooksPath=/tmp/hooks commit -m x",
+            "git -c core.fsmonitor=/tmp/fsmon status",
+            "git --config-env=http.extraHeader=TOKEN commit -m x",
+            "git --config-env=core.hooksPath=HOOKS status",
+            "git --exec-path=/tmp/evil commit -m x",
+            "git --exec-path=/tmp/evil status",
+            "git --git-dir=/tmp/other.git commit -m x",
+            "git --git-dir=/tmp/other.git status",
+            "git --work-tree=/tmp/elsewhere commit -m x",
+            "git -C /tmp/elsewhere commit -m x",
+            "git --namespace=evil commit -m x",
+            "git --namespace=evil status",
+            "FOO=bar git commit -m x",
+            "HOOKS=/tmp/h git status",
+            "git commit -m x && git status",
+            "git status || true",
+        ];
+        for cmd in refuse {
+            assert!(
+                allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, cmd), &options(), &wt).is_none(),
+                "should refuse: {cmd}"
+            );
+        }
+        // Existing allowed forms still pass.
+        for cmd in ["git commit -m work", "git add LICENSE", "git status", "git diff"] {
+            assert!(
+                allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, cmd), &options(), &wt).is_some(),
+                "should allow: {cmd}"
+            );
+        }
     }
 }
