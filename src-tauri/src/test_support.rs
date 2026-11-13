@@ -1,6 +1,6 @@
 //! What the tests need from the machine they run on.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A fresh folder under the temp dir whose path leaves room for a Unix socket inside it: macOS
 /// puts `temp_dir()` under `/var/folders/…` (about 50 characters) and caps a socket path at
@@ -8,6 +8,59 @@ use std::path::PathBuf;
 pub fn short_dir(tag: &str) -> PathBuf {
     let id = crate::db::new_id();
     std::env::temp_dir().join(format!("pb-{tag}-{}", &id[..8]))
+}
+
+/// A test's scratch folder, removed when it is dropped. The mesh tests make one per node (a
+/// database, its WAL, attachment stores): before this they were never removed and the temp dir
+/// grew by tens of gigabytes. Declare it as the LAST field of the struct that owns the node, so
+/// the database, the mesh and everything else holding a file open drop first (fields drop in
+/// declaration order); a task that still holds a handle (Windows will not delete an open file)
+/// is waited for with a few retries. Removal never panics: a leftover folder must not fail a test.
+/// Set `PB_KEEP_TEST_DIRS=1` to keep the folders of a test that FAILED, for a post-mortem.
+pub struct TestDir(PathBuf);
+
+impl TestDir {
+    /// `<temp>/<prefix>-<name>-<id>`, created.
+    pub fn new(prefix: &str, name: &str) -> TestDir {
+        let dir = std::env::temp_dir().join(format!("{prefix}-{name}-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        TestDir(dir)
+    }
+}
+
+impl std::ops::Deref for TestDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+/// Whether a dropped folder is kept: only when `PB_KEEP_TEST_DIRS` is `1` AND the test failed.
+pub fn keep_test_dirs(env: Option<&str>, failed: bool) -> bool {
+    failed && env == Some("1")
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        if keep_test_dirs(std::env::var("PB_KEEP_TEST_DIRS").ok().as_deref(), std::thread::panicking()) {
+            eprintln!("PB_KEEP_TEST_DIRS=1: keeping {}", self.0.display());
+            return;
+        }
+        for _ in 0..20 {
+            match std::fs::remove_dir_all(&self.0) {
+                Ok(()) => return,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            }
+        }
+    }
+}
+
+/// How many folders in the temp dir have `tag` in their name.
+pub fn dirs_named(tag: &str) -> usize {
+    std::fs::read_dir(std::env::temp_dir())
+        .map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().contains(tag)).count())
+        .unwrap_or(0)
 }
 
 /// Serialize the tests that set `GEMINI_HOME`. `std::env::set_var` (edition 2024: `unsafe`)
