@@ -258,8 +258,11 @@ Members report progress with `item_note`; the coordinator keeps sole ownership o
     anything outside still ask."
   - **Mode.** The stricter of the seat's mode and the coordinator's current mode; always-approve is
     refused. Workers have `created_by` = the coordinator, so lowering the coordinator's mode lowers theirs.
-    A dispatched Codex worker whose effective mode is Auto launches in Codex `workspace-write`
-    (network off); Default stays `read-only`. Standing seats and non-team Codex Auto stay `read-only`.
+    A **current** active dispatched Codex worker whose effective mode is Auto launches in Codex
+    `workspace-write` (network off; worktree plus `/tmp` and `$TMPDIR` writable); Default stays
+    `read-only`. Released, restored-after-release, swapped-out, or item-`done`/`dropped` sessions
+    stay `read-only` even if a `dispatches` history row remains. Standing seats and non-team Codex
+    Auto stay `read-only`.
   - **Pool.** The seat's `count` workers at once, enforced with the rate limits (10 dispatches per
     hour and 40 per day per team) in one `BEGIN IMMEDIATE` transaction that reserves the place
     before the worktree or session exists; a failed start gives the place back, though the

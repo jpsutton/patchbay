@@ -170,9 +170,33 @@ impl TeamsDb {
         }
     }
 
-    /// Whether `session` was started by `dispatch_item`.
+    /// Whether `session` was started by `dispatch_item` (history row; survives release).
     fn dispatched(&self, session: &str) -> Result<bool> {
         Ok(self.0.query_row("SELECT COUNT(*) FROM dispatches WHERE session_id = ?1", [session], |r| r.get::<_, i64>(0))? > 0)
+    }
+
+    /// True only while `session` is a **current** active dispatched worker: membership still open
+    /// (`left_at` NULL, status active), worker role, team not archived, assigned item not
+    /// `done`/`dropped`, and a `dispatches` row for this session. Released, restored-after-release,
+    /// swapped-out old sessions, and workers whose item is already done stay false — so Codex
+    /// Auto maps them to read-only. Dispatch history rows are not deleted.
+    pub(crate) fn active_dispatched_worker(&self, session: &str) -> Result<bool> {
+        Ok(self
+            .0
+            .query_row(
+                "SELECT COUNT(*) FROM members m
+                 JOIN teams t ON t.id = m.team_id AND t.archived_at IS NULL
+                 JOIN roles r ON r.id = m.role_id AND r.standing = 0
+                 JOIN items i ON i.team_id = m.team_id AND i.id = m.item_id
+                   AND i.status NOT IN ('done', 'dropped')
+                 WHERE m.session_id = ?1
+                   AND m.left_at IS NULL
+                   AND m.status = 'active'
+                   AND EXISTS (SELECT 1 FROM dispatches d WHERE d.session_id = m.session_id)",
+                [session],
+                |r| r.get::<_, i64>(0),
+            )?
+            > 0)
     }
 
     /// Sessions `desk` dispatched.
@@ -203,6 +227,24 @@ pub fn is_dispatched_in(data_dir: &std::path::Path, session: &str) -> bool {
         return false;
     }
     TeamsDb::open(data_dir).and_then(|t| t.dispatched(session)).unwrap_or(false)
+}
+
+/// True while `session` is a current active dispatched worker (see [`TeamsDb::active_dispatched_worker`]).
+/// Used for Codex Auto → workspace-write; history-only [`is_dispatched`] is not enough.
+pub fn is_active_dispatched_worker(state: &AppState, session: &str) -> bool {
+    open_if_any(state)
+        .and_then(|t| t.active_dispatched_worker(session).ok())
+        .unwrap_or(false)
+}
+
+/// Same as [`is_active_dispatched_worker`], for callers with only a data directory (e.g. `prepare`).
+pub fn is_active_dispatched_worker_in(data_dir: &std::path::Path, session: &str) -> bool {
+    if !data_dir.join("teams.db").is_file() {
+        return false;
+    }
+    TeamsDb::open(data_dir)
+        .and_then(|t| t.active_dispatched_worker(session))
+        .unwrap_or(false)
 }
 
 /// How many of the sessions `desk` created were dispatched workers, which don't count toward the
@@ -510,7 +552,7 @@ pub async fn member_release(state: &AppState, desk: &str, args: &Value) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::teams::{NewTeam, TeamsDb};
+    use crate::teams::{Ack, NewTeam, TeamsDb};
 
     #[test]
     fn stricter_picks_the_less_permissive_mode() {
@@ -636,6 +678,19 @@ mod tests {
             ack.gaps_text.clear();
         }
         assert!(!stale.acknowledged(true), "gaps_text change re-requires ack");
+        // Codex worker-auto consent names /tmp and $TMPDIR; changing that line alone would re-require.
+        let mut codex_seat = w(&saved);
+        codex_seat.agent = "codex".into();
+        codex_seat.permission_mode = "auto".into();
+        let with_tmp = codex_seat.snapshot(true);
+        assert!(with_tmp.gaps_text.contains("/tmp") && with_tmp.gaps_text.contains("$TMPDIR"), "{}", with_tmp.gaps_text);
+        codex_seat.unasked_ack = Some(Ack {
+            gaps_text: with_tmp.gaps_text.replace("/tmp and $TMPDIR", "TEMP"),
+            ..with_tmp.clone()
+        });
+        assert!(!codex_seat.acknowledged(true), "tmp wording change re-requires ack");
+        codex_seat.unasked_ack = Some(with_tmp);
+        assert!(codex_seat.acknowledged(true));
     }
 
     #[test]

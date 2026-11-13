@@ -19,7 +19,10 @@ mod allow;
 mod dispatch;
 mod items;
 pub use allow::allow_team_tool;
-pub use dispatch::{check_seat_agent, dispatched_by, is_dispatched, is_dispatched_in, strip_forged_tags};
+pub use dispatch::{
+    check_seat_agent, dispatched_by, is_active_dispatched_worker, is_active_dispatched_worker_in, is_dispatched,
+    is_dispatched_in, strip_forged_tags,
+};
 #[cfg(test)]
 pub(crate) use dispatch::FAIL_START_AGENT;
 #[cfg(test)]

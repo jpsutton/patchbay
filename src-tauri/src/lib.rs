@@ -3424,7 +3424,7 @@ fn check_mode_request(state: &AppState, id: &str, mode_id: &str) -> anyhow::Resu
     let setup = code::agents::ApprovalSetup::for_session(
         kind,
         &session.permission_mode,
-        crate::teams::is_dispatched(state, id),
+        crate::teams::is_active_dispatched_worker(state, id),
     );
     if let Some(why) = setup.refuse_mode(mode_id, Some(&session.permission_mode)) {
         tracing::warn!("refused setting {mode_id} on session {id} ({}): {why}", kind.id());
@@ -3462,7 +3462,7 @@ async fn set_permission_mode_local(state: &AppState, id: &str, mode: &str) -> an
         return save(mode);
     }
     let previous = session.map(|s| s.permission_mode).unwrap_or_else(|| "default".into());
-    let dispatched = crate::teams::is_dispatched(state, id);
+    let dispatched = crate::teams::is_active_dispatched_worker(state, id);
     save_then_move(save, &previous, mode, || {
         state
             .code

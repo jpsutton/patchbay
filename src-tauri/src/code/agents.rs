@@ -218,8 +218,9 @@ pub struct ApprovalSetup {
     /// `select_mode` is not fixed: it follows the session's approval mode (`codex_mode_for`), at
     /// start, on resume, on a change while running, and in `keep_mode`.
     pub follows_approval: bool,
-    /// True when this session was started by `dispatch_item`. Codex Auto then maps to
-    /// `workspace-write` instead of `read-only` (standing seats and non-team sessions stay read-only).
+    /// True when this session is a **current** active dispatched worker (open membership, worker
+    /// role, open item, team not archived). Codex Auto then maps to `workspace-write`; released /
+    /// restored / item-done / standing / non-team sessions stay read-only.
     pub dispatched_worker: bool,
 }
 
@@ -334,7 +335,7 @@ const CODEX_WRITING_GAPS: &[&str] = &[
 ];
 /// Dispatched worker in Auto: workspace-write, network off; outside the sandbox still asks.
 const CODEX_WORKER_AUTO_GAPS: &[&str] = &[
-    "As a team worker in Auto, Codex edits files and runs commands inside its worktree sandbox without asking. Network and anything outside the sandbox still ask.",
+    "As a team worker in Auto, Codex edits files and runs commands inside its worktree sandbox without asking, and also writes under /tmp and $TMPDIR without asking. Network stays off; anything else outside the sandbox still asks.",
     CODEX_CONFIG_GAP,
 ];
 
@@ -1216,7 +1217,7 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
         }
         AgentKind::Kilo => env.push(("KILO_CONFIG_CONTENT".to_owned(), base_config)),
         AgentKind::Codex => {
-            let dispatched = crate::teams::is_dispatched_in(data_dir, &session.id);
+            let dispatched = crate::teams::is_active_dispatched_worker_in(data_dir, &session.id);
             env.push((
                 "INITIAL_AGENT_MODE".to_owned(),
                 codex_mode_for(Some(&session.permission_mode), dispatched).to_owned(),
@@ -1289,7 +1290,7 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
         approvals: ApprovalSetup::for_session(
             kind,
             &session.permission_mode,
-            crate::teams::is_dispatched_in(data_dir, &session.id),
+            crate::teams::is_active_dispatched_worker_in(data_dir, &session.id),
         ),
         native: None,
     })
@@ -2352,6 +2353,7 @@ time.sleep(60)
         }
         let worker_auto = codex_gaps_for(Some("auto"), true).join(" ");
         assert!(worker_auto.contains("team worker in Auto") && worker_auto.contains("still ask"), "{worker_auto}");
+        assert!(worker_auto.contains("/tmp") && worker_auto.contains("$TMPDIR"), "{worker_auto}");
         assert!(!worker_auto.contains("approved automatically"), "{worker_auto}");
         assert_eq!(codex_gaps_for(Some("auto"), false), codex_gaps_for(Some("default"), false));
         assert_eq!(codex_gaps_for(Some("default"), true), codex_gaps_for(Some("default"), false));
@@ -2376,7 +2378,30 @@ time.sleep(60)
         assert!(!claude.follows_approval);
     }
 
-    /// A dispatched Codex worker in Auto launches in workspace-write with the worker-auto header.
+    /// Seed an active dispatched worker membership + open item for `session`.
+    fn seed_active_worker(dir: &std::path::Path, team_id: &str, session: &str, item: &str, status: &str) {
+        let conn = rusqlite::Connection::open(dir.join("teams.db")).unwrap();
+        conn.execute(
+            "INSERT INTO items(team_id, id, title, type, severity, status, plan, created_at, updated_at)
+             VALUES (?1, ?2, ?2, 'bug', 'low', ?3, '', 0, 0)",
+            rusqlite::params![team_id, item, status],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO members(team_id, session_id, seat, role_id, status, item_id, joined_at)
+             VALUES (?1, ?2, 'workers', 'builtin-worker', 'active', ?3, 0)",
+            rusqlite::params![team_id, session, item],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO dispatches(team_id, item_id, seat, desk_session, session_id, at)
+             VALUES (?1, ?2, 'workers', 'desk', ?3, 0)",
+            rusqlite::params![team_id, item, session],
+        )
+        .unwrap();
+    }
+
+    /// A current active Codex worker in Auto launches in workspace-write; released / item-done do not.
     #[test]
     fn codex_dispatched_worker_auto_launches_workspace_write() {
         let dir = std::env::temp_dir().join(format!("pb-ag-{}", crate::db::new_id()));
@@ -2401,13 +2426,8 @@ time.sleep(60)
                 export_dir: Some(dir.join("out").to_string_lossy().into_owned()),
             })
             .unwrap();
-        // Second connection: TeamsDb's Connection field is private outside the teams module.
-        let conn = rusqlite::Connection::open(dir.join("teams.db")).unwrap();
-        conn.execute(
-            "INSERT INTO dispatches(team_id, item_id, seat, desk_session, session_id, at) VALUES (?1,'i1','workers','desk',?2,0)",
-            rusqlite::params![team.id, session.id],
-        )
-        .unwrap();
+        seed_active_worker(&dir, &team.id, &session.id, "i1", "in-progress");
+        assert!(crate::teams::is_active_dispatched_worker_in(&dir, &session.id));
         assert!(crate::teams::is_dispatched_in(&dir, &session.id));
         let l = prepare(&db, &dir, &session).unwrap();
         let mode = |k: &str| l.env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
@@ -2415,14 +2435,63 @@ time.sleep(60)
         assert_eq!(l.approvals.select_mode.as_deref(), Some("workspace-write"));
         assert!(l.approvals.dispatched_worker);
         assert_eq!(l.approvals.gaps, codex_gaps_for(Some("auto"), true));
-        // Same session under default stays read-only even when dispatched.
+        // Same session under default stays read-only even when an active worker.
         db.set_code_session_permission_mode(&session.id, "default").unwrap();
         let l = prepare(&db, &dir, &db.get_code_session(&session.id).unwrap().unwrap()).unwrap();
         assert_eq!(
             l.env.iter().find(|(n, _)| n == "INITIAL_AGENT_MODE").map(|(_, v)| v.as_str()),
             Some("read-only")
         );
+        db.set_code_session_permission_mode(&session.id, "auto").unwrap();
+
+        // Item done (not yet released) => read-only: coding is finished; don't keep write sandbox.
+        let conn = rusqlite::Connection::open(dir.join("teams.db")).unwrap();
+        conn.execute("UPDATE items SET status = 'done' WHERE id = 'i1'", []).unwrap();
+        assert!(!crate::teams::is_active_dispatched_worker_in(&dir, &session.id));
+        assert!(crate::teams::is_dispatched_in(&dir, &session.id), "history row kept");
+        let l = prepare(&db, &dir, &db.get_code_session(&session.id).unwrap().unwrap()).unwrap();
+        assert_eq!(mode_of(&l), Some("read-only"), "item done => read-only");
+
+        // Restore open item, then release membership: history remains, active flag clears.
+        conn.execute("UPDATE items SET status = 'in-progress' WHERE id = 'i1'", []).unwrap();
+        assert!(crate::teams::is_active_dispatched_worker_in(&dir, &session.id));
+        conn.execute(
+            "UPDATE members SET left_at = 1, status = 'released' WHERE session_id = ?1",
+            [&session.id],
+        )
+        .unwrap();
+        assert!(!crate::teams::is_active_dispatched_worker_in(&dir, &session.id));
+        let l = prepare(&db, &dir, &db.get_code_session(&session.id).unwrap().unwrap()).unwrap();
+        assert_eq!(mode_of(&l), Some("read-only"), "released => read-only");
+
+        // Restart: new session is the active worker; old stays read-only.
+        let neu = db
+            .create_code_session(&dir.to_string_lossy(), None, "codex", "auto")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO members(team_id, session_id, seat, role_id, status, item_id, joined_at)
+             VALUES (?1, ?2, 'workers', 'builtin-worker', 'active', 'i1', 2)",
+            rusqlite::params![team.id, neu.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO dispatches(team_id, item_id, seat, desk_session, session_id, at)
+             VALUES (?1, 'i1', 'workers', 'desk', ?2, 2)",
+            rusqlite::params![team.id, neu.id],
+        )
+        .unwrap();
+        assert!(crate::teams::is_active_dispatched_worker_in(&dir, &neu.id));
+        assert!(!crate::teams::is_active_dispatched_worker_in(&dir, &session.id));
+        assert_eq!(mode_of(&prepare(&db, &dir, &neu).unwrap()), Some("workspace-write"));
+        assert_eq!(
+            mode_of(&prepare(&db, &dir, &db.get_code_session(&session.id).unwrap().unwrap()).unwrap()),
+            Some("read-only")
+        );
         let _ = std::fs::remove_dir_all(&dir);
+
+        fn mode_of(l: &Launch) -> Option<&str> {
+            l.env.iter().find(|(n, _)| n == "INITIAL_AGENT_MODE").map(|(_, v)| v.as_str())
+        }
     }
 
     /// A team member's role instructions reach the prompt hook of each agent that has one, and
