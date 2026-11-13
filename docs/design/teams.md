@@ -121,14 +121,17 @@ option allow-list:
 
 Path args must be relative (no `..` component), resolve inside the worktree after following
 symlinks, and name a regular file or directory. Before any `git` verb auto-approves, Patchbay
-reads the worktree's effective `core.hooksPath` and `core.fsmonitor` (hardened read, no `-c`
-override that would hide them) and falls to a prompt if `fsmonitor` is set to anything but
-false/empty, if `hooksPath` resolves inside the project's worktree root (worker-writable), or if
-a hook file for that verb exists under a hooks dir inside the item worktree. Human-installed hooks
-in the main `.git/hooks` (default when `hooksPath` is unset) are trusted.
+reads `core.fsmonitor` and the effective hooks directory (`core.hooksPath` if set, else
+`rev-parse --git-path hooks`), wherever it is. Auto-approve falls to a prompt if `fsmonitor` is
+set to anything but false/empty; if the hooks dir cannot be determined; or, for `commit`/`add`, if
+that directory contains any executable non-`.sample` file (simplest form — covers husky,
+lint-staged, and every commit hook; human-installed hooks are not trusted because they run
+worker-written content). For `status`/`diff`/`log`, only an executable `post-index-change` blocks
+(plus the fsmonitor gate). In a repo with commit hooks, worker commits therefore always prompt.
+`.sample` hooks and non-executable files are ignored; a missing hooks directory is allowed.
 
-Residual: config-defined clean/smudge filters, textconv, and external diff helpers are
-human-configured programs that may still run on worker content; this allow does not disable them.
+Residual: config-defined clean/smudge filters, textconv, and external diff helpers; check-then-exec
+TOCTOU on the hooks directory; unbounded `ls -R` is not capped here.
 
 ## Team
 

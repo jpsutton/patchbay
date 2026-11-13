@@ -478,6 +478,7 @@ export function TemplatesEditor() {
                 <code className="text-[10px]">git log</code> inside their assigned worktree without asking.
                 <span className="mt-1 block text-muted">
                   Path arguments must resolve inside that worktree (no absolute escapes, <code className="text-[10px]">..</code>, or symlinks out).
+                  In a repo with commit hooks (husky, lint-staged, or any executable hook under the effective hooks dir), worker commits always prompt.
                   Push, branch delete, rewrite, and write/exec options (for example <code className="text-[10px]">git log --output</code>) remain prompted.
                 </span>
               </span>

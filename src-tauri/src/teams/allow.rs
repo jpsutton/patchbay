@@ -5,11 +5,11 @@
 //! `git commit`, and read-only `ls` / `cat` / `git status` / `git diff` / `git log`, inside its
 //! assigned worktree without a prompt. Tokenization is fail-closed (shell metacharacters rejected;
 //! option allow-lists per verb; paths relative, no `..`, symlink-resolved inside the worktree).
-//! Before any git verb auto-approves, effective `core.hooksPath` / `core.fsmonitor` and
-//! worktree-local hook files are checked (see `worker_git_repo_blocks_auto`).
+//! Before any git verb auto-approves, effective hooks dir + `core.fsmonitor` are checked
+//! (`worker_git_repo_blocks_auto`). Any executable non-`.sample` hook blocks `commit`/`add`
+//! (human husky/lint-staged included); status/diff/log only gate on `post-index-change` + fsmonitor.
 //!
-//! Residual: config-defined filters / textconv / external diff are human-configured programs that
-//! may still run on worker content; Patchbay does not disable those on auto-approve.
+//! Residual: config-defined filters / textconv / external diff; check-then-exec TOCTOU on hooks.
 //!
 //! Not a `permission_rules` row: those match a tool kind and a command prefix, and MCP calls are
 //! kind `other`, so a rule would approve every MCP tool of every server. This runs in the
@@ -382,7 +382,7 @@ fn is_safe_worker_command(cmd: &str, worktree: &Path) -> bool {
     }
 }
 
-// ---- Repo config / hooks gate (R2) ------------------------------------------------------------
+// ---- Repo config / hooks gate -----------------------------------------------------------------
 
 /// Read-only git probe in `cwd`. No `-c` overrides: they would make `config --get` lie about the
 /// keys we are inspecting. These subcommands do not run hooks or fsmonitor.
@@ -404,24 +404,61 @@ fn hardened_git(cwd: &Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
-fn path_under(root: &Path, candidate: &Path) -> bool {
-    match (root.canonicalize(), candidate.canonicalize()) {
-        (Ok(r), Ok(c)) => c.starts_with(&r),
-        _ => false,
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
     }
 }
 
-fn hooks_for_verb(verb: &str) -> &'static [&'static str] {
-    match verb {
-        "commit" => &["pre-commit", "prepare-commit-msg", "commit-msg", "post-commit"],
-        "add" => &[], // no hook runs for add alone
-        // status/diff/log: fsmonitor covered separately
-        _ => &[],
+/// Effective hooks directory for `worktree`, or `None` if it cannot be determined (fail closed).
+fn resolve_hooks_dir(worktree: &Path) -> Option<PathBuf> {
+    let hooks_path = hardened_git(worktree, &["config", "--get", "core.hooksPath"])?;
+    let dir = if hooks_path.is_empty() {
+        let rel = hardened_git(worktree, &["rev-parse", "--git-path", "hooks"])?;
+        let p = PathBuf::from(rel);
+        if p.is_absolute() { p } else { worktree.join(p) }
+    } else {
+        let p = PathBuf::from(hooks_path);
+        if p.is_absolute() { p } else { worktree.join(p) }
+    };
+    Some(dir)
+}
+
+fn name_is_sample(name: &std::ffi::OsStr) -> bool {
+    name.to_string_lossy().ends_with(".sample")
+}
+
+/// Form chosen for commit/add: refuse if the hooks dir contains **any** executable non-`.sample`
+/// file (covers husky/lint-staged and every verb-specific hook without enumerating names).
+fn hooks_dir_has_executable_non_sample(hooks_dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(hooks_dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        if name_is_sample(&entry.file_name()) {
+            continue;
+        }
+        if is_executable_file(&entry.path()) {
+            return true;
+        }
     }
+    false
 }
 
 /// True when auto-approve must fall through to a prompt.
-fn worker_git_repo_blocks_auto(worktree: &Path, worktree_root: &Path, verb: &str) -> bool {
+fn worker_git_repo_blocks_auto(worktree: &Path, verb: &str) -> bool {
     let Some(fsmonitor) = hardened_git(worktree, &["config", "--get", "core.fsmonitor"]) else {
         return true; // fail closed if git isn't usable
     };
@@ -429,36 +466,19 @@ fn worker_git_repo_blocks_auto(worktree: &Path, worktree_root: &Path, verb: &str
         return true;
     }
 
-    let Some(hooks_path) = hardened_git(worktree, &["config", "--get", "core.hooksPath"]) else {
-        return true;
+    let Some(hooks_dir) = resolve_hooks_dir(worktree) else {
+        return true; // cannot determine hooks dir
     };
-
-    let hooks_dir = if hooks_path.is_empty() {
-        let Some(rel) = hardened_git(worktree, &["rev-parse", "--git-path", "hooks"]) else {
-            return true;
-        };
-        let p = PathBuf::from(&rel);
-        if p.is_absolute() { p } else { worktree.join(p) }
-    } else {
-        let p = PathBuf::from(&hooks_path);
-        if p.is_absolute() { p } else { worktree.join(p) }
-    };
-
-    // hooksPath set and resolves inside any project worktree (worktree_root) or this worktree.
-    if !hooks_path.is_empty() && (path_under(worktree_root, &hooks_dir) || path_under(worktree, &hooks_dir)) {
-        return true;
+    // Missing hooks directory: nothing to run → allow (subject to fsmonitor above).
+    if !hooks_dir.is_dir() {
+        return false;
     }
 
-    // Hook file for this verb living inside the item worktree (worker-writable).
-    if path_under(worktree, &hooks_dir) {
-        for name in hooks_for_verb(verb) {
-            if hooks_dir.join(name).is_file() {
-                return true;
-            }
-        }
+    match verb {
+        "commit" | "add" => hooks_dir_has_executable_non_sample(&hooks_dir),
+        "status" | "diff" | "log" => is_executable_file(&hooks_dir.join("post-index-change")),
+        _ => true,
     }
-
-    false
 }
 
 /// Opt-in worktree allow: active worker on an assigned item, template opted in, cwd is the
@@ -495,7 +515,7 @@ fn allow_worker_commit(data_dir: &Path, session: &str, tool_call: &Value, option
     };
     if tokens.first().map(String::as_str) == Some("git") {
         let verb = tokens.get(1).map(String::as_str).unwrap_or("");
-        if worker_git_repo_blocks_auto(&worktree, &worktree_root, verb) {
+        if worker_git_repo_blocks_auto(&worktree, verb) {
             return None;
         }
     }
@@ -632,11 +652,21 @@ mod tests {
         let item_id = "G-20261112-01";
         let worktree = trees.join(item_id.to_lowercase());
         std::fs::create_dir_all(&worktree).unwrap();
-        // Real git repo so R2 config probes succeed (hooksPath unset, fsmonitor unset).
+        // Real git repo so config probes succeed. Host `init.templateDir` may install executable
+        // hooks (e.g. pre-push); point hooksPath at an empty dir so defaults stay allowable.
         assert!(
             std::process::Command::new("git")
                 .args(["-c", "init.defaultBranch=main", "init", "-q"])
                 .current_dir(&worktree)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let empty_hooks = worktree.join(".pb-test-hooks-empty");
+        std::fs::create_dir_all(&empty_hooks).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", worktree.to_str().unwrap(), "config", "core.hooksPath", empty_hooks.to_str().unwrap()])
                 .status()
                 .unwrap()
                 .success()
@@ -718,8 +748,22 @@ mod tests {
         }
     }
 
+    fn write_hook(dir: &std::path::Path, name: &str, executable: bool) {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = if executable { 0o755 } else { 0o644 };
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        #[cfg(not(unix))]
+        let _ = executable;
+    }
+
     #[test]
-    fn worker_symlink_and_hooks_path_inside_worktree_block_auto() {
+    fn worker_symlink_escape_and_fsmonitor_block_auto() {
         let (d, wt, proj, _item) = worker_commit_fixture(true);
         let root = std::path::Path::new(&wt);
         std::fs::write(root.join("README"), "hi").unwrap();
@@ -730,27 +774,6 @@ mod tests {
         std::os::unix::fs::symlink(&outside, &link).unwrap();
         assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "cat leak"), &options(), &wt).is_none());
 
-        // Plant hooksPath inside the worktree → refuse git auto-approve.
-        let hooks = root.join("planted-hooks");
-        std::fs::create_dir_all(&hooks).unwrap();
-        assert!(
-            std::process::Command::new("git")
-                .args(["-C", &wt, "config", "core.hooksPath", hooks.to_str().unwrap()])
-                .status()
-                .unwrap()
-                .success()
-        );
-        assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git status"), &options(), &wt).is_none(),
-            "hooksPath inside worktree"
-        );
-        assert!(
-            std::process::Command::new("git")
-                .args(["-C", &wt, "config", "--unset", "core.hooksPath"])
-                .status()
-                .unwrap()
-                .success()
-        );
         assert!(
             std::process::Command::new("git")
                 .args(["-C", &wt, "config", "core.fsmonitor", "/tmp/fsmon"])
@@ -761,6 +784,95 @@ mod tests {
         assert!(
             allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git status"), &options(), &wt).is_none(),
             "fsmonitor set"
+        );
+    }
+
+    #[test]
+    fn worker_executable_hooks_anywhere_block_commit_add() {
+        let (d, wt, _proj, _item) = worker_commit_fixture(true);
+        std::fs::write(std::path::Path::new(&wt).join("LICENSE"), "x").unwrap();
+        // Fixture points hooksPath at an empty dir → commit/add auto-approve.
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some());
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git add LICENSE"), &options(), &wt).is_some());
+
+        let empty = resolve_hooks_dir(std::path::Path::new(&wt)).expect("hooks dir");
+        write_hook(&empty, "pre-commit.sample", true);
+        write_hook(&empty, "pre-commit", false);
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some(),
+            "sample + non-exec ignored"
+        );
+
+        // Simulate main .git/hooks: unset hooksPath and plant an executable hook there.
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", &wt, "config", "--unset", "core.hooksPath"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let main_hooks = {
+            let rel = hardened_git(std::path::Path::new(&wt), &["rev-parse", "--git-path", "hooks"]).unwrap();
+            let p = std::path::PathBuf::from(&rel);
+            if p.is_absolute() { p } else { std::path::Path::new(&wt).join(p) }
+        };
+        // Clear template-installed hooks so only our planted file matters.
+        if main_hooks.is_dir() {
+            for e in std::fs::read_dir(&main_hooks).unwrap().flatten() {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+        write_hook(&main_hooks, "pre-commit", true);
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_none(),
+            "executable hook in .git/hooks"
+        );
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git add LICENSE"), &options(), &wt).is_none(),
+            "add also blocked by any executable hook"
+        );
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git status"), &options(), &wt).is_some());
+
+        // External core.hooksPath with an executable hook → refuse.
+        let external = std::path::Path::new(&wt).join("external-hooks");
+        write_hook(&external, "pre-commit", true);
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", &wt, "config", "core.hooksPath", external.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_none(),
+            "external hooksPath with executable"
+        );
+
+        // Empty / missing hooks dir via hooksPath → allow.
+        let empty2 = std::path::Path::new(&wt).join("empty-hooks-2");
+        std::fs::create_dir_all(&empty2).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", &wt, "config", "core.hooksPath", empty2.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some(),
+            "empty hooks dir allowed"
+        );
+        let missing = std::path::Path::new(&wt).join("missing-hooks-dir");
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", &wt, "config", "core.hooksPath", missing.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some(),
+            "missing hooks dir allowed"
         );
     }
 
