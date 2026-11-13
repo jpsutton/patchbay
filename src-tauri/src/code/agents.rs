@@ -560,8 +560,9 @@ fn path_under(path: &Path, root: &Path) -> bool {
 
 /// Roots Codex still makes writable under workspace-write while F1 excludes are unconfirmed.
 ///
-/// Returns `None` (caller refuses workspace-write) when `$TMPDIR` is set but not absolute, or when
-/// any included root fails to canonicalize.
+/// Returns `None` (caller refuses workspace-write) when `$TMPDIR` is set to a non-empty value that
+/// is not absolute or cannot canonicalize. A non-empty value is never trimmed away to "unset"
+/// (whitespace-only `$TMPDIR` refuses).
 fn temp_writable_roots() -> Option<Vec<PathBuf>> {
     temp_writable_roots_from(std::env::var("TMPDIR").ok().as_deref())
 }
@@ -580,11 +581,12 @@ fn temp_writable_roots_from(tmpdir: Option<&str>) -> Option<Vec<PathBuf>> {
             return None;
         }
     }
+    // Any non-empty $TMPDIR (including whitespace-only) must be usable as-is.
+    // Do not trim-to-unset: whitespace or relative values refuse the mapping.
     if let Some(raw) = tmpdir {
-        let t = raw.trim();
-        if !t.is_empty() {
-            let p = Path::new(t);
-            // Relative $TMPDIR is unusable for safe comparison — refuse mapping.
+        if !raw.is_empty() {
+            let p = Path::new(raw);
+            // Relative / non-absolute $TMPDIR is unusable for safe comparison — refuse mapping.
             if !p.is_absolute() {
                 return None;
             }
@@ -2918,6 +2920,24 @@ time.sleep(60)
             "relative TMPDIR => roots unavailable => mapping refused"
         );
         assert!(temp_writable_roots_from(Some("/tmp")).is_some());
+        // Whitespace-only / padded $TMPDIR must not trim-to-unset — refuse unless raw is absolute.
+        assert!(
+            temp_writable_roots_from(Some("   ")).is_none(),
+            "whitespace-only TMPDIR => refuse (no trim-to-unset)"
+        );
+        assert!(
+            temp_writable_roots_from(Some("\t\n")).is_none(),
+            "tab/newline TMPDIR => refuse"
+        );
+        assert!(
+            temp_writable_roots_from(Some("  /tmp  ")).is_none(),
+            "padded absolute TMPDIR is not absolute as raw Path => refuse"
+        );
+        assert!(
+            temp_writable_roots_from(Some("")).is_some(),
+            "empty string TMPDIR treated as unset => ok"
+        );
+        assert!(temp_writable_roots_from(None).is_some());
 
         let id = crate::db::new_id();
         let home = f2_non_temp_fixture(&format!("proj-gate-{id}"));
