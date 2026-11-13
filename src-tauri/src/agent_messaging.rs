@@ -359,7 +359,6 @@ impl AgentMessagingBridge {
     pub fn revoke(&self, session_id: &str) {
         self.tokens.lock().unwrap().remove(session_id);
     }
-    }
 
     pub fn serve(&self, listener: StdTcpListener, state: AppState) {
         let tokens = self.tokens.clone();
