@@ -262,9 +262,15 @@ Members report progress with `item_note`; the coordinator keeps sole ownership o
     `workspace-write` (network off; worktree plus `/tmp` and `$TMPDIR` writable) only when
     `codex_worker_workspace_write_blocked` is clear: a linked item worktree whose common git dir is
     outside the worktree and, while F1 temp excludes are not confirmed, not under `/tmp` /
-    `$TMPDIR`. Otherwise F2 keeps the worker `read-only` (temp teams, main-checkout cwd, unprobeable
-    git). Default stays `read-only`. The `dispatches` row must match the membership's `team_id` and
-    `item_id`. Released, restored-after-release, swapped-out, or item-`done`/`dropped` sessions stay
+    `$TMPDIR`. **F1 (upstream limit):** `@agentclientprotocol/codex-acp@2.2.2` hardcodes
+    `excludeSlashTmp` / `excludeTmpdirEnvVar` (`exclude_slash_tmp` / `exclude_tmpdir_env_var`) to
+    false on every turn, so a `CODEX_CONFIG` / `[sandbox_workspace_write]` exclude cannot stick;
+    Patchbay keeps `CODEX_WORKER_TEMP_EXCLUDES_CONFIRMED = false` until an adapter (or Patchbay)
+    can confirm those excludes in effect. Otherwise F2 keeps the worker `read-only` (temp teams,
+    main-checkout cwd, unprobeable git) and `dispatch_item`'s `note` includes
+    `CODEX_WORKER_TEMP_READONLY_HINT` ("project is under a temp directory"). Default stays
+    `read-only`. The `dispatches` row must match the membership's `team_id` and `item_id`.
+    Released, restored-after-release, swapped-out, or item-`done`/`dropped` sessions stay
     `read-only` on the next launch even if a `dispatches` history row remains. Standing seats and
     non-team Codex Auto stay `read-only`. **Lifecycle (known):** a *running* Codex worker keeps the
     sandbox it launched with between item `done` and `member_release`; mode is fixed at launch.
