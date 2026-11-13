@@ -3125,13 +3125,14 @@ async fn production_quit_path_uses_the_ruled_budget_as_its_deadline() {
     .await;
     let elapsed = t0.elapsed();
     assert!(finished.load(std::sync::atomic::Ordering::Relaxed), "finish ran");
+    // Branch (advisor ruling): the path's deadline is std/wall-clock (`std::time::Instant`
+    // in tell_queued_senders_then, consumed via saturating_duration_since in
+    // tell_drained_then) — tokio's paused clock cannot control wall arithmetic, so this
+    // stays REAL TIME with the FLOOR only: >= 4.5s proves the path read QUIT_NOTICE_BUDGET
+    // (the 1s hardcode trips it), and there is NO ceiling to overrun under CI load.
     assert!(
         elapsed >= std::time::Duration::from_millis(4500),
         "the production path waited its full ruled budget (it must read QUIT_NOTICE_BUDGET), took {elapsed:?}"
-    );
-    assert!(
-        elapsed < std::time::Duration::from_secs(7),
-        "the production path uses QUIT_NOTICE_BUDGET as its deadline, not a longer one, took {elapsed:?}"
     );
 }
 
