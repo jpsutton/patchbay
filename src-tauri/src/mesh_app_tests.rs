@@ -167,6 +167,37 @@ async fn desktop_starts_a_session_in_a_remote_folder() {
     assert_eq!(s.host_node.as_deref(), Some(bn.as_str()));
 }
 
+/// A remote `code.image` request (a phone or another computer asking this host for a picture a reply
+/// linked) for a source on another machine's share, in any spelling, or behind a link in the session
+/// folder that points at one, is refused before the host's filesystem is asked: asking connects to the
+/// share and offers the host's credentials. `PB_E2E_LINK` is a link made earlier by whoever watches the
+/// network (its folder is then the session folder); `PB_E2E_SHARE` the share it points at.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_remote_image_request_for_a_share_is_refused_without_touching_it() {
+    let (a, b) = (node("alpha3"), node("bravo3"));
+    link(&a, &b).await;
+    let an = a.state.mesh.node_id().to_owned();
+    let pre = std::env::var("PB_E2E_LINK").ok().map(PathBuf::from);
+    let proj = pre.as_ref().and_then(|l| l.parent().map(PathBuf::from)).unwrap_or_else(|| a.dir.join("proj"));
+    std::fs::create_dir_all(&proj).unwrap();
+    if pre.is_none() {
+        let share = std::env::var("PB_E2E_SHARE").unwrap_or_else(|_| r"\\192.0.2.1\share".into());
+        if let Err(e) = std::os::windows::fs::symlink_dir(&share, proj.join("to_share")) {
+            eprintln!("skipped: cannot create a directory symlink here ({e})");
+            return;
+        }
+    }
+    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok", "default").unwrap();
+    until("session reaches B", 10, || b.state.db.get_code_session(&s.id).unwrap().is_some()).await;
+    let started = std::time::Instant::now();
+    for path in [r"\\192.0.2.1\s\a.png", "file:////192.0.2.1/s/a.png", r"to_share\a.png", "to_share/deep/a.png"] {
+        let err = b.state.mesh.rpc(&an, "code.image", json!({ "id": s.id, "path": path })).await.unwrap_err().to_string();
+        assert!(err.contains("another machine"), "{path}: {err}");
+    }
+    assert!(started.elapsed() < Duration::from_secs(5), "refusing took {:?}: the share was reached", started.elapsed());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn remote_session_commands_and_terminal() {
     let (a, b) = (node("alpha2"), node("bravo2"));

@@ -413,11 +413,11 @@ fn local_path_exists(path: String, cwd: Option<String>) -> bool {
 /// as existing so its link is drawn, and a click asks first (`open_local_path`).
 fn path_exists_with(path: &str, cwd: Option<&str>, exists: impl Fn(&std::path::Path) -> bool) -> bool {
     let home = std::path::Path::new(cwd.unwrap_or(""));
-    if patchbay_agent::foreign_location(home, std::path::Path::new(path)) {
+    if patchbay_agent::foreign_target(home, std::path::Path::new(path)) {
         return true;
     }
     match resolve_mentioned(path, cwd) {
-        Some(p) if patchbay_agent::foreign_location(home, &p) => true,
+        Some(p) if patchbay_agent::foreign_target(home, &p) => true,
         Some(p) => exists(&p),
         None => false,
     }
@@ -1145,6 +1145,41 @@ mod file_link_tests {
         assert_eq!(click("sub/a.txt", Some(&dir.display().to_string()), &mut ops).unwrap(), ClickDone::Opened);
         assert_eq!(ops.opened, vec![dir.join("sub/a.txt")]);
         assert!(ops.copied.is_empty());
+    }
+
+    /// A mentioned path that goes through a link in the folder to another machine's share is drawn as a
+    /// link without a probe: `exists` follows the link and connects to the share, for every path a
+    /// transcript mentions, with no click. The probe handed in is the real `exists`, counted.
+    #[test]
+    #[cfg(windows)]
+    fn a_mention_behind_a_link_to_a_share_is_drawn_without_a_probe() {
+        let dir = std::env::temp_dir().join(format!("pb-mention-{}", crate::db::new_id()));
+        // `PB_E2E_LINK`: a link made earlier by whoever watches the network, so the OS's own reaction to
+        // creating a link to a share is over before the call under test (its folder is then the project).
+        let pre = std::env::var("PB_E2E_LINK").ok().map(std::path::PathBuf::from);
+        let proj = pre.as_ref().and_then(|l| l.parent().map(|d| d.to_path_buf())).unwrap_or_else(|| dir.join("proj"));
+        std::fs::create_dir_all(&proj).unwrap();
+        let link = pre.clone().unwrap_or_else(|| proj.join("to_share"));
+        if pre.is_none() {
+            let share = std::env::var("PB_E2E_SHARE").unwrap_or_else(|_| r"\\192.0.2.1\share".into());
+            if let Err(e) = std::os::windows::fs::symlink_dir(&share, &link) {
+                eprintln!("skipped: cannot create a directory symlink here ({e})");
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+        }
+        let cwd = proj.to_string_lossy().into_owned();
+        let probes = std::cell::Cell::new(0);
+        let started = std::time::Instant::now();
+        for mention in ["to_share/a.png".to_owned(), r"to_share\deep\a.png".to_owned(), link.join("a.png").to_string_lossy().into_owned()] {
+            assert!(path_exists_with(&mention, Some(&cwd), |p| { probes.set(probes.get() + 1); p.exists() }), "the link is drawn: {mention}");
+        }
+        assert_eq!(probes.get(), 0, "a mention behind a link to a share was probed");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "deciding took {:?}: a network attempt", started.elapsed());
+        if pre.is_none() {
+            let _ = std::fs::remove_dir(&link);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]
