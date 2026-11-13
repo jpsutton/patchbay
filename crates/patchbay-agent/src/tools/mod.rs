@@ -734,49 +734,73 @@ mod tests {
     // that must stay outside (each one is a NEW file, so a lexical shortcut for new files would let
     // it through) and the verbatim spellings both sides must agree on.
 
-    /// A new file behind a junction, a directory symlink, an 8.3 alias OF a junction, and `..`
-    /// written with mixed separators: every one is outside. The 8.3 alias of a junction names the
-    /// junction by its short name, so it lies lexically inside the root and only resolving it shows
-    /// it is not.
-    #[test]
+    /// A root, an outside directory with a secret, and the long-named dirs the link kinds below use.
     #[cfg(windows)]
-    fn new_files_behind_every_kind_of_link_are_outside() {
-        let base = scratch("newlinks");
+    fn link_fixture(tag: &str) -> (PathBuf, PathBuf) {
+        let base = scratch(tag);
         let root = base.join("work_directory_with_a_long_name");
         let outside = base.join("outside_directory_with_a_long_name");
         std::fs::create_dir_all(root.join("a")).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("secret.txt"), "s").unwrap();
+        (root, outside)
+    }
 
-        // junction
-        let long_junction = root.join("a_junction_with_a_long_name");
-        junction(&long_junction, &outside);
-        assert!(!inside(&root, &long_junction.join("new.txt")), "new file behind a junction");
-        assert!(!inside(&root, &long_junction.join("x/y/new.txt")), "new file, several missing levels, behind a junction");
-        // the junction reached by its 8.3 short name: lexically inside the root
-        let short_junction = short_path(&long_junction);
-        if short_junction == long_junction {
+    /// The four tests below take one kind of link each (so one regression names the kind that
+    /// broke): every NEW file behind it is outside, with an in-root control. A lexical shortcut for
+    /// a path that does not exist yet would let each of them through.
+    #[test]
+    #[cfg(windows)]
+    fn a_new_file_behind_a_junction_by_its_long_name_is_outside() {
+        let (root, outside) = link_fixture("nl-junction");
+        let link = root.join("a_junction_with_a_long_name");
+        junction(&link, &outside);
+        assert!(!inside(&root, &link.join("new.txt")), "new file behind a junction");
+        assert!(!inside(&root, &link.join("x/y/new.txt")), "new file, several missing levels, behind a junction");
+        assert!(inside(&root, &root.join("a").join("new.txt")), "control: a new file in a real directory");
+    }
+
+    /// The junction reached by its 8.3 short name lies lexically inside the root; only resolving it
+    /// shows it is not.
+    #[test]
+    #[cfg(windows)]
+    fn a_new_file_behind_a_junction_named_by_its_8_3_alias_is_outside() {
+        let (root, outside) = link_fixture("nl-alias");
+        let link = root.join("a_junction_with_a_long_name");
+        junction(&link, &outside);
+        let short = short_path(&link);
+        if short == link {
             skip("this volume does not make 8.3 short names");
-        } else {
-            assert!(!inside(&root, &short_junction.join("new.txt")), "new file behind a junction named by its 8.3 alias");
-            assert!(!inside(&root, &short_junction.join("secret.txt")), "existing file behind a junction named by its 8.3 alias");
+            return;
         }
-        // directory symlink (needs a privilege on a developer's machine: skip says so; CI fails a skip)
-        match std::os::windows::fs::symlink_dir(&outside, root.join("symlink_dir")) {
-            Ok(()) => {
-                assert!(!inside(&root, &root.join("symlink_dir/new.txt")), "new file behind a directory symlink");
-                assert!(!inside(&root, &root.join("symlink_dir/x/new.txt")));
-            }
-            Err(e) => skip(&format!("cannot create a directory symlink here ({e})")),
+        assert!(!inside(&root, &short.join("new.txt")), "new file behind a junction named by its 8.3 alias");
+        assert!(!inside(&root, &short.join("secret.txt")), "existing file behind a junction named by its 8.3 alias");
+        assert!(inside(&root, &short_path(&root).join("a").join("new.txt")), "control: a new file in the root by its short name");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_new_file_behind_a_directory_symlink_is_outside() {
+        let (root, outside) = link_fixture("nl-symlink");
+        if let Err(e) = std::os::windows::fs::symlink_dir(&outside, root.join("symlink_dir")) {
+            skip(&format!("cannot create a directory symlink here ({e})"));
+            return;
         }
-        // `..` with mixed separators, to a file that is not there yet
+        assert!(!inside(&root, &root.join("symlink_dir/new.txt")), "new file behind a directory symlink");
+        assert!(!inside(&root, &root.join("symlink_dir/x/new.txt")));
+        assert!(inside(&root, &root.join("a").join("new.txt")), "control");
+    }
+
+    /// `..` written with mixed separators to a file that is not there yet climbs out all the same.
+    #[test]
+    #[cfg(windows)]
+    fn a_new_file_through_mixed_separator_dotdot_is_outside() {
+        let (root, _outside) = link_fixture("nl-mixed");
         let r = root.display();
         for escape in [format!("{r}\\a/..\\..\\new.txt"), format!("{r}/a\\../..\\new.txt"), format!("{r}\\..\\new.txt")] {
             assert!(!inside(&root, Path::new(&escape)), "mixed separators, new file: {escape}");
         }
-        // the controls: the same shapes, kept inside
-        assert!(inside(&root, &root.join("a").join("new.txt")));
-        assert!(inside(&root, Path::new(&format!("{r}\\a/..\\a\\new.txt"))));
+        assert!(inside(&root, Path::new(&format!("{r}\\a/..\\a\\new.txt"))), "control: the same mixture that stays inside");
     }
 
     /// `std::fs::canonicalize` returns `\\?\C:\...`; a path written that way must be judged like the
