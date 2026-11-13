@@ -23,22 +23,43 @@ assert(
   "auto mode still warns",
 );
 
-// always-approve: no warn (David: warn, allow always-approve).
+// always-approve: no warn for standing (David: warn, allow always-approve).
 assert(
   teamToolPromptWarn({ standing: true, permissionMode: "always-approve", prompts: ["opencode"], label }) === null,
-  "always-approve suppresses warn",
+  "always-approve suppresses standing warn",
 );
 
-// Workers / non-standing: no warn from this helper.
+// Workers / non-standing with no-rule agent: always warn (cannot use always-approve).
+const workerWarn = teamToolPromptWarn({
+  standing: false,
+  permissionMode: "default",
+  prompts: ["opencode"],
+  label,
+});
+assert(workerWarn?.includes("OpenCode"), "worker labels OpenCode");
+assert(workerWarn?.includes("worker seats cannot use always-approve"), "worker names the constraint");
+assert(workerWarn?.includes("always wait on a human"), "worker says always waits");
 assert(
-  teamToolPromptWarn({ standing: false, permissionMode: "default", prompts: ["opencode"], label }) === null,
-  "non-standing suppressed",
+  teamToolPromptWarn({ standing: false, permissionMode: "auto", prompts: ["opencode"], label })?.includes(
+    "worker seats cannot use always-approve",
+  ),
+  "worker auto still warns",
+);
+assert(
+  teamToolPromptWarn({ standing: false, permissionMode: "always-approve", prompts: ["opencode"], label })?.includes(
+    "worker seats cannot use always-approve",
+  ),
+  "worker warns even if mode were always-approve",
 );
 
 // Agents with a team-tool rule: empty prompts → no warn.
 assert(
   teamToolPromptWarn({ standing: true, permissionMode: "default", prompts: [], label }) === null,
-  "empty prompts",
+  "empty prompts standing",
+);
+assert(
+  teamToolPromptWarn({ standing: false, permissionMode: "default", prompts: [], label }) === null,
+  "empty prompts worker",
 );
 assert(
   teamToolPromptWarn({ standing: true, permissionMode: "default", prompts: undefined, label }) === null,

@@ -1,7 +1,8 @@
 /**
- * Standing seats that call team tools: agents without an allow.rs team-tool rule
- * (`Seat.prompts`, filled via `has_rule`) need a human on every call unless the seat
- * is always-approve. Warn only — never block save/start.
+ * Seats whose agents lack an allow.rs team-tool rule (`Seat.prompts`, via `!has_rule`):
+ * - Standing: need a human unless always-approve.
+ * - Workers: cannot use always-approve, so they always wait on a human for team tools.
+ * Warn only — never block save/start.
  */
 export function teamToolPromptWarn(args: {
   standing: boolean;
@@ -10,11 +11,14 @@ export function teamToolPromptWarn(args: {
   prompts: string[] | undefined;
   label?: (agent: string) => string;
 }): string | null {
-  if (!args.standing) return null;
-  if (args.permissionMode === "always-approve") return null;
   const agents = args.prompts ?? [];
   if (agents.length === 0) return null;
   const label = args.label ?? ((a: string) => a);
   const names = agents.map(label).join(", ");
-  return `${names}: this agent needs a human answer for every team tool unless the seat runs in always-approve.`;
+  if (args.standing) {
+    if (args.permissionMode === "always-approve") return null;
+    return `${names}: this agent needs a human answer for every team tool unless the seat runs in always-approve.`;
+  }
+  // Worker seats: always-approve is refused elsewhere; no escape hatch.
+  return `${names}: this agent needs a human answer for every team tool call; worker seats cannot use always-approve, so this seat will always wait on a human`;
 }
