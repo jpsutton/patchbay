@@ -791,12 +791,17 @@ mod tests {
         let (d, wt, proj, _item) = worker_commit_fixture(true);
         let root = std::path::Path::new(&wt);
         std::fs::write(root.join("README"), "hi").unwrap();
-        let outside = std::path::Path::new(&proj).join("outside.txt");
-        std::fs::write(&outside, "secret").unwrap();
-        let link = root.join("leak");
+        // Symlink escape needs unix create; product path resolve refuses escapes on all OSes.
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&outside, &link).unwrap();
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "cat leak"), &options(), &wt).is_none());
+        {
+            let outside = std::path::Path::new(&proj).join("outside.txt");
+            std::fs::write(&outside, "secret").unwrap();
+            let link = root.join("leak");
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "cat leak"), &options(), &wt).is_none());
+        }
+        #[cfg(not(unix))]
+        let _ = proj;
 
         assert!(
             std::process::Command::new("git")
@@ -826,9 +831,16 @@ mod tests {
         );
         assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git add LICENSE"), &options(), &wt).is_some());
 
-        // Non-executable commit-msg ignored; executable commit-msg refuses commit.
+        // Non-executable commit-msg ignored on unix; on Windows any hook file fails closed
+        // (`is_executable_file` treats existing files as executable — no reliable exec bit).
         write_hook(&hooks, "commit-msg", false);
+        #[cfg(unix)]
         assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some());
+        #[cfg(not(unix))]
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_none(),
+            "Windows: hook file present fails closed"
+        );
         write_hook(&hooks, "commit-msg", true);
         assert!(
             allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_none(),

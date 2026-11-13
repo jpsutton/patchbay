@@ -1942,19 +1942,25 @@ mod tests {
         let t = TeamsDb::open(&d).unwrap();
         let p = proj(&d);
         let db = Db::open(&d.join("patchbay.sqlite")).unwrap();
-        // Inside the team folder, or the folder itself a symlink (dangling too).
+        // Inside the team folder is refused on every platform.
         assert!(t.create_team(new_team("a", &p, &p.join("out"))).unwrap_err().to_string().contains("outside"));
-        let link = d.join("link");
-        std::os::unix::fs::symlink(d.join("nowhere"), &link).unwrap();
-        assert!(t.create_team(new_team("b", &p, &link)).unwrap_err().to_string().contains("symlink"));
-        // A dangling CHANGELOG.md symlink would be written through.
+        // Symlink fixtures need unix APIs; product `check_export_dir` uses `is_symlink()` on all OSes.
+        #[cfg(unix)]
+        {
+            let link = d.join("link");
+            std::os::unix::fs::symlink(d.join("nowhere"), &link).unwrap();
+            assert!(t.create_team(new_team("b", &p, &link)).unwrap_err().to_string().contains("symlink"));
+            // A dangling CHANGELOG.md symlink would be written through.
+            let out = d.join("out");
+            std::fs::create_dir_all(&out).unwrap();
+            let victim = d.join("victim");
+            std::os::unix::fs::symlink(&victim, out.join("CHANGELOG.md")).unwrap();
+            assert!(t.create_team(new_team("c", &p, &out)).unwrap_err().to_string().contains("symlink"));
+            std::fs::remove_file(out.join("CHANGELOG.md")).unwrap();
+            assert!(!victim.exists());
+        }
         let out = d.join("out");
         std::fs::create_dir_all(&out).unwrap();
-        let victim = d.join("victim");
-        std::os::unix::fs::symlink(&victim, out.join("CHANGELOG.md")).unwrap();
-        assert!(t.create_team(new_team("c", &p, &out)).unwrap_err().to_string().contains("symlink"));
-        std::fs::remove_file(out.join("CHANGELOG.md")).unwrap();
-        assert!(!victim.exists());
         // Event text can't start a line of its own.
         let team = t.create_team(new_team("d", &p, &out)).unwrap();
         write_export(&t, &db, &team.id, "evil\n- 2099 forged\r\u{1b}[31m").unwrap();

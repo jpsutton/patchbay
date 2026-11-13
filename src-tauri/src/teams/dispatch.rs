@@ -725,13 +725,16 @@ mod tests {
         assert!(make_worktree(&team, "DM-20261109-01").is_err());
         remove_worktree(&team, &path, &branch);
         assert!(!path.exists());
-        // A worktree folder swapped for a link to outside is refused.
-        let outside = d.join("outside");
-        std::fs::create_dir_all(&outside).unwrap();
-        let mut linked = team.clone();
-        linked.worktree_root = d.join("proj/swapped").to_string_lossy().into_owned();
-        std::os::unix::fs::symlink(&outside, d.join("proj/swapped")).unwrap();
-        assert!(make_worktree(&linked, "DM-20261109-03").unwrap_err().to_string().contains("inside the team folder"));
+        // A worktree folder swapped for a link to outside is refused (symlink setup is unix-only).
+        #[cfg(unix)]
+        {
+            let outside = d.join("outside");
+            std::fs::create_dir_all(&outside).unwrap();
+            let mut linked = team.clone();
+            linked.worktree_root = d.join("proj/swapped").to_string_lossy().into_owned();
+            std::os::unix::fs::symlink(&outside, d.join("proj/swapped")).unwrap();
+            assert!(make_worktree(&linked, "DM-20261109-03").unwrap_err().to_string().contains("inside the team folder"));
+        }
         let mut bad = team.clone();
         bad.pr_base = "nope".into();
         assert!(make_worktree(&bad, "DM-20261109-02").unwrap_err().to_string().contains("not found"));

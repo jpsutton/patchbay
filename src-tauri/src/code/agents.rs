@@ -319,9 +319,10 @@ const CODEX_ASKING_MODE: &str = "read-only";
 /// Codex mode that edits the project without asking; network and anything outside the sandbox
 /// still go through Codex's own `on-request` approvals (pb-20261110-15).
 ///
-/// Under `codex-acp` 2.2.2 the live `workspace-write` turn policy also keeps `/tmp` and `$TMPDIR`
-/// writable (`excludeSlashTmp` / `excludeTmpdirEnvVar` hardcoded false). Patchbay cannot confirm
-/// those excludes at ACP launch (F1), so a dispatched worker only takes this mode when
+/// Under `codex-acp` 2.2.2 the live `workspace-write` turn policy also keeps temp folders writable
+/// (`/tmp` and `$TMPDIR` on unix; system `%TEMP%`/`%TMP%` on Windows — `excludeSlashTmp` /
+/// `excludeTmpdirEnvVar` hardcoded false). Patchbay cannot confirm those excludes at ACP launch
+/// (F1), so a dispatched worker only takes this mode when
 /// [`codex_worker_workspace_write_blocked`] is clear — otherwise it stays read-only (F2).
 const CODEX_WRITING_MODE: &str = "workspace-write";
 
@@ -365,6 +366,8 @@ const CODEX_ASKING_GAPS: &[&str] = &[
     CODEX_CONFIG_GAP,
 ];
 const CODEX_WRITING_GAPS: &[&str] = &[
+    // Wording is part of worker-auto consent ack; keep "/tmp and $TMPDIR" stable. Windows also
+    // treats %TEMP%/%TMP% as temp roots in the F2 gate (see temp_writable_roots).
     "Codex writes in this project and in the temp folders (/tmp and $TMPDIR) without asking. Everything else it asks for (network, files outside the project) is approved automatically under Approve all.",
     CODEX_CONFIG_GAP,
 ];
@@ -409,10 +412,11 @@ pub(crate) fn codex_gaps_for(
 ///
 /// Refuses when the worktree's common git dir or **main** checkout lies under a path Codex would
 /// make writable under today's workspace-write policy: the session cwd (worktree), and (while F1
-/// temp excludes are not confirmed) `/tmp`, `/private/tmp`, or `$TMPDIR`. A linked worktree is
-/// allowed when those live outside the worktree (and outside temp). Fail closed if git cannot be
-/// probed, any path canonicalize fails, or `$TMPDIR` is set but not absolute. (`--show-toplevel`
-/// is the current worktree, not the main checkout — use [`git_main_worktree`].)
+/// temp excludes are not confirmed) unix `/tmp`/`/private/tmp`/`$TMPDIR`, or Windows
+/// `%TEMP%`/`%TMP%`/`$TMPDIR`. A linked worktree is allowed when those live outside the worktree
+/// (and outside temp). Fail closed if git cannot be probed, any path canonicalize fails, required
+/// temp roots cannot be resolved, or `$TMPDIR` is set but not absolute. (`--show-toplevel` is the
+/// current worktree, not the main checkout — use [`git_main_worktree`].)
 pub(crate) fn codex_worker_workspace_write_blocked(cwd: &Path) -> Option<&'static str> {
     let common = match git_rev_parse_path(cwd, &["--git-common-dir"]) {
         Some(p) => p,
@@ -560,24 +564,52 @@ fn path_under(path: &Path, root: &Path) -> bool {
 
 /// Roots Codex still makes writable under workspace-write while F1 excludes are unconfirmed.
 ///
-/// Returns `None` (caller refuses workspace-write) when `$TMPDIR` is set to a non-empty value that
-/// is not absolute or cannot canonicalize. A non-empty value is never trimmed away to "unset"
-/// (whitespace-only `$TMPDIR` refuses).
+/// Returns `None` (caller refuses workspace-write) when a required temp root cannot be resolved, or
+/// when `$TMPDIR` is set to a non-empty value that is not absolute or cannot canonicalize. A
+/// non-empty value is never trimmed away to "unset" (whitespace-only `$TMPDIR` refuses).
+///
+/// Unix: `/tmp` (required) plus `/private/tmp` on macOS (required there; optional elsewhere) and
+/// `$TMPDIR` when set. Windows has no `/tmp` in the Codex policy sense — use `%TEMP%` / `%TMP%`
+/// (at least one must resolve) plus `$TMPDIR` when set; otherwise fail closed.
 fn temp_writable_roots() -> Option<Vec<PathBuf>> {
     temp_writable_roots_from(std::env::var("TMPDIR").ok().as_deref())
 }
 
 fn temp_writable_roots_from(tmpdir: Option<&str>) -> Option<Vec<PathBuf>> {
     let mut roots = Vec::new();
-    // /tmp must resolve; refuse the mapping if it cannot.
-    roots.push(path_key(Path::new("/tmp"))?);
-    // /private/tmp is the macOS real path behind /tmp; require it there. Elsewhere it often does
-    // not exist — only include when canonicalize succeeds (do not fail closed on Linux).
-    if let Some(private) = path_key(Path::new("/private/tmp")) {
-        roots.push(private);
-    } else {
-        #[cfg(target_os = "macos")]
-        {
+    #[cfg(unix)]
+    {
+        // /tmp must resolve; refuse the mapping if it cannot.
+        roots.push(path_key(Path::new("/tmp"))?);
+        // /private/tmp is the macOS real path behind /tmp; require it there. Elsewhere it often does
+        // not exist — only include when canonicalize succeeds (do not fail closed on Linux).
+        if let Some(private) = path_key(Path::new("/private/tmp")) {
+            roots.push(private);
+        } else {
+            #[cfg(target_os = "macos")]
+            {
+                return None;
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Windows: system temp dirs are %TEMP% / %TMP%. Skip empty; refuse if a non-empty value is
+        // relative or cannot canonicalize; refuse entirely when neither resolves.
+        let mut got = false;
+        for key in ["TEMP", "TMP"] {
+            let Ok(raw) = std::env::var(key) else { continue };
+            if raw.is_empty() {
+                continue;
+            }
+            let p = Path::new(&raw);
+            if !p.is_absolute() {
+                return None;
+            }
+            roots.push(path_key(p)?);
+            got = true;
+        }
+        if !got {
             return None;
         }
     }
@@ -2947,7 +2979,17 @@ time.sleep(60)
             temp_writable_roots_from(Some("relative-tmpdir")).is_none(),
             "relative TMPDIR => roots unavailable => mapping refused"
         );
+        #[cfg(unix)]
         assert!(temp_writable_roots_from(Some("/tmp")).is_some());
+        #[cfg(windows)]
+        {
+            let temp = std::env::temp_dir();
+            let temp_s = temp.to_str().expect("temp_dir utf-8");
+            assert!(
+                temp_writable_roots_from(Some(temp_s)).is_some(),
+                "absolute Windows temp as TMPDIR => ok"
+            );
+        }
         // Whitespace-only / padded $TMPDIR must not trim-to-unset — refuse unless raw is absolute.
         assert!(
             temp_writable_roots_from(Some("   ")).is_none(),
@@ -2990,28 +3032,41 @@ time.sleep(60)
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// macOS often case-folds `/TMP` ↔ `/tmp`; canonicalize should still classify as temp and refuse.
+    /// Project under the system temp root is refused; on unix also `/TMP` case-folding vs `/tmp`.
     #[test]
     fn codex_worker_workspace_write_blocked_tmp_case_spelling() {
         let id = crate::db::new_id();
-        let under_tmp = PathBuf::from(format!("/tmp/pb-f2-case-{id}"));
+        let under_tmp = std::env::temp_dir().join(format!("pb-f2-case-{id}"));
         let _ = std::fs::remove_dir_all(&under_tmp);
         std::fs::create_dir_all(&under_tmp).unwrap();
         f2_git_init_commit(&under_tmp, "f", "x");
         assert_eq!(
             codex_worker_workspace_write_blocked(&under_tmp),
             Some(CODEX_WORKER_TEMP_READONLY_HINT),
-            "/tmp path => blocked"
+            "system temp path => blocked"
         );
         // Differently-cased spelling: on case-insensitive volumes this is the same inode; after
         // canonicalize it still sits under the temp root. If the volume is case-sensitive and
         // `/TMP` does not resolve, path_key / git probe fails closed → still refuse.
-        let weird = PathBuf::from(format!("/TMP/pb-f2-case-{id}"));
-        assert_eq!(
-            codex_worker_workspace_write_blocked(&weird),
-            Some(CODEX_WORKER_TEMP_READONLY_HINT),
-            "/TMP case spelling => blocked (canonicalize or fail-closed)"
-        );
+        #[cfg(unix)]
+        {
+            let under_slash_tmp = PathBuf::from(format!("/tmp/pb-f2-case-{id}"));
+            let _ = std::fs::remove_dir_all(&under_slash_tmp);
+            std::fs::create_dir_all(&under_slash_tmp).unwrap();
+            f2_git_init_commit(&under_slash_tmp, "f", "x");
+            assert_eq!(
+                codex_worker_workspace_write_blocked(&under_slash_tmp),
+                Some(CODEX_WORKER_TEMP_READONLY_HINT),
+                "/tmp path => blocked"
+            );
+            let weird = PathBuf::from(format!("/TMP/pb-f2-case-{id}"));
+            assert_eq!(
+                codex_worker_workspace_write_blocked(&weird),
+                Some(CODEX_WORKER_TEMP_READONLY_HINT),
+                "/TMP case spelling => blocked (canonicalize or fail-closed)"
+            );
+            let _ = std::fs::remove_dir_all(&under_slash_tmp);
+        }
         let _ = std::fs::remove_dir_all(&under_tmp);
     }
 

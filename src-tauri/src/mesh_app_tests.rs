@@ -4267,19 +4267,21 @@ async fn restart_member_failure_rollback_leaves_one_live_session() {
     assert_eq!(all_sessions.len(), 2, "only coord and s1 exist");
 }
 
-/// F2 + dispatch_item: a Codex Auto worker for a project under `/tmp` (→ `/private/tmp` on macOS)
-/// stays read-only and the dispatch note carries `CODEX_WORKER_TEMP_READONLY_HINT`.
+/// F2 + dispatch_item: a Codex Auto worker for a project under the system temp root stays
+/// read-only and the dispatch note carries `CODEX_WORKER_TEMP_READONLY_HINT`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dispatch_item_temp_project_keeps_codex_worker_read_only_with_hint_note() {
     let id = db::new_id();
-    // Prefer the real macOS temp root; `/tmp` canonicalizes to `/private/tmp`.
-    let proj = PathBuf::from(format!("/tmp/pb-f2-dispatch-{id}"));
+    // System temp (unix often `/tmp` → `/private/tmp` on macOS; Windows `%TEMP%`).
+    let proj = std::env::temp_dir().join(format!("pb-f2-dispatch-{id}"));
     let _ = std::fs::remove_dir_all(&proj);
     repo(&proj);
     let canon = proj.canonicalize().unwrap();
+    let temp_root = std::env::temp_dir().canonicalize().unwrap();
     assert!(
-        canon.starts_with("/private/tmp") || canon.starts_with("/tmp"),
-        "expected /tmp or /private/tmp project, got {}",
+        canon.starts_with(&temp_root),
+        "expected project under temp root {}, got {}",
+        temp_root.display(),
         canon.display()
     );
 
