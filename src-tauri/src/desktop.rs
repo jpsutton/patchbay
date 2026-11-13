@@ -403,13 +403,24 @@ fn runs_when_opened(p: &std::path::Path, meta: &std::fs::Metadata) -> bool {
 /// links what a click can open.
 #[tauri::command]
 fn local_path_exists(path: String, cwd: Option<String>) -> bool {
-    // A network location or device path is not looked at: `exists` on a UNC path makes Windows
-    // connect to it, and this runs for every path the agent mentions, with no click. It reads as
-    // existing so the link is drawn; a click then asks first (`open_local_path`).
-    if patchbay_agent::foreign_location(std::path::Path::new(cwd.as_deref().unwrap_or("")), std::path::Path::new(&path)) {
+    path_exists_with(&path, cwd.as_deref(), |p| p.exists())
+}
+
+/// [`local_path_exists`] with the existence probe handed in. A network location or device path is
+/// NEVER probed: `exists` on a UNC path makes Windows connect to it, and this runs for every path any
+/// agent's transcript mentions, with no click (text from a web page that an agent echoes is enough).
+/// The lexical check comes first, on the text as written and on the resolved path; such a path reads
+/// as existing so its link is drawn, and a click asks first (`open_local_path`).
+fn path_exists_with(path: &str, cwd: Option<&str>, exists: impl Fn(&std::path::Path) -> bool) -> bool {
+    let home = std::path::Path::new(cwd.unwrap_or(""));
+    if patchbay_agent::foreign_location(home, std::path::Path::new(path)) {
         return true;
     }
-    resolve_mentioned(&path, cwd.as_deref()).is_some_and(|p| p.exists())
+    match resolve_mentioned(path, cwd) {
+        Some(p) if patchbay_agent::foreign_location(home, &p) => true,
+        Some(p) => exists(&p),
+        None => false,
+    }
 }
 
 /// What a click on a mentioned path does first.
@@ -432,18 +443,29 @@ fn plan_open(path: &str, cwd: Option<&str>) -> Option<ClickPlan> {
     Some(if foreign { ClickPlan::Confirm(p) } else { ClickPlan::Open(p) })
 }
 
-/// Ask whether to open a network location, showing the path exactly as it was written. The
-/// dialog focuses its first button, so Cancel is first: `blocking_show` is true for it, hence the `!`.
+/// The label of the one button that opens a network location (never a plain "OK").
+const OPEN_NETWORK_LABEL: &str = "Open network location";
+
+/// Whether a dialog result means "open". ONLY a click on the button labelled
+/// [`OPEN_NETWORK_LABEL`] does: Cancel, Esc, closing the window and anything unexpected do not.
+fn opens(result: &tauri_plugin_dialog::MessageDialogResult) -> bool {
+    matches!(result, tauri_plugin_dialog::MessageDialogResult::Custom(label) if label == OPEN_NETWORK_LABEL)
+}
+
+/// Ask whether to open a network location, showing the path exactly as it was written. Cancel is the
+/// FIRST button, which the dialog focuses; the other is labelled for what it does.
 fn confirm_network_open(app: &tauri::AppHandle, raw: &str) -> bool {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-    !app.dialog()
-        .message(format!(
-            "This is a network location:\n\n{raw}\n\nOpening it makes this computer connect to it and send it your sign-in. Only open it if you know where it leads."
-        ))
-        .title("Open a network location?")
-        .kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::OkCancelCustom("Cancel".into(), "Open".into()))
-        .blocking_show()
+    opens(
+        &app.dialog()
+            .message(format!(
+                "This is a network location:\n\n{raw}\n\nOpening it makes this computer connect to it and send it your sign-in. Only open it if you know where it leads."
+            ))
+            .title("Open a network location?")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom("Cancel".into(), OPEN_NETWORK_LABEL.into()))
+            .blocking_show_with_result(),
+    )
 }
 
 /// Open a mentioned file or folder in the OS's default app. Anything that would run is shown in
@@ -1055,13 +1077,34 @@ mod file_link_tests {
             for spelling in [r"\\203.0.113.1\s\x.txt", "//203.0.113.1/s/x.txt", r"\??\UNC\203.0.113.1\s\x", r"\\.\PhysicalDrive0", r"\\203.0.113.1"] {
                 assert!(matches!(plan_open(spelling, None), Some(ClickPlan::Confirm(_))), "{spelling} would be opened without asking");
                 assert!(matches!(plan_open(spelling, Some(r"C:\Users\x\proj")), Some(ClickPlan::Confirm(_))), "{spelling} with a folder");
-                assert!(local_path_exists(spelling.into(), None), "the link is drawn, without a lookup: {spelling}");
+                // Rendering: the existence probe is mocked and must NEVER be called for any spelling.
+                let probes = std::cell::Cell::new(0);
+                for cwd in [None, Some(r"C:\Users\x\proj")] {
+                    assert!(path_exists_with(spelling, cwd, |_| { probes.set(probes.get() + 1); false }), "the link is drawn: {spelling}");
+                }
+                assert_eq!(probes.get(), 0, "rendering {spelling} probed the filesystem");
             }
             assert!(started.elapsed() < std::time::Duration::from_secs(1), "deciding took {:?}: a network attempt", started.elapsed());
         }
+        // Everywhere: a path on this computer is probed and found as before (the control for the 0 above).
+        let probes = std::cell::Cell::new(0);
+        let here = std::env::temp_dir().join("a-local-file.txt");
+        assert!(!path_exists_with(&here.display().to_string(), None, |_| { probes.set(probes.get() + 1); false }));
+        assert_eq!(probes.get(), 1, "a local path is probed");
         // Everywhere: a path on this computer is looked at and opened as before.
         let local = std::env::temp_dir().join("a-local-file.txt");
         assert_eq!(plan_open(&local.display().to_string(), None), Some(ClickPlan::Open(local)));
+    }
+
+    /// Only the "Open network location" button opens; Cancel, Esc and closing do not (the plugin
+    /// reports those as Cancel, or as another label, so anything else is a no).
+    #[test]
+    fn only_the_open_button_opens_a_network_location() {
+        use tauri_plugin_dialog::MessageDialogResult as R;
+        assert!(opens(&R::Custom("Open network location".into())));
+        for no in [R::Cancel, R::Ok, R::Yes, R::No, R::Custom("Cancel".into()), R::Custom("Open".into()), R::Custom("OK".into()), R::Custom(String::new())] {
+            assert!(!opens(&no), "{no:?} must not open a network location");
+        }
     }
 
     #[test]

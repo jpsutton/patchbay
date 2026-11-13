@@ -1064,4 +1064,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&elsewhere);
     }
 
+
+    /// A path-taking tool that forgets to declare `locations()` would slip past the dispatcher's
+    /// refusal of network locations. So: every registered tool whose schema has a path-like argument
+    /// must report that argument from `locations()`, or sit on this list WITH A REASON.
+    #[tokio::test]
+    async fn every_tool_with_a_path_argument_declares_its_locations_or_says_why_not() {
+        // (tool, argument, why `locations()` does not carry it)
+        // Bash has no path argument (a command string): it is not guardable lexically and is disclosed.
+        const NO_LOCATION: &[(&str, &str, &str)] = &[];
+        let (a, b) = tokio::io::duplex(1 << 16);
+        let (peer, _incoming) = crate::rpc::connect(a, b);
+        let session = Session::new("0b91d1a5-9d5e-4a2b-8c3f-1e2d3c4b5a6d".into(), std::env::temp_dir(), Arc::new(NativeSearchHost), peer, "pb-mock".into(), Mode::Default);
+        let registry = Registry::builtin(true, true);
+        let mut checked = 0;
+        for spec in registry.specs(false, crate::prompts::Prompts::new(false)) {
+            let Some(props) = spec.parameters.get("properties").and_then(Value::as_object) else { continue };
+            for key in props.keys() {
+                let k = key.to_ascii_lowercase();
+                if !["path", "file", "dir", "folder", "cwd", "root"].iter().any(|w| k.contains(w)) {
+                    continue;
+                }
+                checked += 1;
+                let tool = registry.get(&spec.name).unwrap();
+                let marker = "PB_LOCATION_MARKER";
+                let declared = tool.locations(&json!({ key: marker }), &session).iter().any(|l| l.contains(marker));
+                let excused = NO_LOCATION.iter().any(|(t, a, _)| *t == spec.name && *a == key);
+                assert!(
+                    declared || excused,
+                    "tool {} takes `{key}` but does not return it from locations(): the dispatcher cannot refuse a network location there. Declare it, or add it to NO_LOCATION with a reason.",
+                    spec.name
+                );
+            }
+        }
+        assert!(checked >= 6, "the check looked at only {checked} path arguments: did the schema shape change?");
+    }
+
 }
