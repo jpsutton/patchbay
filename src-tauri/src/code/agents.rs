@@ -331,6 +331,10 @@ const CODEX_WRITING_MODE: &str = "workspace-write";
 pub(crate) const CODEX_WORKER_TEMP_READONLY_HINT: &str =
     "Codex worker stays read-only: project is under a temp directory";
 
+/// Hint when F2 refuses workspace-write on Windows: codex-acp sandboxing there is unproven.
+pub(crate) const CODEX_WORKER_WINDOWS_READONLY_HINT: &str =
+    "Codex worker stays read-only on Windows until codex-acp sandboxing there is proven";
+
 /// `codex-acp` 2.2.2's `workspace-write` / `agent` modes hardcode `excludeSlashTmp` and
 /// `excludeTmpdirEnvVar` to false on every turn, so `CODEX_CONFIG` / `[sandbox_workspace_write]`
 /// excludes do not stick. Stay false until an adapter (or Patchbay) can confirm them in effect.
@@ -339,9 +343,9 @@ pub(crate) const CODEX_WORKER_TEMP_EXCLUDES_CONFIRMED: bool = false;
 /// The Codex mode a session's approval mode implies.
 ///
 /// Approve all => `workspace-write`. A **dispatched worker** in Auto => `workspace-write` only when
-/// `cwd` is omitted (template consent / matrix) or [`codex_worker_workspace_write_blocked`] is
-/// `None`; otherwise read-only. Everything else => `read-only`. Never `agent` or
-/// `agent-full-access`.
+/// `cwd` is set and [`codex_worker_workspace_write_blocked`] is `None`; omitted `cwd` (template
+/// consent / matrix) stays `read-only` so mode mapping never grants writing without a probed path.
+/// Everything else => `read-only`. Never `agent` or `agent-full-access`.
 pub(crate) fn codex_mode_for(
     permission_mode: Option<&str>,
     dispatched_worker: bool,
@@ -349,13 +353,12 @@ pub(crate) fn codex_mode_for(
 ) -> &'static str {
     match permission_mode {
         Some("always-approve") => CODEX_WRITING_MODE,
-        Some("auto") if dispatched_worker => {
-            if cwd.map(codex_worker_workspace_write_blocked).flatten().is_some() {
-                CODEX_ASKING_MODE
-            } else {
-                CODEX_WRITING_MODE
-            }
-        }
+        Some("auto") if dispatched_worker => match cwd {
+            // Omitted cwd must not grant writing (consent text may still describe the allowed case).
+            None => CODEX_ASKING_MODE,
+            Some(path) if codex_worker_workspace_write_blocked(path).is_some() => CODEX_ASKING_MODE,
+            Some(_) => CODEX_WRITING_MODE,
+        },
         _ => CODEX_ASKING_MODE,
     }
 }
@@ -383,12 +386,18 @@ const CODEX_WORKER_TEMP_REFUSED_GAPS: &[&str] = &[
     "Codex runs shell commands inside its read-only sandbox without asking. It asks before editing files and before network use.",
     CODEX_CONFIG_GAP,
 ];
+const CODEX_WORKER_WINDOWS_REFUSED_GAPS: &[&str] = &[
+    CODEX_WORKER_WINDOWS_READONLY_HINT,
+    "Codex runs shell commands inside its read-only sandbox without asking. It asks before editing files and before network use.",
+    CODEX_CONFIG_GAP,
+];
 
 /// What Codex does without asking under a session's approval mode: the header's text.
 ///
-/// `cwd`: when set, a dispatched worker whose project fails the F2 git-dir gate gets the
-/// temp-refused gaps. When `None` (template editor / seat consent), worker Auto uses the
-/// workspace-write gaps text so acknowledgement covers the allowed case.
+/// `cwd`: when set, a dispatched worker whose project fails the F2 git-dir / Windows gate gets the
+/// matching refused gaps. When `None` (template editor / seat consent), worker Auto still uses the
+/// workspace-write gaps text so acknowledgement covers the allowed case — but [`codex_mode_for`]
+/// with omitted cwd stays read-only.
 pub(crate) fn codex_gaps_for(
     permission_mode: Option<&str>,
     dispatched_worker: bool,
@@ -396,13 +405,11 @@ pub(crate) fn codex_gaps_for(
 ) -> &'static [&'static str] {
     match permission_mode {
         Some("always-approve") => CODEX_WRITING_GAPS,
-        Some("auto") if dispatched_worker => {
-            if cwd.map(codex_worker_workspace_write_blocked).flatten().is_some() {
-                CODEX_WORKER_TEMP_REFUSED_GAPS
-            } else {
-                CODEX_WORKER_AUTO_GAPS
-            }
-        }
+        Some("auto") if dispatched_worker => match cwd.map(codex_worker_workspace_write_blocked).flatten() {
+            Some(hint) if hint == CODEX_WORKER_WINDOWS_READONLY_HINT => CODEX_WORKER_WINDOWS_REFUSED_GAPS,
+            Some(_) => CODEX_WORKER_TEMP_REFUSED_GAPS,
+            None => CODEX_WORKER_AUTO_GAPS,
+        },
         _ => CODEX_ASKING_GAPS,
     }
 }
@@ -410,14 +417,22 @@ pub(crate) fn codex_gaps_for(
 /// Why a dispatched Codex worker must stay read-only instead of `workspace-write`, or `None`
 /// when the mapping is allowed.
 ///
-/// Refuses when the worktree's common git dir or **main** checkout lies under a path Codex would
-/// make writable under today's workspace-write policy: the session cwd (worktree), and (while F1
-/// temp excludes are not confirmed) unix `/tmp`/`/private/tmp`/`$TMPDIR`, or Windows
-/// `%TEMP%`/`%TMP%`/`$TMPDIR`. A linked worktree is allowed when those live outside the worktree
-/// (and outside temp). Fail closed if git cannot be probed, any path canonicalize fails, required
-/// temp roots cannot be resolved, or `$TMPDIR` is set but not absolute. (`--show-toplevel` is the
-/// current worktree, not the main checkout — use [`git_main_worktree`].)
+/// On Windows always refuses ([`CODEX_WORKER_WINDOWS_READONLY_HINT`]) until codex-acp sandboxing
+/// there is proven. Elsewhere refuses when the worktree's common git dir or **main** checkout lies
+/// under a path Codex would make writable under today's workspace-write policy: the session cwd
+/// (worktree), and (while F1 temp excludes are not confirmed) unix `/tmp`/`/private/tmp`/`$TMPDIR`,
+/// or Windows `%TEMP%`/`%TMP%`/`$TMPDIR`. A linked worktree is allowed when those live outside the
+/// worktree (and outside temp). Fail closed if git cannot be probed, any path canonicalize fails,
+/// required temp roots cannot be resolved, or `$TMPDIR` is set but not absolute.
+/// (`--show-toplevel` is the current worktree, not the main checkout — use [`git_main_worktree`].)
 pub(crate) fn codex_worker_workspace_write_blocked(cwd: &Path) -> Option<&'static str> {
+    #[cfg(windows)]
+    {
+        let _ = cwd;
+        return Some(CODEX_WORKER_WINDOWS_READONLY_HINT);
+    }
+    #[cfg(not(windows))]
+    {
     let common = match git_rev_parse_path(cwd, &["--git-common-dir"]) {
         Some(p) => p,
         None => return Some(CODEX_WORKER_TEMP_READONLY_HINT),
@@ -454,6 +469,7 @@ pub(crate) fn codex_worker_workspace_write_blocked(cwd: &Path) -> Option<&'stati
         }
     }
     None
+    } // cfg(not(windows))
 }
 
 /// Clear inherited git location / config overrides, then ignore global + system config.
@@ -541,24 +557,53 @@ fn git_main_worktree(cwd: &Path) -> Option<PathBuf> {
 
 /// Canonical absolute path for comparisons. **No raw-string fallback** — canonicalize failure is
 /// `None` so the F2 gate can refuse. On macOS map `/tmp` → `/private/tmp` when still present.
-/// On Windows, strip the `\\?\` verbatim prefix so keys match ordinary `%TEMP%` / cwd strings.
+/// On Windows, strip an accepted `\\?\` verbatim prefix so keys match ordinary `%TEMP%` / cwd
+/// strings; unknown `\\?\` namespaces fail closed (`None`).
 fn path_key(path: &Path) -> Option<PathBuf> {
     let canon = path.canonicalize().ok()?;
-    Some(normalize_macos_tmp(strip_windows_verbatim(canon)))
+    Some(normalize_macos_tmp(strip_windows_verbatim(canon)?))
 }
 
-fn strip_windows_verbatim(path: PathBuf) -> PathBuf {
+/// Strip a Windows `\\?\` verbatim prefix when it names a drive (`\\?\C:\…`) or UNC share
+/// (`\\?\UNC\server\share\…`). Any other `\\?\` namespace (Volume GUID, HarddiskVolume, bare
+/// `\\?\foo`, …) is unresolvable → `None`.
+fn strip_windows_verbatim(path: PathBuf) -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        let s = path.to_string_lossy();
-        if let Some(rest) = s.strip_prefix(r"\\?\") {
-            if let Some(unc) = rest.strip_prefix(r"UNC\") {
-                return PathBuf::from(format!(r"\\{unc}"));
-            }
-            return PathBuf::from(rest);
+        return strip_windows_verbatim_str(&path.to_string_lossy()).map(PathBuf::from);
+    }
+    #[cfg(not(windows))]
+    {
+        Some(path)
+    }
+}
+
+/// Pure string form of [`strip_windows_verbatim`] (testable on every OS).
+fn strip_windows_verbatim_str(s: &str) -> Option<String> {
+    let Some(rest) = s.strip_prefix(r"\\?\") else {
+        return Some(s.to_owned());
+    };
+    if let Some(unc) = rest.strip_prefix(r"UNC\") {
+        // Require server\share (at least two non-empty components).
+        let mut parts = unc.split('\\');
+        let server = parts.next().unwrap_or("");
+        let share = parts.next().unwrap_or("");
+        if server.is_empty() || share.is_empty() {
+            return None;
+        }
+        return Some(format!(r"\\{unc}"));
+    }
+    // Drive: X:\… or X:/… (optional bare X:).
+    let b = rest.as_bytes();
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        if b.len() == 2 {
+            return Some(rest.to_owned());
+        }
+        if b[2] == b'\\' || b[2] == b'/' {
+            return Some(rest.to_owned());
         }
     }
-    path
+    None
 }
 
 fn normalize_macos_tmp(path: PathBuf) -> PathBuf {
@@ -2643,14 +2688,20 @@ time.sleep(60)
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Mapping matrix: only Approve all, or a dispatched worker in Auto (cwd omitted = consent /
-    /// matrix), open write access — and only to `workspace-write`. Standing seats, non-team Auto,
-    /// and worker Default stay read-only. No input reaches `agent` or `agent-full-access`.
+    /// Mapping matrix: only Approve all opens write without a probed cwd. A dispatched worker in
+    /// Auto with omitted cwd stays read-only (mode never grants writing from consent alone);
+    /// gaps text for omitted cwd still describes the allowed workspace-write case. Standing seats,
+    /// non-team Auto, and worker Default stay read-only. No input reaches `agent` /
+    /// `agent-full-access`.
     #[test]
     fn codex_mode_mapping_matrix() {
         assert_eq!(codex_mode_for(Some("always-approve"), false, None), "workspace-write");
         assert_eq!(codex_mode_for(Some("always-approve"), true, None), "workspace-write");
-        assert_eq!(codex_mode_for(Some("auto"), true, None), "workspace-write", "worker+auto");
+        assert_eq!(
+            codex_mode_for(Some("auto"), true, None),
+            "read-only",
+            "worker+auto with omitted cwd must not grant writing"
+        );
         assert_eq!(codex_mode_for(Some("default"), true, None), "read-only", "worker+default");
         assert_eq!(codex_mode_for(Some("auto"), false, None), "read-only", "standing/non-team auto");
         assert_eq!(codex_mode_for(Some("default"), false, None), "read-only");
@@ -2670,6 +2721,65 @@ time.sleep(60)
             codex_gaps_for(Some("default"), true, None),
             codex_gaps_for(Some("default"), false, None)
         );
+    }
+
+    #[test]
+    fn codex_mode_for_omitted_cwd_read_only_even_when_gaps_optimistic() {
+        assert_eq!(codex_mode_for(Some("auto"), true, None), "read-only");
+        let gaps = codex_gaps_for(Some("auto"), true, None).join(" ");
+        assert!(gaps.contains("team worker in Auto"), "{gaps}");
+    }
+
+    #[test]
+    fn strip_windows_verbatim_accepts_drive_and_unc_refuses_other_namespaces() {
+        assert_eq!(
+            strip_windows_verbatim_str(r"\\?\C:\Users\x\proj"),
+            Some(r"C:\Users\x\proj".into())
+        );
+        assert_eq!(
+            strip_windows_verbatim_str(r"\\?\c:\temp"),
+            Some(r"c:\temp".into())
+        );
+        assert_eq!(
+            strip_windows_verbatim_str(r"\\?\UNC\server\share\path"),
+            Some(r"\\server\share\path".into())
+        );
+        assert_eq!(
+            strip_windows_verbatim_str(r"\\?\UNC\srv\share"),
+            Some(r"\\srv\share".into())
+        );
+        // Not verbatim — leave alone.
+        assert_eq!(strip_windows_verbatim_str(r"C:\x"), Some(r"C:\x".into()));
+        // Refuse other \\?\ namespaces.
+        for bad in [
+            r"\\?\Volume{00000000-0000-0000-0000-000000000000}\x",
+            r"\\?\HarddiskVolume1\Windows",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1\x",
+            r"\\?\foo",
+            r"\\?\UNC\serveronly",
+            r"\\?\UNC\",
+            r"\\?\C",
+            r"\\?\C:noslash",
+        ] {
+            assert_eq!(strip_windows_verbatim_str(bad), None, "must refuse {bad}");
+        }
+    }
+
+    #[test]
+    fn codex_worker_windows_refuse_hint_constant_is_distinct() {
+        assert_ne!(CODEX_WORKER_WINDOWS_READONLY_HINT, CODEX_WORKER_TEMP_READONLY_HINT);
+        assert!(CODEX_WORKER_WINDOWS_READONLY_HINT.contains("Windows"));
+        #[cfg(windows)]
+        {
+            let hint = codex_worker_workspace_write_blocked(Path::new(r"C:\any"));
+            assert_eq!(hint, Some(CODEX_WORKER_WINDOWS_READONLY_HINT));
+            assert_eq!(
+                codex_mode_for(Some("auto"), true, Some(Path::new(r"C:\any"))),
+                "read-only"
+            );
+            let gaps = codex_gaps_for(Some("auto"), true, Some(Path::new(r"C:\any"))).join(" ");
+            assert!(gaps.contains("Windows"), "{gaps}");
+        }
     }
 
     /// The header says what is true in each state: Ask asks for edits and network; Approve all

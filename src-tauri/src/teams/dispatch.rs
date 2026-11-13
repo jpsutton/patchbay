@@ -720,7 +720,7 @@ mod tests {
         run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]);
         let (path, branch) = make_worktree(&team, "DM-20261109-01").unwrap();
         assert_eq!(branch, "dm-20261109-01");
-        assert!(path.join(".git").exists() && path.starts_with(super::super::resolve(&d).join("proj").join("trees")));
+        assert!(path.join(".git").exists() && path.starts_with(super::super::resolve(&d).unwrap().join("proj").join("trees")));
         // The same item twice is refused by git (branch exists), not silently shared.
         assert!(make_worktree(&team, "DM-20261109-01").is_err());
         remove_worktree(&team, &path, &branch);
@@ -759,7 +759,7 @@ mod tests {
             .unwrap();
         assert!(team.worktree_root.is_empty(), "stored root stays empty");
         let root = team.effective_worktree_root().unwrap();
-        assert_eq!(root, super::super::resolve(Path::new(&team.cwd)).join(".trees"));
+        assert_eq!(root, super::super::resolve(Path::new(&team.cwd)).unwrap().join(".trees"));
 
         // Existing stuck row: empty string in SQLite still resolves and can host a worktree.
         t.0.execute("UPDATE teams SET worktree_root = '' WHERE id = ?1", [&team.id]).unwrap();

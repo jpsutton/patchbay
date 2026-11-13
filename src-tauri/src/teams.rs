@@ -278,11 +278,11 @@ impl Team {
     /// Worktree folder for dispatch and durable-done checks. An empty stored value means
     /// `<team cwd>/.trees`, so teams created without an explicit folder are not stuck.
     pub fn effective_worktree_root(&self) -> Result<PathBuf> {
-        let cwd = resolve(Path::new(&self.cwd));
+        let cwd = resolve(Path::new(&self.cwd))?;
         let root = if self.worktree_root.trim().is_empty() {
             cwd.join(".trees")
         } else {
-            resolve(Path::new(&self.worktree_root))
+            resolve(Path::new(&self.worktree_root))?
         };
         if !root.starts_with(&cwd) {
             bail!("the worktree folder must be inside the team folder {}", cwd.display());
@@ -588,10 +588,10 @@ impl TeamsDb {
         }
         let pr_base = input.pr_base.filter(|p| !p.trim().is_empty()).unwrap_or_else(|| "main".into());
         check_pr_base(&pr_base)?;
-        let cwd = resolve(Path::new(&input.cwd));
+        let cwd = resolve(Path::new(&input.cwd))?;
         let worktree_root = match input.worktree_root.filter(|w| !w.trim().is_empty()) {
             Some(w) => {
-                let w = resolve(Path::new(&w));
+                let w = resolve(Path::new(&w))?;
                 if !w.starts_with(&cwd) {
                     bail!("the worktree folder must be inside the team folder {}", cwd.display());
                 }
@@ -1070,37 +1070,64 @@ pub fn preamble_for(data_dir: &Path, db: &Db, session_id: &str) -> Option<String
 /// `path` made absolute with symlinks resolved as far as it exists; the missing tail is kept as is.
 ///
 /// On Windows, `canonicalize` returns a `\\?\` verbatim path. Git (and several other tools) reject
-/// those when creating worktrees, so the prefix is stripped before the path is returned or stored.
-fn resolve(path: &Path) -> PathBuf {
+/// those when creating worktrees, so an accepted drive/UNC prefix is stripped before the path is
+/// returned or stored. Unknown `\\?\` namespaces fail closed.
+fn resolve(path: &Path) -> Result<PathBuf> {
     let mut tail = Vec::new();
     let mut cur = path.to_path_buf();
     loop {
         if let Ok(c) = cur.canonicalize() {
-            return tail.iter().rev().fold(strip_windows_verbatim(c), |acc, t| acc.join(t));
+            let stripped = strip_windows_verbatim(c)
+                .ok_or_else(|| anyhow!("unresolvable Windows path namespace for {}", path.display()))?;
+            return Ok(tail.iter().rev().fold(stripped, |acc, t| acc.join(t)));
         }
         match (cur.file_name().map(|n| n.to_owned()), cur.parent().map(Path::to_path_buf)) {
             (Some(n), Some(p)) => {
                 tail.push(n);
                 cur = p;
             }
-            _ => return path.to_path_buf(),
+            _ => return Ok(path.to_path_buf()),
         }
     }
 }
 
-/// Drop the Windows `\\?\` / `\\?\UNC\` prefix from a canonical path so git and other tools accept it.
-fn strip_windows_verbatim(path: PathBuf) -> PathBuf {
+/// Drop an accepted Windows `\\?\` / `\\?\UNC\` prefix from a canonical path so git and other tools
+/// accept it. Other `\\?\` namespaces (Volume GUID, HarddiskVolume, bare) are unresolvable → `None`.
+fn strip_windows_verbatim(path: PathBuf) -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        let s = path.to_string_lossy();
-        if let Some(rest) = s.strip_prefix(r"\\?\") {
-            if let Some(unc) = rest.strip_prefix(r"UNC\") {
-                return PathBuf::from(format!(r"\\{unc}"));
-            }
-            return PathBuf::from(rest);
+        return strip_windows_verbatim_str(&path.to_string_lossy()).map(PathBuf::from);
+    }
+    #[cfg(not(windows))]
+    {
+        Some(path)
+    }
+}
+
+/// Pure string form of [`strip_windows_verbatim`] (testable on every OS).
+fn strip_windows_verbatim_str(s: &str) -> Option<String> {
+    let Some(rest) = s.strip_prefix(r"\\?\") else {
+        return Some(s.to_owned());
+    };
+    if let Some(unc) = rest.strip_prefix(r"UNC\") {
+        let mut parts = unc.split('\\');
+        let server = parts.next().unwrap_or("");
+        let share = parts.next().unwrap_or("");
+        if server.is_empty() || share.is_empty() {
+            return None;
+        }
+        return Some(format!(r"\\{unc}"));
+    }
+    let b = rest.as_bytes();
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        if b.len() == 2 {
+            return Some(rest.to_owned());
+        }
+        if b[2] == b'\\' || b[2] == b'/' {
+            return Some(rest.to_owned());
         }
     }
-    path
+    None
 }
 
 /// A branch name safe to hand to git later: no leading `-`, and git accepts it as a branch.
@@ -1145,7 +1172,7 @@ fn check_export_dir(dir: &Path, cwd: &Path, worktree_root: &Path) -> Result<()> 
     if is_link(dir) {
         bail!("{} is a symlink; pick a real export folder", dir.display());
     }
-    let real = resolve(dir);
+    let real = resolve(dir)?;
     for root in [cwd, worktree_root] {
         if !root.as_os_str().is_empty() && real.starts_with(root) {
             bail!("the export folder must be outside the team folder {}", root.display());
@@ -1182,7 +1209,7 @@ fn write_export(tdb: &TeamsDb, db: &Db, team_id: &str, event: &str) -> Result<()
         return Ok(());
     }
     let dir = PathBuf::from(&team.export_dir);
-    check_export_dir(&dir, &resolve(Path::new(&team.cwd)), &team.effective_worktree_root()?)?;
+    check_export_dir(&dir, &resolve(Path::new(&team.cwd))?, &team.effective_worktree_root()?)?;
     std::fs::create_dir_all(&dir)?;
     let roles = tdb.roles()?;
     let mut roster = format!("{GENERATED}\n# Roster: {}\n\nFolder: {}\n\n| Role | Seat | Session | Agent |\n|---|---|---|---|\n", team.slug, team.cwd);
@@ -1719,7 +1746,7 @@ mod tests {
         let team = t.create_team(new_team("emptywt", &proj(&d), &d.join("out"))).unwrap();
         assert!(team.worktree_root.is_empty());
         let root = team.effective_worktree_root().unwrap();
-        assert_eq!(root, resolve(Path::new(&team.cwd)).join(".trees"));
+        assert_eq!(root, resolve(Path::new(&team.cwd)).unwrap().join(".trees"));
         // Explicit outside path is still refused.
         let mut escaped = team.clone();
         escaped.worktree_root = d.to_string_lossy().into_owned();
@@ -2008,7 +2035,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(ok.pr_base, "release/1.0");
-        assert!(Path::new(&ok.worktree_root).starts_with(resolve(&p)));
+        assert!(Path::new(&ok.worktree_root).starts_with(resolve(&p).unwrap()));
     }
 
     #[cfg(unix)]
@@ -2151,5 +2178,26 @@ mod tests {
         let expected_capped = format!("\"{}\"", "A".repeat(80));
         assert!(instructions.contains(&expected_capped));
         assert!(!instructions.contains(&format!("\"{}\"", "A".repeat(81))));
+    }
+
+    #[test]
+    fn strip_windows_verbatim_accepts_drive_and_unc_refuses_other_namespaces() {
+        assert_eq!(
+            strip_windows_verbatim_str(r"\\?\D:\trees\item"),
+            Some(r"D:\trees\item".into())
+        );
+        assert_eq!(
+            strip_windows_verbatim_str(r"\\?\UNC\fileserver\share\wt"),
+            Some(r"\\fileserver\share\wt".into())
+        );
+        assert_eq!(strip_windows_verbatim_str(r"D:\plain"), Some(r"D:\plain".into()));
+        for bad in [
+            r"\\?\Volume{11111111-2222-3333-4444-555555555555}\x",
+            r"\\?\HarddiskVolume2\foo",
+            r"\\?\foo",
+            r"\\?\UNC\onlyserver",
+        ] {
+            assert_eq!(strip_windows_verbatim_str(bad), None, "must refuse {bad}");
+        }
     }
 }
