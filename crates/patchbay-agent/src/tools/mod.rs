@@ -1194,6 +1194,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A chain of links longer than the hop limit is REFUSED, never let through to be followed by the
+    /// filesystem, and so is a pair of links that point at each other. The chains end on this machine,
+    /// so it is the limit, not a share, that refuses them.
+    #[test]
+    #[cfg(windows)]
+    fn a_chain_of_links_past_the_hop_limit_and_a_cycle_are_refused() {
+        let root = root_on_the_current_drive("link-hops");
+        std::fs::create_dir_all(root.join("end")).unwrap();
+        let chain = |n: usize| {
+            // l1 -> l2 -> ... -> l<n> -> end
+            for i in 1..=n {
+                let target = if i == n { root.join("end") } else { root.join(format!("c{n}_l{}", i + 1)) };
+                std::os::windows::fs::symlink_dir(target, root.join(format!("c{n}_l{i}"))).unwrap();
+            }
+            root.join(format!("c{n}_l1")).join("x.txt")
+        };
+        if let Err(e) = std::os::windows::fs::symlink_dir(root.join("end"), root.join("probe")) {
+            skip(&format!("cannot create a directory symlink here ({e})"));
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        let at_the_limit = chain(LINK_HOPS);
+        assert!(!foreign_target(&root, &at_the_limit), "{LINK_HOPS} links on this machine are within the limit");
+        let past_the_limit = chain(LINK_HOPS + 1);
+        assert!(foreign_target(&root, &past_the_limit), "{} links were not refused", LINK_HOPS + 1);
+        // Two links that point at each other.
+        std::os::windows::fs::symlink_dir(root.join("cycle_b"), root.join("cycle_a")).unwrap();
+        std::os::windows::fs::symlink_dir(root.join("cycle_a"), root.join("cycle_b")).unwrap();
+        assert!(foreign_target(&root, &root.join("cycle_a").join("x.txt")), "a cycle of links was not refused");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Links that point at each other are not followed forever and not left for the canonicalization
     /// to follow: the path is not judged inside.
     #[test]

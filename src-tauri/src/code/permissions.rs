@@ -139,6 +139,11 @@ fn protected(rel: &Path) -> bool {
 /// `p` made absolute against `root`, with symlinks resolved. A path that doesn't exist yet
 /// resolves through its nearest existing ancestor.
 fn resolve(root: &Path, p: &str) -> Option<PathBuf> {
+    resolve_with(root, p, &|q: &Path| q.canonicalize())
+}
+
+/// [`resolve`] with the canonicalizer given, so a test can make it fail the way Windows does.
+fn resolve_with(root: &Path, p: &str, canon: &dyn Fn(&Path) -> std::io::Result<PathBuf>) -> Option<PathBuf> {
     use std::path::Component;
     let p = p.strip_prefix("file://").unwrap_or(p);
     let joined = if Path::new(p).is_absolute() { PathBuf::from(p) } else { root.join(p) };
@@ -149,7 +154,7 @@ fn resolve(root: &Path, p: &str) -> Option<PathBuf> {
         // Only "not there" means look at a shorter prefix. Any other failure (Windows' "untrusted mount
         // point" 448 on a link to a share is one) is NOT a reason to re-add the rest by hand and call the
         // path inside the project: it cannot be judged.
-        let mut real = match comps[..i].iter().collect::<PathBuf>().canonicalize() {
+        let mut real = match canon(&comps[..i].iter().collect::<PathBuf>()) {
             Ok(real) => real,
             Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => continue,
             Err(_) => return None,
@@ -391,6 +396,32 @@ mod tests {
             assert!(decide("auto", &[], &cwd, &call, &opencode_opts()).is_none(), "Auto edits approved {}", p.display());
         }
         assert!(started.elapsed() < std::time::Duration::from_secs(1), "classifying took {:?}: a network attempt", started.elapsed());
+    }
+
+    /// A prefix that cannot be canonicalized for any reason but "it is not there" (Windows' os error 448,
+    /// "untrusted mount point", on a link to a share is one) is not re-assembled by hand and called
+    /// inside the project: the path cannot be judged. A missing prefix still resolves through the
+    /// nearest one that exists.
+    #[test]
+    fn a_canonicalize_error_that_is_not_a_missing_path_is_not_inside() {
+        use std::io::{Error, ErrorKind};
+        let root = Path::new("proj");
+        let canon = |fail_at_two: Option<Error>| {
+            move |q: &Path| match q.components().count() {
+                1 => Ok(PathBuf::from("proj")),
+                2 => match &fail_at_two {
+                    Some(e) => Err(Error::new(e.kind(), "x")),
+                    None => Err(Error::from(ErrorKind::NotFound)),
+                },
+                _ => Err(Error::from(ErrorKind::NotFound)),
+            }
+        };
+        // The control: everything below the root is merely missing.
+        assert_eq!(resolve_with(root, "a/b.txt", &canon(None)), Some(PathBuf::from("proj/a/b.txt")));
+        // The same, but the prefix `proj/a` fails the way a link to a share does.
+        for kind in [ErrorKind::PermissionDenied, ErrorKind::Other, ErrorKind::InvalidInput] {
+            assert_eq!(resolve_with(root, "a/b.txt", &canon(Some(Error::from(kind)))), None, "{kind:?}");
+        }
     }
 
     // Option lists as each agent sends them (docs/design/approval-modes.md).
