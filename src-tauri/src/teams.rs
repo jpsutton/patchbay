@@ -796,6 +796,13 @@ impl TeamsDb {
             if !crate::db::PERMISSION_MODES.contains(&s.permission_mode.as_str()) {
                 bail!("seat {} has an unknown permission mode {:?}", s.seat, s.permission_mode);
             }
+            let role = roles.iter().find(|r| r.id == s.role_id).unwrap();
+            if !role.standing && s.permission_mode == "always-approve" {
+                bail!(
+                    "seat {}: worker seats can't use always-approve; pick default or auto (same rule as dispatch)",
+                    s.seat
+                );
+            }
             if s.count == 0 {
                 bail!("seat {} needs a count of at least 1", s.seat);
             }
@@ -1209,8 +1216,17 @@ pub(crate) async fn create_team(state: &AppState, input: NewTeam) -> CmdResult<T
 }
 
 pub(crate) async fn team_attach(state: &AppState, team_id: String, session_id: String, seat: String) -> CmdResult<Member> {
-    state.db.get_code_session(&session_id)?.ok_or_else(|| CmdError("unknown Code session".into()))?;
+    let session = state.db.get_code_session(&session_id)?.ok_or_else(|| CmdError("unknown Code session".into()))?;
     let tdb = open(state)?;
+    let team = tdb.team(&team_id)?;
+    let tpl = tdb.template(&team.template_id)?;
+    let seat_def = tpl.seats.iter().find(|s| s.seat == seat).ok_or_else(|| CmdError(format!("the template has no seat {seat}")))?;
+    let role = tdb.role(&seat_def.role_id)?;
+    if !role.standing && session.permission_mode == "always-approve" {
+        return Err(CmdError(
+            "workers don't start in always-approve mode; set the seat or the session to a stricter mode".into(),
+        ));
+    }
     let m = tdb.attach(&team_id, &session_id, &seat)?;
     export(&tdb, &state.db, &team_id, &format!("session {session_id} joined seat {seat}"));
     Ok(m)
@@ -1774,6 +1790,12 @@ mod tests {
         let mut bad = tpl(None, "cursor");
         bad.seats[0].role_id = "missing".into();
         assert!(t.save_template(bad).is_err());
+        let mut always = tpl(None, "cursor");
+        always.seats[0].permission_mode = "always-approve".into();
+        assert!(
+            t.save_template(always).unwrap_err().to_string().contains("always-approve"),
+            "worker seat refuses always-approve"
+        );
         let mine_tpl = t.save_template(tpl(None, "cursor")).unwrap();
         assert_eq!(mine_tpl.seats[0].agent, "cursor");
 

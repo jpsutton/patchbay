@@ -89,7 +89,8 @@ A seat has a role, an agent, an optional model, a permission mode, and:
 - standing seats: `count` (usually 1);
 - worker seats: `pool`, the most workers of this seat alive at once, and an optional list of
   agent/model choices the coordinator picks from (e.g. Claude Code Sonnet, Cursor Auto, Antigravity
-  Gemini).
+  Gemini). Worker seats may not be saved or Started in `always-approve` (same rule as dispatch);
+  a human may still switch a live session's mode in the session UI — that override is deliberate.
 
 The template also holds the decision routing:
 

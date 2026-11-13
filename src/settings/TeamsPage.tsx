@@ -235,7 +235,9 @@ function TeamsPanel() {
             <div className="text-muted">{detail.team.cwd} · {detail.template.name} · {detail.team.exportDir ? `export to ${detail.team.exportDir}` : "export: off"}</div>
             {detail.template.seats.map((seat) => {
               const here = detail.members.filter((m) => m.member.seat === seat.seat);
-              const role = detail.roles.find((r) => r.id === seat.roleId)?.name ?? seat.roleId;
+              const roleRow = detail.roles.find((r) => r.id === seat.roleId);
+              const role = roleRow?.name ?? seat.roleId;
+              const isWorkerSeat = roleRow ? !roleRow.standing : false;
               const taken = new Set(detail.members.map((m) => m.member.sessionId));
               const free = sessions
                 .filter((s) => !taken.has(s.id) && s.archivedAt == null)
@@ -280,12 +282,17 @@ function TeamsPanel() {
                         className="rounded-md border border-border px-2 text-xs hover:border-accent"
                         onClick={async () => {
                           try {
+                            const mode = (seat.permissionMode as "default" | "auto" | "always-approve") || "default";
+                            if (isWorkerSeat && mode === "always-approve") {
+                              fail(new Error("workers don't start in always-approve mode; set the seat to default or auto"));
+                              return;
+                            }
                             const s = await api.createCodeSession(
                               detail.team.cwd,
                               seat.model || null,
                               seat.agent as AgentId,
                               null,
-                              (seat.permissionMode as "default" | "auto" | "always-approve") || "default",
+                              mode,
                             );
                             await api.teamAttach(detail.team.id, s.id, seat.seat);
                             changed();
