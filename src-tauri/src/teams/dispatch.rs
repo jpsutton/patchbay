@@ -416,9 +416,10 @@ async fn start(state: &AppState, p: &Plan) -> Result<Value> {
     let mut session_id: Option<String> = None;
     let made: Result<String> = async {
         let cwd = path.to_string_lossy().into_owned();
-        let session = crate::create_code_session_local(state, &cwd, p.model.as_deref(), Some(p.agent.clone()))?;
+        let session = crate::create_code_session_local(state, &cwd, p.model.as_deref(), Some(p.agent.clone()), None)?;
         session_id = Some(session.id.clone());
         // Created by the coordinator, so lowering its mode lowers the worker's too.
+        // Always set after create: stricter(seat, coordinator), never always-approve for workers.
         state.db.set_code_session_permission_mode(&session.id, &p.mode)?;
         state.db.set_code_session_created_by(&session.id, &p.desk)?;
         state.db.set_code_session_title(&session.id, &format!("{} {}", p.item.id, super::clean(&p.item.title)), true)?;

@@ -1334,8 +1334,20 @@ export const api = {
 
   listCodeSessions: () => invoke<CodeSession[]>("list_code_sessions"),
   /** With `host`, the session runs on that computer, in its folder `cwd`. */
-  createCodeSession: (cwd: string, modelRef: string | null, agent?: AgentId, host?: string | null) =>
-    invoke<CodeSession>("create_code_session", { cwd, modelRef, agent: agent ?? null, host: host ?? null }),
+  createCodeSession: (
+    cwd: string,
+    modelRef: string | null,
+    agent?: AgentId,
+    host?: string | null,
+    permissionMode?: "default" | "auto" | "always-approve" | null,
+  ) =>
+    invoke<CodeSession>("create_code_session", {
+      cwd,
+      modelRef,
+      agent: agent ?? null,
+      host: host ?? null,
+      permissionMode: permissionMode ?? null,
+    }),
   /** Claude Code's sessions on this computer, from every account. */
   listClaudeSessions: () => invoke<ClaudeSession[]>("list_claude_sessions"),
   /** Make Code sessions from Claude Code's, continued by `agent` (default: the preferred one). */

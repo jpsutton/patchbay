@@ -1579,6 +1579,7 @@ export function install() {
         }
         case "create_code_session": {
           const prefs = JSON.parse(db.settings.preferences ?? "{}") as { defaultAgent?: AgentId; permissionMode?: CodeSession["permissionMode"] };
+          const mode = (a.permissionMode as CodeSession["permissionMode"] | null) ?? prefs.permissionMode ?? "default";
           const s: CodeSession = {
             id: id(),
             cwd: a.cwd as string,
@@ -1593,7 +1594,7 @@ export function install() {
             agentModel: null,
             hostNode: (a.host as string | null) ?? ME,
             epoch: 0,
-            permissionMode: prefs.permissionMode ?? "default",
+            permissionMode: mode,
           };
           db.code.push(s);
           return s;

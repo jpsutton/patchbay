@@ -284,6 +284,8 @@ function TeamsPanel() {
                               detail.team.cwd,
                               seat.model || null,
                               seat.agent as AgentId,
+                              null,
+                              (seat.permissionMode as "default" | "auto" | "always-approve") || "default",
                             );
                             await api.teamAttach(detail.team.id, s.id, seat.seat);
                             changed();

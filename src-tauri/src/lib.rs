@@ -751,11 +751,14 @@ async fn create_code_session(
     model_ref: Option<String>,
     agent: Option<String>,
     host: Option<String>,
+    permission_mode: Option<String>,
 ) -> CmdResult<CodeSession> {
     let Some(host) = host.filter(|h| h != state.mesh.node_id()) else {
-        return Ok(create_code_session_local(state, &cwd, model_ref.as_deref(), agent)?);
+        return Ok(create_code_session_local(state, &cwd, model_ref.as_deref(), agent, permission_mode.as_deref())?);
     };
-    let p = serde_json::json!({ "host": host, "cwd": cwd, "modelRef": model_ref, "agent": agent });
+    let p = serde_json::json!({
+        "host": host, "cwd": cwd, "modelRef": model_ref, "agent": agent, "permissionMode": permission_mode
+    });
     let created = gateway::on_host(state, &p, "code.create").await?;
     let id = created["id"].as_str().ok_or_else(|| CmdError("the host returned no session".into()))?;
     wait_for_session_row(state, id, &host).await
@@ -828,7 +831,7 @@ async fn import_claude_sessions(state: &AppState, ids: Vec<String>, agent: Optio
         } else {
             cwd
         };
-        let s = create_code_session_local(state, &cwd.to_string_lossy(), None, agent.clone())?;
+        let s = create_code_session_local(state, &cwd.to_string_lossy(), None, agent.clone(), None)?;
         state.db.set_code_session_title(&s.id, &chat::clip(&conv.title, 80), true)?;
         state.db.set_code_session_times(&s.id, conv.created_ms.max(1), conv.updated_ms.max(conv.created_ms).max(1))?;
         code::import_claude::attach(&state.db, &s, info, &conv, original.is_dir())?;
@@ -838,12 +841,30 @@ async fn import_claude_sessions(state: &AppState, ids: Vec<String>, agent: Optio
     Ok(made)
 }
 
+/// Standing seat start from the Teams page passes the seat's `permission_mode` here so prefs
+/// don't silently win; workers still get their mode from `dispatch` (`stricter`, no always-approve).
+#[cfg(test)]
+#[test]
+fn create_code_session_local_applies_explicit_permission_mode() {
+    let dir = std::env::temp_dir().join(format!("pb-seat-mode-{}", db::new_id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let state = open_state(dir.clone(), std::sync::Arc::new(|_: &str, _: serde_json::Value| {})).unwrap();
+    let cwd = dir.to_string_lossy();
+    let auto = create_code_session_local(&state, &cwd, None, Some("opencode".into()), Some("auto")).unwrap();
+    assert_eq!(auto.permission_mode, "auto");
+    let seeded = create_code_session_local(&state, &cwd, None, Some("opencode".into()), None).unwrap();
+    assert_eq!(seeded.permission_mode, "default");
+    assert!(create_code_session_local(&state, &cwd, None, Some("opencode".into()), Some("yolo")).is_err());
+}
+
 /// A new Code session hosted here, in `cwd` on this computer.
+/// `permission_mode` overrides the prefs default when set (e.g. a Teams standing seat's mode).
 pub(crate) fn create_code_session_local(
     state: &AppState,
     cwd: &str,
     model_ref: Option<&str>,
     agent: Option<String>,
+    permission_mode: Option<&str>,
 ) -> anyhow::Result<CodeSession> {
     // Native folder pickers can return a trailing slash (the KDE portal does); `/a/b` and `/a/b/`
     // are one folder, and the same permission rules and recent-folder entry must serve both.
@@ -856,7 +877,12 @@ pub(crate) fn create_code_session_local(
     if code::agents::AgentKind::parse(&agent).is_none() {
         anyhow::bail!("unknown coding agent {agent}");
     }
-    state.db.create_code_session(cwd, model_ref, &agent, &prefs.permission_mode)
+    let mode = match permission_mode {
+        Some(m) if db::PERMISSION_MODES.contains(&m) => m,
+        Some(m) => anyhow::bail!("unknown permission mode {m:?}"),
+        None => prefs.permission_mode.as_str(),
+    };
+    state.db.create_code_session(cwd, model_ref, &agent, mode)
 }
 
 /// The coding agents Patchbay can drive, and whether each is installed here or, with `host`, on
@@ -2952,7 +2978,7 @@ pub(crate) async fn create_agent_session(
     }
     let agent = agent.map(str::to_owned).unwrap_or_else(|| creator.agent.clone());
     let model = model.or(creator.model_ref.as_deref());
-    let session = create_code_session_local(state, &cwd, model, Some(agent))?;
+    let session = create_code_session_local(state, &cwd, model, Some(agent), None)?;
     // A failure past this point would leave an empty session that still counts toward the cap.
     let started: anyhow::Result<()> = async {
         // Inherit rather than seed from prefs: a restricted creator can't spawn a looser session.

@@ -140,7 +140,7 @@ commands! {
     list_shares();
     revoke_share(token);
     list_code_sessions();
-    create_code_session(cwd, model_ref, agent, host);
+    create_code_session(cwd, model_ref, agent, host, permission_mode);
     list_agents(host);
     install_antigravity_agent();
     clear_antigravity_auth();

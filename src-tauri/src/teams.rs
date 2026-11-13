@@ -1501,7 +1501,7 @@ async fn restart_member_inner(
 
     // Swap, start, brief with rollback.
     let cwd = old_session.cwd.clone();
-    let new_session = match crate::create_code_session_local(state, &cwd, model.as_deref(), Some(agent)) {
+    let new_session = match crate::create_code_session_local(state, &cwd, model.as_deref(), Some(agent), None) {
         Ok(s) => s,
         Err(e) => {
             let _ = crate::archive_code_session(state, old_session_id, false).await;

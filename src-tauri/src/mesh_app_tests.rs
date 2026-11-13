@@ -149,21 +149,21 @@ async fn desktop_starts_a_session_in_a_remote_folder() {
     let cwd = proj.to_string_lossy().into_owned();
 
     // Started from B with A as host, it runs on A, and B has its row when the call returns.
-    let s = create_code_session(&b.state, cwd.clone(), None, Some("grok".into()), Some(an.clone())).await.unwrap();
+    let s = create_code_session(&b.state, cwd.clone(), None, Some("grok".into()), Some(an.clone()), None).await.unwrap();
     assert_eq!(s.host_node.as_deref(), Some(an.as_str()));
     assert_eq!(s.cwd, cwd);
     assert_eq!(host_of(&a, &s.id).as_deref(), Some(an.as_str()));
     assert_eq!(host_of(&b, &s.id).as_deref(), Some(an.as_str()));
 
     // A folder picker's trailing slash is not part of the folder.
-    let slashed = create_code_session(&b.state, format!("{cwd}/"), None, Some("grok".into()), Some(an.clone())).await.unwrap();
+    let slashed = create_code_session(&b.state, format!("{cwd}/"), None, Some("grok".into()), Some(an.clone()), None).await.unwrap();
     assert_eq!(slashed.cwd, cwd);
 
     // Naming this computer as host is the same as naming none.
     let bn = b.state.mesh.node_id().to_owned();
     let bproj = b.dir.join("proj");
     repo(&bproj);
-    let s = create_code_session(&b.state, bproj.to_string_lossy().into_owned(), None, None, Some(bn.clone())).await.unwrap();
+    let s = create_code_session(&b.state, bproj.to_string_lossy().into_owned(), None, None, Some(bn.clone()), None).await.unwrap();
     assert_eq!(s.host_node.as_deref(), Some(bn.as_str()));
 }
 
