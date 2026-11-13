@@ -219,19 +219,30 @@ pub struct ApprovalSetup {
     /// start, on resume, on a change while running, and in `keep_mode`.
     pub follows_approval: bool,
     /// True when this session is a **current** active dispatched worker (open membership, worker
-    /// role, open item, team not archived). Codex Auto then maps to `workspace-write`; released /
+    /// role, open item, team not archived). Codex Auto then maps to `workspace-write` when the
+    /// worktree's common git dir is safe (see [`codex_worker_workspace_write_blocked`]); released /
     /// restored / item-done / standing / non-team sessions stay read-only.
     pub dispatched_worker: bool,
+    /// Session cwd used to decide whether a dispatched Codex worker may take `workspace-write`.
+    /// Empty for template consent / matrix checks that skip the path gate.
+    pub session_cwd: Option<PathBuf>,
 }
 
 impl ApprovalSetup {
     /// `for_agent`, with what depends on the session's approval mode filled in (Codex's sandbox).
-    pub(crate) fn for_session(kind: AgentKind, permission_mode: &str, dispatched_worker: bool) -> Self {
+    pub(crate) fn for_session(
+        kind: AgentKind,
+        permission_mode: &str,
+        dispatched_worker: bool,
+        session_cwd: Option<&Path>,
+    ) -> Self {
         let mut setup = Self::for_agent(kind);
         if setup.follows_approval {
             setup.dispatched_worker = dispatched_worker;
-            setup.select_mode = Some(codex_mode_for(Some(permission_mode), dispatched_worker).into());
-            setup.gaps = codex_gaps_for(Some(permission_mode), dispatched_worker);
+            setup.session_cwd = session_cwd.map(Path::to_path_buf);
+            setup.select_mode =
+                Some(codex_mode_for(Some(permission_mode), dispatched_worker, session_cwd).into());
+            setup.gaps = codex_gaps_for(Some(permission_mode), dispatched_worker, session_cwd);
         }
         setup
     }
@@ -243,7 +254,8 @@ impl ApprovalSetup {
     /// control implies right now is accepted. `approval_now`: the session's saved approval mode.
     pub(crate) fn refuse_mode(&self, mode_id: &str, approval_now: Option<&str>) -> Option<String> {
         if self.follows_approval {
-            let implied = codex_mode_for(approval_now, self.dispatched_worker);
+            let implied =
+                codex_mode_for(approval_now, self.dispatched_worker, self.session_cwd.as_deref());
             return (mode_id != implied).then(|| {
                 format!("Codex's mode follows the session's approval control ({implied} right now), so \"{mode_id}\" can't be set directly.")
             });
@@ -280,6 +292,7 @@ impl ApprovalSetup {
                 gaps: CODEX_ASKING_GAPS,
                 follows_approval: true,
                 dispatched_worker: false,
+                ..Self::default()
             },
             AgentKind::Antigravity => Self {
                 select_mode: Some("default".into()),
@@ -303,23 +316,45 @@ impl ApprovalSetup {
 
 /// Codex mode that asks before edits; also its starting mode (`INITIAL_AGENT_MODE`).
 const CODEX_ASKING_MODE: &str = "read-only";
-/// Codex mode that edits the project (and the temp folders) without asking; network and anything
-/// outside the sandbox still go through Codex's own `on-request` approvals (pb-20261110-15).
-/// Writable roots Codex grants under this preset: the session cwd (for a dispatched worker, the
-/// item worktree) plus `/tmp` and `$TMPDIR`. The main repo's `.git/worktrees/<name>` and object
-/// store are outside that cwd, so writes there escalate as Codex prompts (and may then match
-/// `allow_worker_commit`) rather than by widening the sandbox roots.
+/// Codex mode that edits the project without asking; network and anything outside the sandbox
+/// still go through Codex's own `on-request` approvals (pb-20261110-15).
+///
+/// Under `codex-acp` 2.2.2 the live `workspace-write` turn policy also keeps `/tmp` and `$TMPDIR`
+/// writable (`excludeSlashTmp` / `excludeTmpdirEnvVar` hardcoded false). Patchbay cannot confirm
+/// those excludes at ACP launch (F1), so a dispatched worker only takes this mode when
+/// [`codex_worker_workspace_write_blocked`] is clear — otherwise it stays read-only (F2).
 const CODEX_WRITING_MODE: &str = "workspace-write";
 
-/// The Codex mode a session's approval mode implies. Approve all => `workspace-write`. A
-/// **dispatched worker** in Auto also => `workspace-write` (network still off). Everything else
-/// (Ask, Auto on a non-worker / standing / non-team session, or an unreadable mode) => `read-only`.
-/// Never `agent` or `agent-full-access`: this mapping never picks them, and `refuse_mode` refuses
-/// a caller that names them.
-pub(crate) fn codex_mode_for(permission_mode: Option<&str>, dispatched_worker: bool) -> &'static str {
+/// Hint shown when F2 keeps a Codex worker read-only because the project/git dir is under a
+/// temp root (or otherwise under a path workspace-write would make writable).
+pub(crate) const CODEX_WORKER_TEMP_READONLY_HINT: &str =
+    "Codex worker stays read-only: project is under a temp directory";
+
+/// `codex-acp` 2.2.2's `workspace-write` / `agent` modes hardcode `excludeSlashTmp` and
+/// `excludeTmpdirEnvVar` to false on every turn, so `CODEX_CONFIG` / `[sandbox_workspace_write]`
+/// excludes do not stick. Stay false until an adapter (or Patchbay) can confirm them in effect.
+pub(crate) const CODEX_WORKER_TEMP_EXCLUDES_CONFIRMED: bool = false;
+
+/// The Codex mode a session's approval mode implies.
+///
+/// Approve all => `workspace-write`. A **dispatched worker** in Auto => `workspace-write` only when
+/// `cwd` is omitted (template consent / matrix) or [`codex_worker_workspace_write_blocked`] is
+/// `None`; otherwise read-only. Everything else => `read-only`. Never `agent` or
+/// `agent-full-access`.
+pub(crate) fn codex_mode_for(
+    permission_mode: Option<&str>,
+    dispatched_worker: bool,
+    cwd: Option<&Path>,
+) -> &'static str {
     match permission_mode {
         Some("always-approve") => CODEX_WRITING_MODE,
-        Some("auto") if dispatched_worker => CODEX_WRITING_MODE,
+        Some("auto") if dispatched_worker => {
+            if cwd.map(codex_worker_workspace_write_blocked).flatten().is_some() {
+                CODEX_ASKING_MODE
+            } else {
+                CODEX_WRITING_MODE
+            }
+        }
         _ => CODEX_ASKING_MODE,
     }
 }
@@ -333,19 +368,156 @@ const CODEX_WRITING_GAPS: &[&str] = &[
     "Codex writes in this project and in the temp folders (/tmp and $TMPDIR) without asking. Everything else it asks for (network, files outside the project) is approved automatically under Approve all.",
     CODEX_CONFIG_GAP,
 ];
-/// Dispatched worker in Auto: workspace-write, network off; outside the sandbox still asks.
+/// Dispatched worker in Auto when workspace-write is allowed. Temp roots stay writable under
+/// current codex-acp (F1 excludes not confirmed); F2 refuses the mapping when the project's
+/// common git dir would fall under those roots or under the worktree itself.
 const CODEX_WORKER_AUTO_GAPS: &[&str] = &[
-    "As a team worker in Auto, Codex edits files and runs commands inside its worktree sandbox without asking, and also writes under /tmp and $TMPDIR without asking. Network stays off; anything else outside the sandbox still asks.",
+    "As a team worker in Auto, Codex edits files and runs commands inside its worktree sandbox without asking, and also writes under /tmp and $TMPDIR without asking. Network stays off; anything else outside the sandbox still asks. If the team project or its .git is under /tmp or $TMPDIR (or git metadata would be writable inside the worktree), the worker stays read-only instead.",
+    CODEX_CONFIG_GAP,
+];
+const CODEX_WORKER_TEMP_REFUSED_GAPS: &[&str] = &[
+    CODEX_WORKER_TEMP_READONLY_HINT,
+    "Codex runs shell commands inside its read-only sandbox without asking. It asks before editing files and before network use.",
     CODEX_CONFIG_GAP,
 ];
 
 /// What Codex does without asking under a session's approval mode: the header's text.
-pub(crate) fn codex_gaps_for(permission_mode: Option<&str>, dispatched_worker: bool) -> &'static [&'static str] {
+///
+/// `cwd`: when set, a dispatched worker whose project fails the F2 git-dir gate gets the
+/// temp-refused gaps. When `None` (template editor / seat consent), worker Auto uses the
+/// workspace-write gaps text so acknowledgement covers the allowed case.
+pub(crate) fn codex_gaps_for(
+    permission_mode: Option<&str>,
+    dispatched_worker: bool,
+    cwd: Option<&Path>,
+) -> &'static [&'static str] {
     match permission_mode {
         Some("always-approve") => CODEX_WRITING_GAPS,
-        Some("auto") if dispatched_worker => CODEX_WORKER_AUTO_GAPS,
+        Some("auto") if dispatched_worker => {
+            if cwd.map(codex_worker_workspace_write_blocked).flatten().is_some() {
+                CODEX_WORKER_TEMP_REFUSED_GAPS
+            } else {
+                CODEX_WORKER_AUTO_GAPS
+            }
+        }
         _ => CODEX_ASKING_GAPS,
     }
+}
+
+/// Why a dispatched Codex worker must stay read-only instead of `workspace-write`, or `None`
+/// when the mapping is allowed.
+///
+/// Refuses when the worktree's common git dir or **main** checkout lies under a path Codex would
+/// make writable under today's workspace-write policy: the session cwd (worktree), and (while F1
+/// temp excludes are not confirmed) `/tmp`, `/private/tmp`, or `$TMPDIR`. A linked worktree is
+/// allowed when those live outside the worktree (and outside temp). Fail closed if git cannot be
+/// probed. (`--show-toplevel` is the current worktree, not the main checkout — use
+/// [`git_main_worktree`].)
+pub(crate) fn codex_worker_workspace_write_blocked(cwd: &Path) -> Option<&'static str> {
+    let common = match git_rev_parse_path(cwd, &["--git-common-dir"]) {
+        Some(p) => p,
+        None => return Some(CODEX_WORKER_TEMP_READONLY_HINT),
+    };
+    let main = match git_main_worktree(cwd) {
+        Some(p) => p,
+        None => return Some(CODEX_WORKER_TEMP_READONLY_HINT),
+    };
+    let cwd_key = path_key(cwd);
+    if path_under(&common, &cwd_key) || path_under(&main, &cwd_key) {
+        return Some(CODEX_WORKER_TEMP_READONLY_HINT);
+    }
+    if !CODEX_WORKER_TEMP_EXCLUDES_CONFIRMED {
+        for root in temp_writable_roots() {
+            if path_under(&common, &root) || path_under(&main, &root) {
+                return Some(CODEX_WORKER_TEMP_READONLY_HINT);
+            }
+        }
+    }
+    None
+}
+
+/// Hardened `git rev-parse` path result for `cwd`, resolved to an absolute normalised path.
+fn git_rev_parse_path(cwd: &Path, rev_args: &[&str]) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C"])
+        .arg(cwd)
+        .arg("rev-parse")
+        .args(rev_args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if raw.is_empty() {
+        return None;
+    }
+    let p = PathBuf::from(&raw);
+    let abs = if p.is_absolute() { p } else { cwd.join(p) };
+    Some(path_key(&abs))
+}
+
+/// Absolute path of the repository's primary (main) worktree, from `git worktree list --porcelain`.
+/// Not [`git rev-parse --show-toplevel`], which is the *current* worktree and would always sit
+/// under a linked worker cwd.
+fn git_main_worktree(cwd: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C"])
+        .arg(cwd)
+        .args(["worktree", "list", "--porcelain"])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let Some(raw) = line.strip_prefix("worktree ") else { continue };
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let p = PathBuf::from(raw);
+        let abs = if p.is_absolute() { p } else { cwd.join(p) };
+        return Some(path_key(&abs));
+    }
+    None
+}
+
+/// Canonicalise when possible; on macOS map `/tmp` → `/private/tmp` so comparisons match.
+fn path_key(path: &Path) -> PathBuf {
+    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    normalize_macos_tmp(canon)
+}
+
+fn normalize_macos_tmp(path: PathBuf) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        const TMP: &str = "/tmp";
+        const PRIVATE_TMP: &str = "/private/tmp";
+        if let Ok(s) = path.strip_prefix(TMP) {
+            return PathBuf::from(PRIVATE_TMP).join(s);
+        }
+    }
+    path
+}
+
+fn path_under(path: &Path, root: &Path) -> bool {
+    path == root || path.starts_with(root)
+}
+
+/// Roots Codex still makes writable under workspace-write while F1 excludes are unconfirmed.
+fn temp_writable_roots() -> Vec<PathBuf> {
+    let mut roots = vec![path_key(Path::new("/tmp")), path_key(Path::new("/private/tmp"))];
+    if let Ok(tmpdir) = std::env::var("TMPDIR") {
+        let t = tmpdir.trim();
+        if !t.is_empty() {
+            roots.push(path_key(Path::new(t)));
+        }
+    }
+    roots
 }
 
 const OPCODE_ALWAYS_APPROVE_MODE: &str = "always-approve";
@@ -1220,7 +1392,8 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
             let dispatched = crate::teams::is_active_dispatched_worker_in(data_dir, &session.id);
             env.push((
                 "INITIAL_AGENT_MODE".to_owned(),
-                codex_mode_for(Some(&session.permission_mode), dispatched).to_owned(),
+                codex_mode_for(Some(&session.permission_mode), dispatched, Some(Path::new(&session.cwd)))
+                    .to_owned(),
             ));
             // The adapter reads an API key from the environment only when told to sign in with
             // one; without a login it otherwise stops at `auth_required`.
@@ -1291,6 +1464,7 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
             kind,
             &session.permission_mode,
             crate::teams::is_active_dispatched_worker_in(data_dir, &session.id),
+            Some(Path::new(&session.cwd)),
         ),
         native: None,
     })
@@ -2288,7 +2462,7 @@ time.sleep(60)
         assert_eq!(env(&l, "INITIAL_AGENT_MODE").as_deref(), Some("read-only"));
         assert_eq!(env(&l, "CODEX_CONFIG"), None);
         assert_eq!(l.approvals.select_mode.as_deref(), Some("read-only"));
-        assert_eq!(l.approvals.gaps, codex_gaps_for(Some("default"), false));
+        assert_eq!(l.approvals.gaps, codex_gaps_for(Some("default"), false, Some(Path::new(&session.cwd))));
 
         prefs.agent_instructions = "be terse".into();
         crate::prefs::save(&db, &prefs).unwrap();
@@ -2325,7 +2499,11 @@ time.sleep(60)
             let l = launch();
             assert_eq!(env(&l, "INITIAL_AGENT_MODE").as_deref(), Some(mode), "{approval}");
             assert_eq!(l.approvals.select_mode.as_deref(), Some(mode), "{approval}");
-            assert_eq!(l.approvals.gaps, codex_gaps_for(Some(approval), false), "{approval}");
+            assert_eq!(
+                l.approvals.gaps,
+                codex_gaps_for(Some(approval), false, Some(Path::new(&session.cwd))),
+                "{approval}"
+            );
             assert!(l.approvals.follows_approval);
             assert!(!l.approvals.dispatched_worker);
             // The write-capable mode is never offered, and neither are the agent modes.
@@ -2336,44 +2514,53 @@ time.sleep(60)
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Mapping matrix: only Approve all, or a dispatched worker in Auto, open write access — and
-    /// only to `workspace-write`. Standing seats, non-team Auto, and worker Default stay read-only.
-    /// No input reaches `agent` or `agent-full-access`.
+    /// Mapping matrix: only Approve all, or a dispatched worker in Auto (cwd omitted = consent /
+    /// matrix), open write access — and only to `workspace-write`. Standing seats, non-team Auto,
+    /// and worker Default stay read-only. No input reaches `agent` or `agent-full-access`.
     #[test]
     fn codex_mode_mapping_matrix() {
-        assert_eq!(codex_mode_for(Some("always-approve"), false), "workspace-write");
-        assert_eq!(codex_mode_for(Some("always-approve"), true), "workspace-write");
-        assert_eq!(codex_mode_for(Some("auto"), true), "workspace-write", "worker+auto");
-        assert_eq!(codex_mode_for(Some("default"), true), "read-only", "worker+default");
-        assert_eq!(codex_mode_for(Some("auto"), false), "read-only", "standing/non-team auto");
-        assert_eq!(codex_mode_for(Some("default"), false), "read-only");
+        assert_eq!(codex_mode_for(Some("always-approve"), false, None), "workspace-write");
+        assert_eq!(codex_mode_for(Some("always-approve"), true, None), "workspace-write");
+        assert_eq!(codex_mode_for(Some("auto"), true, None), "workspace-write", "worker+auto");
+        assert_eq!(codex_mode_for(Some("default"), true, None), "read-only", "worker+default");
+        assert_eq!(codex_mode_for(Some("auto"), false, None), "read-only", "standing/non-team auto");
+        assert_eq!(codex_mode_for(Some("default"), false, None), "read-only");
         for other in [None, Some(""), Some("agent"), Some("agent-full-access"), Some("workspace-write")] {
-            assert_eq!(codex_mode_for(other, false), "read-only", "{other:?}");
-            assert_eq!(codex_mode_for(other, true), "read-only", "{other:?}");
+            assert_eq!(codex_mode_for(other, false, None), "read-only", "{other:?}");
+            assert_eq!(codex_mode_for(other, true, None), "read-only", "{other:?}");
         }
-        let worker_auto = codex_gaps_for(Some("auto"), true).join(" ");
+        let worker_auto = codex_gaps_for(Some("auto"), true, None).join(" ");
         assert!(worker_auto.contains("team worker in Auto") && worker_auto.contains("still ask"), "{worker_auto}");
         assert!(worker_auto.contains("/tmp") && worker_auto.contains("$TMPDIR"), "{worker_auto}");
         assert!(!worker_auto.contains("approved automatically"), "{worker_auto}");
-        assert_eq!(codex_gaps_for(Some("auto"), false), codex_gaps_for(Some("default"), false));
-        assert_eq!(codex_gaps_for(Some("default"), true), codex_gaps_for(Some("default"), false));
+        assert_eq!(
+            codex_gaps_for(Some("auto"), false, None),
+            codex_gaps_for(Some("default"), false, None)
+        );
+        assert_eq!(
+            codex_gaps_for(Some("default"), true, None),
+            codex_gaps_for(Some("default"), false, None)
+        );
     }
 
     /// The header says what is true in each state: Ask asks for edits and network; Approve all
     /// writes in the project and the temp folders unasked and approves the rest itself.
     #[test]
     fn codex_header_text_differs_per_state() {
-        let ask = codex_gaps_for(Some("default"), false).join(" ");
-        let all = codex_gaps_for(Some("always-approve"), false).join(" ");
+        let ask = codex_gaps_for(Some("default"), false, None).join(" ");
+        let all = codex_gaps_for(Some("always-approve"), false, None).join(" ");
         assert_ne!(ask, all);
         assert!(ask.contains("read-only sandbox") && ask.contains("asks before editing files"), "{ask}");
         assert!(!ask.contains("temp folders"), "{ask}");
         assert!(all.contains("writes in this project") && all.contains("/tmp and $TMPDIR"), "{all}");
         assert!(all.contains("network, files outside the project") && all.contains("approved automatically"), "{all}");
         // Unreadable approval mode reads as Ask, text included.
-        assert_eq!(codex_gaps_for(None, false), codex_gaps_for(Some("default"), false));
+        assert_eq!(
+            codex_gaps_for(None, false, None),
+            codex_gaps_for(Some("default"), false, None)
+        );
         // Other agents keep a fixed setup whatever the session's approval mode is.
-        let claude = ApprovalSetup::for_session(AgentKind::ClaudeCode, "always-approve", false);
+        let claude = ApprovalSetup::for_session(AgentKind::ClaudeCode, "always-approve", false, None);
         assert_eq!(claude, ApprovalSetup::for_agent(AgentKind::ClaudeCode));
         assert!(!claude.follows_approval);
     }
@@ -2401,7 +2588,8 @@ time.sleep(60)
         .unwrap();
     }
 
-    /// A current active Codex worker in Auto launches in workspace-write; released / item-done do not.
+    /// Under a temp_dir team (F2), a current active Codex worker in Auto stays read-only; released /
+    /// item-done stay read-only too. Workspace-write needs a safe linked worktree (see next test).
     #[test]
     fn codex_dispatched_worker_auto_launches_workspace_write() {
         let dir = std::env::temp_dir().join(format!("pb-ag-{}", crate::db::new_id()));
@@ -2431,10 +2619,15 @@ time.sleep(60)
         assert!(crate::teams::is_dispatched_in(&dir, &session.id));
         let l = prepare(&db, &dir, &session).unwrap();
         let mode = |k: &str| l.env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
-        assert_eq!(mode("INITIAL_AGENT_MODE"), Some("workspace-write"));
-        assert_eq!(l.approvals.select_mode.as_deref(), Some("workspace-write"));
+        // F2: temp roots stay writable under today's workspace-write, so the worker stays read-only.
+        assert_eq!(mode("INITIAL_AGENT_MODE"), Some("read-only"));
+        assert_eq!(l.approvals.select_mode.as_deref(), Some("read-only"));
         assert!(l.approvals.dispatched_worker);
-        assert_eq!(l.approvals.gaps, codex_gaps_for(Some("auto"), true));
+        assert_eq!(
+            l.approvals.gaps,
+            codex_gaps_for(Some("auto"), true, Some(Path::new(&session.cwd)))
+        );
+        assert!(l.approvals.gaps.iter().any(|g| g.contains("temp directory")));
         // Same session under default stays read-only even when an active worker.
         db.set_code_session_permission_mode(&session.id, "default").unwrap();
         let l = prepare(&db, &dir, &db.get_code_session(&session.id).unwrap().unwrap()).unwrap();
@@ -2464,7 +2657,7 @@ time.sleep(60)
         let l = prepare(&db, &dir, &db.get_code_session(&session.id).unwrap().unwrap()).unwrap();
         assert_eq!(mode_of(&l), Some("read-only"), "released => read-only");
 
-        // Restart: new session is the active worker; old stays read-only.
+        // Restart: new session is the active worker; under temp it still stays read-only (F2).
         let neu = db
             .create_code_session(&dir.to_string_lossy(), None, "codex", "auto")
             .unwrap();
@@ -2482,7 +2675,7 @@ time.sleep(60)
         .unwrap();
         assert!(crate::teams::is_active_dispatched_worker_in(&dir, &neu.id));
         assert!(!crate::teams::is_active_dispatched_worker_in(&dir, &session.id));
-        assert_eq!(mode_of(&prepare(&db, &dir, &neu).unwrap()), Some("workspace-write"));
+        assert_eq!(mode_of(&prepare(&db, &dir, &neu).unwrap()), Some("read-only"));
         assert_eq!(
             mode_of(&prepare(&db, &dir, &db.get_code_session(&session.id).unwrap().unwrap()).unwrap()),
             Some("read-only")
@@ -2520,6 +2713,162 @@ time.sleep(60)
         fn mode_of(l: &Launch) -> Option<&str> {
             l.env.iter().find(|(n, _)| n == "INITIAL_AGENT_MODE").map(|(_, v)| v.as_str())
         }
+    }
+
+    /// Linked worktree under a non-temp home data path: active Codex worker Auto => workspace-write.
+    #[test]
+    fn codex_dispatched_worker_auto_home_linked_worktree_is_workspace_write() {
+        let id = crate::db::new_id();
+        let home = PathBuf::from(format!("/Users/dfrazer/patchbay-teams-data/proj-home-test-{id}"));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("trees")).unwrap();
+        // Main checkout + one linked worktree (common git dir stays outside the worktree cwd).
+        std::process::Command::new("git")
+            .args(["-c", "init.defaultBranch=main", "init"])
+            .current_dir(&home)
+            .status()
+            .unwrap();
+        std::fs::write(home.join("README"), "home").unwrap();
+        std::process::Command::new("git")
+            .args(["-c", "core.hooksPath=/dev/null", "add", "README"])
+            .current_dir(&home)
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-c", "core.hooksPath=/dev/null", "commit", "-m", "init"])
+            .current_dir(&home)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .unwrap();
+        let wt = home.join("trees/i1");
+        let wt_s = wt.to_string_lossy().into_owned();
+        std::process::Command::new("git")
+            .args(["worktree", "add", "-b", "i1", "--", &wt_s, "main"])
+            .current_dir(&home)
+            .status()
+            .unwrap();
+        assert!(codex_worker_workspace_write_blocked(&wt).is_none());
+
+        let data = std::env::temp_dir().join(format!("pb-ag-home-{id}"));
+        std::fs::create_dir_all(&data).unwrap();
+        let db = std::sync::Arc::new(Db::open(&data.join("db.sqlite")).unwrap());
+        let mut o = AgentPaths::new();
+        o.insert("codex".into(), std::env::current_exe().unwrap().to_string_lossy().into_owned());
+        crate::prefs::save(&db, &crate::prefs::Preferences { agent_paths: o, ..Default::default() }).unwrap();
+        let session = db.create_code_session(&wt_s, None, "codex", "auto").unwrap();
+        let tdb = crate::teams::TeamsDb::open(&data).unwrap();
+        let team = tdb
+            .create_team(crate::teams::NewTeam {
+                template_id: "builtin-triage-desk".into(),
+                slug: "home".into(),
+                cwd: home.to_string_lossy().into_owned(),
+                id_prefix: Some("HM".into()),
+                pr_base: Some("main".into()),
+                worktree_root: Some(home.join("trees").to_string_lossy().into_owned()),
+                project_rules: None,
+                export_dir: Some(data.join("out").to_string_lossy().into_owned()),
+            })
+            .unwrap();
+        seed_active_worker(&data, &team.id, &session.id, "i1", "in-progress");
+        let l = prepare(&db, &data, &session).unwrap();
+        assert!(l.approvals.dispatched_worker);
+        assert_eq!(
+            l.env.iter().find(|(n, _)| n == "INITIAL_AGENT_MODE").map(|(_, v)| v.as_str()),
+            Some("workspace-write")
+        );
+        assert_eq!(l.approvals.select_mode.as_deref(), Some("workspace-write"));
+        assert_eq!(l.approvals.gaps, codex_gaps_for(Some("auto"), true, Some(Path::new(&wt_s))));
+        assert!(!l.approvals.gaps.iter().any(|g| *g == CODEX_WORKER_TEMP_READONLY_HINT));
+
+        let _ = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force", "--", &wt_s])
+            .current_dir(&home)
+            .status();
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// F2 gate: temp cwd blocks; home linked worktree allows; main-checkout cwd blocks.
+    #[test]
+    fn codex_worker_workspace_write_blocked_cases() {
+        let temp = std::env::temp_dir().join(format!("pb-f2-temp-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&temp).unwrap();
+        std::process::Command::new("git")
+            .args(["-c", "init.defaultBranch=main", "init"])
+            .current_dir(&temp)
+            .status()
+            .unwrap();
+        std::fs::write(temp.join("f"), "x").unwrap();
+        std::process::Command::new("git")
+            .args(["-c", "core.hooksPath=/dev/null", "add", "f"])
+            .current_dir(&temp)
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-c", "core.hooksPath=/dev/null", "commit", "-m", "t"])
+            .current_dir(&temp)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .unwrap();
+        assert_eq!(
+            codex_worker_workspace_write_blocked(&temp),
+            Some(CODEX_WORKER_TEMP_READONLY_HINT),
+            "temp => blocked"
+        );
+        let _ = std::fs::remove_dir_all(&temp);
+
+        let id = crate::db::new_id();
+        let home = PathBuf::from(format!("/Users/dfrazer/patchbay-teams-data/proj-home-test-{id}"));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("trees")).unwrap();
+        std::process::Command::new("git")
+            .args(["-c", "init.defaultBranch=main", "init"])
+            .current_dir(&home)
+            .status()
+            .unwrap();
+        std::fs::write(home.join("README"), "x").unwrap();
+        std::process::Command::new("git")
+            .args(["-c", "core.hooksPath=/dev/null", "add", "README"])
+            .current_dir(&home)
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-c", "core.hooksPath=/dev/null", "commit", "-m", "t"])
+            .current_dir(&home)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .unwrap();
+        assert_eq!(
+            codex_worker_workspace_write_blocked(&home),
+            Some(CODEX_WORKER_TEMP_READONLY_HINT),
+            "main-checkout cwd => blocked (git metadata under cwd)"
+        );
+        let wt = home.join("trees/wt1");
+        let wt_s = wt.to_string_lossy().into_owned();
+        std::process::Command::new("git")
+            .args(["worktree", "add", "-b", "wt1", "--", &wt_s, "main"])
+            .current_dir(&home)
+            .status()
+            .unwrap();
+        assert_eq!(
+            codex_worker_workspace_write_blocked(&wt),
+            None,
+            "home linked worktree => allowed"
+        );
+        let _ = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force", "--", &wt_s])
+            .current_dir(&home)
+            .status();
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// A team member's role instructions reach the prompt hook of each agent that has one, and

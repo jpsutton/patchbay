@@ -180,7 +180,12 @@ impl Seat {
                 let kind = AgentKind::parse(a)?;
                 let gaps = match kind {
                     AgentKind::Codex => {
-                        crate::code::agents::codex_gaps_for(Some(self.permission_mode.as_str()), worker_seat)
+                        // Template consent: no session cwd yet — optimistic worker Auto gaps.
+                        crate::code::agents::codex_gaps_for(
+                            Some(self.permission_mode.as_str()),
+                            worker_seat,
+                            None,
+                        )
                     }
                     _ => ApprovalSetup::for_agent(kind).gaps,
                 };
@@ -213,9 +218,11 @@ impl Seat {
             .filter_map(|a| {
                 let kind = AgentKind::parse(a)?;
                 let gaps = match kind {
-                    AgentKind::Codex => {
-                        crate::code::agents::codex_gaps_for(Some(self.permission_mode.as_str()), worker_seat)
-                    }
+                    AgentKind::Codex => crate::code::agents::codex_gaps_for(
+                        Some(self.permission_mode.as_str()),
+                        worker_seat,
+                        None,
+                    ),
                     _ => ApprovalSetup::for_agent(kind).gaps,
                 };
                 (!gaps.is_empty()).then(|| AgentGaps { agent: a.clone(), gaps: gaps.iter().map(|g| g.to_string()).collect() })

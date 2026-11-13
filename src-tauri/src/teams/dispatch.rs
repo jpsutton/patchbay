@@ -286,7 +286,9 @@ pub fn check_seat_agent(
     let kind = AgentKind::parse(a).ok_or_else(|| anyhow!("unknown coding agent {a}"))?;
     // check_seat_agent only runs for worker seats, so Codex uses the dispatched-worker gaps text.
     let gaps = match kind {
-        AgentKind::Codex => crate::code::agents::codex_gaps_for(Some(seat.permission_mode.as_str()), true),
+        AgentKind::Codex => {
+            crate::code::agents::codex_gaps_for(Some(seat.permission_mode.as_str()), true, None)
+        }
         _ => ApprovalSetup::for_agent(kind).gaps,
     };
     if !gaps.is_empty() && !(seat.allow_unasked && seat.acknowledged(true) && !template_id.starts_with("builtin-")) {
@@ -511,6 +513,16 @@ async fn start(state: &AppState, p: &Plan) -> Result<Value> {
     tdb.set_item(&p.team.id, &p.item.id, Some(&p.desk), &json!({ "status": "dispatched", "assignee": worker }))?;
     changed(state, &tdb, &p.team.id, &format!("{} dispatched to {} ({} {})", p.item.id, p.role_name, p.agent, p.model.as_deref().unwrap_or("")));
     (state.emit)("mesh://changed", serde_json::json!({ "tables": ["code_sessions"] }));
+    let mut note = "Started and briefed. Follow its progress with item_get; release it with member_release when the item is done, dropped or awaiting review.".to_owned();
+    let mut codex_sandbox = json!(null);
+    if p.agent == "codex" && p.mode == "auto" {
+        if let Some(why) = crate::code::agents::codex_worker_workspace_write_blocked(&path) {
+            note = format!("{why}. {note}");
+            codex_sandbox = json!("read-only");
+        } else {
+            codex_sandbox = json!("workspace-write");
+        }
+    }
     Ok(json!({
         "sessionId": worker,
         "agent": p.agent,
@@ -518,7 +530,8 @@ async fn start(state: &AppState, p: &Plan) -> Result<Value> {
         "permissionMode": p.mode,
         "worktree": path.to_string_lossy(),
         "branch": branch,
-        "note": "Started and briefed. Follow its progress with item_get; release it with member_release when the item is done, dropped or awaiting review.",
+        "codexSandbox": codex_sandbox,
+        "note": note,
     }))
 }
 

@@ -3425,6 +3425,7 @@ fn check_mode_request(state: &AppState, id: &str, mode_id: &str) -> anyhow::Resu
         kind,
         &session.permission_mode,
         crate::teams::is_active_dispatched_worker(state, id),
+        Some(std::path::Path::new(&session.cwd)),
     );
     if let Some(why) = setup.refuse_mode(mode_id, Some(&session.permission_mode)) {
         tracing::warn!("refused setting {mode_id} on session {id} ({}): {why}", kind.id());
@@ -3461,12 +3462,15 @@ async fn set_permission_mode_local(state: &AppState, id: &str, mode: &str) -> an
     if !(codex && state.code.is_running(id)) {
         return save(mode);
     }
+    let cwd = session.as_ref().map(|s| s.cwd.clone());
     let previous = session.map(|s| s.permission_mode).unwrap_or_else(|| "default".into());
     let dispatched = crate::teams::is_active_dispatched_worker(state, id);
+    let cwd_path = cwd.as_deref().map(std::path::Path::new);
     save_then_move(save, &previous, mode, || {
-        state
-            .code
-            .set_mode(id, code::agents::codex_mode_for(Some(mode), dispatched).to_owned())
+        state.code.set_mode(
+            id,
+            code::agents::codex_mode_for(Some(mode), dispatched, cwd_path).to_owned(),
+        )
     })
     .await?;
     on_code_event(
@@ -3474,7 +3478,7 @@ async fn set_permission_mode_local(state: &AppState, id: &str, mode: &str) -> an
         code::acp::Envelope {
             code_session_id: id.to_owned(),
             event: code::acp::CodeEvent::ApprovalGaps {
-                gaps: code::agents::codex_gaps_for(Some(mode), dispatched),
+                gaps: code::agents::codex_gaps_for(Some(mode), dispatched, cwd_path),
             },
         },
     );

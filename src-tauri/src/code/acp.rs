@@ -898,6 +898,7 @@ impl UiClient {
             super::agents::codex_mode_for(
                 (self.permission_mode)().as_deref(),
                 self.approvals.dispatched_worker,
+                self.approvals.session_cwd.as_deref(),
             )
             .to_owned()
         } else if self.approvals.hide_modes.contains(&current) {
@@ -1888,8 +1889,12 @@ async fn run(
     let start_mode = if approvals.follows_approval {
         // Read now, not at launch: the approval mode may have changed while the agent started.
         Some(
-            super::agents::codex_mode_for(permission_mode().as_deref(), approvals.dispatched_worker)
-                .to_owned(),
+            super::agents::codex_mode_for(
+                permission_mode().as_deref(),
+                approvals.dispatched_worker,
+                approvals.session_cwd.as_deref(),
+            )
+            .to_owned(),
         )
     } else {
         approvals.select_mode.clone()
@@ -1922,7 +1927,11 @@ async fn run(
             config_options: cfg.extra.clone(),
             extensions,
             approval_gaps: if approvals.follows_approval {
-                super::agents::codex_gaps_for(permission_mode().as_deref(), approvals.dispatched_worker)
+                super::agents::codex_gaps_for(
+                    permission_mode().as_deref(),
+                    approvals.dispatched_worker,
+                    approvals.session_cwd.as_deref(),
+                )
             } else {
                 approvals.gaps
             },
