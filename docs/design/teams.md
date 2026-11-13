@@ -103,10 +103,13 @@ The template also holds the decision routing:
 The class list and the examples are editable text; Patchbay only routes by class.
 
 Templates may also set `allow_worker_commit` (off by default; built-ins never carry it). When on,
-a dispatched worker whose cwd is its assigned item worktree may run, without a prompt, a single
-command that passes a fail-closed tokenizer (no shell metacharacters; plain tokens match
-`[A-Za-z0-9._/@:+,=-]+`; quotes only for `git commit -m` / `--message` values) and a per-verb
-option allow-list:
+a dispatched worker whose **request** `rawInput.cwd` is its assigned item worktree may run, without
+a prompt, a single command that passes a fail-closed tokenizer (no shell metacharacters; plain tokens
+match `[A-Za-z0-9._/@:+,=-]+`; quotes only for `git commit -m` / `--message` values) and a per-verb
+option allow-list. Missing or empty `cwd` on the request is fail-closed (no fallback to the session's
+recorded start cwd — that only proves launch directory, not the shell's actual cwd). Agents that do
+not report cwd on execute requests (Cursor today) therefore always prompt for worker git commands
+under this rule:
 
 - `git commit`: only `-m` / `--message` (required; no `-q`/`-v`/`--no-verify`/`-F`/`--template`).
 - `git add`: paths and/or `-A` / `--all` / `-u` / `--update` / `--` (no `-f`, no `--pathspec-from-file`).

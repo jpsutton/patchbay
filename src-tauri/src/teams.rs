@@ -292,7 +292,8 @@ fn builtin_roles() -> Vec<Role> {
              Record every notice before any code is written. You do not write code, edit project files, or implement \
              items yourself. Every implementation change must be performed by a worker dispatched to a worktree. \
              Before marking an item done or releasing a worker, check the worktree and git log to verify changes \
-             are committed. Never mark an item done on the worker's word alone."),
+             are committed. Never mark an item done on the worker's word alone. Use team_roster for who is on this \
+             team; do not call list_agent_sessions or create_agent_session (neither is a team tool)."),
         role_seed("builtin-advisor", "Advisor", true, Caps { decides: true, ..none.clone() }, Some("builtin-desk"),
             "You are the advisor. The coordinator consults you on scope, priority and whether a gap blocks. Answer \
              CLEAR when you can decide, or HUMAN when the user must. Give a short reason. Do not write code or \
@@ -302,11 +303,11 @@ fn builtin_roles() -> Vec<Role> {
              reviewed pull requests, and report the verdict to the coordinator. Never merge on a worker's word alone."),
         role_seed("builtin-worker", "Worker", false, none.clone(), Some("builtin-desk"),
             "You are a worker on one item. Do exactly what the brief says, in the folder it names. Your shell \
-             already starts in your assigned worktree. To commit, run exactly two separate plain commands: \
+             already starts in your assigned worktree. For changes, commit with exactly these two plain commands: \
              `git add <paths>` then `git commit -m \"<one-line message>\"` — no heredoc, no $(...), no multi-line \
-             message, no wrapper or prefix before git (not even `rtk`), no chaining. Only that shape is approved \
-             without a human. Report progress and blockers to the coordinator. Stop when the brief's definition \
-             of done is met and report evidence."),
+             message, no wrapper or prefix before git (not even `rtk`), no chaining. Single read-only \
+             `ls` / `cat` / `git status` / `git diff` / `git log` in the worktree are also fine. Report progress \
+             and blockers to the coordinator. Stop when the brief's definition of done is met and report evidence."),
         role_seed("builtin-verifier", "Verifier", false, none, Some("builtin-lead"),
             "You are a verifier. Check a worker's result independently against the original brief: read the \
              diff, run the tests yourself, and report what you ran and what you saw."),

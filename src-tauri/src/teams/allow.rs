@@ -489,25 +489,16 @@ fn worker_git_repo_blocks_auto(worktree: &Path, verb: &str) -> bool {
     hooks_dir_has_executable(&hooks_dir, names)
 }
 
-/// Cwd for the worktree gate: a non-empty `rawInput.cwd` from the request, else the worker
-/// session's recorded cwd (Patchbay's Code-session cwd, which for a dispatch is the item
-/// worktree). Empty string counts as missing — Cursor has sent that. Never invent a path from
-/// other agent-supplied fields. Caller still requires the chosen cwd to equal the item worktree.
-fn worker_call_cwd<'a>(tool_call: &'a Value, session_cwd: &'a str) -> Option<&'a str> {
-    if let Some(cwd) = tool_call["rawInput"]["cwd"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
-        return Some(cwd);
-    }
-    let recorded = session_cwd.trim();
-    if recorded.is_empty() {
-        None
-    } else {
-        Some(recorded)
-    }
+/// Non-empty `rawInput.cwd` from the request. Missing or empty is fail-closed: a recorded
+/// session cwd only proves the start directory, not the shell's actual cwd (verifier: not
+/// push-safe to fall back). Caller still requires this cwd to equal the item worktree.
+fn worker_request_cwd(tool_call: &Value) -> Option<&str> {
+    tool_call["rawInput"]["cwd"].as_str().map(str::trim).filter(|s| !s.is_empty())
 }
 
 /// Opt-in worktree allow: active worker on an assigned item, template opted in, cwd is the
 /// assigned worktree, command is a safe git / ls / cat form.
-fn allow_worker_commit(data_dir: &Path, session: &str, tool_call: &Value, options: &Value, session_cwd: &str) -> Option<(String, String)> {
+fn allow_worker_commit(data_dir: &Path, session: &str, tool_call: &Value, options: &Value, _session_cwd: &str) -> Option<(String, String)> {
     if tool_call["kind"].as_str() != Some("execute") {
         return None;
     }
@@ -526,7 +517,8 @@ fn allow_worker_commit(data_dir: &Path, session: &str, tool_call: &Value, option
     }
     let worktree_root = team.effective_worktree_root().ok()?;
     let worktree = worktree_root.join(item_id.to_lowercase());
-    let call_cwd = worker_call_cwd(tool_call, session_cwd)?;
+    // Fail closed: no request cwd ⇒ no auto-approve (do not use session cwd).
+    let call_cwd = worker_request_cwd(tool_call)?;
     if !paths_equal(Path::new(call_cwd), &worktree) {
         return None;
     }
@@ -974,22 +966,22 @@ mod tests {
         }
     }
 
-    /// Cursor has sent empty `rawInput.cwd`; fall back to the worker session's recorded cwd.
+    /// Missing/empty request cwd is fail-closed even when the session cwd is the worktree.
     #[test]
-    fn worker_commit_missing_cwd_uses_session_cwd() {
+    fn worker_commit_missing_cwd_refuses_even_with_session_cwd() {
         let (d, wt, _proj, _item) = worker_commit_fixture(true);
         std::fs::write(std::path::Path::new(&wt).join("LICENSE"), "x").unwrap();
         assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec_no_cwd("git commit -m work"), &options(), &wt).is_some(),
-            "omitted cwd + session worktree"
+            allow_team_tool(&d, "w1", "claude-code", &git_exec_no_cwd("git commit -m work"), &options(), &wt).is_none(),
+            "omitted cwd must refuse"
         );
         assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec_empty_cwd("git commit -m work"), &options(), &wt).is_some(),
-            "empty-string cwd + session worktree (Cursor)"
+            allow_team_tool(&d, "w1", "claude-code", &git_exec_empty_cwd("git commit -m work"), &options(), &wt).is_none(),
+            "empty-string cwd must refuse (Cursor)"
         );
         assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec_empty_cwd("git add LICENSE"), &options(), &wt).is_some(),
-            "empty cwd git add"
+            allow_team_tool(&d, "w1", "claude-code", &git_exec_empty_cwd("git add LICENSE"), &options(), &wt).is_none(),
+            "empty cwd git add must refuse"
         );
     }
 
