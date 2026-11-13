@@ -146,7 +146,14 @@ fn resolve(root: &Path, p: &str) -> Option<PathBuf> {
     // The longest prefix that exists resolves on disk, symlinks and `..` included; the rest
     // can only be followed by hand.
     for i in (1..=comps.len()).rev() {
-        let Ok(mut real) = comps[..i].iter().collect::<PathBuf>().canonicalize() else { continue };
+        // Only "not there" means look at a shorter prefix. Any other failure (Windows' "untrusted mount
+        // point" 448 on a link to a share is one) is NOT a reason to re-add the rest by hand and call the
+        // path inside the project: it cannot be judged.
+        let mut real = match comps[..i].iter().collect::<PathBuf>().canonicalize() {
+            Ok(real) => real,
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => continue,
+            Err(_) => return None,
+        };
         for c in &comps[i..] {
             match c {
                 Component::ParentDir => {
@@ -195,6 +202,11 @@ fn paths_of(tool_call: &Value) -> Vec<String> {
 fn all_inside(cwd: &str, paths: &[String]) -> Option<bool> {
     let root = Path::new(cwd).canonicalize().ok()?;
     for p in paths {
+        // Before anything is resolved: a path that is, or goes through a link to, another machine's
+        // share is outside, and canonicalizing it would connect to that share.
+        if patchbay_agent::foreign_target(Path::new(cwd), Path::new(p.strip_prefix("file://").unwrap_or(p))) {
+            return Some(false);
+        }
         let real = resolve(&root, p)?;
         match real.strip_prefix(&root) {
             Ok(rel) if !rel.iter().any(|c| c == "..") && !protected(rel) => {}
@@ -352,6 +364,33 @@ mod tests {
         std::os::unix::fs::symlink(&outside, root.join("out")).unwrap();
         let cwd = root.to_string_lossy().into_owned();
         (dir, cwd, outside)
+    }
+
+    /// A path that goes through a link to another machine's share is outside the project and is
+    /// judged without touching the share: Windows connects to it (and sends the user's credentials)
+    /// the moment the path is canonicalized, which `classify` does before the user is asked anything.
+    #[test]
+    #[cfg(windows)]
+    fn a_path_through_a_link_to_a_share_is_outside_and_touches_no_network() {
+        let (_dir, cwd, _outside) = project();
+        // `PB_E2E_LINK`: a link made earlier by whoever watches the network, so the OS's own reaction to
+        // creating a link to a share is over before the call under test (its folder is then the project).
+        let pre = std::env::var("PB_E2E_LINK").ok().map(PathBuf::from);
+        let cwd = pre.as_ref().and_then(|l| l.parent().map(|d| d.to_string_lossy().into_owned())).unwrap_or(cwd);
+        let link = pre.clone().unwrap_or_else(|| Path::new(&cwd).join("to_share"));
+        if pre.is_none() {
+            if let Err(e) = std::os::windows::fs::symlink_dir(r"\\192.0.2.1\share", &link) {
+                eprintln!("skipped: cannot create a directory symlink here ({e})");
+                return;
+            }
+        }
+        let started = std::time::Instant::now();
+        for p in [link.clone(), link.join("file.txt")] {
+            let call = json!({ "kind": "read", "title": "Read", "locations": [{ "path": p.to_string_lossy() }] });
+            assert_eq!(classify(&call, &opencode_opts(), &cwd), Class::Outside, "{}", p.display());
+            assert!(decide("auto", &[], &cwd, &call, &opencode_opts()).is_none(), "Auto edits approved {}", p.display());
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "classifying took {:?}: a network attempt", started.elapsed());
     }
 
     // Option lists as each agent sends them (docs/design/approval-modes.md).

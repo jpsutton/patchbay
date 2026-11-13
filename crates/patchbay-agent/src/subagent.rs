@@ -478,7 +478,15 @@ pub fn create_worktree(cwd: &Path, data_dir: &Path, agent_id: &str) -> Result<(W
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    git(&top, &["worktree", "add", "-q", "-b", &branch, &path.to_string_lossy(), "HEAD"])?;
+    // On Windows a repo's committed symlinks must not become real links in a worktree an agent
+    // works in (a link to a share would make the OS connect to it): check them out as text.
+    let mut add = vec!["-c", "core.symlinks=false", "worktree", "add", "-q", "-b", &branch];
+    if !cfg!(windows) {
+        add.drain(..2);
+    }
+    let path_text = path.to_string_lossy();
+    add.extend([&*path_text, "HEAD"]);
+    git(&top, &add)?;
     let inner = cwd.strip_prefix(&top).map(|r| path.join(r)).unwrap_or_else(|_| path.clone());
     Ok((Worktree { path, branch, repo: top, base }, inner))
 }

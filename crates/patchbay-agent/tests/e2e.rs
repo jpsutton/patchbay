@@ -819,3 +819,45 @@ async fn loads_the_claude_code_setup() {
     assert!(store().contains("KEEP-GOING") && !cwd.join(".stop-once").exists(), "{}", store());
     let _ = std::fs::remove_dir_all(cwd);
 }
+
+/// A search whose root is, or lies behind, a link to another machine's share is refused by the dispatcher before the
+/// user is asked and before anything is opened: asking, or running once approved, would make Windows
+/// connect to the share. Both the deny and the approve answer must end with no prompt shown and the
+/// call failed. The share is `PB_E2E_SHARE` (default a documentation address; never resolved by name).
+#[tokio::test]
+#[ignore]
+#[cfg(windows)]
+async fn a_search_rooted_at_a_link_to_a_share_is_refused_without_asking() {
+    let share = std::env::var("PB_E2E_SHARE").unwrap_or_else(|_| r"\\192.0.2.1\share".into());
+    let only = std::env::var("PB_E2E_ANSWERS").unwrap_or_else(|_| "reject,allow".into());
+    for answer in ["reject", "allow"].into_iter().filter(|a| only.split(',').any(|o| o == *a)) {
+        for tool in ["glob", "grep"] {
+            // `PB_E2E_LINK`: a link made earlier by whoever watches the network, so that the OS's own
+            // reaction to creating a link to a share is over before the call under test.
+            let pre = std::env::var("PB_E2E_LINK").ok().map(PathBuf::from);
+            let cwd = pre.as_ref().and_then(|l| l.parent().map(PathBuf::from)).unwrap_or_else(workdir);
+            let link = pre.clone().unwrap_or_else(|| cwd.join("to_share"));
+            if pre.is_none() {
+                if let Err(e) = std::os::windows::fs::symlink_dir(&share, &link) {
+                    eprintln!("skipped: cannot create a directory symlink here ({e})");
+                    let _ = std::fs::remove_dir_all(&cwd);
+                    return;
+                }
+            }
+            let mut acp = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));
+            acp.answer = answer;
+            let sid = open(&mut acp, &cwd).await;
+            let started = std::time::Instant::now();
+            let r = prompt(&mut acp, &sid, &format!("please !{tool} {}", link.join("sub").display())).await;
+            assert_eq!(r["stopReason"], "end_turn", "{tool}/{answer}");
+            assert!(acp.asked.is_empty(), "{tool}/{answer}: the user was asked about a search of a link to a share: {:?}", acp.asked);
+            let failed = acp.updates.iter().any(|u| u["sessionUpdate"] == "tool_call_update" && u["status"] == "failed");
+            assert!(failed, "{tool}/{answer}: the call was not refused");
+            assert!(started.elapsed() < std::time::Duration::from_secs(10), "{tool}/{answer}: took {:?}", started.elapsed());
+            if pre.is_none() {
+                let _ = std::fs::remove_dir(&link);
+                let _ = std::fs::remove_dir_all(&cwd);
+            }
+        }
+    }
+}

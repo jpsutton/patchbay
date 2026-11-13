@@ -269,7 +269,52 @@ pub fn foreign_location(cwd: &Path, p: &Path) -> bool {
 /// Every path-taking tool calls it first in `run`, so it holds however the tool was reached; the
 /// dispatcher refuses the same paths before any hook or approval (`turn.rs`).
 pub fn foreign_refusal(session: &Session, raw: &str) -> Option<String> {
-    foreign_location(&session.cwd, Path::new(raw)).then(|| session.prompts().msg("foreign_location", &[("path", raw)]))
+    foreign_target(&session.cwd, Path::new(raw)).then(|| session.prompts().msg("foreign_location", &[("path", raw)]))
+}
+
+/// Most links followed in [`foreign_target`]; a chain longer than that is refused, not followed.
+const LINK_HOPS: usize = 16;
+
+/// [`foreign_location`] for the path AND for where any link on the way to it points: a link in the
+/// project whose target is another machine's share (or a device path) is refused exactly like the
+/// share written out, because the first thing Windows does with such a path (a canonicalize, a stat,
+/// the search that walks it) is connect to the share and send the user's credentials.
+///
+/// LOCAL and lexical: each component is read with `symlink_metadata` (the link itself, never what it
+/// points at) and `read_link`, and the TEXT of a target is judged; nothing is opened through a link,
+/// and the walk stops at the first link that leads off the machine, so no component behind it is
+/// touched. Links to links are followed up to [`LINK_HOPS`]. This is the one check every caller uses:
+/// the dispatcher (`turn.rs`), each tool's own `foreign_refusal`, and the permission classifier
+/// (`src-tauri/src/code/permissions.rs`).
+pub fn foreign_target(cwd: &Path, p: &Path) -> bool {
+    foreign_location(cwd, p) || (cfg!(windows) && link_leads_off_machine(cwd, p, LINK_HOPS))
+}
+
+fn link_leads_off_machine(cwd: &Path, p: &Path, hops: usize) -> bool {
+    let p = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
+    let mut real = PathBuf::new();
+    for c in p.components() {
+        match c {
+            // Windows folds `..` in the text before it opens anything.
+            Component::ParentDir => {
+                real.pop();
+            }
+            Component::CurDir => {}
+            Component::Normal(name) => {
+                real.push(name);
+                if !std::fs::symlink_metadata(&real).is_ok_and(|m| m.file_type().is_symlink()) {
+                    continue;
+                }
+                let Ok(target) = std::fs::read_link(&real) else { continue };
+                let target = if target.is_absolute() { target } else { real.parent().map(|d| d.join(&target)).unwrap_or(target) };
+                if foreign_location(cwd, &target) || hops == 0 || link_leads_off_machine(cwd, &target, hops - 1) {
+                    return true;
+                }
+            }
+            other => real.push(other.as_os_str()),
+        }
+    }
+    false
 }
 
 /// What a path's prefix names, for comparing two of them: `C:` and `\\?\C:` are one drive,
@@ -1120,6 +1165,32 @@ mod tests {
             }
             Err(e) => skip(&format!("cannot create a directory symlink here ({e})")),
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A link whose target is another machine's share is refused like the share written out, from the
+    /// link's own text, before anything is opened through it; a link that stays on the machine is not.
+    #[test]
+    #[cfg(windows)]
+    fn a_link_to_another_machines_share_is_a_foreign_target() {
+        let root = root_on_the_current_drive("link-target");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        if let Err(e) = std::os::windows::fs::symlink_dir(r"\\192.0.2.1\share", root.join("to_share")) {
+            skip(&format!("cannot create a directory symlink here ({e})"));
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        std::os::windows::fs::symlink_dir(root.join("to_share"), root.join("hop")).unwrap();
+        std::os::windows::fs::symlink_dir(root.join("src"), root.join("local")).unwrap();
+        let started = std::time::Instant::now();
+        for p in [root.join("to_share"), root.join("to_share").join("x.txt"), root.join("hop"), root.join("hop").join("a").join("b.txt")] {
+            assert!(foreign_target(&root, &p), "a link to another machine's share was not refused: {}", p.display());
+        }
+        assert!(foreign_target(&root, Path::new("to_share")), "the relative spelling");
+        for p in [root.join("local"), root.join("local").join("a.txt"), root.join("src").join("a.txt"), root.join("new.txt")] {
+            assert!(!foreign_target(&root, &p), "a path that stays on this machine was refused: {}", p.display());
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "judging links took {:?}: a network attempt", started.elapsed());
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -115,6 +115,12 @@ def _decide(user_text, images, after_tool, tools):
     if "!tools" in user_text:
         names = sorted((t.get("function", t) or {}).get("name", "?") for t in tools or [])
         return ("text", "tool names: " + ", ".join(names))
+    search = re.search(r"!(glob|grep) (\S+)", user_text)
+    if search:  # "!glob <path>" / "!grep <path>": that tool, searching under <path>
+        want = "Glob" if search.group(1) == "glob" else "Grep"
+        for t in tools or []:
+            if (t.get("function", t) or {}).get("name") == want:
+                return ("tool", want, {"pattern": "**/*.txt" if want == "Glob" else "needle", "path": search.group(2)})
     if "!run" in user_text:
         name = find_tool(tools, {"command"})
         if name:
