@@ -3171,20 +3171,37 @@ async fn production_quit_path_uses_the_ruled_budget_as_its_deadline() {
     let _stub = n.state.code.attach_test_agent(&s.id);
     let finished = std::sync::atomic::AtomicBool::new(false);
     let t0 = std::time::Instant::now();
-    crate::tell_queued_senders_then(&n.state, || {
+    let drive = crate::tell_queued_senders_then(&n.state, || {
         finished.store(true, std::sync::atomic::Ordering::Relaxed)
-    })
-    .await;
+    });
+    // The ceiling as an OUTER TIMEOUT (advisor part-5 addendum): a long hardcode — a 60s
+    // typo, Ship's 3600s plant shape — fails fast at ~30s instead of hanging the suite
+    // (the old remove-timeout plant produced exactly a hang-shaped red). A path that comes
+    // back is then checked against the same bound below.
+    let reached = tokio::time::timeout(std::time::Duration::from_secs(30), drive).await;
     let elapsed = t0.elapsed();
+    assert!(
+        reached.is_ok(),
+        "the production path came back within the 30s ceiling (it must use QUIT_NOTICE_BUDGET as its deadline), took {elapsed:?}"
+    );
     assert!(finished.load(std::sync::atomic::Ordering::Relaxed), "finish ran");
-    // Branch (advisor ruling): the path's deadline is std/wall-clock (`std::time::Instant`
+    // Floor (advisor's branch B): the path's deadline is std/wall-clock (`std::time::Instant`
     // in tell_queued_senders_then, consumed via saturating_duration_since in
     // tell_drained_then) — tokio's paused clock cannot control wall arithmetic, so this
-    // stays REAL TIME with the FLOOR only: >= 4.5s proves the path read QUIT_NOTICE_BUDGET
-    // (the 1s hardcode trips it), and there is NO ceiling to overrun under CI load.
+    // stays REAL TIME: >= 4.5s proves the path read QUIT_NOTICE_BUDGET (the 1s hardcode
+    // trips it).
     assert!(
         elapsed >= std::time::Duration::from_millis(4500),
         "the production path waited its full ruled budget (it must read QUIT_NOTICE_BUDGET), took {elapsed:?}"
+    );
+    // Ceiling (advisor part-5 addendum): < 30s — no CI load stretches a 5s wait to 30s
+    // (flake-safe by margin), while the long-hardcode mistakes the branch-B floor-only
+    // trade left open now fail. The outer timeout above is the fail-fast guard; this
+    // assert states the same bound for a path that does come back, closing the #447
+    // caveat through this PR.
+    assert!(
+        elapsed < std::time::Duration::from_secs(30),
+        "the production path uses QUIT_NOTICE_BUDGET as its deadline, not a longer one, took {elapsed:?}"
     );
 }
 
