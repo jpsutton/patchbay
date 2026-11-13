@@ -3104,6 +3104,38 @@ async fn deliveries_to_a_closing_session_are_refused() {
     assert!(!n.state.code.is_running(&sender.id), "no agent is woken during shutdown");
 }
 
+/// pb-20261107-30 (advisor (ii)): the PRODUCTION quit-notice path, called with NO injected
+/// deadline, must use QUIT_NOTICE_BUDGET as its own. The (i) pin proves the const is 5s;
+/// this proves the PATH reads it: a hang inside `tell_queued_senders_then` is cut at the
+/// budget, so a hardcoded deadline in the path trips the floor (too short) or the ceiling
+/// (too long) while the pin stays green.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_quit_path_uses_the_ruled_budget_as_its_deadline() {
+    let n = node("alpha-quit-deadline");
+    let proj = n.dir.join("proj");
+    repo(&proj);
+    let s = n.state.db.create_code_session(&proj.to_string_lossy(), None, "patchbay", "default").unwrap();
+    // A running session whose loop never answers the drain command: the gather hangs on it.
+    let _stub = n.state.code.attach_test_agent(&s.id);
+    let finished = std::sync::atomic::AtomicBool::new(false);
+    let t0 = std::time::Instant::now();
+    crate::tell_queued_senders_then(&n.state, || {
+        finished.store(true, std::sync::atomic::Ordering::Relaxed)
+    })
+    .await;
+    let elapsed = t0.elapsed();
+    assert!(finished.load(std::sync::atomic::Ordering::Relaxed), "finish ran");
+    // Branch (advisor ruling): the path's deadline is std/wall-clock (`std::time::Instant`
+    // in tell_queued_senders_then, consumed via saturating_duration_since in
+    // tell_drained_then) — tokio's paused clock cannot control wall arithmetic, so this
+    // stays REAL TIME with the FLOOR only: >= 4.5s proves the path read QUIT_NOTICE_BUDGET
+    // (the 1s hardcode trips it), and there is NO ceiling to overrun under CI load.
+    assert!(
+        elapsed >= std::time::Duration::from_millis(4500),
+        "the production path waited its full ruled budget (it must read QUIT_NOTICE_BUDGET), took {elapsed:?}"
+    );
+}
+
 /// pb-20261107-30 (advisor condition 3, BOUNDED): the quit tell phase keeps its deadline
 /// even when a delivery hangs — finish still runs, and the latency stays under a fixed bound.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
