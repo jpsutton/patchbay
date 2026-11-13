@@ -808,8 +808,14 @@ mod tests {
             skip("this volume does not make 8.3 short names");
             return;
         }
-        assert!(!inside(&root, &short.join("new.txt")), "new file behind a junction named by its 8.3 alias");
-        assert!(!inside(&root, &short.join("secret.txt")), "existing file behind a junction named by its 8.3 alias");
+        // `short` shortens every component (the root's too), so it differs from the root as text. The
+        // alias that matters keeps the root's long name and shortens only the junction's: lexically it
+        // lies INSIDE the root, which is what a lexical shortcut would believe.
+        let alias = root.join(short.file_name().unwrap());
+        assert!(!inside(&root, &alias.join("new.txt")), "new file behind a junction named by its 8.3 alias (long root)");
+        assert!(!inside(&root, &alias.join("secret.txt")), "existing file behind a junction named by its 8.3 alias (long root)");
+        assert!(!inside(&root, &short.join("new.txt")), "new file behind a junction named by its 8.3 alias (all short)");
+        assert!(!inside(&root, &short.join("secret.txt")), "existing file behind a junction named by its 8.3 alias (all short)");
         assert!(inside(&root, &short_path(&root).join("a").join("new.txt")), "control: a new file in the root by its short name");
     }
 
