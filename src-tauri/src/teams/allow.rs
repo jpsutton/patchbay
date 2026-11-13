@@ -40,14 +40,40 @@ pub(crate) fn worker_safe_hooks_dir(data_dir: &Path, team_id: &str) -> PathBuf {
 }
 
 /// Forward-slash form for `git -c core.hooksPath=` (works on Windows git too; avoids `\\` tokens).
+/// Canonicalize when possible so Windows short names (`RUNNER~1`) become long paths — `~` is
+/// forbidden in unquoted tokens (tilde expansion).
 pub(crate) fn path_for_git_c_flag(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    #[cfg(windows)]
+    {
+        let s = resolved.to_string_lossy();
+        if let Some(stripped) = strip_windows_verbatim_for_c(&s) {
+            return stripped.replace('\\', "/");
+        }
+        return s.replace('\\', "/");
+    }
+    #[cfg(not(windows))]
+    {
+        resolved.to_string_lossy().replace('\\', "/")
+    }
 }
 
-/// `core.hooksPath=…` argument as it should appear in a brief / command (quoted if it has spaces).
+#[cfg(windows)]
+fn strip_windows_verbatim_for_c(s: &str) -> Option<String> {
+    let Some(rest) = s.strip_prefix(r"\\?\") else {
+        return Some(s.to_owned());
+    };
+    if let Some(unc) = rest.strip_prefix(r"UNC\") {
+        return Some(format!(r"\\{unc}"));
+    }
+    Some(rest.to_owned())
+}
+
+/// `core.hooksPath=…` argument as it should appear in a brief / command.
+/// Quoted when the path has spaces, tabs, or `~` (Windows short names) so the tokenizer accepts it.
 pub(crate) fn hooks_path_c_arg(hooks_path: &Path) -> String {
     let inner = format!("core.hooksPath={}", path_for_git_c_flag(hooks_path));
-    if inner.contains(' ') || inner.contains('\t') {
+    if inner.chars().any(|c| c == ' ' || c == '\t' || c == '~') {
         format!("\"{inner}\"")
     } else {
         inner

@@ -2866,7 +2866,10 @@ time.sleep(60)
             l.approvals.gaps,
             codex_gaps_for(Some("auto"), true, Some(Path::new(&session.cwd)))
         );
-        assert!(l.approvals.gaps.iter().any(|g| g.contains("temp directory")));
+        assert!(
+            l.approvals.gaps.iter().any(|g| g.contains("temp directory") || g.contains("Windows")),
+            "read-only refusal hint (temp or Windows)"
+        );
         // Same session under default stays read-only even when an active worker.
         db.set_code_session_permission_mode(&session.id, "default").unwrap();
         let l = prepare(&db, &dir, &db.get_code_session(&session.id).unwrap().unwrap()).unwrap();
@@ -3035,7 +3038,8 @@ time.sleep(60)
         );
     }
 
-    /// Linked worktree under a non-temp build-tree path: active Codex worker Auto => workspace-write.
+    /// Linked worktree under a non-temp build-tree path: active Codex worker Auto => workspace-write
+    /// (Unix). On Windows the mapping always stays read-only until codex-acp sandboxing is proven.
     #[test]
     fn codex_dispatched_worker_auto_home_linked_worktree_is_workspace_write() {
         let id = crate::db::new_id();
@@ -3045,6 +3049,12 @@ time.sleep(60)
         let wt = home.join("trees/i1");
         let wt_s = wt.to_string_lossy().into_owned();
         f2_add_worktree(&home, "i1", &wt);
+        #[cfg(windows)]
+        assert_eq!(
+            codex_worker_workspace_write_blocked(&wt),
+            Some(CODEX_WORKER_WINDOWS_READONLY_HINT)
+        );
+        #[cfg(not(windows))]
         assert!(codex_worker_workspace_write_blocked(&wt).is_none());
 
         let data = std::env::temp_dir().join(format!("pb-ag-home-{id}"));
@@ -3070,13 +3080,25 @@ time.sleep(60)
         seed_active_worker(&data, &team.id, &session.id, "i1", "in-progress");
         let l = prepare(&db, &data, &session).unwrap();
         assert!(l.approvals.dispatched_worker);
-        assert_eq!(
-            l.env.iter().find(|(n, _)| n == "INITIAL_AGENT_MODE").map(|(_, v)| v.as_str()),
-            Some("workspace-write")
-        );
-        assert_eq!(l.approvals.select_mode.as_deref(), Some("workspace-write"));
-        assert_eq!(l.approvals.gaps, codex_gaps_for(Some("auto"), true, Some(Path::new(&wt_s))));
-        assert!(!l.approvals.gaps.iter().any(|g| *g == CODEX_WORKER_TEMP_READONLY_HINT));
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                l.env.iter().find(|(n, _)| n == "INITIAL_AGENT_MODE").map(|(_, v)| v.as_str()),
+                Some("read-only")
+            );
+            assert_eq!(l.approvals.select_mode.as_deref(), Some("read-only"));
+            assert!(l.approvals.gaps.iter().any(|g| g.contains("Windows")));
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                l.env.iter().find(|(n, _)| n == "INITIAL_AGENT_MODE").map(|(_, v)| v.as_str()),
+                Some("workspace-write")
+            );
+            assert_eq!(l.approvals.select_mode.as_deref(), Some("workspace-write"));
+            assert_eq!(l.approvals.gaps, codex_gaps_for(Some("auto"), true, Some(Path::new(&wt_s))));
+            assert!(!l.approvals.gaps.iter().any(|g| *g == CODEX_WORKER_TEMP_READONLY_HINT));
+        }
 
         let _ = std::process::Command::new("git")
             .args(["worktree", "remove", "--force", "--", &wt_s])
@@ -3084,6 +3106,18 @@ time.sleep(60)
             .status();
         let _ = std::fs::remove_dir_all(&home);
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// Expected F2 refuse hint: Windows always uses the Windows constant; elsewhere the temp/layout hint.
+    fn f2_refuse_hint() -> &'static str {
+        #[cfg(windows)]
+        {
+            CODEX_WORKER_WINDOWS_READONLY_HINT
+        }
+        #[cfg(not(windows))]
+        {
+            CODEX_WORKER_TEMP_READONLY_HINT
+        }
     }
 
     /// F2 gate: temp refuse; main-checkout refuse; linked non-temp allow; edge layouts.
@@ -3094,7 +3128,7 @@ time.sleep(60)
         f2_git_init_commit(&temp, "f", "x");
         assert_eq!(
             codex_worker_workspace_write_blocked(&temp),
-            Some(CODEX_WORKER_TEMP_READONLY_HINT),
+            Some(f2_refuse_hint()),
             "temp => blocked"
         );
         let _ = std::fs::remove_dir_all(&temp);
@@ -3139,12 +3173,19 @@ time.sleep(60)
         f2_git_init_commit(&home, "README", "x");
         assert_eq!(
             codex_worker_workspace_write_blocked(&home),
-            Some(CODEX_WORKER_TEMP_READONLY_HINT),
+            Some(f2_refuse_hint()),
             "main-checkout cwd => blocked (git metadata under cwd)"
         );
         let wt = home.join("trees/wt1");
         let wt_s = wt.to_string_lossy().into_owned();
         f2_add_worktree(&home, "wt1", &wt);
+        #[cfg(windows)]
+        assert_eq!(
+            codex_worker_workspace_write_blocked(&wt),
+            Some(CODEX_WORKER_WINDOWS_READONLY_HINT),
+            "Windows always refuses"
+        );
+        #[cfg(not(windows))]
         assert_eq!(
             codex_worker_workspace_write_blocked(&wt),
             None,
@@ -3167,7 +3208,7 @@ time.sleep(60)
         f2_git_init_commit(&under_tmp, "f", "x");
         assert_eq!(
             codex_worker_workspace_write_blocked(&under_tmp),
-            Some(CODEX_WORKER_TEMP_READONLY_HINT),
+            Some(f2_refuse_hint()),
             "system temp path => blocked"
         );
         // Differently-cased spelling: on case-insensitive volumes this is the same inode; after
@@ -3235,7 +3276,7 @@ time.sleep(60)
         // Separate git dir outside cwd must not allow workspace-write on the main checkout.
         assert_eq!(
             codex_worker_workspace_write_blocked(&main),
-            Some(CODEX_WORKER_TEMP_READONLY_HINT),
+            Some(f2_refuse_hint()),
             "separate-git-dir main checkout => blocked"
         );
         let _ = std::fs::remove_dir_all(&base);
@@ -3277,7 +3318,7 @@ time.sleep(60)
         let sub = super_repo.join("sub");
         assert_eq!(
             codex_worker_workspace_write_blocked(&sub),
-            Some(CODEX_WORKER_TEMP_READONLY_HINT),
+            Some(f2_refuse_hint()),
             "submodule cwd => blocked"
         );
         let _ = std::fs::remove_dir_all(&base);
@@ -3310,6 +3351,13 @@ time.sleep(60)
                 .success()
         );
         // Linked worktree of a non-temp bare: common/main live outside the worktree cwd.
+        #[cfg(windows)]
+        assert_eq!(
+            codex_worker_workspace_write_blocked(&wt),
+            Some(CODEX_WORKER_WINDOWS_READONLY_HINT),
+            "Windows always refuses"
+        );
+        #[cfg(not(windows))]
         assert_eq!(
             codex_worker_workspace_write_blocked(&wt),
             None,
@@ -3332,7 +3380,7 @@ time.sleep(60)
         f2_broken_git_dir(&broken);
         assert_eq!(
             codex_worker_workspace_write_blocked(&broken),
-            Some(CODEX_WORKER_TEMP_READONLY_HINT),
+            Some(f2_refuse_hint()),
             "invalid gitfile => refuse (location-independent)"
         );
 
@@ -3348,7 +3396,7 @@ time.sleep(60)
         F2_GIT_PROGRAM_OVERRIDE.with(|c| *c.borrow_mut() = None);
         assert_eq!(
             blocked,
-            Some(CODEX_WORKER_TEMP_READONLY_HINT),
+            Some(f2_refuse_hint()),
             "git missing => refuse"
         );
         let _ = std::fs::remove_dir_all(&base);
@@ -3371,6 +3419,13 @@ time.sleep(60)
         f2_add_worktree(&home, "wt1", &wt);
         let sub = wt.join("nested/deep");
         std::fs::create_dir_all(&sub).unwrap();
+        #[cfg(windows)]
+        assert_eq!(
+            codex_worker_workspace_write_blocked(&sub),
+            Some(CODEX_WORKER_WINDOWS_READONLY_HINT),
+            "Windows always refuses"
+        );
+        #[cfg(not(windows))]
         assert_eq!(
             codex_worker_workspace_write_blocked(&sub),
             None,

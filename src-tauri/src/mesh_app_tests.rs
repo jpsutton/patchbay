@@ -4356,8 +4356,10 @@ async fn dispatch_item_temp_project_keeps_codex_worker_read_only_with_hint_note(
     let note = w["note"].as_str().unwrap_or("");
     assert!(
         note.contains(code::agents::CODEX_WORKER_TEMP_READONLY_HINT)
-            || note.contains("project is under a temp directory"),
-        "dispatch note must carry temp-readonly hint, got: {note}"
+            || note.contains("project is under a temp directory")
+            || note.contains(code::agents::CODEX_WORKER_WINDOWS_READONLY_HINT)
+            || note.contains("Windows"),
+        "dispatch note must carry temp- or Windows-readonly hint, got: {note}"
     );
     assert_eq!(
         w["codexSandbox"].as_str(),
@@ -4379,11 +4381,12 @@ async fn dispatch_item_temp_project_keeps_codex_worker_read_only_with_hint_note(
         Some("read-only"),
         "worker Auto under /tmp stays read-only at prepare"
     );
-    assert!(launch
-        .approvals
-        .gaps
-        .iter()
-        .any(|g| *g == code::agents::CODEX_WORKER_TEMP_READONLY_HINT || g.contains("temp directory")));
+    assert!(launch.approvals.gaps.iter().any(|g| {
+        *g == code::agents::CODEX_WORKER_TEMP_READONLY_HINT
+            || *g == code::agents::CODEX_WORKER_WINDOWS_READONLY_HINT
+            || g.contains("temp directory")
+            || g.contains("Windows")
+    }));
 
     let _ = std::fs::remove_dir_all(&proj);
 }
