@@ -237,6 +237,41 @@ pub fn inside(root: &Path, p: &Path) -> bool {
     prefix_key(&p_r) == own && without_prefix(&p_r).starts_with(without_prefix(&root_r))
 }
 
+/// Whether `p` names another machine's share, a device or a volume namespace: a path that opens
+/// with a pair of separators (a UNC share, `\\?\UNC\...`, `\\.\...`, `\\?\Volume{...}`, even `\\host`
+/// alone) or with the NT prefix `\??\`, unless it is a verbatim drive (`\\?\C:\...`) or the share the
+/// root `cwd` itself lives on. Windows takes either slash and any mix of them as a separator, so the
+/// text is normalized first: `//host/share`, `\/host/share` and `/\host/share` are UNC too. `localhost`,
+/// `127.0.0.1` and the machine's own name are foreign like any other host (a loopback connection can be
+/// relayed). LEXICAL: it reads the text and calls nothing on the filesystem, so asking never connects
+/// to anything. Off Windows a leading `//` or a backslash means nothing special: always false there.
+pub fn foreign_location(cwd: &Path, p: &Path) -> bool {
+    if !cfg!(windows) {
+        return false;
+    }
+    let n = p.to_string_lossy().replace('/', "\\");
+    if n.starts_with(r"\??\") {
+        return true; // the NT object namespace, which CreateFile passes straight through
+    }
+    if !n.starts_with(r"\\") {
+        return false;
+    }
+    let key = prefix_key(Path::new(&n));
+    if key.starts_with("disk:") {
+        return false; // `\\?\C:\...`: a verbatim drive is local
+    }
+    let cwd_n = cwd.to_string_lossy().replace('/', "\\");
+    !(key.starts_with("unc:") && key == prefix_key(Path::new(&cwd_n)))
+}
+
+/// The refusal for a raw path argument that names a network location or a device path
+/// ([`foreign_location`]), judged on the TEXT before the path is resolved, joined, stat'ed or opened.
+/// Every path-taking tool calls it first in `run`, so it holds however the tool was reached; the
+/// dispatcher refuses the same paths before any hook or approval (`turn.rs`).
+pub fn foreign_refusal(session: &Session, raw: &str) -> Option<String> {
+    foreign_location(&session.cwd, Path::new(raw)).then(|| session.prompts().msg("foreign_location", &[("path", raw)]))
+}
+
 /// What a path's prefix names, for comparing two of them: `C:` and `\\?\C:` are one drive,
 /// `\\server\share` and `\\?\UNC\server\share` one share, case does not matter. Anything else (a
 /// device `\\.\X`, `\\?\GLOBALROOT`, a `\\?\Volume{GUID}`) is a namespace of its own. A path with no
@@ -1088,6 +1123,79 @@ mod tests {
         std::os::unix::fs::symlink(root.join("a"), root.join("b")).unwrap();
         assert!(!inside(&root, &root.join("a/x.txt")));
         assert!(inside(&root, &root.join("ok.txt")), "the control");
+    }
+
+
+    /// `foreign_location` reads only the text of a path, whatever the separators.
+    #[test]
+    #[cfg(windows)]
+    fn foreign_location_is_lexical_and_catches_every_spelling() {
+        let cwd = Path::new(r"C:\Users\x\proj");
+        let foreign = |s: &str| foreign_location(cwd, Path::new(s));
+        for spelling in [
+            r"\\203.0.113.1\s\x",
+            "//203.0.113.1/s/x",
+            r"\\?\UNC\203.0.113.1\s\x",
+            r"\\localhost\C$\Users\x\proj\a.txt",
+            r"\\.\C:\x",
+            r"\\.\pipe\x",
+            r"\\.\PhysicalDrive0",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1\x",
+            r"\\?\Volume{00000000-0000-0000-0000-000000000000}\x",
+        ] {
+            assert!(foreign(spelling), "not caught: {spelling}");
+        }
+        for local in [r"C:\Users\x\proj\a.txt", r"D:\other", r"\\?\C:\Users\x\proj\a.txt", r"a\b.txt", "a/b.txt", r"..\x"] {
+            assert!(!foreign(local), "wrongly caught: {local}");
+        }
+        // A root that is itself on a share: that share is its own, any other is foreign.
+        let unc_cwd = Path::new(r"\\srv\share\proj");
+        assert!(!foreign_location(unc_cwd, Path::new(r"\\SRV\share\proj\x")));
+        assert!(!foreign_location(unc_cwd, Path::new(r"\\?\UNC\srv\SHARE\proj\x")));
+        assert!(foreign_location(unc_cwd, Path::new(r"\\srv\other\x")));
+        assert!(foreign_location(unc_cwd, Path::new(r"\\attacker\share\proj\x")));
+    }
+
+
+    /// Windows reads a leading pair of ANY slash mix as UNC, and a leading `\??\` as the NT object
+    /// namespace: each spelling is caught, and `localhost`, `127.0.0.1` and the machine's own name
+    /// are foreign like any other host.
+    #[test]
+    #[cfg(windows)]
+    fn every_windows_unc_spelling_is_caught() {
+        let cwd = Path::new(r"C:\Users\x\proj");
+        let own_name = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "THIS-MACHINE".into());
+        let mut spellings: Vec<String> = [
+            r"\\203.0.113.1\s\x",
+            "//203.0.113.1/s/x",
+            r"\/203.0.113.1/s/x",
+            r"/\203.0.113.1\s\x",
+            r"\\203.0.113.1/s\x",
+            r"\\?\UNC\203.0.113.1\s\x",
+            r"\\.\UNC\203.0.113.1\s\x",
+            r"\??\UNC\203.0.113.1\s\x",
+            r"\??\C:\Users\x\proj\a.txt",
+            r"\\203.0.113.1",
+            r"\\203.0.113.1\s",
+            r"\\localhost\C$\Users\x\proj\a.txt",
+            "//localhost/C$/Users/x/proj/a.txt",
+            r"\\127.0.0.1\C$\Users\x\proj\a.txt",
+            r"\\[::1]\C$\x",
+            r"\\.\C:\Users\x\proj\a.txt",
+            r"\\.\pipe\x",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        spellings.push(format!(r"\\{own_name}\C$\Users\x\proj\a.txt"));
+        spellings.push(format!("//{own_name}/C$/Users/x/proj/a.txt"));
+        for s in &spellings {
+            assert!(foreign_location(cwd, Path::new(s)), "not caught: {s}");
+        }
+        // What stays local: plain and verbatim drives in either slash, relative paths.
+        for local in [r"C:\x", "C:/x/y", r"\\?\C:\x", r"\\?\c:\x\y", r"d:\a\b", "a/b", r"a\b", r"\x"] {
+            assert!(!foreign_location(cwd, Path::new(local)), "wrongly caught: {local}");
+        }
     }
 
 }

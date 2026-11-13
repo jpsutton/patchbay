@@ -83,6 +83,10 @@
     "full": "Unknown tool: {name}",
     "min": "Unknown tool: {name}"
   },
+  "foreign_location": {
+    "full": "Refused: {path} is a network location or a device path. It is never read, written or listed, in any permission mode, because opening it would make this computer connect to it. Use a path on this computer.",
+    "min": "Refused: {path} is a network location or device path. Never opened, in any mode. Use a path on this computer."
+  },
   "not_in_plan_mode": {
     "full": "{name} is not available in plan mode. Explore with Read, Glob and Grep, then call ExitPlanMode with your plan.",
     "min": "{name} unavailable in plan mode. Explore with Read, Glob, Grep, then call ExitPlanMode with plan."

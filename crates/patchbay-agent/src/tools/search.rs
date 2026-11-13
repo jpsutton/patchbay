@@ -78,6 +78,9 @@ searches that need several rounds, search step by step yourself."
 
     async fn run(&self, input: Value, ctx: &ToolCtx) -> ToolOutput {
         let Some(pattern) = str_arg(&input, "pattern") else { return ToolOutput::error("pattern is required") };
+        if let Some(m) = str_arg(&input, "path").and_then(|p| crate::tools::foreign_refusal(&ctx.session, p)) {
+            return ToolOutput::error(m);
+        }
         let root = search_root(&input, &ctx.session);
         if !root.is_dir() {
             return ToolOutput::error(format!("Directory does not exist: {}", root.display()));
@@ -180,6 +183,9 @@ struct GrepArgs {
 
 fn grep_args(input: &Value, session: &Session) -> Result<GrepArgs, String> {
     let pattern = str_arg(input, "pattern").ok_or("pattern is required")?;
+    if let Some(m) = str_arg(input, "path").and_then(|p| crate::tools::foreign_refusal(session, p)) {
+        return Err(m);
+    }
     let multiline = bool_arg(input, "multiline");
     let re = RegexBuilder::new(pattern)
         .case_insensitive(bool_arg(input, "-i"))

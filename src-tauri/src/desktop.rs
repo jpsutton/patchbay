@@ -403,14 +403,66 @@ fn runs_when_opened(p: &std::path::Path, meta: &std::fs::Metadata) -> bool {
 /// links what a click can open.
 #[tauri::command]
 fn local_path_exists(path: String, cwd: Option<String>) -> bool {
+    // A network location or device path is not looked at: `exists` on a UNC path makes Windows
+    // connect to it, and this runs for every path the agent mentions, with no click. It reads as
+    // existing so the link is drawn; a click then asks first (`open_local_path`).
+    if patchbay_agent::foreign_location(std::path::Path::new(cwd.as_deref().unwrap_or("")), std::path::Path::new(&path)) {
+        return true;
+    }
     resolve_mentioned(&path, cwd.as_deref()).is_some_and(|p| p.exists())
+}
+
+/// What a click on a mentioned path does first.
+#[derive(Debug, PartialEq)]
+enum ClickPlan {
+    /// A path on this computer: look at it (it may run) and open it.
+    Open(std::path::PathBuf),
+    /// Another machine's share or a device path: nothing touches it until the user confirms,
+    /// because looking at a UNC path makes Windows connect to it and send it the user's credentials.
+    Confirm(std::path::PathBuf),
+}
+
+/// Decide what a click does, from the text of the path alone: no filesystem call. The raw text and
+/// the resolved path are both judged, so `\\host` alone (not absolute, so joined to the folder) is
+/// still caught.
+fn plan_open(path: &str, cwd: Option<&str>) -> Option<ClickPlan> {
+    let p = resolve_mentioned(path, cwd)?;
+    let home = std::path::Path::new(cwd.unwrap_or(""));
+    let foreign = patchbay_agent::foreign_location(home, std::path::Path::new(path)) || patchbay_agent::foreign_location(home, &p);
+    Some(if foreign { ClickPlan::Confirm(p) } else { ClickPlan::Open(p) })
+}
+
+/// Ask whether to open a network location, showing the path exactly as it was written. The
+/// dialog focuses its first button, so Cancel is first: `blocking_show` is true for it, hence the `!`.
+fn confirm_network_open(app: &tauri::AppHandle, raw: &str) -> bool {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    !app.dialog()
+        .message(format!(
+            "This is a network location:\n\n{raw}\n\nOpening it makes this computer connect to it and send it your sign-in. Only open it if you know where it leads."
+        ))
+        .title("Open a network location?")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom("Cancel".into(), "Open".into()))
+        .blocking_show()
 }
 
 /// Open a mentioned file or folder in the OS's default app. Anything that would run is shown in
 /// the file manager instead.
 #[tauri::command]
-fn open_local_path(path: String, cwd: Option<String>) -> crate::CmdResult<()> {
-    let p = resolve_mentioned(&path, cwd.as_deref()).ok_or_else(|| anyhow!("{path} is relative and has no folder"))?;
+async fn open_local_path(app: tauri::AppHandle, path: String, cwd: Option<String>) -> crate::CmdResult<()> {
+    let plan = plan_open(&path, cwd.as_deref()).ok_or_else(|| anyhow!("{path} is relative and has no folder"))?;
+    let p = match plan {
+        ClickPlan::Open(p) => p,
+        ClickPlan::Confirm(p) => {
+            // Nothing has touched the path yet. It is shown as written, and only a click on Open goes on.
+            let (dialog_app, shown) = (app.clone(), path.clone());
+            let open = tauri::async_runtime::spawn_blocking(move || confirm_network_open(&dialog_app, &shown)).await.unwrap_or(false);
+            if !open {
+                return Ok(());
+            }
+            p
+        }
+    };
     let meta = std::fs::metadata(&p).map_err(|e| anyhow!("{}: {e}", p.display()))?;
     if runs_when_opened(&p, &meta) {
         tauri_plugin_opener::reveal_item_in_dir(&p)?;
@@ -990,6 +1042,26 @@ mod file_link_tests {
         if let Some(home) = crate::code::agents::home_dir() {
             assert_eq!(resolve_mentioned("~/notes.md", None), Some(home.join("notes.md")));
         }
+    }
+
+    /// A network location in an agent's text is not looked at to draw its link and not looked at on a
+    /// click until the user confirms: both decisions are made on the text, with no filesystem call, so
+    /// they cannot connect to anything (203.0.113.1 is a documentation address nobody answers: a
+    /// connection attempt would take far more than a second). Windows only; type-checked everywhere.
+    #[test]
+    fn a_network_location_is_confirmed_before_anything_touches_it() {
+        if cfg!(windows) {
+            let started = std::time::Instant::now();
+            for spelling in [r"\\203.0.113.1\s\x.txt", "//203.0.113.1/s/x.txt", r"\??\UNC\203.0.113.1\s\x", r"\\.\PhysicalDrive0", r"\\203.0.113.1"] {
+                assert!(matches!(plan_open(spelling, None), Some(ClickPlan::Confirm(_))), "{spelling} would be opened without asking");
+                assert!(matches!(plan_open(spelling, Some(r"C:\Users\x\proj")), Some(ClickPlan::Confirm(_))), "{spelling} with a folder");
+                assert!(local_path_exists(spelling.into(), None), "the link is drawn, without a lookup: {spelling}");
+            }
+            assert!(started.elapsed() < std::time::Duration::from_secs(1), "deciding took {:?}: a network attempt", started.elapsed());
+        }
+        // Everywhere: a path on this computer is looked at and opened as before.
+        let local = std::env::temp_dir().join("a-local-file.txt");
+        assert_eq!(plan_open(&local.display().to_string(), None), Some(ClickPlan::Open(local)));
     }
 
     #[test]
