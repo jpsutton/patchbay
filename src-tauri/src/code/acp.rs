@@ -163,6 +163,15 @@ pub enum CodeEvent {
         prompt_ids: Vec<String>,
         restore: bool,
     },
+    /// The queue died with its loop (pb-20261111-74): the peer entries still waiting, so
+    /// `on_code_event` can tell each sender its message was dropped, never delivered. Never
+    /// reaches a window — the window hears `Unqueued` from the loop itself — so it stays off
+    /// the wire (`serde(skip)`, like `TurnFailed`).
+    #[serde(skip)]
+    QueueDropped {
+        entries: Vec<QueuedAgentMessage>,
+        reason: String,
+    },
     /// The session was renamed automatically (see `code::titles`).
     Title {
         title: String,
@@ -643,12 +652,43 @@ fn stop_job(conn: &Rc<acp::ClientSideConnection>, method: &'static str, params: 
     });
 }
 
-fn drop_queue(ctx: &TurnCtx, queue: &mut Queue) {
+/// The queue is gone (pb-20261111-74): tell the window every id left it, and hand the peer
+/// entries to `on_code_event` with `reason`, which tells their senders. Wired into every way
+/// the loop can end with a queue still full — it had no caller before this. Own prompts go
+/// back to the composer (`restore: true`); a peer entry leaves hard-dropped
+/// (`restore: false`), its sender told beside this by `QueueDropped`. The mirror drops every
+/// listed id either way, so nothing ghosts and nothing is silent.
+fn drop_queue(ctx: &TurnCtx, queue: &mut Queue, reason: &str) {
     if queue.is_empty() {
         return;
     }
-    let prompt_ids = queue.drain(..).map(|(_, m)| m.id).collect();
-    emit(&ctx.sink, &ctx.csid, CodeEvent::Unqueued { prompt_ids, restore: true });
+    let entries: Vec<QueuedAgentMessage> = queue
+        .iter()
+        .filter(|(_, m)| is_agent_message_origin(&m.origin))
+        .map(|(_, m)| QueuedAgentMessage {
+            message_id: m.id.clone(),
+            preview: agent_message_preview(&m.text),
+            origin: m.origin.clone(),
+        })
+        .collect();
+    let mut own = Vec::new();
+    let mut peers = Vec::new();
+    for (_, m) in queue.drain(..) {
+        if is_agent_message_origin(&m.origin) {
+            peers.push(m.id);
+        } else {
+            own.push(m.id);
+        }
+    }
+    if !own.is_empty() {
+        emit(&ctx.sink, &ctx.csid, CodeEvent::Unqueued { prompt_ids: own, restore: true });
+    }
+    if !peers.is_empty() {
+        emit(&ctx.sink, &ctx.csid, CodeEvent::Unqueued { prompt_ids: peers, restore: false });
+    }
+    if !entries.is_empty() {
+        emit(&ctx.sink, &ctx.csid, CodeEvent::QueueDropped { entries, reason: reason.to_owned() });
+    }
 }
 
 /// Decides whether a permission request is pre-approved: (merged tool call, options) ->
@@ -2018,6 +2058,7 @@ async fn run(
             // instead of cancelling one that is already over.
             biased;
             status = child.wait() => {
+                drop_queue(&turns, &mut queue, "the agent crashed");
                 return Err(exited(status, &stderr_tail));
             }
             Some(go_on) = done_rx.recv() => {
@@ -2084,7 +2125,10 @@ async fn run(
                 emit(&sink, &csid, CodeEvent::Notice { message });
             }
             cmd = rx.recv() => {
-                let Some(cmd) = cmd else { break };
+                let Some(cmd) = cmd else {
+                    drop_queue(&turns, &mut queue, "the agent was stopped");
+                    break;
+                };
                 // A forced send steers instead of cancelling where steering moves a running shell
                 // command to the background and `session/cancel` would kill it (`force_steers`).
                 let force_steers = extensions.force_steers && steer == Some(Steer::Acp) && running && !forcing;
@@ -2373,7 +2417,10 @@ async fn run(
                     AgentCmd::TerminalAuth { method_id, reply } => {
                         let _ = reply.send(login_command(&method_id));
                     }
-                    AgentCmd::Shutdown => break,
+                    AgentCmd::Shutdown => {
+                        drop_queue(&turns, &mut queue, "the agent was stopped");
+                        break;
+                    }
                 }
             }
         }
@@ -3219,6 +3266,8 @@ for line in sys.stdin:
         send({"jsonrpc": "2.0", "id": i, "result": {}})
     elif meth == "session/prompt":
         t = text_of(p)
+        if t == "die":
+            sys.exit(7)
         if held is not None:
             err(i, "a turn is already running")
             continue
@@ -4128,6 +4177,123 @@ for line in sys.stdin:
         no_errors(&events);
         tx.send(AgentCmd::Shutdown).unwrap();
         thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A held turn with a peer message and an own prompt waiting behind it — the full queue a
+    /// dying loop has to account for (pb-20261111-74).
+    fn hold_with_a_full_queue(tx: &tokio::sync::mpsc::UnboundedSender<AgentCmd>) {
+        assert_eq!(prompt(tx, "hold"), Delivery::Sent);
+        let peer = UserMessage {
+            id: "peer-0".into(),
+            blocks: vec![json!({ "type": "text", "text": "peer msg" })],
+            text: "peer msg".into(),
+            origin: "agent:node-a:session-b".into(),
+            attachments: json!([]),
+        };
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        tx.send(AgentCmd::Prompt { msg: peer, force: false, reply: Some(reply) }).unwrap();
+        assert_eq!(rx.blocking_recv().unwrap().unwrap(), Delivery::Queued);
+        assert_eq!(prompt(tx, "mine"), Delivery::Queued);
+    }
+
+    /// What every dying queue must have said (pb-20261111-74): own prompts back to the
+    /// composer, the peer entry hard-dropped out of the mirror, and its sender handed the
+    /// entry with the reason — silence is the bug this row closes.
+    fn told_the_queue(events: &Events, reason: &str) {
+        assert_eq!(
+            count(events, |e| matches!(e, CodeEvent::Unqueued { prompt_ids, restore: true } if prompt_ids == &["mine"])),
+            1,
+            "the own prompt went back to the composer"
+        );
+        assert_eq!(
+            count(events, |e| matches!(e, CodeEvent::Unqueued { prompt_ids, restore: false } if prompt_ids == &["peer-0"])),
+            1,
+            "the peer entry left the mirror, hard-dropped"
+        );
+        assert_eq!(
+            count(events, |e| matches!(e, CodeEvent::QueueDropped { entries, reason: r }
+                if r == reason
+                    && entries.len() == 1
+                    && entries[0].message_id == "peer-0"
+                    && entries[0].origin == "agent:node-a:session-b")),
+            1,
+            "the peer sender is handed the entry with its reason ({reason})"
+        );
+    }
+
+    /// pb-20261111-74 (the Shutdown path): a loop that ends on `AgentCmd::Shutdown` with the
+    /// queue full is not silent — the window hears every id leave, and the peer entry travels
+    /// to `on_code_event`, which tells its sender.
+    #[test]
+    fn shutdown_tells_the_queue_before_the_loop_ends() {
+        let dir = std::env::temp_dir().join(format!("pb-shutdown-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        hold_with_a_full_queue(&tx);
+
+        tx.send(AgentCmd::Shutdown).unwrap();
+        thread.join().unwrap();
+
+        told_the_queue(&events, "the agent was stopped");
+        no_errors(&events);
+        assert_eq!(
+            count(&events, |e| matches!(e, CodeEvent::Status { state, .. } if state == "exited")),
+            1,
+            "the loop still reports its end"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// pb-20261111-74 (the crash path): an agent that dies with the queue full — the forced
+    /// send ends the held turn, and its prompt is the one the agent dies receiving — still
+    /// tells the window and the sender before the loop goes.
+    #[test]
+    fn a_crash_tells_the_queue_before_the_loop_goes() {
+        let dir = std::env::temp_dir().join(format!("pb-crash-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        hold_with_a_full_queue(&tx);
+
+        // The forced send ends the held turn; "die" sits at the front of the queue (forced
+        // rank), so it becomes the next turn — and the agent exits receiving it, mid-queue.
+        assert_eq!(force(&tx, "die"), Delivery::Queued);
+        thread.join().unwrap();
+
+        told_the_queue(&events, "the agent crashed");
+        // The crash still reports itself (the exited explanation), and the loop is gone.
+        assert!(
+            count(&events, |e| matches!(e, CodeEvent::Error { .. })) >= 1,
+            "the crash is reported, not swallowed"
+        );
+        assert_eq!(count(&events, |e| matches!(e, CodeEvent::Status { state, .. } if state == "exited")), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// pb-20261111-74 (the third way the loop ends): every command sender gone — the channel
+    /// closes under the loop — drains the queue the same way. No ending of a loop with a full
+    /// queue is silent.
+    #[test]
+    fn a_closed_command_channel_tells_the_queue_too() {
+        let dir = std::env::temp_dir().join(format!("pb-channel-{}", crate::db::new_id()));
+        let Some((events, tx, thread)) = spawn_fake_agent_with(&dir, &["--no-methods"], "") else {
+            eprintln!("skipped: no python");
+            return;
+        };
+        ready(&events);
+        hold_with_a_full_queue(&tx);
+
+        drop(tx); // no Shutdown: every sender is simply gone
+        thread.join().unwrap();
+
+        told_the_queue(&events, "the agent was stopped");
+        no_errors(&events);
         let _ = std::fs::remove_dir_all(dir);
     }
 

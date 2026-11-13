@@ -3082,6 +3082,58 @@ async fn quit_notices_leave_no_orphan_agents() {
     assert!(!n.state.code.is_running(&sender.id), "the woken sender was stopped with the rest");
 }
 
+/// pb-20261111-74 (the bridge): a `QueueDropped` event — what a dying loop emits — reaches
+/// `on_code_event` and tells the peer sender its message was dropped, never delivered, with
+/// the reason. The acp tests prove the event fires on each exit path; this proves it lands
+/// where the mesh lives (their sink is a collector with no mesh behind it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_queue_tells_its_senders() {
+    let n = node("alpha-queue-dropped");
+    seed_mock_model(&n);
+    let proj = n.dir.join("proj");
+    repo(&proj);
+    let sender = n
+        .state
+        .db
+        .create_code_session(&proj.to_string_lossy(), None, "patchbay", "default")
+        .unwrap();
+    let target = n.state.db.create_code_session(&proj.to_string_lossy(), None, "patchbay", "default").unwrap();
+    let entries = vec![code::acp::QueuedAgentMessage {
+        message_id: "m-drop-1".into(),
+        preview: "queued words".into(),
+        origin: format!("agent:{}:{}", n.state.mesh.node_id(), sender.id),
+    }];
+    crate::on_code_event(
+        &n.state,
+        code::acp::Envelope {
+            code_session_id: target.id.clone(),
+            event: code::acp::CodeEvent::QueueDropped { entries, reason: "the agent crashed".into() },
+        },
+    );
+    // The notice runs on its own thread (the agent's runtime is going away with the loop):
+    // poll for it rather than racing it.
+    let mut woke = false;
+    for _ in 0..100 {
+        woke = n.events.lock().unwrap().iter().any(|(name, p)| {
+            *name == code::acp::EVENT
+                && p["codeSessionId"].as_str() == Some(sender.id.as_str())
+                && p["event"]["type"].as_str() == Some("userPrompt")
+                && p["event"]["text"].as_str().is_some_and(|t| {
+                    t.contains("dropped your queued message") && t.contains("the agent crashed")
+                })
+        });
+        if woke {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        woke,
+        "the sender was told its queued message was dropped: {:?}",
+        n.events.lock().unwrap()
+    );
+}
+
 /// pb-20261107-30 (advisor condition 2, NO LOOP): once the quit guard is set, deliveries to
 /// a session being stopped are refused and the SENDER is told — a woken sender replying into
 /// the shutdown must not start work that extends it.

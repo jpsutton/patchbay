@@ -1103,6 +1103,26 @@ fn outbound_provider_report<L: serde::Serialize>(account_id: &str, limits: &L) -
 
 fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     use code::acp::CodeEvent;
+    // A queue that died with its loop (pb-20261111-74): tell every peer sender its message
+    // was dropped, never delivered — here, where the mesh lives. Not a window event (the
+    // window hears `Unqueued` from the loop), so it never reaches the delivery log either.
+    // A thread of its own: this runs on the agent's thread, whose runtime the ending loop
+    // is about to drop (`api::spawn` would land there and die with it).
+    if let CodeEvent::QueueDropped { entries, reason } = &env.event {
+        let (state, id, entries, reason) =
+            (state.clone(), env.code_session_id.clone(), entries.clone(), reason.clone());
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::error!("no runtime to tell senders of a dropped queue: {e}");
+                    return;
+                }
+            };
+            rt.block_on(tell_senders_of_dropped(&state, &id, entries, &reason));
+        });
+        return;
+    }
     // The delivery log (pb-20261111-46): a peer message's turn starting or failing.
     if let Some(bridge) = state.agent_message_bridge.get() {
         bridge.log_code_event(&env.code_session_id, &env.event);
