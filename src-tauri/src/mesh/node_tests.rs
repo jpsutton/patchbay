@@ -22,9 +22,11 @@ struct Node {
 }
 
 impl Drop for Node {
-    /// Stop the mesh's tasks (they hold the database open) before the fields, then the folder, go.
+    /// Stop the mesh's tasks, then close the database file, before the folder goes: nothing may
+    /// hold a file in it (Windows will not delete an open file).
     fn drop(&mut self) {
         self.mesh.stop();
+        self.db.release_files();
     }
 }
 
