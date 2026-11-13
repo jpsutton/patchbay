@@ -455,8 +455,29 @@ fn opens(result: &tauri_plugin_dialog::MessageDialogResult) -> bool {
     matches!(result, tauri_plugin_dialog::MessageDialogResult::Custom(label) if label == OPEN_NETWORK_LABEL)
 }
 
-/// Ask whether to open a network location, showing the path exactly as it was written. Cancel is the
-/// FIRST button, which the dialog focuses; the other is labelled for what it does.
+/// The two button labels `(ok slot, cancel slot)` of the confirm dialog. The plugin maps what the
+/// OS dialog returns to these labels by SLOT: a click on the OK button is `Custom(ok slot)`, and
+/// Esc, the window's X, and a dialog that failed to show all come back as the OS's Cancel, which
+/// the plugin turns into `Custom(cancel slot)` (tauri-plugin-dialog `show_message_dialog`). So the
+/// label that opens must be in the OK slot: put it in the cancel slot and Esc opens the location.
+fn network_buttons() -> (&'static str, &'static str) {
+    (OPEN_NETWORK_LABEL, "Cancel")
+}
+
+/// What the plugin hands back for a result of the OS dialog, given the `(ok, cancel)` labels:
+/// the same mapping as the plugin's, written out so a test can see what Esc does.
+#[cfg(test)]
+fn plugin_result(os: tauri_plugin_dialog::MessageDialogResult, (ok, cancel): (&str, &str)) -> tauri_plugin_dialog::MessageDialogResult {
+    use tauri_plugin_dialog::MessageDialogResult as R;
+    match os {
+        R::Ok => R::Custom(ok.into()),
+        R::Cancel => R::Custom(cancel.into()),
+        other => other,
+    }
+}
+
+/// Ask whether to open a network location, showing the path exactly as it was written. Only a click
+/// on the button labelled for what it does opens; Esc, close and an error are Cancel.
 fn confirm_network_open(app: &tauri::AppHandle, raw: &str) -> bool {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
     opens(
@@ -466,7 +487,10 @@ fn confirm_network_open(app: &tauri::AppHandle, raw: &str) -> bool {
             ))
             .title("Open a network location?")
             .kind(MessageDialogKind::Warning)
-            .buttons(MessageDialogButtons::OkCancelCustom("Cancel".into(), OPEN_NETWORK_LABEL.into()))
+            .buttons({
+                let (ok, cancel) = network_buttons();
+                MessageDialogButtons::OkCancelCustom(ok.into(), cancel.into())
+            })
             .blocking_show_with_result(),
     )
 }
@@ -1097,6 +1121,21 @@ mod file_link_tests {
         // Everywhere: a path on this computer is looked at and opened as before.
         let local = std::env::temp_dir().join("a-local-file.txt");
         assert_eq!(plan_open(&local.display().to_string(), None), Some(ClickPlan::Open(local)));
+    }
+
+    /// What the OS dialog returns goes through the plugin's slot mapping before `opens` sees it:
+    /// only a click on the OK slot may open, and Esc, X and a failed dialog (all the OS's Cancel)
+    /// must not. Fed the OS results, not the plugin's: the plugin never returns `Cancel` for
+    /// custom labels, so a test of `opens(Cancel)` alone could not see Esc opening.
+    #[test]
+    fn escape_close_and_a_dialog_error_never_open_a_network_location() {
+        use tauri_plugin_dialog::MessageDialogResult as R;
+        let buttons = network_buttons();
+        assert_ne!(buttons.1, OPEN_NETWORK_LABEL, "the cancel slot must never carry the opening label");
+        assert!(opens(&plugin_result(R::Ok, buttons)), "a click on the open button opens");
+        for os in [R::Cancel, R::No, R::Yes, R::Custom(String::new())] {
+            assert!(!opens(&plugin_result(os.clone(), buttons)), "{os:?} (Esc, X, or an error) must not open");
+        }
     }
 
     /// Only the "Open network location" button opens; Cancel, Esc and closing do not (the plugin
