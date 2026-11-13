@@ -15,21 +15,55 @@ const PASS: &str = "correct horse battery";
 
 struct Node {
     state: AppState,
-    dir: PathBuf,
     events: Arc<Mutex<Vec<(String, Value)>>>,
+    /// LAST, so it drops after the database and mesh above have let go of their files.
+    dir: crate::test_support::TestDir,
+}
+
+impl Drop for Node {
+    /// Stop the mesh's tasks, then close the database file (the app state and mesh keep each other
+    /// alive, so the fields dropping does not): the folder can only go once nothing holds a file in it.
+    fn drop(&mut self) {
+        self.state.mesh.stop();
+        self.state.db.release_files();
+    }
 }
 
 fn node(name: &str) -> Node {
     crate::test_support::raise_fd_limit();
-    let dir = std::env::temp_dir().join(format!("pb-app-{name}-{}", db::new_id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::test_support::TestDir::new("pb-app", name);
     let db = Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
-    let mesh = Mesh::new(db.clone(), dir.clone(), Arc::new(MemKeyStore::default())).unwrap();
+    let mesh = Mesh::new(db.clone(), dir.to_path_buf(), Arc::new(MemKeyStore::default())).unwrap();
     mesh.set_config(Some(name), Some("127.0.0.1:0"), None).unwrap();
     let events = Arc::new(Mutex::new(Vec::new()));
     let ev = events.clone();
     let emit: mesh::node::UiSink = Arc::new(move |n: &str, p: Value| ev.lock().unwrap().push((n.to_owned(), p)));
-    Node { state: AppState::new(db, dir.clone(), mesh, emit), dir, events }
+    Node { state: AppState::new(db, dir.to_path_buf(), mesh, emit), events, dir }
+}
+
+/// A node's folder (database, WAL, attachment stores) is gone once the node is dropped: these
+/// folders were never removed and the temp dir grew by tens of gigabytes. Counted by a name no
+/// other test uses, so tests running beside this one do not disturb the count.
+#[test]
+fn a_dropped_node_leaves_no_directory_behind() {
+    let tag = format!("leak-{}", db::new_id());
+    assert_eq!(crate::test_support::dirs_named(&tag), 0);
+    {
+        let a = node(&tag);
+        assert_eq!(crate::test_support::dirs_named(&tag), 1, "the folder exists while the node lives");
+        assert!(a.dir.join("db.sqlite").exists());
+    }
+    assert_eq!(crate::test_support::dirs_named(&tag), 0, "dropping the node removes its folder, database and WAL included");
+}
+
+/// Folders are kept only for a FAILED test and only behind `PB_KEEP_TEST_DIRS=1`: never by default.
+#[test]
+fn test_dirs_are_kept_only_for_a_failure_behind_the_variable() {
+    use crate::test_support::keep_test_dirs;
+    assert!(keep_test_dirs(Some("1"), true));
+    for (env, failed) in [(None, true), (Some("0"), true), (Some(""), true), (Some("true"), true), (Some("1"), false), (None, false)] {
+        assert!(!keep_test_dirs(env, failed), "{env:?} failed={failed} must not keep");
+    }
 }
 
 /// Startup runs the CLAUDE_SECURESTORAGE_CONFIG_DIR check (`AppState::new` -> `warn_unmodelled_env`).
@@ -1072,7 +1106,7 @@ async fn usage_limit_stops_claude_turns() {
     assert_eq!(by("Claude Code login")["latest"]["fiveHour"]["utilization"], 0.97);
     assert_eq!(by("Claude (Teams)")["latest"]["fiveHour"]["utilization"], 0.2);
     assert!(a.events.lock().unwrap().iter().any(|(n, p)| n == "code://plan-limits" && p[0]["latest"]["sevenDay"]["utilization"] == 0.3));
-    let again = AppState::new(a.state.db.clone(), a.dir.clone(), a.state.mesh.clone(), Arc::new(|_: &str, _: Value| {}));
+    let again = AppState::new(a.state.db.clone(), a.dir.to_path_buf(), a.state.mesh.clone(), Arc::new(|_: &str, _: Value| {}));
     let latest = |acct: &str| again.code.plan.account(acct).latest.and_then(|l| l.five_hour).map(|w| w.utilization);
     assert_eq!(latest(&crate::default_plan_account().0), Some(0.97));
     assert_eq!(latest("/tmp/pb-other-claude"), Some(0.2));

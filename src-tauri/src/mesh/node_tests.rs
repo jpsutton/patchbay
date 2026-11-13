@@ -17,6 +17,17 @@ struct Node {
     db: Arc<Db>,
     keys: Arc<MemKeyStore>,
     events: Arc<Mutex<Vec<(String, Value)>>>,
+    /// LAST, so it drops after the database and mesh above have let go of their files.
+    _dir: crate::test_support::TestDir,
+}
+
+impl Drop for Node {
+    /// Stop the mesh's tasks, then close the database file, before the folder goes: nothing may
+    /// hold a file in it (Windows will not delete an open file).
+    fn drop(&mut self) {
+        self.mesh.stop();
+        self.db.release_files();
+    }
 }
 
 struct Echo;
@@ -29,17 +40,30 @@ impl RpcHandler for Echo {
 }
 
 fn node(name: &str) -> Node {
-    let dir = std::env::temp_dir().join(format!("pb-mesh-{name}-{}", new_id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::test_support::TestDir::new("pb-mesh", name);
     let db = Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
     let keys = Arc::new(MemKeyStore::default());
-    let mesh = Mesh::new(db.clone(), dir, keys.clone()).unwrap();
+    let mesh = Mesh::new(db.clone(), dir.to_path_buf(), keys.clone()).unwrap();
     mesh.set_config(Some(name), Some("127.0.0.1:0"), None).unwrap();
     let events = Arc::new(Mutex::new(Vec::new()));
     let ev = events.clone();
     mesh.set_ui(Arc::new(move |n: &str, p: Value| ev.lock().unwrap().push((n.to_owned(), p))));
     mesh.set_handler(Arc::new(Echo));
-    Node { mesh, db, keys, events }
+    Node { mesh, db, keys, events, _dir: dir }
+}
+
+/// A node's folder is gone once the node is dropped (see `a_dropped_node_leaves_no_directory_behind`
+/// in the app tests: the same leak, in the mesh crate's own tests).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_node_leaves_no_directory_behind() {
+    let tag = format!("leak-{}", new_id());
+    assert_eq!(crate::test_support::dirs_named(&tag), 0);
+    {
+        let n = node(&tag);
+        assert_eq!(crate::test_support::dirs_named(&tag), 1, "the folder exists while the node lives");
+        assert!(a_dir(&n).join("db.sqlite").exists());
+    }
+    assert_eq!(crate::test_support::dirs_named(&tag), 0, "dropping the node removes its folder");
 }
 
 async fn until(what: &str, secs: u64, mut f: impl FnMut() -> bool) {

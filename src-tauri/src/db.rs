@@ -621,6 +621,18 @@ pub const CODE_ACTIVITIES: &[&str] = &["chat", "edit", "commit", "branch", "pr"]
 pub const PERMISSION_MODES: &[&str] = &["default", "auto", "always-approve"];
 
 impl Db {
+    /// Tests only: close the database FILE while the `Db` itself stays alive. The app state and the
+    /// mesh hold each other (the mesh's RPC handler owns the app state), so a test node's `Db` is
+    /// never freed and its file connection, with the WAL, stays open for the life of the process:
+    /// harmless on Unix, but Windows will not delete the folder around an open file. Swapping in an
+    /// in-memory connection drops the file connection (the last one closes and removes the WAL).
+    #[cfg(test)]
+    pub fn release_files(&self) {
+        if let Ok(mem) = Connection::open_in_memory() {
+            *self.0.lock().unwrap_or_else(|e| e.into_inner()) = mem;
+        }
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
