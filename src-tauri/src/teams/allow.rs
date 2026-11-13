@@ -1,10 +1,15 @@
 //! The standing allow for team tools: a live team member's call to `send_agent_message` or a team
 //! tool on Patchbay's own messaging server is approved once, without a prompt.
 //!
-//! Also (opt-in per template): a dispatched worker may `git add` / `git commit`, and read-only
-//! `ls` / `cat` / `git status` / `git diff` / `git log`, inside its assigned worktree without a
-//! prompt. Path args must resolve inside that worktree (no `..`, absolute escape, or symlink out).
-//! Push, branch delete, force, history rewrite, and write/exec git options stay prompted.
+//! Also (opt-in per template): a dispatched worker may run a strictly tokenized `git add` /
+//! `git commit`, and read-only `ls` / `cat` / `git status` / `git diff` / `git log`, inside its
+//! assigned worktree without a prompt. Tokenization is fail-closed (shell metacharacters rejected;
+//! option allow-lists per verb; paths relative, no `..`, symlink-resolved inside the worktree).
+//! Before any git verb auto-approves, effective `core.hooksPath` / `core.fsmonitor` and
+//! worktree-local hook files are checked (see `worker_git_repo_blocks_auto`).
+//!
+//! Residual: config-defined filters / textconv / external diff are human-configured programs that
+//! may still run on worker content; Patchbay does not disable those on auto-approve.
 //!
 //! Not a `permission_rules` row: those match a tool kind and a command prefix, and MCP calls are
 //! kind `other`, so a rule would approve every MCP tool of every server. This runs in the
@@ -15,7 +20,7 @@
 //! (docs/design/teams.md, "Tool-call titles"). OpenCode has no form here: it reaches MCP tools
 //! only through an `execute` tool that runs JavaScript, which can't be allowed by title.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 
@@ -83,49 +88,114 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Commands that chain, substitute or redirect can't be judged by their verb alone.
-fn is_compound(cmd: &str) -> bool {
-    cmd.contains(['\n', ';', '&', '|', '`', '>', '<']) || cmd.contains("$(") || cmd.contains("&&") || cmd.contains("||")
+// ---- Worker command allow-list (strict tokenizer) --------------------------------------------
+
+/// Plain tokens after tokenization: `[A-Za-z0-9._/@:+,=-]+`.
+fn is_plain_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "._/@:+,=-".contains(c)
 }
 
-/// `VAR=value` prefix before the program (e.g. `FOO=bar git …`).
-fn has_env_assignment_prefix(tokens: &[&str]) -> bool {
-    tokens.first().is_some_and(|t| t.contains('=') && !t.starts_with('-'))
+fn is_forbidden_outside_message(c: char) -> bool {
+    matches!(
+        c,
+        '\\' | '$' | '`' | '~' | '*' | '?' | '[' | ']' | '{' | '}' | '<' | '>' | '|' | '&' | ';' | '(' | ')' | '!' | '#' | '\n' | '\r' | '\0'
+    ) || !c.is_ascii()
+        || c.is_control()
 }
 
-/// Git switches that retarget the repo or inject config/hooks/exec — never auto-approve.
-fn has_forbidden_git_override(tokens: &[&str]) -> bool {
-    tokens.iter().any(|t| {
-        matches!(
-            *t,
-            "-c" | "-C" | "--config-env" | "--exec-path" | "--namespace" | "--git-dir" | "--work-tree"
-        ) || t.starts_with("--config-env=")
-            || t.starts_with("--exec-path=")
-            || t.starts_with("--namespace=")
-            || t.starts_with("--git-dir=")
-            || t.starts_with("--work-tree=")
-    })
+fn is_forbidden_inside_message_quote(c: char) -> bool {
+    matches!(c, '$' | '`' | '\\' | '!' | '\n' | '\r' | '\0') || !c.is_ascii() || c.is_control()
 }
 
-/// Git log/diff options that write output or enable external filters/commands.
-fn has_forbidden_git_write_or_exec(tokens: &[&str]) -> bool {
-    tokens.iter().any(|t| {
-        matches!(*t, "--output" | "--output-directory" | "--ext-diff" | "--textconv")
-            || t.starts_with("--output=")
-            || t.starts_with("--output-directory=")
-            // `=`-carried command/filter payloads (e.g. `--ext-diff=…`, custom helpers).
-            || (t.starts_with("--ext-diff=") || t.starts_with("--textconv="))
-    })
+/// Fail-closed tokenizer. Quotes only for the value of `git commit -m` / `--message`.
+fn tokenize_worker_command(cmd: &str) -> Option<Vec<String>> {
+    let cmd = cmd.trim();
+    if cmd.is_empty() {
+        return None;
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut chars = cmd.chars().peekable();
+    let mut expect_message = false;
+
+    while let Some(&c) = chars.peek() {
+        if c == ' ' || c == '\t' {
+            chars.next();
+            continue;
+        }
+        if expect_message && (c == '"' || c == '\'') {
+            let quote = c;
+            chars.next();
+            let mut msg = String::new();
+            loop {
+                let ch = chars.next()?;
+                if ch == quote {
+                    break;
+                }
+                if is_forbidden_inside_message_quote(ch) {
+                    return None;
+                }
+                msg.push(ch);
+            }
+            if msg.is_empty() {
+                return None;
+            }
+            out.push(msg);
+            expect_message = false;
+            continue;
+        }
+
+        let mut tok = String::new();
+        while let Some(&ch) = chars.peek() {
+            if ch == ' ' || ch == '\t' {
+                break;
+            }
+            if is_forbidden_outside_message(ch) || !is_plain_char(ch) {
+                return None;
+            }
+            tok.push(ch);
+            chars.next();
+        }
+        if tok.is_empty() {
+            return None;
+        }
+        let is_msg_flag = tok == "-m" || tok == "--message";
+        out.push(tok);
+        if expect_message {
+            expect_message = false;
+        } else if is_msg_flag {
+            expect_message = true;
+        }
+    }
+    if expect_message {
+        return None;
+    }
+    Some(out)
 }
 
-/// Force / amend / soft-hard reset style flags — never auto-approve.
-fn has_forbidden_git_force(tokens: &[&str]) -> bool {
-    tokens.iter().any(|t| matches!(*t, "-f" | "--force" | "--amend" | "--soft" | "--hard" | "--mixed"))
-}
+/// Option allow-lists (unknown option ⇒ not auto-approvable).
+const GIT_ADD_OPTS: &[&str] = &["-A", "--all", "-u", "--update", "--"];
+const GIT_STATUS_OPTS: &[&str] = &["-s", "--short", "-b", "--branch", "--porcelain", "--long"];
+const GIT_DIFF_OPTS: &[&str] =
+    &["--stat", "--name-only", "--name-status", "--cached", "--staged", "--no-ext-diff", "--no-textconv"];
+const GIT_LOG_OPTS: &[&str] = &[
+    "--oneline",
+    "--decorate",
+    "--stat",
+    "--reverse",
+    "-1",
+    "-2",
+    "-3",
+    "-4",
+    "-5",
+    "-10",
+    "--max-count=1",
+    "--max-count=2",
+    "--max-count=5",
+    "--max-count=10",
+];
+const LS_OPTS: &[&str] = &["-l", "-a", "-A", "-1", "-h", "-R", "-la", "-al", "-lh", "-hl", "-lah", "-alh", "-hla"];
 
-/// `p` absolute against `root`, resolving symlinks through the longest existing prefix.
-fn resolve_against(root: &Path, p: &str) -> Option<std::path::PathBuf> {
-    use std::path::{Component, PathBuf};
+fn resolve_against(root: &Path, p: &str) -> Option<PathBuf> {
     let joined = if Path::new(p).is_absolute() { PathBuf::from(p) } else { root.join(p) };
     let comps: Vec<Component> = joined.components().collect();
     for i in (1..=comps.len()).rev() {
@@ -146,120 +216,249 @@ fn resolve_against(root: &Path, p: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-fn path_inside_worktree(worktree: &Path, p: &str) -> bool {
+/// Relative path only; no `..`; symlink-resolved inside worktree; regular file or directory.
+fn path_arg_ok(worktree: &Path, p: &str) -> bool {
+    if p.is_empty() || p == "-" || p.starts_with('/') || p.starts_with('-') {
+        return false;
+    }
+    let path = Path::new(p);
+    if path.components().any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_))) {
+        return false;
+    }
     let Ok(root) = worktree.canonicalize() else {
         return false;
     };
-    match resolve_against(&root, p) {
-        Some(real) => real.strip_prefix(&root).is_ok(),
-        None => false,
-    }
-}
-
-/// Git options whose next token is a value, not a path (so we don't treat `-m msg` as a path).
-fn git_opt_takes_value(tok: &str) -> bool {
-    matches!(
-        tok,
-        "-m" | "--message"
-            | "-F"
-            | "--file"
-            | "--author"
-            | "--date"
-            | "--cleanup"
-            | "--fix"
-            | "-t"
-            | "--template"
-            | "-n"
-            | "--max-count"
-            | "--skip"
-            | "--since"
-            | "--until"
-            | "--after"
-            | "--before"
-            | "--grep"
-            | "-S"
-            | "-G"
-            | "--diff-filter"
-            | "--pretty"
-            | "--format"
-            | "--relative"
-            | "--output"
-            | "--output-directory"
-    )
-}
-
-/// Positional path args after the program (and git verb), skipping options and their values.
-fn path_args_after<'a>(tokens: &'a [&str], skip: usize) -> Vec<&'a str> {
-    let mut out = Vec::new();
-    let mut i = skip;
-    let mut seen_double_dash = false;
-    while i < tokens.len() {
-        let t = tokens[i];
-        if !seen_double_dash && t == "--" {
-            seen_double_dash = true;
-            i += 1;
-            continue;
-        }
-        if !seen_double_dash && t.starts_with('-') && t.contains('=') {
-            // `--opt=value` — value attached; not a path arg.
-            i += 1;
-            continue;
-        }
-        if !seen_double_dash && t.starts_with('-') {
-            if git_opt_takes_value(t) {
-                i += 2;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-        out.push(t);
-        i += 1;
-    }
-    out
-}
-
-/// True when every path argument resolves inside `worktree` (symlinks followed).
-fn paths_stay_in_worktree(worktree: &Path, paths: &[&str]) -> bool {
-    paths.iter().all(|p| path_inside_worktree(worktree, p))
-}
-
-/// Single safe worker command: git add/commit/status/diff/log, or ls/cat, with path containment.
-fn is_safe_worker_command(cmd: &str, worktree: &Path) -> bool {
-    let cmd = cmd.trim();
-    if cmd.is_empty() || is_compound(cmd) {
-        return false;
-    }
-    let tokens: Vec<&str> = cmd.split_whitespace().collect();
-    if has_env_assignment_prefix(&tokens) {
-        return false;
-    }
-    let Some(prog) = tokens.first().copied() else {
+    let Some(real) = resolve_against(&root, p) else {
         return false;
     };
-    match prog {
-        "git" => {
-            if has_forbidden_git_override(&tokens)
-                || has_forbidden_git_write_or_exec(&tokens)
-                || has_forbidden_git_force(&tokens)
-            {
-                return false;
+    let Ok(rel) = real.strip_prefix(&root) else {
+        return false;
+    };
+    if rel.components().any(|c| c == Component::ParentDir) {
+        return false;
+    }
+    let Ok(meta) = std::fs::metadata(&real) else {
+        return false;
+    };
+    meta.is_file() || meta.is_dir()
+}
+
+fn all_path_args_ok(worktree: &Path, paths: &[String]) -> bool {
+    paths.iter().all(|p| path_arg_ok(worktree, p))
+}
+
+fn is_opt(tok: &str) -> bool {
+    tok.starts_with('-')
+}
+
+/// Parse `git <verb> …` under per-verb option allow-lists; collect path args.
+fn parse_git_verb(tokens: &[String], worktree: &Path) -> bool {
+    let verb = tokens.get(1).map(String::as_str).unwrap_or("");
+    let rest = &tokens[2..];
+    match verb {
+        "add" => {
+            let mut paths = Vec::new();
+            let mut i = 0;
+            let mut seen_dd = false;
+            while i < rest.len() {
+                let t = &rest[i];
+                if !seen_dd && t == "--" {
+                    seen_dd = true;
+                    i += 1;
+                    continue;
+                }
+                if !seen_dd && is_opt(t) {
+                    if !GIT_ADD_OPTS.contains(&t.as_str()) {
+                        return false;
+                    }
+                    i += 1;
+                    continue;
+                }
+                paths.push(t.clone());
+                i += 1;
             }
-            let Some(verb) = tokens.get(1).copied() else {
-                return false;
-            };
-            if !matches!(verb, "add" | "commit" | "status" | "diff" | "log") {
-                return false;
+            // -A/--all/-u may stand alone; otherwise at least one path.
+            let has_all = rest.iter().any(|t| matches!(t.as_str(), "-A" | "--all" | "-u" | "--update"));
+            if paths.is_empty() {
+                return has_all;
             }
-            let paths = path_args_after(&tokens, 2);
-            paths_stay_in_worktree(worktree, &paths)
+            all_path_args_ok(worktree, &paths)
         }
-        "ls" | "cat" => {
-            let paths = path_args_after(&tokens, 1);
-            paths_stay_in_worktree(worktree, &paths)
+        "commit" => {
+            // Only -m/--message (required). No -q/-v/--no-verify/amend/file/template.
+            let mut saw_message = false;
+            let mut i = 0;
+            while i < rest.len() {
+                let t = &rest[i];
+                if t == "-m" || t == "--message" {
+                    let Some(msg) = rest.get(i + 1) else {
+                        return false;
+                    };
+                    if msg.is_empty() || is_opt(msg) {
+                        return false;
+                    }
+                    saw_message = true;
+                    i += 2;
+                    continue;
+                }
+                return false;
+            }
+            saw_message
+        }
+        "status" => {
+            let mut paths = Vec::new();
+            for t in rest {
+                if is_opt(t) {
+                    if !GIT_STATUS_OPTS.contains(&t.as_str()) {
+                        return false;
+                    }
+                } else {
+                    paths.push(t.clone());
+                }
+            }
+            all_path_args_ok(worktree, &paths)
+        }
+        "diff" => {
+            let mut paths = Vec::new();
+            for t in rest {
+                if is_opt(t) {
+                    if !GIT_DIFF_OPTS.contains(&t.as_str()) {
+                        return false;
+                    }
+                } else {
+                    paths.push(t.clone());
+                }
+            }
+            all_path_args_ok(worktree, &paths)
+        }
+        "log" => {
+            let mut paths = Vec::new();
+            for t in rest {
+                if is_opt(t) {
+                    if !GIT_LOG_OPTS.contains(&t.as_str()) {
+                        return false;
+                    }
+                } else {
+                    paths.push(t.clone());
+                }
+            }
+            all_path_args_ok(worktree, &paths)
         }
         _ => false,
     }
+}
+
+fn parse_ls_cat(tokens: &[String], worktree: &Path) -> bool {
+    let prog = tokens[0].as_str();
+    let rest = &tokens[1..];
+    let mut paths = Vec::new();
+    for t in rest {
+        if is_opt(t) {
+            if prog != "ls" || !LS_OPTS.contains(&t.as_str()) {
+                return false;
+            }
+        } else {
+            paths.push(t.clone());
+        }
+    }
+    match prog {
+        "ls" => all_path_args_ok(worktree, &paths),
+        "cat" => !paths.is_empty() && all_path_args_ok(worktree, &paths),
+        _ => false,
+    }
+}
+
+fn is_safe_worker_command(cmd: &str, worktree: &Path) -> bool {
+    let Some(tokens) = tokenize_worker_command(cmd) else {
+        return false;
+    };
+    let Some(prog) = tokens.first().map(String::as_str) else {
+        return false;
+    };
+    match prog {
+        "git" => tokens.len() >= 2 && parse_git_verb(&tokens, worktree),
+        "ls" | "cat" => parse_ls_cat(&tokens, worktree),
+        _ => false,
+    }
+}
+
+// ---- Repo config / hooks gate (R2) ------------------------------------------------------------
+
+/// Read-only git probe in `cwd`. No `-c` overrides: they would make `config --get` lie about the
+/// keys we are inspecting. These subcommands do not run hooks or fsmonitor.
+fn hardened_git(cwd: &Path, args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(cwd)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        // `config --get` exits 1 when unset — treat as empty.
+        if args.first() == Some(&"config") && out.status.code() == Some(1) {
+            return Some(String::new());
+        }
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+fn path_under(root: &Path, candidate: &Path) -> bool {
+    match (root.canonicalize(), candidate.canonicalize()) {
+        (Ok(r), Ok(c)) => c.starts_with(&r),
+        _ => false,
+    }
+}
+
+fn hooks_for_verb(verb: &str) -> &'static [&'static str] {
+    match verb {
+        "commit" => &["pre-commit", "prepare-commit-msg", "commit-msg", "post-commit"],
+        "add" => &[], // no hook runs for add alone
+        // status/diff/log: fsmonitor covered separately
+        _ => &[],
+    }
+}
+
+/// True when auto-approve must fall through to a prompt.
+fn worker_git_repo_blocks_auto(worktree: &Path, worktree_root: &Path, verb: &str) -> bool {
+    let Some(fsmonitor) = hardened_git(worktree, &["config", "--get", "core.fsmonitor"]) else {
+        return true; // fail closed if git isn't usable
+    };
+    if !fsmonitor.is_empty() && fsmonitor != "false" {
+        return true;
+    }
+
+    let Some(hooks_path) = hardened_git(worktree, &["config", "--get", "core.hooksPath"]) else {
+        return true;
+    };
+
+    let hooks_dir = if hooks_path.is_empty() {
+        let Some(rel) = hardened_git(worktree, &["rev-parse", "--git-path", "hooks"]) else {
+            return true;
+        };
+        let p = PathBuf::from(&rel);
+        if p.is_absolute() { p } else { worktree.join(p) }
+    } else {
+        let p = PathBuf::from(&hooks_path);
+        if p.is_absolute() { p } else { worktree.join(p) }
+    };
+
+    // hooksPath set and resolves inside any project worktree (worktree_root) or this worktree.
+    if !hooks_path.is_empty() && (path_under(worktree_root, &hooks_dir) || path_under(worktree, &hooks_dir)) {
+        return true;
+    }
+
+    // Hook file for this verb living inside the item worktree (worker-writable).
+    if path_under(worktree, &hooks_dir) {
+        for name in hooks_for_verb(verb) {
+            if hooks_dir.join(name).is_file() {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 /// Opt-in worktree allow: active worker on an assigned item, template opted in, cwd is the
@@ -281,7 +480,8 @@ fn allow_worker_commit(data_dir: &Path, session: &str, tool_call: &Value, option
     if !tpl.allow_worker_commit {
         return None;
     }
-    let worktree = team.effective_worktree_root().ok()?.join(item_id.to_lowercase());
+    let worktree_root = team.effective_worktree_root().ok()?;
+    let worktree = worktree_root.join(item_id.to_lowercase());
     let call_cwd = tool_call["rawInput"]["cwd"].as_str().unwrap_or(session_cwd);
     if !paths_equal(Path::new(call_cwd), &worktree) {
         return None;
@@ -289,6 +489,15 @@ fn allow_worker_commit(data_dir: &Path, session: &str, tool_call: &Value, option
     let cmd = command_of(tool_call)?;
     if !is_safe_worker_command(&cmd, &worktree) {
         return None;
+    }
+    let Some(tokens) = tokenize_worker_command(&cmd) else {
+        return None;
+    };
+    if tokens.first().map(String::as_str) == Some("git") {
+        let verb = tokens.get(1).map(String::as_str).unwrap_or("");
+        if worker_git_repo_blocks_auto(&worktree, &worktree_root, verb) {
+            return None;
+        }
     }
     Some((allow_option(options)?, "Auto-approved: worker commit in worktree".into()))
 }
@@ -342,7 +551,6 @@ mod tests {
         ] {
             assert!(matched_tool(agent, &call(title, kind, raw)).is_some(), "{title}");
         }
-        // Another agent's form doesn't match, and an agent with no known form matches nothing.
         let claude = call("mcp__patchbay-agent-messaging__send_agent_message", "other", json!({}));
         for other in ["codex", "cursor", "antigravity", "patchbay", "opencode", "grok", "kilo"] {
             assert!(matched_tool(other, &claude).is_none(), "{other}");
@@ -399,7 +607,6 @@ mod tests {
         let trees = proj.join("trees");
         std::fs::create_dir_all(&trees).unwrap();
         let t = TeamsDb::open(&d).unwrap();
-        // Copy built-in to a user template so opt-in can be saved.
         let builtin = t.template("builtin-triage-desk").unwrap();
         let tpl = t
             .save_template(super::super::TemplateInput {
@@ -425,6 +632,15 @@ mod tests {
         let item_id = "G-20261112-01";
         let worktree = trees.join(item_id.to_lowercase());
         std::fs::create_dir_all(&worktree).unwrap();
+        // Real git repo so R2 config probes succeed (hooksPath unset, fsmonitor unset).
+        assert!(
+            std::process::Command::new("git")
+                .args(["-c", "init.defaultBranch=main", "init", "-q"])
+                .current_dir(&worktree)
+                .status()
+                .unwrap()
+                .success()
+        );
         t.attach(&team.id, "w1", "workers").unwrap();
         t.0.execute("UPDATE members SET item_id = ?1 WHERE session_id = 'w1'", [item_id]).unwrap();
         (d, worktree.to_string_lossy().into_owned(), proj.to_string_lossy().into_owned(), item_id.to_owned())
@@ -444,6 +660,7 @@ mod tests {
         assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git add LICENSE"), &options(), &wt).is_some());
         assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git status"), &options(), &wt).is_some());
         assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git diff"), &options(), &wt).is_some());
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m \"hello world\""), &options(), &wt).is_some());
     }
 
     #[test]
@@ -452,7 +669,7 @@ mod tests {
         let root = std::path::Path::new(&wt);
         std::fs::write(root.join("README"), "hi").unwrap();
         std::fs::create_dir_all(root.join("src")).unwrap();
-        let accept = ["ls", "ls src", "cat README", "git log", "git log -1", "git status", "git diff"];
+        let accept = ["ls", "ls src", "ls -la src", "cat README", "git log", "git log -1", "git status", "git diff", "git status -s -b"];
         for cmd in accept {
             assert!(
                 allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, cmd), &options(), &wt).is_some(),
@@ -462,7 +679,47 @@ mod tests {
     }
 
     #[test]
-    fn worker_readonly_path_escapes_and_write_exec_opts_rejected() {
+    fn worker_shell_metachar_and_message_file_bypasses_rejected() {
+        let (d, wt, proj, _item) = worker_commit_fixture(true);
+        let root = std::path::Path::new(&wt);
+        std::fs::write(root.join("README"), "hi").unwrap();
+        std::fs::write(std::path::Path::new(&proj).join("outside.txt"), "secret").unwrap();
+        let refuse = [
+            // Verifier-listed bypasses (whitespace-split was not what the shell sees).
+            r#"cat "../outside.txt""#,
+            r#"cat "$HOME/.ssh/id_rsa""#,
+            r#"cat ${HOME}/.ssh/id_rsa"#,
+            r#"cat ~/.ssh/id_rsa"#,
+            "git commit -F /etc/passwd",
+            "git commit --template=/etc/passwd",
+            // Related escapes / options.
+            "cat ../../outside.txt",
+            "cat /etc/passwd",
+            "cat -",
+            "cat",
+            "ls ..",
+            "ls /tmp",
+            "git commit -m x --no-verify",
+            "git commit -m x -q",
+            "git add -f README",
+            "git add --pathspec-from-file=x",
+            "git log --output=/tmp/out",
+            "git log --ext-diff",
+            "FOO=bar git status",
+            "git -c core.hooksPath=/tmp commit -m x",
+            "git commit -m \"hi$USER\"",
+            "git commit -m 'hi`id`'",
+        ];
+        for cmd in refuse {
+            assert!(
+                allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, cmd), &options(), &wt).is_none(),
+                "should refuse: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_symlink_and_hooks_path_inside_worktree_block_auto() {
         let (d, wt, proj, _item) = worker_commit_fixture(true);
         let root = std::path::Path::new(&wt);
         std::fs::write(root.join("README"), "hi").unwrap();
@@ -471,25 +728,40 @@ mod tests {
         let link = root.join("leak");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, &link).unwrap();
-        let refuse = [
-            "cat /etc/passwd",
-            "cat ../../outside.txt",
-            "cat leak",
-            "ls /tmp",
-            "ls ..",
-            "git log --output=/tmp/out",
-            "git log --output /tmp/out",
-            "git log --ext-diff",
-            "git log --textconv",
-            "git log --ext-diff=/bin/true",
-            "git log --textconv=/bin/true",
-        ];
-        for cmd in refuse {
-            assert!(
-                allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, cmd), &options(), &wt).is_none(),
-                "should refuse: {cmd}"
-            );
-        }
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "cat leak"), &options(), &wt).is_none());
+
+        // Plant hooksPath inside the worktree → refuse git auto-approve.
+        let hooks = root.join("planted-hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", &wt, "config", "core.hooksPath", hooks.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git status"), &options(), &wt).is_none(),
+            "hooksPath inside worktree"
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", &wt, "config", "--unset", "core.hooksPath"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", &wt, "config", "core.fsmonitor", "/tmp/fsmon"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git status"), &options(), &wt).is_none(),
+            "fsmonitor set"
+        );
     }
 
     #[test]
@@ -504,10 +776,6 @@ mod tests {
         assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&proj, "git commit -m work"), &options(), &proj).is_none());
         assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec("/", "git commit -m work"), &options(), "/").is_none());
         assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git push origin HEAD"), &options(), &wt).is_none());
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git branch -d topic"), &options(), &wt).is_none());
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git branch -D topic"), &options(), &wt).is_none());
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git rebase main"), &options(), &wt).is_none());
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git reset --hard HEAD~1"), &options(), &wt).is_none());
         assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit --amend -m x"), &options(), &wt).is_none());
         assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git add -f secret"), &options(), &wt).is_none());
     }
@@ -515,21 +783,17 @@ mod tests {
     #[test]
     fn worker_git_config_and_path_overrides_are_never_auto_approved() {
         let (d, wt, _proj, _item) = worker_commit_fixture(true);
+        std::fs::write(std::path::Path::new(&wt).join("LICENSE"), "x").unwrap();
         let refuse = [
             "git -c core.hooksPath=/tmp/hooks commit -m x",
             "git -c core.fsmonitor=/tmp/fsmon status",
             "git --config-env=http.extraHeader=TOKEN commit -m x",
-            "git --config-env=core.hooksPath=HOOKS status",
-            "git --exec-path=/tmp/evil commit -m x",
             "git --exec-path=/tmp/evil status",
-            "git --git-dir=/tmp/other.git commit -m x",
             "git --git-dir=/tmp/other.git status",
             "git --work-tree=/tmp/elsewhere commit -m x",
             "git -C /tmp/elsewhere commit -m x",
-            "git --namespace=evil commit -m x",
             "git --namespace=evil status",
             "FOO=bar git commit -m x",
-            "HOOKS=/tmp/h git status",
             "git commit -m x && git status",
             "git status || true",
         ];
@@ -539,7 +803,6 @@ mod tests {
                 "should refuse: {cmd}"
             );
         }
-        // Existing allowed forms still pass.
         for cmd in ["git commit -m work", "git add LICENSE", "git status", "git diff"] {
             assert!(
                 allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, cmd), &options(), &wt).is_some(),

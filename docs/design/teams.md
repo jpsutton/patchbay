@@ -103,16 +103,31 @@ The class list and the examples are editable text; Patchbay only routes by class
 
 Templates may also set `allow_worker_commit` (off by default; built-ins never carry it). When on,
 a dispatched worker whose cwd is its assigned item worktree may run, without a prompt, a single
-non-compound command that is one of:
+command that passes a fail-closed tokenizer (no shell metacharacters; plain tokens match
+`[A-Za-z0-9._/@:+,=-]+`; quotes only for `git commit -m` / `--message` values) and a per-verb
+option allow-list:
 
-- `git add` / `git commit` (no force, amend, soft/hard/mixed reset);
-- read-only `ls`, `cat`, `git status`, `git diff`, `git log`.
+- `git commit`: only `-m` / `--message` (required; no `-q`/`-v`/`--no-verify`/`-F`/`--template`).
+- `git add`: paths and/or `-A` / `--all` / `-u` / `--update` / `--` (no `-f`, no `--pathspec-from-file`).
+- `git status`: `-s` / `--short` / `-b` / `--branch` / `--porcelain` / `--long`, plus relative paths.
+- `git diff`: `--stat` / `--name-only` / `--name-status` / `--cached` / `--staged` / `--no-ext-diff` /
+  `--no-textconv`, plus relative paths.
+- `git log`: `--oneline` / `--decorate` / `--stat` / `--reverse` / `-1`…`-5` / `-10` /
+  `--max-count=1|2|5|10`, plus relative paths.
+- `ls`: `-l` / `-a` / `-A` / `-1` / `-h` / `-R` / `-la` / `-al` / `-lh` / `-hl` / `-lah` / `-alh` /
+  `-hla`, plus relative paths.
+- `cat`: one or more relative paths required (no bare `cat`, no `-`).
 
-Every path argument must resolve inside that worktree after symlink resolution; absolute paths
-outside, `..` escapes, and symlinks that leave the worktree stay prompted. Git config/path
-overrides (`-c`, `--config-env`, `--exec-path`, `--git-dir`, `--work-tree`, `-C`, `--namespace`),
-env-assignment prefixes (`FOO=bar git …`), and write/exec options (e.g. `git log --output`,
-`--ext-diff`, `--textconv`) stay prompted. Push, branch delete, and history rewrite stay prompted.
+Path args must be relative (no `..` component), resolve inside the worktree after following
+symlinks, and name a regular file or directory. Before any `git` verb auto-approves, Patchbay
+reads the worktree's effective `core.hooksPath` and `core.fsmonitor` (hardened read, no `-c`
+override that would hide them) and falls to a prompt if `fsmonitor` is set to anything but
+false/empty, if `hooksPath` resolves inside the project's worktree root (worker-writable), or if
+a hook file for that verb exists under a hooks dir inside the item worktree. Human-installed hooks
+in the main `.git/hooks` (default when `hooksPath` is unset) are trusted.
+
+Residual: config-defined clean/smudge filters, textconv, and external diff helpers are
+human-configured programs that may still run on worker content; this allow does not disable them.
 
 ## Team
 
