@@ -259,14 +259,17 @@ Members report progress with `item_note`; the coordinator keeps sole ownership o
   - **Mode.** The stricter of the seat's mode and the coordinator's current mode; always-approve is
     refused. Workers have `created_by` = the coordinator, so lowering the coordinator's mode lowers theirs.
     A **current** active dispatched Codex worker whose effective mode is Auto launches in Codex
-    `workspace-write` (network off; worktree plus `/tmp` and `$TMPDIR` writable); Default stays
-    `read-only`. The `dispatches` row must match the membership's `team_id` and `item_id`. Released,
-    restored-after-release, swapped-out, or item-`done`/`dropped` sessions stay `read-only` on the
-    next launch even if a `dispatches` history row remains. Standing seats and non-team Codex Auto
-    stay `read-only`. **Lifecycle (known):** a *running* Codex worker keeps the sandbox it launched
-    with (workspace-write) between item `done` and `member_release`; mode is fixed at launch. Release
-    stops/archives the session; any later restore+start is read-only. Coordinators release right after
-    the item is done.
+    `workspace-write` (network off; worktree plus `/tmp` and `$TMPDIR` writable) only when
+    `codex_worker_workspace_write_blocked` is clear: a linked item worktree whose common git dir is
+    outside the worktree and, while F1 temp excludes are not confirmed, not under `/tmp` /
+    `$TMPDIR`. Otherwise F2 keeps the worker `read-only` (temp teams, main-checkout cwd, unprobeable
+    git). Default stays `read-only`. The `dispatches` row must match the membership's `team_id` and
+    `item_id`. Released, restored-after-release, swapped-out, or item-`done`/`dropped` sessions stay
+    `read-only` on the next launch even if a `dispatches` history row remains. Standing seats and
+    non-team Codex Auto stay `read-only`. **Lifecycle (known):** a *running* Codex worker keeps the
+    sandbox it launched with between item `done` and `member_release`; mode is fixed at launch.
+    Release stops/archives the session; any later restore+start is read-only. Coordinators release
+    right after the item is done.
   - **Pool.** The seat's `count` workers at once, enforced with the rate limits (10 dispatches per
     hour and 40 per day per team) in one `BEGIN IMMEDIATE` transaction that reserves the place
     before the worktree or session exists; a failed start gives the place back, though the
