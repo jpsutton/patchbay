@@ -197,6 +197,14 @@ pub fn is_dispatched(state: &AppState, session: &str) -> bool {
     open_if_any(state).and_then(|t| t.dispatched(session).ok()).unwrap_or(false)
 }
 
+/// Same as [`is_dispatched`], for callers that only have a data directory (e.g. `prepare`).
+pub fn is_dispatched_in(data_dir: &std::path::Path, session: &str) -> bool {
+    if !data_dir.join("teams.db").is_file() {
+        return false;
+    }
+    TeamsDb::open(data_dir).and_then(|t| t.dispatched(session)).unwrap_or(false)
+}
+
 /// How many of the sessions `desk` created were dispatched workers, which don't count toward the
 /// creator's cap. Only sessions that still exist and are recorded under `desk` are counted.
 pub fn dispatched_by(state: &AppState, desk: &str) -> i64 {
@@ -229,8 +237,12 @@ pub fn check_seat_agent(
         anyhow!("agent must be one of this seat's: {}", list.join(", "))
     })?;
     let kind = AgentKind::parse(a).ok_or_else(|| anyhow!("unknown coding agent {a}"))?;
-    let gaps = ApprovalSetup::for_agent(kind).gaps;
-    if !gaps.is_empty() && !(seat.allow_unasked && seat.acknowledged() && !template_id.starts_with("builtin-")) {
+    // check_seat_agent only runs for worker seats, so Codex uses the dispatched-worker gaps text.
+    let gaps = match kind {
+        AgentKind::Codex => crate::code::agents::codex_gaps_for(Some(seat.permission_mode.as_str()), true),
+        _ => ApprovalSetup::for_agent(kind).gaps,
+    };
+    if !gaps.is_empty() && !(seat.allow_unasked && seat.acknowledged(true) && !template_id.starts_with("builtin-")) {
         bail!(
             "{a} can act without asking whatever the approval mode, and this seat has no acknowledgement for that. The user can allow it in Settings > Teams > the template's seat ({})",
             gaps.join("; ")
@@ -607,17 +619,23 @@ mod tests {
             })
             .unwrap();
         let w = |t: &crate::teams::Template| t.seats.iter().find(|s| s.seat == "workers").unwrap().clone();
-        assert!(w(&saved).allow_unasked && w(&saved).acknowledged());
+        assert!(w(&saved).allow_unasked && w(&saved).acknowledged(true));
         // Another agent in the choices, written straight to the file (not through the editor).
         let mut changed = w(&saved);
         changed.role_id = "builtin-verifier".into();
-        assert!(!changed.acknowledged(), "a different role lapses it");
+        assert!(!changed.acknowledged(true), "a different role lapses it");
         changed.role_id = w(&saved).role_id;
         changed.choices.push(crate::teams::Choice { agent: "cursor".into(), model: None });
-        assert!(!changed.acknowledged());
+        assert!(!changed.acknowledged(true));
         changed.choices = w(&saved).choices;
         changed.permission_mode = "auto".into();
-        assert!(!changed.acknowledged());
+        assert!(!changed.acknowledged(true));
+        // gaps_text is part of the snapshot: an older ack without it (or with different text) lapses.
+        let mut stale = w(&saved);
+        if let Some(ack) = stale.unasked_ack.as_mut() {
+            ack.gaps_text.clear();
+        }
+        assert!(!stale.acknowledged(true), "gaps_text change re-requires ack");
     }
 
     #[test]

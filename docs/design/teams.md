@@ -250,10 +250,16 @@ Members report progress with `item_note`; the coordinator keeps sole ownership o
   - **Agent.** The seat's own agent or one of its `choices`, never anything from item text. Agents
     that can act without asking whatever the mode (`ApprovalSetup.gaps`: Patchbay, Claude Code,
     Codex, Antigravity, Cursor) also need the seat's `allowUnasked` tick, set by the user in the
-    template editor after it shows the gaps text. The tick stores the seat's agent, model, choices
-    and mode and lapses if any changes; built-in templates never carry one.
+    template editor after it shows the gaps text. The tick stores the seat's agent, model, choices,
+    mode and the joined gaps text shown for that seat, and lapses if any of those change (including
+    a gaps-text change alone, so a new consent line re-requires the tick); built-in templates never
+    carry one. For a Codex worker seat the editor and header use the dispatched-worker gaps: under
+    Auto, "edits files and runs commands inside its worktree sandbox without asking; network and
+    anything outside still ask."
   - **Mode.** The stricter of the seat's mode and the coordinator's current mode; always-approve is
     refused. Workers have `created_by` = the coordinator, so lowering the coordinator's mode lowers theirs.
+    A dispatched Codex worker whose effective mode is Auto launches in Codex `workspace-write`
+    (network off); Default stays `read-only`. Standing seats and non-team Codex Auto stay `read-only`.
   - **Pool.** The seat's `count` workers at once, enforced with the rate limits (10 dispatches per
     hour and 40 per day per team) in one `BEGIN IMMEDIATE` transaction that reserves the place
     before the worktree or session exists; a failed start gives the place back, though the
@@ -340,8 +346,9 @@ Routing: the three classes in the table above, with the reference desk's example
    Review (2026-11-10) fixes are in the later commits; known limits, not fixed:
    - The `worktree_root` symlink swap needs shell access as the same user; the same-user limit
      covers it. Dispatch re-resolves the folder and refuses one that left the team folder.
-   - The acknowledgement snapshot holds the seat's role id, agent, model, choices and mode, not the
-     role's capabilities (editing a role's capabilities does not lapse it).
+   - The acknowledgement snapshot holds the seat's role id, agent, model, choices, mode and gaps
+     text, not the role's capabilities (editing a role's capabilities does not lapse it). Changing
+     the gaps text alone re-requires the tick (`unasked_ack` PartialEq vs `snapshot`).
    - `team_detach` and `team_archive` don't stop the agent or revoke its bridge token; only
      `member_release` does.
    - The bridge token sits in the MCP server's environment, readable by the agent's own shell.

@@ -19,7 +19,7 @@ mod allow;
 mod dispatch;
 mod items;
 pub use allow::allow_team_tool;
-pub use dispatch::{check_seat_agent, dispatched_by, is_dispatched, strip_forged_tags};
+pub use dispatch::{check_seat_agent, dispatched_by, is_dispatched, is_dispatched_in, strip_forged_tags};
 #[cfg(test)]
 pub(crate) use dispatch::FAIL_START_AGENT;
 #[cfg(test)]
@@ -129,7 +129,7 @@ pub struct Seat {
     pub choices: Vec<Choice>,
     /// The user's acknowledgement that workers of this seat may run an agent that can act without
     /// asking (`ApprovalSetup::gaps`). Set from the template editor; reads as true only while the
-    /// stored `unasked_ack` still matches the seat's agent, model, choices and mode.
+    /// stored `unasked_ack` still matches the seat's agent, model, choices, mode and gaps text.
     #[serde(default)]
     pub allow_unasked: bool,
     #[serde(default)]
@@ -159,24 +159,62 @@ pub struct Ack {
     pub model: Option<String>,
     pub choices: Vec<Choice>,
     pub permission_mode: String,
+    /// Joined gap lines the editor showed for this seat's agents under its mode. Missing in an
+    /// older ack (serde default empty) so a gaps-text change — including the first time gaps are
+    /// recorded — lapses the tick and re-requires consent (`unasked_ack` PartialEq vs snapshot).
+    #[serde(default)]
+    pub gaps_text: String,
 }
 
 impl Seat {
-    fn snapshot(&self) -> Ack {
-        Ack { role_id: self.role_id.clone(), agent: self.agent.clone(), model: self.model.clone(), choices: self.choices.clone(), permission_mode: self.permission_mode.clone() }
+    /// Gap lines this seat's agents would show under the current mode (worker seats get the
+    /// dispatched-worker Codex mapping).
+    fn consent_gaps_text(&self, worker_seat: bool) -> String {
+        let mut seen = std::collections::HashSet::new();
+        self.agents()
+            .filter(|a| seen.insert((*a).to_owned()))
+            .filter_map(|a| {
+                let kind = AgentKind::parse(a)?;
+                let gaps = match kind {
+                    AgentKind::Codex => {
+                        crate::code::agents::codex_gaps_for(Some(self.permission_mode.as_str()), worker_seat)
+                    }
+                    _ => ApprovalSetup::for_agent(kind).gaps,
+                };
+                (!gaps.is_empty()).then(|| gaps.iter().copied().collect::<Vec<_>>().join("\n"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn snapshot(&self, worker_seat: bool) -> Ack {
+        Ack {
+            role_id: self.role_id.clone(),
+            agent: self.agent.clone(),
+            model: self.model.clone(),
+            choices: self.choices.clone(),
+            permission_mode: self.permission_mode.clone(),
+            gaps_text: self.consent_gaps_text(worker_seat),
+        }
     }
 
     fn agents(&self) -> impl Iterator<Item = &str> {
         std::iter::once(self.agent.as_str()).chain(self.choices.iter().map(|c| c.agent.as_str()))
     }
 
-    fn fill_editor_notes(&mut self) {
+    fn fill_editor_notes(&mut self, worker_seat: bool) {
         let mut seen = std::collections::HashSet::new();
         let agents: Vec<String> = self.agents().filter(|a| seen.insert(a.to_string())).map(str::to_owned).collect();
         self.gaps = agents
             .iter()
             .filter_map(|a| {
-                let gaps = ApprovalSetup::for_agent(AgentKind::parse(a)?).gaps;
+                let kind = AgentKind::parse(a)?;
+                let gaps = match kind {
+                    AgentKind::Codex => {
+                        crate::code::agents::codex_gaps_for(Some(self.permission_mode.as_str()), worker_seat)
+                    }
+                    _ => ApprovalSetup::for_agent(kind).gaps,
+                };
                 (!gaps.is_empty()).then(|| AgentGaps { agent: a.clone(), gaps: gaps.iter().map(|g| g.to_string()).collect() })
             })
             .collect();
@@ -184,8 +222,8 @@ impl Seat {
     }
 
     /// Whether the stored acknowledgement still covers this seat.
-    pub fn acknowledged(&self) -> bool {
-        self.unasked_ack.as_ref() == Some(&self.snapshot())
+    pub fn acknowledged(&self, worker_seat: bool) -> bool {
+        self.unasked_ack.as_ref() == Some(&self.snapshot(worker_seat))
     }
 }
 
@@ -415,6 +453,8 @@ impl TeamsDb {
     }
 
     pub fn templates(&self) -> Result<Vec<Template>> {
+        let standing: std::collections::HashMap<String, bool> =
+            self.roles()?.into_iter().map(|r| (r.id, r.standing)).collect();
         let mut st = self.0.prepare(
             "SELECT id, name, seats_json, routing_json, allow_worker_commit, updated_at FROM templates ORDER BY name",
         )?;
@@ -426,9 +466,10 @@ impl TeamsDb {
             let is_builtin = id.starts_with("builtin-");
             let mut seats: Vec<Seat> = serde_json::from_str(&seats)?;
             for s in &mut seats {
+                let worker_seat = standing.get(&s.role_id).map(|st| !st).unwrap_or(false);
+                s.fill_editor_notes(worker_seat);
                 // Built-ins never carry an acknowledgement, whatever the file says.
-                s.allow_unasked = !is_builtin && s.acknowledged();
-                s.fill_editor_notes();
+                s.allow_unasked = !is_builtin && s.acknowledged(worker_seat);
             }
             Ok(Template {
                 id,
@@ -773,10 +814,6 @@ impl TeamsDb {
 
     /// Create or update a user template. The built-in one is copied, never edited in place.
     pub fn save_template(&self, mut input: TemplateInput) -> Result<Template> {
-        // The tick in the editor is the user's acknowledgement of exactly what the seat says now.
-        for s in &mut input.seats {
-            s.unasked_ack = s.allow_unasked.then(|| s.snapshot());
-        }
         let name = input.name.trim();
         if name.is_empty() {
             bail!("a template needs a name");
@@ -785,6 +822,12 @@ impl TeamsDb {
             bail!("a template needs at least one seat");
         }
         let roles = self.roles()?;
+        // The tick in the editor is the user's acknowledgement of exactly what the seat says now
+        // (agent/model/choices/mode + the gap lines shown for that seat).
+        for s in &mut input.seats {
+            let worker_seat = roles.iter().find(|r| r.id == s.role_id).map(|r| !r.standing).unwrap_or(false);
+            s.unasked_ack = s.allow_unasked.then(|| s.snapshot(worker_seat));
+        }
         let mut keys = std::collections::HashSet::new();
         for s in &input.seats {
             if s.seat.trim().is_empty() || !keys.insert(s.seat.as_str()) {

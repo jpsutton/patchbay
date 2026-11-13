@@ -3513,7 +3513,7 @@ async fn hidden_agent_modes_are_refused_through_ipc_and_mesh() {
     ];
     for (agent, approval, visible) in cases {
         let kind = AgentKind::parse(agent).unwrap();
-        let setup = ApprovalSetup::for_session(kind, approval);
+        let setup = ApprovalSetup::for_session(kind, approval, false);
         // Every id the agent hides, except the one Codex's approval control implies.
         let hidden: Vec<&str> = setup.hide_modes.iter().copied().filter(|m| *m != visible).collect();
         assert!(!hidden.is_empty(), "{agent} hides modes");

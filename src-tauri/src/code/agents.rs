@@ -218,15 +218,19 @@ pub struct ApprovalSetup {
     /// `select_mode` is not fixed: it follows the session's approval mode (`codex_mode_for`), at
     /// start, on resume, on a change while running, and in `keep_mode`.
     pub follows_approval: bool,
+    /// True when this session was started by `dispatch_item`. Codex Auto then maps to
+    /// `workspace-write` instead of `read-only` (standing seats and non-team sessions stay read-only).
+    pub dispatched_worker: bool,
 }
 
 impl ApprovalSetup {
     /// `for_agent`, with what depends on the session's approval mode filled in (Codex's sandbox).
-    pub(crate) fn for_session(kind: AgentKind, permission_mode: &str) -> Self {
+    pub(crate) fn for_session(kind: AgentKind, permission_mode: &str, dispatched_worker: bool) -> Self {
         let mut setup = Self::for_agent(kind);
         if setup.follows_approval {
-            setup.select_mode = Some(codex_mode_for(Some(permission_mode)).into());
-            setup.gaps = codex_gaps_for(Some(permission_mode));
+            setup.dispatched_worker = dispatched_worker;
+            setup.select_mode = Some(codex_mode_for(Some(permission_mode), dispatched_worker).into());
+            setup.gaps = codex_gaps_for(Some(permission_mode), dispatched_worker);
         }
         setup
     }
@@ -238,7 +242,7 @@ impl ApprovalSetup {
     /// control implies right now is accepted. `approval_now`: the session's saved approval mode.
     pub(crate) fn refuse_mode(&self, mode_id: &str, approval_now: Option<&str>) -> Option<String> {
         if self.follows_approval {
-            let implied = codex_mode_for(approval_now);
+            let implied = codex_mode_for(approval_now, self.dispatched_worker);
             return (mode_id != implied).then(|| {
                 format!("Codex's mode follows the session's approval control ({implied} right now), so \"{mode_id}\" can't be set directly.")
             });
@@ -274,6 +278,7 @@ impl ApprovalSetup {
                 hide_modes: &[CODEX_ASKING_MODE, CODEX_WRITING_MODE, "agent", "agent-full-access"],
                 gaps: CODEX_ASKING_GAPS,
                 follows_approval: true,
+                dispatched_worker: false,
             },
             AgentKind::Antigravity => Self {
                 select_mode: Some("default".into()),
@@ -299,16 +304,22 @@ impl ApprovalSetup {
 const CODEX_ASKING_MODE: &str = "read-only";
 /// Codex mode that edits the project (and the temp folders) without asking; network and anything
 /// outside the sandbox still go through Codex's own `on-request` approvals (pb-20261110-15).
+/// Writable roots Codex grants under this preset: the session cwd (for a dispatched worker, the
+/// item worktree) plus `/tmp` and `$TMPDIR`. The main repo's `.git/worktrees/<name>` and object
+/// store are outside that cwd, so writes there escalate as Codex prompts (and may then match
+/// `allow_worker_commit`) rather than by widening the sandbox roots.
 const CODEX_WRITING_MODE: &str = "workspace-write";
 
-/// The Codex mode a session's approval mode implies: Approve all writes in the project, anything
-/// else (or an approval mode that could not be read) stays read-only. Never `agent` or
-/// `agent-full-access`: this mapping never picks them, and `refuse_mode` refuses a caller that names them.
-pub(crate) fn codex_mode_for(permission_mode: Option<&str>) -> &'static str {
-    if permission_mode == Some("always-approve") {
-        CODEX_WRITING_MODE
-    } else {
-        CODEX_ASKING_MODE
+/// The Codex mode a session's approval mode implies. Approve all => `workspace-write`. A
+/// **dispatched worker** in Auto also => `workspace-write` (network still off). Everything else
+/// (Ask, Auto on a non-worker / standing / non-team session, or an unreadable mode) => `read-only`.
+/// Never `agent` or `agent-full-access`: this mapping never picks them, and `refuse_mode` refuses
+/// a caller that names them.
+pub(crate) fn codex_mode_for(permission_mode: Option<&str>, dispatched_worker: bool) -> &'static str {
+    match permission_mode {
+        Some("always-approve") => CODEX_WRITING_MODE,
+        Some("auto") if dispatched_worker => CODEX_WRITING_MODE,
+        _ => CODEX_ASKING_MODE,
     }
 }
 
@@ -321,13 +332,18 @@ const CODEX_WRITING_GAPS: &[&str] = &[
     "Codex writes in this project and in the temp folders (/tmp and $TMPDIR) without asking. Everything else it asks for (network, files outside the project) is approved automatically under Approve all.",
     CODEX_CONFIG_GAP,
 ];
+/// Dispatched worker in Auto: workspace-write, network off; outside the sandbox still asks.
+const CODEX_WORKER_AUTO_GAPS: &[&str] = &[
+    "As a team worker in Auto, Codex edits files and runs commands inside its worktree sandbox without asking. Network and anything outside the sandbox still ask.",
+    CODEX_CONFIG_GAP,
+];
 
 /// What Codex does without asking under a session's approval mode: the header's text.
-pub(crate) fn codex_gaps_for(permission_mode: Option<&str>) -> &'static [&'static str] {
-    if codex_mode_for(permission_mode) == CODEX_WRITING_MODE {
-        CODEX_WRITING_GAPS
-    } else {
-        CODEX_ASKING_GAPS
+pub(crate) fn codex_gaps_for(permission_mode: Option<&str>, dispatched_worker: bool) -> &'static [&'static str] {
+    match permission_mode {
+        Some("always-approve") => CODEX_WRITING_GAPS,
+        Some("auto") if dispatched_worker => CODEX_WORKER_AUTO_GAPS,
+        _ => CODEX_ASKING_GAPS,
     }
 }
 
@@ -1200,9 +1216,10 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
         }
         AgentKind::Kilo => env.push(("KILO_CONFIG_CONTENT".to_owned(), base_config)),
         AgentKind::Codex => {
+            let dispatched = crate::teams::is_dispatched_in(data_dir, &session.id);
             env.push((
                 "INITIAL_AGENT_MODE".to_owned(),
-                codex_mode_for(Some(&session.permission_mode)).to_owned(),
+                codex_mode_for(Some(&session.permission_mode), dispatched).to_owned(),
             ));
             // The adapter reads an API key from the environment only when told to sign in with
             // one; without a login it otherwise stops at `auth_required`.
@@ -1269,7 +1286,11 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
         session_meta,
         initial_model: session.agent_model.clone(),
         login_hint: kind.login_hint(),
-        approvals: ApprovalSetup::for_session(kind, &session.permission_mode),
+        approvals: ApprovalSetup::for_session(
+            kind,
+            &session.permission_mode,
+            crate::teams::is_dispatched_in(data_dir, &session.id),
+        ),
         native: None,
     })
 }
@@ -2266,7 +2287,7 @@ time.sleep(60)
         assert_eq!(env(&l, "INITIAL_AGENT_MODE").as_deref(), Some("read-only"));
         assert_eq!(env(&l, "CODEX_CONFIG"), None);
         assert_eq!(l.approvals.select_mode.as_deref(), Some("read-only"));
-        assert_eq!(l.approvals.gaps, codex_gaps_for(Some("default")));
+        assert_eq!(l.approvals.gaps, codex_gaps_for(Some("default"), false));
 
         prefs.agent_instructions = "be terse".into();
         crate::prefs::save(&db, &prefs).unwrap();
@@ -2303,8 +2324,9 @@ time.sleep(60)
             let l = launch();
             assert_eq!(env(&l, "INITIAL_AGENT_MODE").as_deref(), Some(mode), "{approval}");
             assert_eq!(l.approvals.select_mode.as_deref(), Some(mode), "{approval}");
-            assert_eq!(l.approvals.gaps, codex_gaps_for(Some(approval)), "{approval}");
+            assert_eq!(l.approvals.gaps, codex_gaps_for(Some(approval), false), "{approval}");
             assert!(l.approvals.follows_approval);
+            assert!(!l.approvals.dispatched_worker);
             // The write-capable mode is never offered, and neither are the agent modes.
             for hidden in ["read-only", "workspace-write", "agent", "agent-full-access"] {
                 assert!(l.approvals.hide_modes.contains(&hidden), "{hidden} stays hidden");
@@ -2313,33 +2335,94 @@ time.sleep(60)
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Only Approve all opens write access, and only to `workspace-write`: no input, including an
-    /// unreadable approval mode, ever reaches `agent` or `agent-full-access`.
+    /// Mapping matrix: only Approve all, or a dispatched worker in Auto, open write access — and
+    /// only to `workspace-write`. Standing seats, non-team Auto, and worker Default stay read-only.
+    /// No input reaches `agent` or `agent-full-access`.
     #[test]
-    fn codex_mode_mapping_is_conservative() {
-        assert_eq!(codex_mode_for(Some("always-approve")), "workspace-write");
-        for other in [None, Some("default"), Some("auto"), Some(""), Some("agent"), Some("agent-full-access"), Some("workspace-write")] {
-            assert_eq!(codex_mode_for(other), "read-only", "{other:?}");
+    fn codex_mode_mapping_matrix() {
+        assert_eq!(codex_mode_for(Some("always-approve"), false), "workspace-write");
+        assert_eq!(codex_mode_for(Some("always-approve"), true), "workspace-write");
+        assert_eq!(codex_mode_for(Some("auto"), true), "workspace-write", "worker+auto");
+        assert_eq!(codex_mode_for(Some("default"), true), "read-only", "worker+default");
+        assert_eq!(codex_mode_for(Some("auto"), false), "read-only", "standing/non-team auto");
+        assert_eq!(codex_mode_for(Some("default"), false), "read-only");
+        for other in [None, Some(""), Some("agent"), Some("agent-full-access"), Some("workspace-write")] {
+            assert_eq!(codex_mode_for(other, false), "read-only", "{other:?}");
+            assert_eq!(codex_mode_for(other, true), "read-only", "{other:?}");
         }
+        let worker_auto = codex_gaps_for(Some("auto"), true).join(" ");
+        assert!(worker_auto.contains("team worker in Auto") && worker_auto.contains("still ask"), "{worker_auto}");
+        assert!(!worker_auto.contains("approved automatically"), "{worker_auto}");
+        assert_eq!(codex_gaps_for(Some("auto"), false), codex_gaps_for(Some("default"), false));
+        assert_eq!(codex_gaps_for(Some("default"), true), codex_gaps_for(Some("default"), false));
     }
 
     /// The header says what is true in each state: Ask asks for edits and network; Approve all
     /// writes in the project and the temp folders unasked and approves the rest itself.
     #[test]
     fn codex_header_text_differs_per_state() {
-        let ask = codex_gaps_for(Some("default")).join(" ");
-        let all = codex_gaps_for(Some("always-approve")).join(" ");
+        let ask = codex_gaps_for(Some("default"), false).join(" ");
+        let all = codex_gaps_for(Some("always-approve"), false).join(" ");
         assert_ne!(ask, all);
         assert!(ask.contains("read-only sandbox") && ask.contains("asks before editing files"), "{ask}");
         assert!(!ask.contains("temp folders"), "{ask}");
         assert!(all.contains("writes in this project") && all.contains("/tmp and $TMPDIR"), "{all}");
         assert!(all.contains("network, files outside the project") && all.contains("approved automatically"), "{all}");
         // Unreadable approval mode reads as Ask, text included.
-        assert_eq!(codex_gaps_for(None), codex_gaps_for(Some("default")));
+        assert_eq!(codex_gaps_for(None, false), codex_gaps_for(Some("default"), false));
         // Other agents keep a fixed setup whatever the session's approval mode is.
-        let claude = ApprovalSetup::for_session(AgentKind::ClaudeCode, "always-approve");
+        let claude = ApprovalSetup::for_session(AgentKind::ClaudeCode, "always-approve", false);
         assert_eq!(claude, ApprovalSetup::for_agent(AgentKind::ClaudeCode));
         assert!(!claude.follows_approval);
+    }
+
+    /// A dispatched Codex worker in Auto launches in workspace-write with the worker-auto header.
+    #[test]
+    fn codex_dispatched_worker_auto_launches_workspace_write() {
+        let dir = std::env::temp_dir().join(format!("pb-ag-{}", crate::db::new_id()));
+        std::fs::create_dir_all(dir.join("proj")).unwrap();
+        let db = std::sync::Arc::new(Db::open(&dir.join("db.sqlite")).unwrap());
+        let mut o = AgentPaths::new();
+        o.insert("codex".into(), std::env::current_exe().unwrap().to_string_lossy().into_owned());
+        crate::prefs::save(&db, &crate::prefs::Preferences { agent_paths: o, ..Default::default() }).unwrap();
+        let session = db
+            .create_code_session(&dir.to_string_lossy(), None, "codex", "auto")
+            .unwrap();
+        let tdb = crate::teams::TeamsDb::open(&dir).unwrap();
+        let team = tdb
+            .create_team(crate::teams::NewTeam {
+                template_id: "builtin-triage-desk".into(),
+                slug: "demo".into(),
+                cwd: dir.join("proj").to_string_lossy().into_owned(),
+                id_prefix: Some("DM".into()),
+                pr_base: None,
+                worktree_root: Some(dir.join("proj/trees").to_string_lossy().into_owned()),
+                project_rules: None,
+                export_dir: Some(dir.join("out").to_string_lossy().into_owned()),
+            })
+            .unwrap();
+        // Second connection: TeamsDb's Connection field is private outside the teams module.
+        let conn = rusqlite::Connection::open(dir.join("teams.db")).unwrap();
+        conn.execute(
+            "INSERT INTO dispatches(team_id, item_id, seat, desk_session, session_id, at) VALUES (?1,'i1','workers','desk',?2,0)",
+            rusqlite::params![team.id, session.id],
+        )
+        .unwrap();
+        assert!(crate::teams::is_dispatched_in(&dir, &session.id));
+        let l = prepare(&db, &dir, &session).unwrap();
+        let mode = |k: &str| l.env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        assert_eq!(mode("INITIAL_AGENT_MODE"), Some("workspace-write"));
+        assert_eq!(l.approvals.select_mode.as_deref(), Some("workspace-write"));
+        assert!(l.approvals.dispatched_worker);
+        assert_eq!(l.approvals.gaps, codex_gaps_for(Some("auto"), true));
+        // Same session under default stays read-only even when dispatched.
+        db.set_code_session_permission_mode(&session.id, "default").unwrap();
+        let l = prepare(&db, &dir, &db.get_code_session(&session.id).unwrap().unwrap()).unwrap();
+        assert_eq!(
+            l.env.iter().find(|(n, _)| n == "INITIAL_AGENT_MODE").map(|(_, v)| v.as_str()),
+            Some("read-only")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A team member's role instructions reach the prompt hook of each agent that has one, and

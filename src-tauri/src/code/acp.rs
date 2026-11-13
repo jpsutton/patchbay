@@ -895,7 +895,11 @@ impl UiClient {
         let (Some(current), Some(fixed)) = (current, self.approvals.select_mode.as_ref()) else { return };
         // Codex: the mode the session's approval mode implies right now, read-only when it can't be read.
         let want = if self.approvals.follows_approval {
-            super::agents::codex_mode_for((self.permission_mode)().as_deref()).to_owned()
+            super::agents::codex_mode_for(
+                (self.permission_mode)().as_deref(),
+                self.approvals.dispatched_worker,
+            )
+            .to_owned()
         } else if self.approvals.hide_modes.contains(&current) {
             fixed.clone()
         } else {
@@ -1883,7 +1887,10 @@ async fn run(
     // Agents with approval policies of their own: start in the one that asks.
     let start_mode = if approvals.follows_approval {
         // Read now, not at launch: the approval mode may have changed while the agent started.
-        Some(super::agents::codex_mode_for(permission_mode().as_deref()).to_owned())
+        Some(
+            super::agents::codex_mode_for(permission_mode().as_deref(), approvals.dispatched_worker)
+                .to_owned(),
+        )
     } else {
         approvals.select_mode.clone()
     };
@@ -1915,7 +1922,7 @@ async fn run(
             config_options: cfg.extra.clone(),
             extensions,
             approval_gaps: if approvals.follows_approval {
-                super::agents::codex_gaps_for(permission_mode().as_deref())
+                super::agents::codex_gaps_for(permission_mode().as_deref(), approvals.dispatched_worker)
             } else {
                 approvals.gaps
             },
