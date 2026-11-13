@@ -149,14 +149,10 @@ export function sessionActions(
   actions.push({ label: "Session info…", onSelect: () => st().setSessionInfoId(s.id) });
   actions.push({
     label: "Copy session ID",
+    // The Patchbay id, not the agent's: `send_agent_message` and `list_agent_sessions` use it.
+    // The agent's own id is in "Session info…".
     onSelect: attempt(async () => {
-      // The live id (the agent's last `sessionReady`) beats the saved one, which can lag.
-      const id = st().code[s.id]?.acpSessionId ?? s.acpSessionId;
-      if (!id) {
-        st().setToast("No agent session ID yet: the agent hasn't started this session.");
-        return;
-      }
-      if (await copyText(id)) st().setToast("Copied the agent session ID");
+      if (await copyText(s.id)) st().setToast("Copied the session ID");
     }),
   });
   actions.push({
