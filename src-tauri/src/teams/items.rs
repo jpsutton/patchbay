@@ -224,9 +224,16 @@ impl TeamsDb {
         let fields = patch.as_object().filter(|o| !o.is_empty()).ok_or_else(|| anyhow!("name at least one field to change"))?;
         let before = self.item(team_id, id)?;
         // Resolve PR URL from the whole patch up front: field order in the object is not stable.
+        // Format check only (https + host + path) — not proof the PR exists.
         let pr_url_after = match fields.get("prUrl") {
             Some(Value::Null) => String::new(),
-            Some(Value::String(s)) => s.trim().to_owned(),
+            Some(Value::String(s)) => {
+                let s = s.trim().to_owned();
+                if !s.is_empty() && !is_well_formed_https_pr_url(&s) {
+                    bail!("prUrl must be a https URL with a host and a path");
+                }
+                s
+            }
             Some(_) => bail!("prUrl must be text (or null to clear it)"),
             None => before.pr_url.clone().unwrap_or_default(),
         };
@@ -476,6 +483,21 @@ fn git_in(cwd: &Path, args: &[&str]) -> Result<String> {
         bail!("git {} failed: {}", args.first().copied().unwrap_or(""), String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// Format-only check: non-empty `prUrl` must be `https://<host>/<path…>` with no whitespace.
+/// Does not verify that the PR exists.
+fn is_well_formed_https_pr_url(s: &str) -> bool {
+    if s.is_empty() || s.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let Some(rest) = s.strip_prefix("https://") else {
+        return false;
+    };
+    let Some((host, path)) = rest.split_once('/') else {
+        return false;
+    };
+    !host.is_empty() && host.contains('.') && !host.contains('@') && !path.is_empty()
 }
 
 /// When marking done without a PR URL, the item's worktree must be clean and ahead of `pr_base`.
@@ -905,8 +927,18 @@ mod tests {
         assert!(t.set_item(&team.id, &i.id, None, &json!({ "status": "nope" })).is_err());
         assert!(t.set_item(&team.id, &i.id, None, &json!({ "colour": "red" })).is_err());
         assert!(t.set_item(&team.id, &i.id, None, &json!({ "assignee": "stranger" })).is_err());
-        let s = t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "status": "triaged", "assignee": "w1", "prUrl": "u" })).unwrap();
-        assert_eq!((s.status.as_str(), s.member_session.as_deref(), s.pr_url.as_deref()), ("triaged", Some("w1"), Some("u")));
+        let s = t
+            .set_item(
+                &team.id,
+                &i.id,
+                Some("desk1"),
+                &json!({ "status": "triaged", "assignee": "w1", "prUrl": "https://example.test/pr/1" }),
+            )
+            .unwrap();
+        assert_eq!(
+            (s.status.as_str(), s.member_session.as_deref(), s.pr_url.as_deref()),
+            ("triaged", Some("w1"), Some("https://example.test/pr/1"))
+        );
         assert!(t.set_item(&team.id, &i.id, None, &json!({ "status": "triaged" })).unwrap_err().to_string().contains("nothing changed"));
         let ev = t.item_events(&team.id, Some(&i.id), 50).unwrap();
         assert_eq!(ev.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), ["created", "set", "set", "set"]);
@@ -986,6 +1018,37 @@ mod tests {
             params![team.id, item_id],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn pr_url_must_be_well_formed_https_with_host_and_path() {
+        let (_d, t, team) = setup();
+        let i = t.add_item(&team, Some("desk1"), "20261109", "x", "bug", "low", "").unwrap();
+        seed_dispatch(&t, &team, &i.id);
+        for bad in ["x", "http://example.test/pr/1", "https://example.test", "https://example.test/", "https://example.test/pr 1", "ftp://example.test/pr/1"] {
+            let err = t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "prUrl": bad })).unwrap_err().to_string();
+            assert!(err.contains("https URL"), "bad={bad:?} err={err}");
+            let err = t
+                .set_item(&team.id, &i.id, Some("desk1"), &json!({ "status": "done", "prUrl": bad }))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("https URL"), "done+bad={bad:?} err={err}");
+        }
+        // Valid format still bypasses local durability (existence not checked).
+        assert_eq!(
+            t.set_item(
+                &team.id,
+                &i.id,
+                Some("desk1"),
+                &json!({ "status": "done", "prUrl": "https://example.test/org/repo/pull/1" })
+            )
+            .unwrap()
+            .pr_url
+            .as_deref(),
+            Some("https://example.test/org/repo/pull/1")
+        );
+        // Clearing is allowed.
+        assert!(t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "prUrl": null, "status": "triaged" })).is_ok());
     }
 
     #[test]
