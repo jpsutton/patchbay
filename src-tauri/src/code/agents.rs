@@ -411,23 +411,39 @@ pub(crate) fn codex_gaps_for(
 /// make writable under today's workspace-write policy: the session cwd (worktree), and (while F1
 /// temp excludes are not confirmed) `/tmp`, `/private/tmp`, or `$TMPDIR`. A linked worktree is
 /// allowed when those live outside the worktree (and outside temp). Fail closed if git cannot be
-/// probed. (`--show-toplevel` is the current worktree, not the main checkout — use
-/// [`git_main_worktree`].)
+/// probed, any path canonicalize fails, or `$TMPDIR` is set but not absolute. (`--show-toplevel`
+/// is the current worktree, not the main checkout — use [`git_main_worktree`].)
 pub(crate) fn codex_worker_workspace_write_blocked(cwd: &Path) -> Option<&'static str> {
     let common = match git_rev_parse_path(cwd, &["--git-common-dir"]) {
         Some(p) => p,
         None => return Some(CODEX_WORKER_TEMP_READONLY_HINT),
     };
+    // Main checkout (embedded `.git`, `--separate-git-dir`, submodule): `--git-dir` equals
+    // `--git-common-dir`. Linked worktrees use `.../worktrees/<name>` so the paths differ.
+    // `git worktree list` alone is wrong for separate-git-dir (lists the gitdir as "main").
+    let git_dir = match git_rev_parse_path(cwd, &["--git-dir"]) {
+        Some(p) => p,
+        None => return Some(CODEX_WORKER_TEMP_READONLY_HINT),
+    };
+    if git_dir == common {
+        return Some(CODEX_WORKER_TEMP_READONLY_HINT);
+    }
     let main = match git_main_worktree(cwd) {
         Some(p) => p,
         None => return Some(CODEX_WORKER_TEMP_READONLY_HINT),
     };
-    let cwd_key = path_key(cwd);
+    let Some(cwd_key) = path_key(cwd) else {
+        return Some(CODEX_WORKER_TEMP_READONLY_HINT);
+    };
     if path_under(&common, &cwd_key) || path_under(&main, &cwd_key) {
         return Some(CODEX_WORKER_TEMP_READONLY_HINT);
     }
     if !CODEX_WORKER_TEMP_EXCLUDES_CONFIRMED {
-        for root in temp_writable_roots() {
+        let Some(roots) = temp_writable_roots() else {
+            // Relative $TMPDIR or any temp-root canonicalize failure => refuse mapping.
+            return Some(CODEX_WORKER_TEMP_READONLY_HINT);
+        };
+        for root in roots {
             if path_under(&common, &root) || path_under(&main, &root) {
                 return Some(CODEX_WORKER_TEMP_READONLY_HINT);
             }
@@ -436,14 +452,50 @@ pub(crate) fn codex_worker_workspace_write_blocked(cwd: &Path) -> Option<&'stati
     None
 }
 
+/// Clear inherited git location / config overrides, then ignore global + system config.
+fn apply_hardened_git_env(cmd: &mut std::process::Command) {
+    for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"] {
+        cmd.env_remove(key);
+    }
+    for (k, _) in std::env::vars() {
+        if k.starts_with("GIT_CONFIG_") {
+            cmd.env_remove(k);
+        }
+    }
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
+}
+
+#[cfg(test)]
+thread_local! {
+    /// When set, F2 git probes use this program instead of `git` (simulate missing binary).
+    static F2_GIT_PROGRAM_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn f2_git_program() -> PathBuf {
+    #[cfg(test)]
+    {
+        if let Some(p) = F2_GIT_PROGRAM_OVERRIDE.with(|c| c.borrow().clone()) {
+            return p;
+        }
+    }
+    PathBuf::from("git")
+}
+
+fn hardened_git_command(cwd: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new(f2_git_program());
+    apply_hardened_git_env(&mut cmd);
+    cmd.args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C"])
+        .arg(cwd);
+    cmd
+}
+
 /// Hardened `git rev-parse` path result for `cwd`, resolved to an absolute normalised path.
 fn git_rev_parse_path(cwd: &Path, rev_args: &[&str]) -> Option<PathBuf> {
-    let out = std::process::Command::new("git")
-        .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C"])
-        .arg(cwd)
+    let out = hardened_git_command(cwd)
         .arg("rev-parse")
         .args(rev_args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .ok()?;
     if !out.status.success() {
@@ -455,18 +507,15 @@ fn git_rev_parse_path(cwd: &Path, rev_args: &[&str]) -> Option<PathBuf> {
     }
     let p = PathBuf::from(&raw);
     let abs = if p.is_absolute() { p } else { cwd.join(p) };
-    Some(path_key(&abs))
+    path_key(&abs)
 }
 
 /// Absolute path of the repository's primary (main) worktree, from `git worktree list --porcelain`.
 /// Not [`git rev-parse --show-toplevel`], which is the *current* worktree and would always sit
 /// under a linked worker cwd.
 fn git_main_worktree(cwd: &Path) -> Option<PathBuf> {
-    let out = std::process::Command::new("git")
-        .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C"])
-        .arg(cwd)
+    let out = hardened_git_command(cwd)
         .args(["worktree", "list", "--porcelain"])
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .ok()?;
     if !out.status.success() {
@@ -481,15 +530,16 @@ fn git_main_worktree(cwd: &Path) -> Option<PathBuf> {
         }
         let p = PathBuf::from(raw);
         let abs = if p.is_absolute() { p } else { cwd.join(p) };
-        return Some(path_key(&abs));
+        return path_key(&abs);
     }
     None
 }
 
-/// Canonicalise when possible; on macOS map `/tmp` → `/private/tmp` so comparisons match.
-fn path_key(path: &Path) -> PathBuf {
-    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    normalize_macos_tmp(canon)
+/// Canonical absolute path for comparisons. **No raw-string fallback** — canonicalize failure is
+/// `None` so the F2 gate can refuse. On macOS map `/tmp` → `/private/tmp` when still present.
+fn path_key(path: &Path) -> Option<PathBuf> {
+    let canon = path.canonicalize().ok()?;
+    Some(normalize_macos_tmp(canon))
 }
 
 fn normalize_macos_tmp(path: PathBuf) -> PathBuf {
@@ -509,15 +559,39 @@ fn path_under(path: &Path, root: &Path) -> bool {
 }
 
 /// Roots Codex still makes writable under workspace-write while F1 excludes are unconfirmed.
-fn temp_writable_roots() -> Vec<PathBuf> {
-    let mut roots = vec![path_key(Path::new("/tmp")), path_key(Path::new("/private/tmp"))];
-    if let Ok(tmpdir) = std::env::var("TMPDIR") {
-        let t = tmpdir.trim();
-        if !t.is_empty() {
-            roots.push(path_key(Path::new(t)));
+///
+/// Returns `None` (caller refuses workspace-write) when `$TMPDIR` is set but not absolute, or when
+/// any included root fails to canonicalize.
+fn temp_writable_roots() -> Option<Vec<PathBuf>> {
+    temp_writable_roots_from(std::env::var("TMPDIR").ok().as_deref())
+}
+
+fn temp_writable_roots_from(tmpdir: Option<&str>) -> Option<Vec<PathBuf>> {
+    let mut roots = Vec::new();
+    // /tmp must resolve; refuse the mapping if it cannot.
+    roots.push(path_key(Path::new("/tmp"))?);
+    // /private/tmp is the macOS real path behind /tmp; require it there. Elsewhere it often does
+    // not exist — only include when canonicalize succeeds (do not fail closed on Linux).
+    if let Some(private) = path_key(Path::new("/private/tmp")) {
+        roots.push(private);
+    } else {
+        #[cfg(target_os = "macos")]
+        {
+            return None;
         }
     }
-    roots
+    if let Some(raw) = tmpdir {
+        let t = raw.trim();
+        if !t.is_empty() {
+            let p = Path::new(t);
+            // Relative $TMPDIR is unusable for safe comparison — refuse mapping.
+            if !p.is_absolute() {
+                return None;
+            }
+            roots.push(path_key(p)?);
+        }
+    }
+    Some(roots)
 }
 
 const OPCODE_ALWAYS_APPROVE_MODE: &str = "always-approve";
@@ -2715,41 +2789,75 @@ time.sleep(60)
         }
     }
 
-    /// Linked worktree under a non-temp home data path: active Codex worker Auto => workspace-write.
+    /// Build-tree fixture root for F2 ALLOW cases.
+    ///
+    /// Must stay **outside** `/tmp`, `/private/tmp`, and `$TMPDIR` — F2 correctly refuses those
+    /// for workspace-write. Prefer `CARGO_TARGET_DIR` (writable in CI/restricted sandboxes) over
+    /// a hard-coded home path like `~/patchbay-teams-data`.
+    fn f2_non_temp_fixture(id: &str) -> PathBuf {
+        let base = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+        let root = base.join("f2-fixtures").join(id);
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("trees")).unwrap();
+        root
+    }
+
+    fn f2_git_init_commit(dir: &Path, file: &str, contents: &str) {
+        assert!(
+            std::process::Command::new("git")
+                .args(["-c", "init.defaultBranch=main", "init"])
+                .current_dir(dir)
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(dir.join(file), contents).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["-c", "core.hooksPath=/dev/null", "add", "--", file])
+                .current_dir(dir)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["-c", "core.hooksPath=/dev/null", "commit", "-m", "t"])
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    fn f2_add_worktree(repo: &Path, branch: &str, wt: &Path) {
+        let wt_s = wt.to_string_lossy().into_owned();
+        assert!(
+            std::process::Command::new("git")
+                .args(["worktree", "add", "-b", branch, "--", &wt_s, "main"])
+                .current_dir(repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    /// Linked worktree under a non-temp build-tree path: active Codex worker Auto => workspace-write.
     #[test]
     fn codex_dispatched_worker_auto_home_linked_worktree_is_workspace_write() {
         let id = crate::db::new_id();
-        let home = PathBuf::from(format!("/Users/dfrazer/patchbay-teams-data/proj-home-test-{id}"));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(home.join("trees")).unwrap();
+        let home = f2_non_temp_fixture(&format!("proj-home-{id}"));
         // Main checkout + one linked worktree (common git dir stays outside the worktree cwd).
-        std::process::Command::new("git")
-            .args(["-c", "init.defaultBranch=main", "init"])
-            .current_dir(&home)
-            .status()
-            .unwrap();
-        std::fs::write(home.join("README"), "home").unwrap();
-        std::process::Command::new("git")
-            .args(["-c", "core.hooksPath=/dev/null", "add", "README"])
-            .current_dir(&home)
-            .status()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["-c", "core.hooksPath=/dev/null", "commit", "-m", "init"])
-            .current_dir(&home)
-            .env("GIT_AUTHOR_NAME", "t")
-            .env("GIT_AUTHOR_EMAIL", "t@t")
-            .env("GIT_COMMITTER_NAME", "t")
-            .env("GIT_COMMITTER_EMAIL", "t@t")
-            .status()
-            .unwrap();
+        f2_git_init_commit(&home, "README", "home");
         let wt = home.join("trees/i1");
         let wt_s = wt.to_string_lossy().into_owned();
-        std::process::Command::new("git")
-            .args(["worktree", "add", "-b", "i1", "--", &wt_s, "main"])
-            .current_dir(&home)
-            .status()
-            .unwrap();
+        f2_add_worktree(&home, "i1", &wt);
         assert!(codex_worker_workspace_write_blocked(&wt).is_none());
 
         let data = std::env::temp_dir().join(format!("pb-ag-home-{id}"));
@@ -2791,31 +2899,12 @@ time.sleep(60)
         let _ = std::fs::remove_dir_all(&data);
     }
 
-    /// F2 gate: temp cwd blocks; home linked worktree allows; main-checkout cwd blocks.
+    /// F2 gate: temp refuse; main-checkout refuse; linked non-temp allow; edge layouts.
     #[test]
     fn codex_worker_workspace_write_blocked_cases() {
         let temp = std::env::temp_dir().join(format!("pb-f2-temp-{}", crate::db::new_id()));
         std::fs::create_dir_all(&temp).unwrap();
-        std::process::Command::new("git")
-            .args(["-c", "init.defaultBranch=main", "init"])
-            .current_dir(&temp)
-            .status()
-            .unwrap();
-        std::fs::write(temp.join("f"), "x").unwrap();
-        std::process::Command::new("git")
-            .args(["-c", "core.hooksPath=/dev/null", "add", "f"])
-            .current_dir(&temp)
-            .status()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["-c", "core.hooksPath=/dev/null", "commit", "-m", "t"])
-            .current_dir(&temp)
-            .env("GIT_AUTHOR_NAME", "t")
-            .env("GIT_AUTHOR_EMAIL", "t@t")
-            .env("GIT_COMMITTER_NAME", "t")
-            .env("GIT_COMMITTER_EMAIL", "t@t")
-            .status()
-            .unwrap();
+        f2_git_init_commit(&temp, "f", "x");
         assert_eq!(
             codex_worker_workspace_write_blocked(&temp),
             Some(CODEX_WORKER_TEMP_READONLY_HINT),
@@ -2823,30 +2912,16 @@ time.sleep(60)
         );
         let _ = std::fs::remove_dir_all(&temp);
 
+        // Relative $TMPDIR cannot be compared safely => refuse (unit on roots helper).
+        assert!(
+            temp_writable_roots_from(Some("relative-tmpdir")).is_none(),
+            "relative TMPDIR => roots unavailable => mapping refused"
+        );
+        assert!(temp_writable_roots_from(Some("/tmp")).is_some());
+
         let id = crate::db::new_id();
-        let home = PathBuf::from(format!("/Users/dfrazer/patchbay-teams-data/proj-home-test-{id}"));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(home.join("trees")).unwrap();
-        std::process::Command::new("git")
-            .args(["-c", "init.defaultBranch=main", "init"])
-            .current_dir(&home)
-            .status()
-            .unwrap();
-        std::fs::write(home.join("README"), "x").unwrap();
-        std::process::Command::new("git")
-            .args(["-c", "core.hooksPath=/dev/null", "add", "README"])
-            .current_dir(&home)
-            .status()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["-c", "core.hooksPath=/dev/null", "commit", "-m", "t"])
-            .current_dir(&home)
-            .env("GIT_AUTHOR_NAME", "t")
-            .env("GIT_AUTHOR_EMAIL", "t@t")
-            .env("GIT_COMMITTER_NAME", "t")
-            .env("GIT_COMMITTER_EMAIL", "t@t")
-            .status()
-            .unwrap();
+        let home = f2_non_temp_fixture(&format!("proj-gate-{id}"));
+        f2_git_init_commit(&home, "README", "x");
         assert_eq!(
             codex_worker_workspace_write_blocked(&home),
             Some(CODEX_WORKER_TEMP_READONLY_HINT),
@@ -2854,15 +2929,11 @@ time.sleep(60)
         );
         let wt = home.join("trees/wt1");
         let wt_s = wt.to_string_lossy().into_owned();
-        std::process::Command::new("git")
-            .args(["worktree", "add", "-b", "wt1", "--", &wt_s, "main"])
-            .current_dir(&home)
-            .status()
-            .unwrap();
+        f2_add_worktree(&home, "wt1", &wt);
         assert_eq!(
             codex_worker_workspace_write_blocked(&wt),
             None,
-            "home linked worktree => allowed"
+            "non-temp linked worktree => allowed"
         );
         let _ = std::process::Command::new("git")
             .args(["worktree", "remove", "--force", "--", &wt_s])
