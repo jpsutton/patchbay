@@ -2487,6 +2487,34 @@ time.sleep(60)
             mode_of(&prepare(&db, &dir, &db.get_code_session(&session.id).unwrap().unwrap()).unwrap()),
             Some("read-only")
         );
+
+        // A dispatches row for the same session but a different item_id does not count.
+        let other = db
+            .create_code_session(&dir.to_string_lossy(), None, "codex", "auto")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO items(team_id, id, title, type, severity, status, plan, created_at, updated_at)
+             VALUES (?1, 'i2', 'i2', 'bug', 'low', 'in-progress', '', 0, 0)",
+            [&team.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO members(team_id, session_id, seat, role_id, status, item_id, joined_at)
+             VALUES (?1, ?2, 'workers', 'builtin-worker', 'active', 'i2', 3)",
+            rusqlite::params![team.id, other.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO dispatches(team_id, item_id, seat, desk_session, session_id, at)
+             VALUES (?1, 'i1', 'workers', 'desk', ?2, 3)",
+            rusqlite::params![team.id, other.id],
+        )
+        .unwrap();
+        assert!(
+            !crate::teams::is_active_dispatched_worker_in(&dir, &other.id),
+            "dispatches.item_id must match membership.item_id"
+        );
+        assert_eq!(mode_of(&prepare(&db, &dir, &other).unwrap()), Some("read-only"));
         let _ = std::fs::remove_dir_all(&dir);
 
         fn mode_of(l: &Launch) -> Option<&str> {

@@ -192,7 +192,12 @@ impl TeamsDb {
                  WHERE m.session_id = ?1
                    AND m.left_at IS NULL
                    AND m.status = 'active'
-                   AND EXISTS (SELECT 1 FROM dispatches d WHERE d.session_id = m.session_id)",
+                   AND EXISTS (
+                     SELECT 1 FROM dispatches d
+                     WHERE d.session_id = m.session_id
+                       AND d.team_id = m.team_id
+                       AND d.item_id = m.item_id
+                   )",
                 [session],
                 |r| r.get::<_, i64>(0),
             )?

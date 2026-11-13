@@ -333,7 +333,9 @@ fn builtin_roles() -> Vec<Role> {
              Record every notice before any code is written. You do not write code, edit project files, or implement \
              items yourself. Every implementation change must be performed by a worker dispatched to a worktree. \
              Before marking an item done or releasing a worker, check the worktree and git log to verify changes \
-             are committed. Never mark an item done on the worker's word alone. Use team_roster for who is on this \
+             are committed. Never mark an item done on the worker's word alone. Release the worker with \
+             member_release right after the item is done (or dropped / awaiting-review): a running Codex worker \
+             keeps workspace-write until release even after the item is done. Use team_roster for who is on this \
              team; do not call list_agent_sessions or create_agent_session (neither is a team tool)."),
         role_seed("builtin-advisor", "Advisor", true, Caps { decides: true, ..none.clone() }, Some("builtin-desk"),
             "You are the advisor. The coordinator consults you on scope, priority and whether a gap blocks. Answer \
