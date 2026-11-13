@@ -6,8 +6,8 @@
 //! assigned worktree without a prompt. Tokenization is fail-closed (shell metacharacters rejected;
 //! option allow-lists per verb; paths relative, no `..`, symlink-resolved inside the worktree).
 //! Before any git verb auto-approves, effective hooks dir + `core.fsmonitor` are checked
-//! (`worker_git_repo_blocks_auto`). Any executable non-`.sample` hook blocks `commit`/`add`
-//! (human husky/lint-staged included); status/diff/log only gate on `post-index-change` + fsmonitor.
+//! (`worker_git_repo_blocks_auto`). Only executable hooks that git would run for that verb block
+//! (see `HOOKS_BLOCKING_COMMIT` / add / status); `pre-push` and other unrelated hooks do not.
 //!
 //! Residual: config-defined filters / textconv / external diff; check-then-exec TOCTOU on hooks.
 //!
@@ -436,25 +436,31 @@ fn resolve_hooks_dir(worktree: &Path) -> Option<PathBuf> {
     Some(dir)
 }
 
-fn name_is_sample(name: &std::ffi::OsStr) -> bool {
-    name.to_string_lossy().ends_with(".sample")
+/// Hooks that block worker git auto-approve when executable (githooks(5)).
+/// `git commit` checks every name here; `add` / `status` / `diff` / `log` only
+/// `post-index-change` (index refresh). Intentionally absent: pre-push, post-checkout,
+/// post-merge, pre-rebase, post-rewrite, pre-receive, update, push-to-checkout, etc.
+const HOOKS_BLOCKING_COMMIT: &[&str] = &[
+    "pre-commit",
+    "prepare-commit-msg",
+    "commit-msg",
+    "post-commit",
+    "pre-merge-commit",
+    "post-index-change",
+    "reference-transaction",
+];
+
+fn hooks_dir_has_executable(hooks_dir: &Path, names: &[&str]) -> bool {
+    names.iter().any(|name| is_executable_file(&hooks_dir.join(name)))
 }
 
-/// Form chosen for commit/add: refuse if the hooks dir contains **any** executable non-`.sample`
-/// file (covers husky/lint-staged and every verb-specific hook without enumerating names).
-fn hooks_dir_has_executable_non_sample(hooks_dir: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(hooks_dir) else {
-        return false;
-    };
-    for entry in entries.flatten() {
-        if name_is_sample(&entry.file_name()) {
-            continue;
-        }
-        if is_executable_file(&entry.path()) {
-            return true;
-        }
+fn blocking_hooks_for_verb(verb: &str) -> &'static [&'static str] {
+    match verb {
+        "commit" => HOOKS_BLOCKING_COMMIT,
+        // Same githooks(5) name as in HOOKS_BLOCKING_COMMIT; only this one runs for these verbs.
+        "add" | "status" | "diff" | "log" => &["post-index-change"],
+        _ => &[],
     }
-    false
 }
 
 /// True when auto-approve must fall through to a prompt.
@@ -474,11 +480,11 @@ fn worker_git_repo_blocks_auto(worktree: &Path, verb: &str) -> bool {
         return false;
     }
 
-    match verb {
-        "commit" | "add" => hooks_dir_has_executable_non_sample(&hooks_dir),
-        "status" | "diff" | "log" => is_executable_file(&hooks_dir.join("post-index-change")),
-        _ => true,
+    let names = blocking_hooks_for_verb(verb);
+    if names.is_empty() {
+        return true;
     }
+    hooks_dir_has_executable(&hooks_dir, names)
 }
 
 /// Opt-in worktree allow: active worker on an assigned item, template opted in, cwd is the
@@ -788,22 +794,33 @@ mod tests {
     }
 
     #[test]
-    fn worker_executable_hooks_anywhere_block_commit_add() {
+    fn worker_verb_relevant_executable_hooks_block_not_pre_push() {
         let (d, wt, _proj, _item) = worker_commit_fixture(true);
         std::fs::write(std::path::Path::new(&wt).join("LICENSE"), "x").unwrap();
-        // Fixture points hooksPath at an empty dir → commit/add auto-approve.
         assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some());
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git add LICENSE"), &options(), &wt).is_some());
 
-        let empty = resolve_hooks_dir(std::path::Path::new(&wt)).expect("hooks dir");
-        write_hook(&empty, "pre-commit.sample", true);
-        write_hook(&empty, "pre-commit", false);
+        let hooks = resolve_hooks_dir(std::path::Path::new(&wt)).expect("hooks dir");
+        // pre-push alone (David's templateDir) does not block commit/add.
+        write_hook(&hooks, "pre-push", true);
         assert!(
             allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some(),
-            "sample + non-exec ignored"
+            "executable pre-push alone still auto-approves commit"
         );
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git add LICENSE"), &options(), &wt).is_some());
 
-        // Simulate main .git/hooks: unset hooksPath and plant an executable hook there.
+        // Non-executable commit-msg ignored; executable commit-msg refuses commit.
+        write_hook(&hooks, "commit-msg", false);
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some());
+        write_hook(&hooks, "commit-msg", true);
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_none(),
+            "executable commit-msg refuses"
+        );
+        // add is not blocked by commit-msg.
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git add LICENSE"), &options(), &wt).is_some());
+        std::fs::remove_file(hooks.join("commit-msg")).unwrap();
+
+        // Main .git/hooks with pre-commit after unsetting hooksPath.
         assert!(
             std::process::Command::new("git")
                 .args(["-C", &wt, "config", "--unset", "core.hooksPath"])
@@ -816,26 +833,25 @@ mod tests {
             let p = std::path::PathBuf::from(&rel);
             if p.is_absolute() { p } else { std::path::Path::new(&wt).join(p) }
         };
-        // Clear template-installed hooks so only our planted file matters.
         if main_hooks.is_dir() {
             for e in std::fs::read_dir(&main_hooks).unwrap().flatten() {
                 let _ = std::fs::remove_file(e.path());
             }
         }
+        write_hook(&main_hooks, "pre-push", true);
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some(),
+            "pre-push in .git/hooks does not block"
+        );
         write_hook(&main_hooks, "pre-commit", true);
         assert!(
             allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_none(),
-            "executable hook in .git/hooks"
+            "executable pre-commit in .git/hooks"
         );
-        assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git add LICENSE"), &options(), &wt).is_none(),
-            "add also blocked by any executable hook"
-        );
-        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git status"), &options(), &wt).is_some());
 
-        // External core.hooksPath with an executable hook → refuse.
+        // External hooksPath with commit-msg → refuse; with only pre-push → allow.
         let external = std::path::Path::new(&wt).join("external-hooks");
-        write_hook(&external, "pre-commit", true);
+        write_hook(&external, "pre-push", true);
         assert!(
             std::process::Command::new("git")
                 .args(["-C", &wt, "config", "core.hooksPath", external.to_str().unwrap()])
@@ -843,12 +859,20 @@ mod tests {
                 .unwrap()
                 .success()
         );
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some());
+        write_hook(&external, "commit-msg", true);
         assert!(
             allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_none(),
-            "external hooksPath with executable"
+            "external hooksPath commit-msg"
         );
 
-        // Empty / missing hooks dir via hooksPath → allow.
+        // post-index-change blocks add and status.
+        std::fs::remove_file(external.join("commit-msg")).unwrap();
+        write_hook(&external, "post-index-change", true);
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git add LICENSE"), &options(), &wt).is_none());
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git status"), &options(), &wt).is_none());
+
+        // Empty / missing hooks dir → allow.
         let empty2 = std::path::Path::new(&wt).join("empty-hooks-2");
         std::fs::create_dir_all(&empty2).unwrap();
         assert!(
@@ -858,10 +882,7 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some(),
-            "empty hooks dir allowed"
-        );
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some());
         let missing = std::path::Path::new(&wt).join("missing-hooks-dir");
         assert!(
             std::process::Command::new("git")
@@ -870,10 +891,7 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        assert!(
-            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some(),
-            "missing hooks dir allowed"
-        );
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, "git commit -m work"), &options(), &wt).is_some());
     }
 
     #[test]

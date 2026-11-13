@@ -123,12 +123,14 @@ Path args must be relative (no `..` component), resolve inside the worktree afte
 symlinks, and name a regular file or directory. Before any `git` verb auto-approves, Patchbay
 reads `core.fsmonitor` and the effective hooks directory (`core.hooksPath` if set, else
 `rev-parse --git-path hooks`), wherever it is. Auto-approve falls to a prompt if `fsmonitor` is
-set to anything but false/empty; if the hooks dir cannot be determined; or, for `commit`/`add`, if
-that directory contains any executable non-`.sample` file (simplest form — covers husky,
-lint-staged, and every commit hook; human-installed hooks are not trusted because they run
-worker-written content). For `status`/`diff`/`log`, only an executable `post-index-change` blocks
-(plus the fsmonitor gate). In a repo with commit hooks, worker commits therefore always prompt.
-`.sample` hooks and non-executable files are ignored; a missing hooks directory is allowed.
+set to anything but false/empty; if the hooks dir cannot be determined; or if an **executable**
+hook that git would run for that verb is present (githooks(5)): for `commit` —
+`pre-commit`, `prepare-commit-msg`, `commit-msg`, `post-commit`, `pre-merge-commit`,
+`post-index-change`, `reference-transaction`; for `add` / `status` / `diff` / `log` —
+`post-index-change` only. Hooks not run by these verbs (`pre-push`, `post-checkout`, …) do not
+block, so a templateDir that only installs `pre-push` still allows the opt-in. In a repo with
+commit hooks (husky/lint-staged `pre-commit`, etc.), worker commits always prompt. Non-executable
+hook files are ignored; a missing hooks directory is allowed.
 
 Residual: config-defined clean/smudge filters, textconv, and external diff helpers; check-then-exec
 TOCTOU on the hooks directory; unbounded `ls -R` is not capped here.
