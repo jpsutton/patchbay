@@ -29,5 +29,6 @@ pub mod proc;
 pub use agent::serve;
 pub use history::{HistoryWindow, history_window};
 pub use store::sessions_dir;
+pub use tools::foreign_location;
 pub use tools::web::{brave_search, web_search_spec};
 pub use host::{ClaudeConfig, DEFAULT_MAX_STEPS, Host, Limits, ModelClient, ModelInfo, Settings};

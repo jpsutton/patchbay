@@ -751,6 +751,16 @@ async fn run_call(
     if mode == Mode::Plan && !tool.allowed_in_plan() {
         return fail(&session, session.prompts().msg("not_in_plan_mode", &[("name", &call.name)]));
     }
+    // A path on another machine's share or in a device namespace is refused in EVERY mode, before a
+    // hook or an approval can say yes and before anything is opened: that is lexical, no filesystem
+    // call, because opening a UNC path makes Windows connect to it and send the user's credentials.
+    if let Some(loc) = tool
+        .locations(&call.arguments, &session)
+        .into_iter()
+        .find(|l| crate::tools::foreign_location(&session.cwd, std::path::Path::new(l)))
+    {
+        return fail(&session, session.prompts().msg("foreign_location", &[("path", &loc)]));
+    }
     let setup = session.claude();
     // PreToolUse hooks may block the call, or decide the permission question themselves.
     let mut decided: Option<String> = None;
@@ -947,4 +957,147 @@ mod tests {
         assert!(matches!(&parts[2], Part::Text(t) if t.contains("<file name=\"a.csv\" type=\"text/csv\">") && t.contains("a,b")));
         assert!(matches!(&parts[3], Part::Text(t) if t == "[Attached file: /x/b.pdf]"));
     }
+
+    /// The client can be set to approve everything; a Read of another machine's share must still not
+    /// run (nor even be asked), and judging it must not make a network attempt: 203.0.113.1 is a
+    /// documentation address nobody answers, so an attempt would take far longer than a second.
+    /// Windows only (a UNC prefix exists only there); the body is type-checked everywhere.
+    #[tokio::test]
+    async fn a_read_of_a_network_location_is_refused_even_when_the_client_approves_everything() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        if !cfg!(windows) {
+            return;
+        }
+        let (a, b) = tokio::io::duplex(1 << 16);
+        let (peer, mut incoming) = crate::rpc::connect(a, b);
+        // The approve-all client: answers every permission request with "allow", and counts them.
+        let asked = Arc::new(AtomicUsize::new(0));
+        let count = asked.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = incoming.recv().await {
+                if let crate::rpc::Incoming::Request { method, reply, .. } = msg {
+                    if method == "session/request_permission" {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        reply.send(Ok(json!({"outcome": {"outcome": "selected", "optionId": "allow"}})));
+                    } else {
+                        reply.send(Ok(Value::Null));
+                    }
+                }
+            }
+        });
+        let cwd = std::env::temp_dir().join(format!("pb-foreign-{}", uuid::Uuid::new_v4()));
+        let outside = std::env::temp_dir().join(format!("pb-foreign-outside-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(cwd.join("in.txt"), "inside").unwrap();
+        std::fs::write(outside.join("out.txt"), "outside").unwrap();
+        let session = Session::new("0b91d1a5-9d5e-4a2b-8c3f-1e2d3c4b5a6b".into(), cwd.clone(), Arc::new(NativeSearchHost), peer, "pb-mock".into(), Mode::Default);
+        let registry = Registry::builtin(false, false);
+        let read = |id: &str, path: String| ToolCall { id: id.into(), name: "Read".into(), arguments: json!({"file_path": path}), signature: None };
+
+        // Another machine's share, a device path: refused, never asked, quickly.
+        let started = std::time::Instant::now();
+        for (i, path) in [r"\\203.0.113.1\s\x".to_owned(), "//203.0.113.1/s/x".to_owned(), r"\\.\PhysicalDrive0".to_owned()].into_iter().enumerate() {
+            let results = execute(&session, &registry, vec![read(&format!("c{i}"), path.clone())], None, &CancellationToken::new(), "").await;
+            let text = results[0].joined_text();
+            assert!(results[0].is_error, "{path} was not refused: {text}");
+            assert!(text.contains(&path) && text.contains("network location"), "the refusal shows the raw path and its kind: {text}");
+        }
+        assert_eq!(asked.load(Ordering::SeqCst), 0, "a network location was put to the client at all");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "refusing took {:?}: a network attempt", started.elapsed());
+
+        // The controls: the same client approves a read outside the cwd (so a 0 above is the refusal,
+        // not a lack of approval), and a read inside it is not asked.
+        let results = execute(&session, &registry, vec![read("o", outside.join("out.txt").display().to_string())], None, &CancellationToken::new(), "").await;
+        assert!(!results[0].is_error, "{}", results[0].joined_text());
+        assert_eq!(asked.load(Ordering::SeqCst), 1, "the outside read should have been asked and approved");
+        let results = execute(&session, &registry, vec![read("i", cwd.join("in.txt").display().to_string())], None, &CancellationToken::new(), "").await;
+        assert!(!results[0].is_error, "{}", results[0].joined_text());
+        assert_eq!(asked.load(Ordering::SeqCst), 1, "an in-cwd read needs no approval");
+        let _ = std::fs::remove_dir_all(&cwd);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+
+    /// Approve-all answers the ask; it does not stop a tool's own `run`. Every path-taking tool
+    /// refuses a network location or a device path in `run` itself, before anything is joined,
+    /// stat'ed or opened (non-routable 203.0.113.1: a network attempt would take far over a second).
+    /// Windows only; the body is type-checked everywhere.
+    #[tokio::test]
+    async fn every_path_taking_tool_refuses_a_network_location_in_run() {
+        if !cfg!(windows) {
+            return;
+        }
+        let (a, b) = tokio::io::duplex(1 << 16);
+        let (peer, _incoming) = crate::rpc::connect(a, b);
+        let cwd = std::env::temp_dir().join(format!("pb-foreign-run-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session = Session::new("0b91d1a5-9d5e-4a2b-8c3f-1e2d3c4b5a6c".into(), cwd.clone(), Arc::new(NativeSearchHost), peer, "pb-mock".into(), Mode::Default);
+        let registry = Registry::builtin(false, false);
+        let ctx = ToolCtx { session: session.clone(), call_id: "c".into(), cancel: CancellationToken::new() };
+        let started = std::time::Instant::now();
+        for spelling in [r"\\203.0.113.1\s\x", "//203.0.113.1/s/x", r"\??\UNC\203.0.113.1\s\x", r"\\.\PhysicalDrive0"] {
+            let calls = [
+                ("Read", json!({"file_path": spelling})),
+                ("Write", json!({"file_path": spelling, "content": "x"})),
+                ("Edit", json!({"file_path": spelling, "old_string": "a", "new_string": "b"})),
+                ("NotebookEdit", json!({"notebook_path": spelling, "new_source": "x", "edit_mode": "insert", "cell_type": "code"})),
+                ("Glob", json!({"pattern": "*.txt", "path": spelling})),
+                ("Grep", json!({"pattern": "x", "path": spelling})),
+            ];
+            for (name, input) in calls {
+                let tool = registry.get(name).unwrap_or_else(|| panic!("no tool {name}"));
+                let out = tool.run(input, &ctx).await;
+                let text = out.text_of();
+                assert!(out.is_error, "{name} {spelling} was not refused: {text}");
+                assert!(text.contains(spelling) && text.contains("network location"), "{name}: the refusal shows the raw path and its kind: {text}");
+            }
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "refusing took {:?}: a network attempt", started.elapsed());
+        // Unchanged: a plain path elsewhere is not refused by this check (it keeps the normal ask).
+        let elsewhere = std::env::temp_dir().join(format!("pb-foreign-else-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("f.txt"), "plain").unwrap();
+        let out = registry.get("Read").unwrap().run(json!({"file_path": elsewhere.join("f.txt").display().to_string()}), &ctx).await;
+        assert!(!out.is_error, "{}", out.text_of());
+        let _ = std::fs::remove_dir_all(&cwd);
+        let _ = std::fs::remove_dir_all(&elsewhere);
+    }
+
+
+    /// A path-taking tool that forgets to declare `locations()` would slip past the dispatcher's
+    /// refusal of network locations. So: every registered tool whose schema has a path-like argument
+    /// must report that argument from `locations()`, or sit on this list WITH A REASON.
+    #[tokio::test]
+    async fn every_tool_with_a_path_argument_declares_its_locations_or_says_why_not() {
+        // (tool, argument, why `locations()` does not carry it)
+        // Bash has no path argument (a command string): it is not guardable lexically and is disclosed.
+        const NO_LOCATION: &[(&str, &str, &str)] = &[];
+        let (a, b) = tokio::io::duplex(1 << 16);
+        let (peer, _incoming) = crate::rpc::connect(a, b);
+        let session = Session::new("0b91d1a5-9d5e-4a2b-8c3f-1e2d3c4b5a6d".into(), std::env::temp_dir(), Arc::new(NativeSearchHost), peer, "pb-mock".into(), Mode::Default);
+        let registry = Registry::builtin(true, true);
+        let mut checked = 0;
+        for spec in registry.specs(false, crate::prompts::Prompts::new(false)) {
+            let Some(props) = spec.parameters.get("properties").and_then(Value::as_object) else { continue };
+            for key in props.keys() {
+                let k = key.to_ascii_lowercase();
+                if !["path", "file", "dir", "folder", "cwd", "root"].iter().any(|w| k.contains(w)) {
+                    continue;
+                }
+                checked += 1;
+                let tool = registry.get(&spec.name).unwrap();
+                let marker = "PB_LOCATION_MARKER";
+                let declared = tool.locations(&json!({ key: marker }), &session).iter().any(|l| l.contains(marker));
+                let excused = NO_LOCATION.iter().any(|(t, a, _)| *t == spec.name && *a == key);
+                assert!(
+                    declared || excused,
+                    "tool {} takes `{key}` but does not return it from locations(): the dispatcher cannot refuse a network location there. Declare it, or add it to NO_LOCATION with a reason.",
+                    spec.name
+                );
+            }
+        }
+        assert!(checked >= 6, "the check looked at only {checked} path arguments: did the schema shape change?");
+    }
+
 }

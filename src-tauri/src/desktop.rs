@@ -403,21 +403,108 @@ fn runs_when_opened(p: &std::path::Path, meta: &std::fs::Metadata) -> bool {
 /// links what a click can open.
 #[tauri::command]
 fn local_path_exists(path: String, cwd: Option<String>) -> bool {
-    resolve_mentioned(&path, cwd.as_deref()).is_some_and(|p| p.exists())
+    path_exists_with(&path, cwd.as_deref(), |p| p.exists())
+}
+
+/// [`local_path_exists`] with the existence probe handed in. A network location or device path is
+/// NEVER probed: `exists` on a UNC path makes Windows connect to it, and this runs for every path any
+/// agent's transcript mentions, with no click (text from a web page that an agent echoes is enough).
+/// The lexical check comes first, on the text as written and on the resolved path; such a path reads
+/// as existing so its link is drawn, and a click asks first (`open_local_path`).
+fn path_exists_with(path: &str, cwd: Option<&str>, exists: impl Fn(&std::path::Path) -> bool) -> bool {
+    let home = std::path::Path::new(cwd.unwrap_or(""));
+    if patchbay_agent::foreign_location(home, std::path::Path::new(path)) {
+        return true;
+    }
+    match resolve_mentioned(path, cwd) {
+        Some(p) if patchbay_agent::foreign_location(home, &p) => true,
+        Some(p) => exists(&p),
+        None => false,
+    }
+}
+
+/// What a click on a mentioned path does first.
+#[derive(Debug, PartialEq)]
+enum ClickPlan {
+    /// A path on this computer: look at it (it may run) and open it.
+    Open(std::path::PathBuf),
+    /// Another machine's share or a device path (the text as written): never opened from the app.
+    /// Looking at a UNC path makes Windows connect to it and send it the user's credentials, and no
+    /// dialog can ask safely (which key an Esc, an Enter or a close presses is the OS's to decide), so
+    /// the path is copied for the user to paste into the file manager themselves.
+    Copy(String),
+}
+
+/// Decide what a click does, from the text of the path alone: no filesystem call. The raw text and
+/// the resolved path are both judged, so `\\host` alone (not absolute, so joined to the folder) is
+/// still caught.
+fn plan_open(path: &str, cwd: Option<&str>) -> Option<ClickPlan> {
+    let home = std::path::Path::new(cwd.unwrap_or(""));
+    // The raw text first: `\??\UNC\...` is not "absolute" to std, so it may not resolve at all.
+    if patchbay_agent::foreign_location(home, std::path::Path::new(path)) {
+        return Some(ClickPlan::Copy(path.to_string()));
+    }
+    let p = resolve_mentioned(path, cwd)?;
+    Some(if patchbay_agent::foreign_location(home, &p) { ClickPlan::Copy(path.to_string()) } else { ClickPlan::Open(p) })
+}
+
+/// What a click did, for the toast the page shows.
+#[derive(Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ClickDone {
+    Opened,
+    Copied,
+}
+
+/// The two effects a click can have, so a test can see which one ran.
+trait ClickOps {
+    /// Put the text on the clipboard.
+    fn copy(&mut self, text: &str) -> anyhow::Result<()>;
+    /// Look at the path (it may run) and open it, or reveal it in the file manager.
+    fn open(&mut self, p: &std::path::Path) -> anyhow::Result<()>;
+}
+
+/// The click: a network location or device path is copied as written (no filesystem or network
+/// call, nothing opened), anything on this computer is opened as before.
+fn click(path: &str, cwd: Option<&str>, ops: &mut impl ClickOps) -> anyhow::Result<ClickDone> {
+    match plan_open(path, cwd).ok_or_else(|| anyhow!("{path} is relative and has no folder"))? {
+        ClickPlan::Open(p) => {
+            ops.open(&p)?;
+            Ok(ClickDone::Opened)
+        }
+        ClickPlan::Copy(text) => {
+            ops.copy(&text)?;
+            Ok(ClickDone::Copied)
+        }
+    }
+}
+
+struct RealClick<'a>(&'a tauri::AppHandle);
+
+impl ClickOps for RealClick<'_> {
+    fn copy(&mut self, text: &str) -> anyhow::Result<()> {
+        use tauri_plugin_clipboard_manager::ClipboardExt;
+        self.0.clipboard().write_text(text.to_string())?;
+        Ok(())
+    }
+
+    fn open(&mut self, p: &std::path::Path) -> anyhow::Result<()> {
+        let meta = std::fs::metadata(p).map_err(|e| anyhow!("{}: {e}", p.display()))?;
+        if runs_when_opened(p, &meta) {
+            tauri_plugin_opener::reveal_item_in_dir(p)?;
+        } else {
+            tauri_plugin_opener::open_path(p, None::<&str>)?;
+        }
+        Ok(())
+    }
 }
 
 /// Open a mentioned file or folder in the OS's default app. Anything that would run is shown in
-/// the file manager instead.
+/// the file manager instead. A network location or device path is copied to the clipboard instead
+/// (`Copied`), never opened.
 #[tauri::command]
-fn open_local_path(path: String, cwd: Option<String>) -> crate::CmdResult<()> {
-    let p = resolve_mentioned(&path, cwd.as_deref()).ok_or_else(|| anyhow!("{path} is relative and has no folder"))?;
-    let meta = std::fs::metadata(&p).map_err(|e| anyhow!("{}: {e}", p.display()))?;
-    if runs_when_opened(&p, &meta) {
-        tauri_plugin_opener::reveal_item_in_dir(&p)?;
-    } else {
-        tauri_plugin_opener::open_path(&p, None::<&str>)?;
-    }
-    Ok(())
+async fn open_local_path(app: tauri::AppHandle, path: String, cwd: Option<String>) -> crate::CmdResult<ClickDone> {
+    Ok(click(&path, cwd.as_deref(), &mut RealClick(&app))?)
 }
 
 // ---------------- updates ----------------
@@ -990,6 +1077,74 @@ mod file_link_tests {
         if let Some(home) = crate::code::agents::home_dir() {
             assert_eq!(resolve_mentioned("~/notes.md", None), Some(home.join("notes.md")));
         }
+    }
+
+    /// A network location in an agent's text is not looked at to draw its link, and a click on it
+    /// does not open it: it is copied (the text as written), with no filesystem call and nothing
+    /// handed to the opener. All three effects are mocked here. Decided on the text, so nothing can
+    /// connect (203.0.113.1 is a documentation address nobody answers: a connection attempt would
+    /// take far more than a second). Windows only for the foreign half; type-checked everywhere.
+    #[test]
+    fn a_network_location_is_copied_never_opened_or_looked_at() {
+        #[derive(Default)]
+        struct Mock {
+            copied: Vec<String>,
+            opened: Vec<std::path::PathBuf>,
+        }
+        impl ClickOps for Mock {
+            fn copy(&mut self, text: &str) -> anyhow::Result<()> {
+                self.copied.push(text.to_string());
+                Ok(())
+            }
+            fn open(&mut self, p: &std::path::Path) -> anyhow::Result<()> {
+                self.opened.push(p.to_path_buf());
+                Ok(())
+            }
+        }
+        if cfg!(windows) {
+            let started = std::time::Instant::now();
+            for spelling in [
+                r"\\203.0.113.1\s\x.txt",
+                "//203.0.113.1/s/x.txt",
+                r"\/203.0.113.1/s/x",
+                r"\??\UNC\203.0.113.1\s\x",
+                r"\\?\UNC\203.0.113.1\s\x",
+                r"\\.\UNC\203.0.113.1\s\x",
+                r"\\.\PhysicalDrive0",
+                r"\\203.0.113.1",
+                r"\\localhost\C$\Users\x",
+            ] {
+                for cwd in [None, Some(r"C:\Users\x\proj")] {
+                    let mut ops = Mock::default();
+                    assert_eq!(click(spelling, cwd, &mut ops).unwrap(), ClickDone::Copied, "{spelling} was not copied");
+                    assert_eq!(ops.copied, vec![spelling.to_string()], "the clipboard gets the text as written: {spelling}");
+                    assert!(ops.opened.is_empty(), "{spelling} was handed to the opener");
+                }
+                // Rendering: the existence probe is mocked and must NEVER be called for any spelling.
+                let probes = std::cell::Cell::new(0);
+                for cwd in [None, Some(r"C:\Users\x\proj")] {
+                    assert!(path_exists_with(spelling, cwd, |_| { probes.set(probes.get() + 1); false }), "the link is drawn: {spelling}");
+                }
+                assert_eq!(probes.get(), 0, "rendering {spelling} probed the filesystem");
+            }
+            assert!(started.elapsed() < std::time::Duration::from_secs(1), "deciding took {:?}: a network attempt", started.elapsed());
+        }
+        // Everywhere: a path on this computer is probed and found as before (the control for the 0 above).
+        let probes = std::cell::Cell::new(0);
+        let here = std::env::temp_dir().join("a-local-file.txt");
+        assert!(!path_exists_with(&here.display().to_string(), None, |_| { probes.set(probes.get() + 1); false }));
+        assert_eq!(probes.get(), 1, "a local path is probed");
+        // Everywhere: a path on this computer is opened as before, and nothing is copied.
+        let mut ops = Mock::default();
+        assert_eq!(click(&here.display().to_string(), None, &mut ops).unwrap(), ClickDone::Opened);
+        assert_eq!(ops.opened, vec![here.clone()]);
+        assert!(ops.copied.is_empty());
+        // A relative path inside the folder opens as before too.
+        let mut ops = Mock::default();
+        let dir = std::env::temp_dir();
+        assert_eq!(click("sub/a.txt", Some(&dir.display().to_string()), &mut ops).unwrap(), ClickDone::Opened);
+        assert_eq!(ops.opened, vec![dir.join("sub/a.txt")]);
+        assert!(ops.copied.is_empty());
     }
 
     #[test]

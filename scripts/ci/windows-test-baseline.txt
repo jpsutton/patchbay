@@ -5,10 +5,8 @@
 # this file has entries the job is not a required check; when it is empty, make it required.
 # First windows-latest run of the job: checks run 43302656372 (PR #440 head 9fd9f5cc).
 patchbay-agent: claude::tests::mcp_servers_convert_and_merge
-patchbay-agent: session::tests::may_read_keeps_the_session_readable_and_the_symlink_escape_out
 patchbay-agent: tools::search::tests::globs_by_extension_anywhere
 patchbay-agent: tools::search::tests::greps_in_three_modes
-patchbay-agent: tools::tests::insideness_folds_dotdot
 src-tauri default: claude_auth::tests::keychain_resolver_matrix
 src-tauri default: claude_auth::tests::keychain_service_matches_claude_code
 src-tauri default: claude_auth::tests::path_account_key_detects_config_dir_fallbacks

@@ -221,8 +221,86 @@ pub fn bool_arg(input: &Value, key: &str) -> bool {
 /// Both are resolved the way the filesystem resolves them ([`resolve`]), so a symlink
 /// followed by `..` leaves for where the link points instead of staying in the directory
 /// that holds the link — the escape `Session::may_read` gates on.
+///
+/// What a path's PREFIX names (a drive, a share, a device) is compared first and on its own
+/// ([`prefix_key`]): a path on another drive or another machine's share is outside whatever its
+/// tail says, the way `\\?\C:\x` and `\\server\share\x` once read as the current drive's `\x`. And
+/// judging `p` never touches another machine or a device namespace: [`resolve`] gives up (so the
+/// answer is no) the moment the walk, including the target of a link, names a share that is not the
+/// root's own or a device, before any filesystem call on it, so the check itself cannot make
+/// Windows connect to an attacker's share and send it the user's credentials.
 pub fn inside(root: &Path, p: &Path) -> bool {
-    resolve(p).starts_with(&resolve(root))
+    // The root is the session's own directory: trusted, it may be anywhere.
+    let Some(root_r) = resolve(root, None) else { return false };
+    let own = prefix_key(&root_r);
+    let Some(p_r) = resolve(p, Some(&own)) else { return false };
+    prefix_key(&p_r) == own && without_prefix(&p_r).starts_with(without_prefix(&root_r))
+}
+
+/// Whether `p` names another machine's share, a device or a volume namespace: a path that opens
+/// with a pair of separators (a UNC share, `\\?\UNC\...`, `\\.\...`, `\\?\Volume{...}`, even `\\host`
+/// alone) or with the NT prefix `\??\`, unless it is a verbatim drive (`\\?\C:\...`) or the share the
+/// root `cwd` itself lives on. Windows takes either slash and any mix of them as a separator, so the
+/// text is normalized first: `//host/share`, `\/host/share` and `/\host/share` are UNC too. `localhost`,
+/// `127.0.0.1` and the machine's own name are foreign like any other host (a loopback connection can be
+/// relayed). LEXICAL: it reads the text and calls nothing on the filesystem, so asking never connects
+/// to anything. Off Windows a leading `//` or a backslash means nothing special: always false there.
+pub fn foreign_location(cwd: &Path, p: &Path) -> bool {
+    if !cfg!(windows) {
+        return false;
+    }
+    let n = p.to_string_lossy().replace('/', "\\");
+    if n.starts_with(r"\??\") {
+        return true; // the NT object namespace, which CreateFile passes straight through
+    }
+    if !n.starts_with(r"\\") {
+        return false;
+    }
+    let key = prefix_key(Path::new(&n));
+    if key.starts_with("disk:") {
+        return false; // `\\?\C:\...`: a verbatim drive is local
+    }
+    let cwd_n = cwd.to_string_lossy().replace('/', "\\");
+    !(key.starts_with("unc:") && key == prefix_key(Path::new(&cwd_n)))
+}
+
+/// The refusal for a raw path argument that names a network location or a device path
+/// ([`foreign_location`]), judged on the TEXT before the path is resolved, joined, stat'ed or opened.
+/// Every path-taking tool calls it first in `run`, so it holds however the tool was reached; the
+/// dispatcher refuses the same paths before any hook or approval (`turn.rs`).
+pub fn foreign_refusal(session: &Session, raw: &str) -> Option<String> {
+    foreign_location(&session.cwd, Path::new(raw)).then(|| session.prompts().msg("foreign_location", &[("path", raw)]))
+}
+
+/// What a path's prefix names, for comparing two of them: `C:` and `\\?\C:` are one drive,
+/// `\\server\share` and `\\?\UNC\server\share` one share, case does not matter. Anything else (a
+/// device `\\.\X`, `\\?\GLOBALROOT`, a `\\?\Volume{GUID}`) is a namespace of its own. A path with no
+/// prefix (everywhere but Windows) names "".
+fn prefix_key(p: &Path) -> String {
+    use std::path::Prefix::*;
+    match p.components().next() {
+        Some(Component::Prefix(pc)) => match pc.kind() {
+            Disk(d) | VerbatimDisk(d) => format!("disk:{}", (d as char).to_ascii_uppercase()),
+            UNC(server, share) | VerbatimUNC(server, share) => {
+                format!("unc:{}\\{}", server.to_string_lossy().to_lowercase(), share.to_string_lossy().to_lowercase())
+            }
+            Verbatim(name) | DeviceNS(name) => format!("other:{}", name.to_string_lossy().to_lowercase()),
+        },
+        _ => String::new(),
+    }
+}
+
+/// Whether a walk may go on through `prefix` (the first component of a path, or of a link's
+/// target): a local drive, or the share the root itself is on (`own`). Another machine's share and
+/// every device or volume namespace stop it before anything is opened.
+fn prefix_allowed(prefix: &std::ffi::OsStr, own: &str) -> bool {
+    let key = prefix_key(Path::new(prefix));
+    key.starts_with("disk:") || (key.starts_with("unc:") && key == own)
+}
+
+/// `p` without its prefix: what is left to compare once the prefixes are known to be the same.
+fn without_prefix(p: &Path) -> PathBuf {
+    p.components().filter(|c| !matches!(c, Component::Prefix(_))).collect()
 }
 
 /// One step of [`resolve`], owned so a symlink's target can be spliced in front of the
@@ -253,9 +331,15 @@ impl Step {
 /// and every symlink followed before the next step — `..` in particular — is applied, so
 /// `link/..` moves to where the link points rather than to the directory holding it.
 /// Steps that do not exist yet stay as they are, so a file about to be written is judged
-/// by the path it will have; a path that exists ends up canonicalized, which settles
-/// case on a case-insensitive filesystem.
-fn resolve(p: &Path) -> PathBuf {
+/// by the path it will have; the part that exists ends up canonicalized ([`canonical_prefix`]),
+/// which settles case on a case-insensitive filesystem and, on Windows, the `\\?\` form and
+/// the 8.3 short names, so a path and the root it sits in are spelled alike.
+///
+/// `own` is the prefix key of the root ([`prefix_key`]) for a path that is not trusted, `None` for
+/// the root itself. `None` comes back when the walk meets a prefix it may not go through
+/// ([`prefix_allowed`]) or a chain of links it cannot follow to the end: the caller reads either as
+/// "not inside" without having opened anything it should not.
+fn resolve(p: &Path, own: Option<&str>) -> Option<PathBuf> {
     // A relative path means "from here", and `..` may climb out of here.
     let mut real = if p.is_absolute() {
         PathBuf::new()
@@ -264,16 +348,25 @@ fn resolve(p: &Path) -> PathBuf {
     };
     // Splice a link's target in front of the steps still to come, so the rest of the path
     // lands where the link points. The budget bounds links that point at each other; past
-    // it the link stays by name, which can only ever make `inside` answer no.
+    // it the path is not judged at all (`None`), because leaving the link by name would let the
+    // canonicalization at the end follow it, wherever it goes.
     let mut hops = 64;
     let mut queue: VecDeque<Step> = p.components().map(Step::of).collect();
     while let Some(step) = queue.pop_front() {
         match step {
-            Step::Prefix(d) => real = PathBuf::from(d),
+            Step::Prefix(d) => {
+                if own.is_some_and(|own| !prefix_allowed(&d, own)) {
+                    return None;
+                }
+                real = PathBuf::from(d)
+            }
             Step::Root(r) => {
-                // On Windows the root completes the drive named just above it; anywhere
-                // else it is the path's own root and replaces what came before it.
-                if !real.has_root() && matches!(real.components().next(), Some(Component::Prefix(_))) {
+                // On Windows the root completes the prefix named just above it: a drive (`C:`),
+                // a verbatim drive (`\\?\C:`), a UNC share (`\\server\share`). The prefix stays:
+                // dropping it left `\\?\C:\x` and `\\server\share\x` as a bare `\x`, which the
+                // end of this function resolved against the CURRENT drive. Anywhere else the root
+                // is the path's own and replaces what came before it.
+                if matches!(real.components().next(), Some(Component::Prefix(_))) {
                     real.push(r);
                 } else {
                     real = PathBuf::from(r);
@@ -285,10 +378,12 @@ fn resolve(p: &Path) -> PathBuf {
             }
             Step::Name(n) => {
                 real.push(n);
-                if hops > 0
-                    && std::fs::symlink_metadata(&real).is_ok_and(|m| m.file_type().is_symlink())
+                if std::fs::symlink_metadata(&real).is_ok_and(|m| m.file_type().is_symlink())
                     && let Ok(target) = std::fs::read_link(&real)
                 {
+                    if hops == 0 {
+                        return None;
+                    }
                     hops -= 1;
                     real.pop();
                     let mut target: VecDeque<Step> = target.components().map(Step::of).collect();
@@ -298,7 +393,32 @@ fn resolve(p: &Path) -> PathBuf {
             }
         }
     }
-    real.canonicalize().unwrap_or(real)
+    Some(canonical_prefix(real))
+}
+
+/// `real` with its longest EXISTING ancestor canonicalized and the rest (not there yet, so no
+/// link in it to follow) appended as written. A path that exists is canonicalized whole, as
+/// before. The old code gave up on a path that did not exist and returned it uncanonicalized:
+/// on Windows that left a short-name, non-verbatim spelling to be compared with the root's
+/// canonical verbatim long-name one, so a file about to be written inside the root read as
+/// outside it.
+fn canonical_prefix(real: PathBuf) -> PathBuf {
+    let mut tail = Vec::new();
+    let mut head = real.as_path();
+    loop {
+        if let Ok(mut done) = head.canonicalize() {
+            done.extend(tail.iter().rev());
+            return done;
+        }
+        match (head.parent(), head.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name.to_owned());
+                head = parent;
+            }
+            // Nothing of it exists (or it ends in `..`, which `resolve` has already applied).
+            _ => return real,
+        }
+    }
 }
 
 /// `p` relative to `root` when inside it, for short display.
@@ -561,6 +681,533 @@ mod tests {
         assert!(inside(&root, &short_root.join("in.txt")));
         assert!(inside(&short_root, &root.join("in.txt")));
         assert!(inside(&short_root, &short_root.join("in.txt")));
+    }
+
+
+    // --- pb-20261111-71: a path that does not exist yet --------------------------------------
+
+    /// A file about to be written inside the root is inside it. Before, a path that did not exist
+    /// was compared as written with a root that was canonicalized: on Windows the two spellings
+    /// (`\\?\` and short names) never matched.
+    #[test]
+    fn a_new_file_in_the_root_is_inside() {
+        let base = scratch("newfile");
+        let root = base.join("work");
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        assert!(inside(&root, &root.join("new.txt")));
+        assert!(inside(&root, &root.join("a/new.txt")));
+        assert!(inside(&root, &root.join("a/b/c/new.txt")), "several missing levels");
+        assert!(inside(&root, &root.join("a/../a/new.txt")));
+        // The same file with the escape asserts beside it, so "inside" is not just "everything".
+        assert!(!inside(&root, &root.join("../new.txt")));
+        assert!(!inside(&root, &root.join("a/../../new.txt")));
+        assert!(!inside(&root, &base.join("work-evil/new.txt")));
+        assert!(!inside(&root, &base.join("elsewhere/new.txt")));
+    }
+
+    /// The existing part of a path is spelled the way the filesystem spells it, so a root written
+    /// in another case still holds a new file (a case-insensitive filesystem: Windows, macOS).
+    #[test]
+    #[cfg(any(windows, target_os = "macos"))]
+    fn a_new_file_in_the_root_is_inside_whatever_the_case() {
+        let base = scratch("newcase");
+        let root = base.join("work");
+        std::fs::create_dir_all(&root).unwrap();
+        let upper = base.join("WORK");
+        if !upper.exists() {
+            eprintln!("skipped: this volume is case-sensitive");
+            return;
+        }
+        assert!(inside(&root, &upper.join("new.txt")));
+        assert!(inside(&upper, &root.join("new.txt")));
+        assert!(!inside(&upper, &base.join("WORK-evil/new.txt")));
+    }
+
+    /// New files behind a junction are outside FOR THE RIGHT REASON: the same junction path with a
+    /// real directory in its place is inside, so a refusal below is the link being followed, not the
+    /// blanket "a path that does not exist is outside" that used to hide it.
+    #[test]
+    #[cfg(windows)]
+    fn a_new_file_behind_a_junction_is_outside_and_one_in_a_real_directory_is_inside() {
+        let base = scratch("newjunction");
+        let root = base.join("work");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        junction(&root.join("link"), &outside);
+        assert!(inside(&root, &root.join("real/nope/new.txt")), "control: a new file in a real directory");
+        assert!(!inside(&root, &root.join("link/nope/new.txt")), "a new file behind a junction");
+        assert!(!inside(&root, &root.join("link/new.txt")));
+    }
+
+    /// The same on Windows with the 8.3 spellings: a new file in the root reached by the root's short
+    /// name is inside; a new file outside it by its short name is not.
+    #[test]
+    #[cfg(windows)]
+    fn a_new_file_is_judged_the_same_in_short_and_long_spellings() {
+        let base = scratch("newshort");
+        let root = base.join("work_directory_with_a_long_name");
+        let outside = base.join("outside_directory_with_a_long_name");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let (short_root, short_outside) = (short_path(&root), short_path(&outside));
+        if short_root == root || short_outside == outside {
+            skip("this volume does not make 8.3 short names");
+            return;
+        }
+        assert!(inside(&root, &short_root.join("new.txt")));
+        assert!(inside(&short_root, &root.join("new.txt")));
+        assert!(inside(&short_root, &short_root.join("new.txt")));
+        assert!(!inside(&root, &short_outside.join("new.txt")));
+        assert!(!inside(&short_root, &outside.join("new.txt")));
+    }
+
+
+    // --- pb-20261111-71, the security bar on the new-file change ---------------------------------
+    // Judging a path that does not exist yet by its canonical existing ancestor turns the new-file
+    // paths from "always outside" into "decided by where they really are". These pin the escapes
+    // that must stay outside (each one is a NEW file, so a lexical shortcut for new files would let
+    // it through) and the verbatim spellings both sides must agree on.
+
+    /// A root, an outside directory with a secret, and the long-named dirs the link kinds below use.
+    #[cfg(windows)]
+    fn link_fixture(tag: &str) -> (PathBuf, PathBuf) {
+        let base = scratch(tag);
+        let root = base.join("work_directory_with_a_long_name");
+        let outside = base.join("outside_directory_with_a_long_name");
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "s").unwrap();
+        (root, outside)
+    }
+
+    /// The four tests below take one kind of link each (so one regression names the kind that
+    /// broke): every NEW file behind it is outside, with an in-root control. A lexical shortcut for
+    /// a path that does not exist yet would let each of them through.
+    #[test]
+    #[cfg(windows)]
+    fn a_new_file_behind_a_junction_by_its_long_name_is_outside() {
+        let (root, outside) = link_fixture("nl-junction");
+        let link = root.join("a_junction_with_a_long_name");
+        junction(&link, &outside);
+        assert!(!inside(&root, &link.join("new.txt")), "new file behind a junction");
+        assert!(!inside(&root, &link.join("x/y/new.txt")), "new file, several missing levels, behind a junction");
+        assert!(inside(&root, &root.join("a").join("new.txt")), "control: a new file in a real directory");
+    }
+
+    /// The junction reached by its 8.3 short name lies lexically inside the root; only resolving it
+    /// shows it is not.
+    #[test]
+    #[cfg(windows)]
+    fn a_new_file_behind_a_junction_named_by_its_8_3_alias_is_outside() {
+        let (root, outside) = link_fixture("nl-alias");
+        let link = root.join("a_junction_with_a_long_name");
+        junction(&link, &outside);
+        let short = short_path(&link);
+        if short == link {
+            skip("this volume does not make 8.3 short names");
+            return;
+        }
+        // `short` shortens every component (the root's too), so it differs from the root as text. The
+        // alias that matters keeps the root's long name and shortens only the junction's: lexically it
+        // lies INSIDE the root, which is what a lexical shortcut would believe.
+        let alias = root.join(short.file_name().unwrap());
+        assert!(!inside(&root, &alias.join("new.txt")), "new file behind a junction named by its 8.3 alias (long root)");
+        assert!(!inside(&root, &alias.join("secret.txt")), "existing file behind a junction named by its 8.3 alias (long root)");
+        assert!(!inside(&root, &short.join("new.txt")), "new file behind a junction named by its 8.3 alias (all short)");
+        assert!(!inside(&root, &short.join("secret.txt")), "existing file behind a junction named by its 8.3 alias (all short)");
+        assert!(inside(&root, &short_path(&root).join("a").join("new.txt")), "control: a new file in the root by its short name");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_new_file_behind_a_directory_symlink_is_outside() {
+        let (root, outside) = link_fixture("nl-symlink");
+        if let Err(e) = std::os::windows::fs::symlink_dir(&outside, root.join("symlink_dir")) {
+            skip(&format!("cannot create a directory symlink here ({e})"));
+            return;
+        }
+        assert!(!inside(&root, &root.join("symlink_dir/new.txt")), "new file behind a directory symlink");
+        assert!(!inside(&root, &root.join("symlink_dir/x/new.txt")));
+        assert!(inside(&root, &root.join("a").join("new.txt")), "control");
+    }
+
+    /// `..` written with mixed separators to a file that is not there yet climbs out all the same.
+    #[test]
+    #[cfg(windows)]
+    fn a_new_file_through_mixed_separator_dotdot_is_outside() {
+        let (root, _outside) = link_fixture("nl-mixed");
+        let r = root.display();
+        for escape in [format!("{r}\\a/..\\..\\new.txt"), format!("{r}/a\\../..\\new.txt"), format!("{r}\\..\\new.txt")] {
+            assert!(!inside(&root, Path::new(&escape)), "mixed separators, new file: {escape}");
+        }
+        assert!(inside(&root, Path::new(&format!("{r}\\a/..\\a\\new.txt"))), "control: the same mixture that stays inside");
+    }
+
+    /// `std::fs::canonicalize` returns `\\?\C:\...`; a path written that way must be judged like the
+    /// plain spelling, on both sides: an escaping one is outside, an in-root one is inside.
+    #[test]
+    #[cfg(windows)]
+    fn verbatim_paths_are_judged_like_plain_ones() {
+        let base = scratch("verbatim");
+        let root = base.join("work");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("in.txt"), "x").unwrap();
+        std::fs::write(outside.join("secret.txt"), "s").unwrap();
+        let verbatim = |p: &Path| PathBuf::from(format!(r"\\?\{}", p.display()));
+        let (v_root, v_outside) = (verbatim(&root), verbatim(&outside));
+        // outside, as an existing file and as a new one
+        assert!(!inside(&root, &v_outside.join("secret.txt")), "verbatim, outside, existing");
+        assert!(!inside(&root, &v_outside.join("new.txt")), "verbatim, outside, new");
+        assert!(!inside(&root, &v_root.join("..").join("outside").join("new.txt")), "verbatim, `..` out of the root");
+        assert!(!inside(&v_root, &outside.join("secret.txt")), "verbatim ROOT, plain outside path");
+        // inside, existing and new, on either side
+        assert!(inside(&root, &v_root.join("in.txt")), "verbatim, inside, existing");
+        assert!(inside(&root, &v_root.join("new.txt")), "verbatim, inside, new");
+        assert!(inside(&v_root, &root.join("in.txt")), "verbatim ROOT, plain inside path");
+        assert!(inside(&v_root, &root.join("new.txt")), "verbatim ROOT, plain new inside path");
+        assert!(inside(&v_root, &v_root.join("new.txt")));
+    }
+
+    /// A UNC path names another machine's share: outside, whatever it is called, and judging it must
+    /// not hang. `localhost` and a share that does not exist answer at once.
+    #[test]
+    #[cfg(windows)]
+    fn a_unc_path_is_outside() {
+        let base = scratch("unc");
+        let root = base.join("work");
+        std::fs::create_dir_all(&root).unwrap();
+        let started = std::time::Instant::now();
+        assert!(!inside(&root, Path::new(r"\\localhost\pb71_no_such_share\x.txt")));
+        assert!(!inside(&root, Path::new(r"\\?\UNC\localhost\pb71_no_such_share\x.txt")));
+        // The drive's own administrative share is the root's own place, spelled as UNC: it is not
+        // judged inside (a different spelling is not trusted), so it asks first.
+        let drive = base.display().to_string();
+        let admin = format!(r"\\localhost\{}$\{}", &drive[..1], drive[3..].replace('/', "\\"));
+        assert!(!inside(&root, &Path::new(&admin).join("work").join("x.txt")), "UNC to the root's own place: {admin}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "judging a UNC path took {:?}", started.elapsed());
+    }
+
+
+    // --- pb-20261111-71, found by the runner: a prefix must keep its drive and its share ----------
+
+    /// A directory under the current directory, so it is on the current drive (what a root that is
+    /// the session's working directory looks like), removed by the caller.
+    #[cfg(windows)]
+    fn root_on_the_current_drive(tag: &str) -> PathBuf {
+        let root = std::env::current_dir().unwrap().join(format!("pb71-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("in.txt"), "x").unwrap();
+        root
+    }
+
+    /// The bypass: a path on ANOTHER drive written `\\?\Y:\<the root's own tail>` was judged as
+    /// `<current drive>:\<tail>`, i.e. inside the root. Both spellings of the other drive are outside.
+    #[test]
+    #[cfg(windows)]
+    fn a_path_on_another_drive_is_outside_even_with_the_roots_own_tail() {
+        let root = root_on_the_current_drive("drive");
+        let root_text = root.display().to_string();
+        let (own, tail) = root_text.split_at(2); // `D:` and `\a\b\...`
+        let other = ('A'..='Z')
+            .map(|l| l.to_string())
+            .find(|l| !l.eq_ignore_ascii_case(&own[..1]) && Path::new(&format!("{l}:\\")).exists());
+        let Some(other) = other else {
+            let _ = std::fs::remove_dir_all(&root);
+            skip("only one drive here, so there is no other drive to name");
+            return;
+        };
+        for spelling in [format!(r"\\?\{other}:{tail}\in.txt"), format!(r"\\?\{other}:{tail}\new.txt"), format!("{other}:{tail}\\in.txt"), format!("{other}:{tail}\\new.txt")] {
+            assert!(!inside(&root, Path::new(&spelling)), "another drive was judged inside the root: {spelling}");
+        }
+        // The controls: the same tail on the root's own drive, plain and verbatim, is inside.
+        assert!(inside(&root, Path::new(&format!(r"\\?\{own}{tail}\in.txt"))), "verbatim, own drive, existing");
+        assert!(inside(&root, Path::new(&format!(r"\\?\{own}{tail}\new.txt"))), "verbatim, own drive, new");
+        assert!(inside(&root, &root.join("in.txt")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same for a UNC share: `\\server\share\<the root's own tail>` is another machine's file,
+    /// not the root's, however the tail reads. `localhost` and a share that is not there answer at
+    /// once; a guard keeps a slow lookup from hanging CI.
+    #[test]
+    #[cfg(windows)]
+    fn a_unc_path_with_the_roots_own_tail_is_outside() {
+        let root = root_on_the_current_drive("unc");
+        let root_text = root.display().to_string();
+        let tail = &root_text[2..];
+        let admin = format!("{}$", &root_text[..1]);
+        let started = std::time::Instant::now();
+        for spelling in [
+            // The bypass shape: the share is the root's own drive (`C$`), so dropping the UNC prefix
+            // leaves exactly the root's tail on the current drive. Old `Step::Root` read these INSIDE.
+            format!(r"\\localhost\{admin}{tail}\in.txt"),
+            format!(r"\\localhost\{admin}{tail}\new.txt"),
+            format!(r"\\?\UNC\localhost\{admin}{tail}\in.txt"),
+            format!(r"\\localhost\pb71_no_such_share{tail}\in.txt"),
+            format!(r"\\localhost\pb71_no_such_share{tail}\new.txt"),
+            format!(r"\\?\UNC\localhost\pb71_no_such_share{tail}\in.txt"),
+        ] {
+            assert!(!inside(&root, Path::new(&spelling)), "a UNC path was judged inside the root: {spelling}");
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(30), "judging UNC paths took {:?}", started.elapsed());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Verbatim paths turn Win32 normalization off: `..` is a literal name, so the OS cannot open
+    /// anything through it. Judging a path that climbs out of the root with `..` outside is the
+    /// safe answer, and the two must agree: classification OUTSIDE and the real open fails.
+    #[test]
+    #[cfg(windows)]
+    fn a_verbatim_path_with_dotdot_is_outside_and_cannot_be_opened() {
+        let base = scratch("vdotdot");
+        let root = base.join("work");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "s").unwrap();
+        std::fs::write(base.join("stolen.txt"), "s").unwrap();
+        let v = |tail: &str| PathBuf::from(format!(r"\\?\{}\{tail}", root.display()));
+        for escape in [v(r"..\outside\secret.txt"), v(r"a\..\..\stolen.txt"), v(r"..\stolen.txt")] {
+            assert!(!inside(&root, &escape), "a verbatim `..` path was judged inside: {}", escape.display());
+            assert!(std::fs::read(&escape).is_err(), "the OS reached outside through a verbatim `..`: {}", escape.display());
+        }
+        // A verbatim `..` that stays under the root is judged by where it lands.
+        assert!(inside(&root, &v(r"a\..\a\new.txt")));
+    }
+
+    /// Win32 strips trailing dots and spaces from a segment; a verbatim path keeps them. Neither
+    /// spelling may be used to step out: `evil. \..\..\x` and `evil.\..\..\x` climb out, a file
+    /// named with a trailing dot or space in the root is a new file in the root.
+    #[test]
+    #[cfg(windows)]
+    fn trailing_dots_and_spaces_cannot_hide_an_escape() {
+        let base = scratch("trailing");
+        let root = base.join("work");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(base.join("stolen.txt"), "s").unwrap();
+        let r = root.display();
+        for escape in [
+            format!(r"{r}\evil. \..\..\stolen.txt"),
+            format!(r"{r}\evil.\..\..\stolen.txt"),
+            format!(r"{r}\evil.\..\..\newfile.txt"),
+            format!(r"\\?\{r}\evil. \..\..\stolen.txt"),
+            format!(r"\\?\{r}\evil.\..\..\newfile.txt"),
+        ] {
+            assert!(!inside(&root, Path::new(&escape)), "trailing dot or space hid an escape: {escape}");
+        }
+        for new_file in [format!(r"{r}\new.txt."), format!(r"{r}\new.txt "), format!(r"\\?\{r}\new.txt."), format!(r"\\?\{r}\new.txt ")] {
+            assert!(inside(&root, Path::new(&new_file)), "a new file with a trailing dot or space is in the root: {new_file}");
+        }
+    }
+
+    /// The root is spelled by the filesystem in the canonical case; a path in another case (the
+    /// volume is case-insensitive) is the same place, plain or verbatim, existing or new.
+    #[test]
+    #[cfg(windows)]
+    fn another_case_than_the_roots_is_still_inside() {
+        let base = scratch("mixedcase");
+        let root = base.join("Work");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("In.txt"), "x").unwrap();
+        let upper = root.display().to_string().to_uppercase();
+        let lower = root.display().to_string().to_lowercase();
+        for spelling in [
+            format!(r"{upper}\IN.TXT"),
+            format!(r"{lower}\in.txt"),
+            format!(r"{upper}\NEW.TXT"),
+            format!(r"\\?\{upper}\IN.TXT"),
+            format!(r"\\?\{lower}\new.txt"),
+        ] {
+            assert!(inside(&root, Path::new(&spelling)), "another case was judged outside: {spelling}");
+        }
+        // and it still is not a license to leave: a sibling in any case is outside
+        assert!(!inside(&root, Path::new(&format!(r"{upper}-EVIL\NEW.TXT"))));
+        assert!(!inside(&root, Path::new(&format!(r"{upper}\..\OUTSIDE.TXT"))));
+    }
+
+
+    // --- pb-20261111-76: the security bar on prefixes, devices and other machines' shares ---------
+
+    /// Prefixes compare by what they name. Pure (no filesystem), Windows only because only Windows
+    /// parses a prefix.
+    #[test]
+    #[cfg(windows)]
+    fn prefixes_compare_by_what_they_name() {
+        let k = |s: &str| prefix_key(Path::new(s));
+        assert_eq!(k(r"C:\x"), k(r"\\?\c:\y"), "a drive, plain or verbatim, any case");
+        assert_ne!(k(r"C:\x"), k(r"D:\x"));
+        assert_eq!(k(r"\\Server\Share\x"), k(r"\\?\UNC\server\SHARE\y"), "a share, plain or verbatim, any case");
+        assert_ne!(k(r"\\server\share\x"), k(r"\\server\other\x"));
+        assert_ne!(k(r"\\server\share\x"), k(r"\\other\share\x"));
+        assert_ne!(k(r"\\server\share\x"), k(r"C:\x"));
+        for namespace in [
+            r"\\.\C:\x",
+            r"\\.\pipe\x",
+            r"\\.\PhysicalDrive0",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1\y",
+            r"\\?\Volume{00000000-0000-0000-0000-000000000000}\x",
+        ] {
+            assert!(k(namespace).starts_with("other:"), "{namespace} -> {}", k(namespace));
+            assert_ne!(k(namespace), k(r"C:\x"));
+        }
+        // May a walk go through it? A local drive, or the root's own share: nothing else.
+        let allowed = |prefix: &str, own: &str| prefix_allowed(std::ffi::OsStr::new(prefix), own);
+        assert!(allowed(r"C:", "disk:D"), "any local drive");
+        assert!(allowed(r"\\?\D:", ""));
+        assert!(allowed(r"\\SRV\SHARE", r"unc:srv\share"), "the root's own share");
+        assert!(allowed(r"\\?\UNC\srv\share", r"unc:srv\share"), "the root's own share, verbatim");
+        assert!(!allowed(r"\\srv\other", r"unc:srv\share"), "another share of the same server");
+        assert!(!allowed(r"\\attacker\share", r"unc:srv\share"));
+        assert!(!allowed(r"\\attacker\share", "disk:C"), "a UNC path when the root is on a drive");
+        for namespace in [r"\\.\C:", r"\\.\pipe", r"\\?\GLOBALROOT", r"\\?\Volume{00000000-0000-0000-0000-000000000000}"] {
+            assert!(!allowed(namespace, "disk:C"), "{namespace}");
+            assert!(!allowed(namespace, "other:x"), "{namespace}");
+        }
+    }
+
+    /// Device and volume namespaces are outside, and judging them opens none of them.
+    #[test]
+    #[cfg(windows)]
+    fn device_and_volume_namespaces_are_outside() {
+        let root = root_on_the_current_drive("devices");
+        let root_text = root.display().to_string();
+        let started = std::time::Instant::now();
+        for spelling in [
+            r"\\.\C:\Windows\System32\drivers\etc\hosts".to_owned(),
+            r"\\.\pipe\pb71_no_such_pipe".to_owned(),
+            r"\\.\PhysicalDrive0".to_owned(),
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1\Windows".to_owned(),
+            r"\\?\Volume{00000000-0000-0000-0000-000000000000}\a\b".to_owned(),
+            // the root's own file through the device namespace is not trusted either (it asks first)
+            format!(r"\\.\{root_text}\in.txt"),
+        ] {
+            assert!(!inside(&root, Path::new(&spelling)), "a device or volume path was judged inside: {spelling}");
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "judging devices took {:?}", started.elapsed());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Another machine's share is denied BEFORE any filesystem call, so judging it never makes
+    /// Windows connect to it (and send it the user's credentials): a non-routable server would take
+    /// seconds to time out, so the answer must come back in under one.
+    #[test]
+    #[cfg(windows)]
+    fn another_machines_share_is_denied_without_a_network_attempt() {
+        let root = root_on_the_current_drive("network");
+        let root_text = root.display().to_string();
+        let tail = &root_text[2..];
+        let started = std::time::Instant::now();
+        for spelling in [
+            r"\\192.0.2.1\share\x.txt".to_owned(),
+            r"\\?\UNC\192.0.2.1\share\x.txt".to_owned(),
+            format!(r"\\192.0.2.1\share{tail}\in.txt"),
+            format!(r"\\192.0.2.1\c$\{}", &root_text[3..]),
+        ] {
+            assert!(!inside(&root, Path::new(&spelling)), "another machine's share was judged inside: {spelling}");
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "judging a UNC path took {:?}: a network attempt", started.elapsed());
+
+        // The same through a link: a directory symlink in the root whose target is that share.
+        match std::os::windows::fs::symlink_dir(r"\\192.0.2.1\share", root.join("to_share")) {
+            Ok(()) => {
+                let started = std::time::Instant::now();
+                assert!(!inside(&root, &root.join("to_share").join("x.txt")), "a link to another machine's share was judged inside");
+                assert!(!inside(&root, &root.join("to_share")));
+                assert!(started.elapsed() < std::time::Duration::from_secs(1), "following a link to a UNC share took {:?}", started.elapsed());
+            }
+            Err(e) => skip(&format!("cannot create a directory symlink here ({e})")),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Links that point at each other are not followed forever and not left for the canonicalization
+    /// to follow: the path is not judged inside.
+    #[test]
+    #[cfg(unix)]
+    fn links_that_point_at_each_other_are_not_inside() {
+        let base = scratch("loop");
+        let root = base.join("work");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(root.join("b"), root.join("a")).unwrap();
+        std::os::unix::fs::symlink(root.join("a"), root.join("b")).unwrap();
+        assert!(!inside(&root, &root.join("a/x.txt")));
+        assert!(inside(&root, &root.join("ok.txt")), "the control");
+    }
+
+
+    /// `foreign_location` reads only the text of a path, whatever the separators.
+    #[test]
+    #[cfg(windows)]
+    fn foreign_location_is_lexical_and_catches_every_spelling() {
+        let cwd = Path::new(r"C:\Users\x\proj");
+        let foreign = |s: &str| foreign_location(cwd, Path::new(s));
+        for spelling in [
+            r"\\203.0.113.1\s\x",
+            "//203.0.113.1/s/x",
+            r"\\?\UNC\203.0.113.1\s\x",
+            r"\\localhost\C$\Users\x\proj\a.txt",
+            r"\\.\C:\x",
+            r"\\.\pipe\x",
+            r"\\.\PhysicalDrive0",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1\x",
+            r"\\?\Volume{00000000-0000-0000-0000-000000000000}\x",
+        ] {
+            assert!(foreign(spelling), "not caught: {spelling}");
+        }
+        for local in [r"C:\Users\x\proj\a.txt", r"D:\other", r"\\?\C:\Users\x\proj\a.txt", r"a\b.txt", "a/b.txt", r"..\x"] {
+            assert!(!foreign(local), "wrongly caught: {local}");
+        }
+        // A root that is itself on a share: that share is its own, any other is foreign.
+        let unc_cwd = Path::new(r"\\srv\share\proj");
+        assert!(!foreign_location(unc_cwd, Path::new(r"\\SRV\share\proj\x")));
+        assert!(!foreign_location(unc_cwd, Path::new(r"\\?\UNC\srv\SHARE\proj\x")));
+        assert!(foreign_location(unc_cwd, Path::new(r"\\srv\other\x")));
+        assert!(foreign_location(unc_cwd, Path::new(r"\\attacker\share\proj\x")));
+    }
+
+
+    /// Windows reads a leading pair of ANY slash mix as UNC, and a leading `\??\` as the NT object
+    /// namespace: each spelling is caught, and `localhost`, `127.0.0.1` and the machine's own name
+    /// are foreign like any other host.
+    #[test]
+    #[cfg(windows)]
+    fn every_windows_unc_spelling_is_caught() {
+        let cwd = Path::new(r"C:\Users\x\proj");
+        let own_name = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "THIS-MACHINE".into());
+        let mut spellings: Vec<String> = [
+            r"\\203.0.113.1\s\x",
+            "//203.0.113.1/s/x",
+            r"\/203.0.113.1/s/x",
+            r"/\203.0.113.1\s\x",
+            r"\\203.0.113.1/s\x",
+            r"\\?\UNC\203.0.113.1\s\x",
+            r"\\.\UNC\203.0.113.1\s\x",
+            r"\??\UNC\203.0.113.1\s\x",
+            r"\??\C:\Users\x\proj\a.txt",
+            r"\\203.0.113.1",
+            r"\\203.0.113.1\s",
+            r"\\localhost\C$\Users\x\proj\a.txt",
+            "//localhost/C$/Users/x/proj/a.txt",
+            r"\\127.0.0.1\C$\Users\x\proj\a.txt",
+            r"\\[::1]\C$\x",
+            r"\\.\C:\Users\x\proj\a.txt",
+            r"\\.\pipe\x",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        spellings.push(format!(r"\\{own_name}\C$\Users\x\proj\a.txt"));
+        spellings.push(format!("//{own_name}/C$/Users/x/proj/a.txt"));
+        for s in &spellings {
+            assert!(foreign_location(cwd, Path::new(s)), "not caught: {s}");
+        }
+        // What stays local: plain and verbatim drives in either slash, relative paths.
+        for local in [r"C:\x", "C:/x/y", r"\\?\C:\x", r"\\?\c:\x\y", r"d:\a\b", "a/b", r"a\b", r"\x"] {
+            assert!(!foreign_location(cwd, Path::new(local)), "wrongly caught: {local}");
+        }
     }
 
 }

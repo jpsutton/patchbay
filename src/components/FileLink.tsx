@@ -70,7 +70,12 @@ function useExists(path: string | null, cwd: string | null, enabled: boolean): b
 }
 
 export function openLocalPath(path: string, cwd: string | null) {
-  api.openLocalPath(path, cwd).catch((e) => useStore.getState().setToast(`Could not open ${path}: ${errorText(e)}`));
+  api
+    .openLocalPath(path, cwd)
+    .then((done) => {
+      if (done === "copied") useStore.getState().setToast("Network location copied \u2014 paste it into File Explorer to open it.");
+    })
+    .catch((e) => useStore.getState().setToast(`Could not open ${path}: ${errorText(e)}`));
 }
 
 /**

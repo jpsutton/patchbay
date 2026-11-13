@@ -98,6 +98,9 @@ come back as cells. Give an absolute path. For a large file read only the part y
         let Some(file) = str_arg(&input, "file_path") else {
             return ToolOutput::error("file_path is required");
         };
+        if let Some(m) = crate::tools::foreign_refusal(&ctx.session, file) {
+            return ToolOutput::error(m);
+        }
         let session = &ctx.session;
         let path = session.resolve(file);
         let meta = match std::fs::metadata(&path) {
@@ -261,6 +264,9 @@ fails. Prefer Edit for partial changes. Do not create documentation files unless
 
     async fn preview(&self, input: &Value, session: &Session) -> Vec<Value> {
         let (Some(p), Some(c)) = (str_arg(input, "file_path"), str_arg(input, "content")) else { return Vec::new() };
+        if crate::tools::foreign_refusal(session, p).is_some() {
+            return Vec::new();
+        }
         let path = session.resolve(p);
         let old = std::fs::read_to_string(&path).ok();
         vec![diff_item(&path, old.as_deref(), c)]
@@ -270,6 +276,9 @@ fails. Prefer Edit for partial changes. Do not create documentation files unless
         let (Some(file), Some(content)) = (str_arg(&input, "file_path"), str_arg(&input, "content")) else {
             return ToolOutput::error("file_path and content are required");
         };
+        if let Some(m) = crate::tools::foreign_refusal(&ctx.session, file) {
+            return ToolOutput::error(m);
+        }
         let session = &ctx.session;
         let path = session.resolve(file);
         if let Err(e) = check_fresh(session, &path) {
@@ -309,6 +318,9 @@ fn plan_edit(input: &Value, session: &Session) -> Result<Planned, String> {
     else {
         return Err("file_path, old_string and new_string are required".into());
     };
+    if let Some(m) = crate::tools::foreign_refusal(session, file) {
+        return Err(m);
+    }
     let path = session.resolve(file);
     if old == new {
         return Err("No changes to make: old_string and new_string are exactly the same.".into());

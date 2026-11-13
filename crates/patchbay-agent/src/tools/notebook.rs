@@ -112,6 +112,9 @@ the cell. A replaced code cell loses its outputs."
         let Some(file) = str_arg(&input, "notebook_path") else {
             return ToolOutput::error("notebook_path is required");
         };
+        if let Some(m) = crate::tools::foreign_refusal(&ctx.session, file) {
+            return ToolOutput::error(m);
+        }
         let session = &ctx.session;
         let path = session.resolve(file);
         if path.extension().and_then(|e| e.to_str()) != Some("ipynb") {
