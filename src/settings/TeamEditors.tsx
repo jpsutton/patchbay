@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { AGENT_LABELS, api, errorText, usesPatchbayModels, type TeamCaps, type TeamRole, type TeamSeat, type TeamTemplate } from "../lib/ipc";
 import { useStore } from "../lib/store";
 import { Field, input } from "./ProviderPage";
+import { teamToolPromptWarn } from "./teamToolPromptWarn";
 
 function SeatModelPicker({
   agent,
@@ -336,6 +337,12 @@ export function TemplatesEditor() {
                   ? "Seat name must be unique"
                   : null;
               const countErr = s.count < 1 ? "Count ≥ 1" : null;
+              const toolPromptWarn = teamToolPromptWarn({
+                standing: !!role?.standing,
+                permissionMode: s.permissionMode,
+                prompts: s.prompts,
+                label: (a) => (AGENT_LABELS as Record<string, string>)[a] ?? a,
+              });
               return (
               <div key={i} className="grid grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] items-start gap-1">
                 <Field label="Seat">
@@ -449,11 +456,7 @@ export function TemplatesEditor() {
                     </span>
                   </label>
                 )}
-                {(s.prompts?.length ?? 0) > 0 && (
-                  <div className="col-span-full text-muted">
-                    {s.prompts!.map((a) => (AGENT_LABELS as Record<string, string>)[a] ?? a).join(", ")}: team tools still wait for your approval on every call (no automatic allow for this agent), so it can't run unattended.
-                  </div>
-                )}
+                {toolPromptWarn && <div className="col-span-full text-muted">{toolPromptWarn}</div>}
                 {!ro && <button className="col-span-full justify-self-end text-muted hover:text-fg" onClick={() => setDraft({ ...draft, seats: draft.seats.filter((_, j) => j !== i) })}>Remove seat</button>}
               </div>
             );
