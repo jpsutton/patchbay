@@ -1068,12 +1068,15 @@ pub fn preamble_for(data_dir: &Path, db: &Db, session_id: &str) -> Option<String
 // ---------------- markdown export ----------------
 
 /// `path` made absolute with symlinks resolved as far as it exists; the missing tail is kept as is.
+///
+/// On Windows, `canonicalize` returns a `\\?\` verbatim path. Git (and several other tools) reject
+/// those when creating worktrees, so the prefix is stripped before the path is returned or stored.
 fn resolve(path: &Path) -> PathBuf {
     let mut tail = Vec::new();
     let mut cur = path.to_path_buf();
     loop {
         if let Ok(c) = cur.canonicalize() {
-            return tail.iter().rev().fold(c, |acc, t| acc.join(t));
+            return tail.iter().rev().fold(strip_windows_verbatim(c), |acc, t| acc.join(t));
         }
         match (cur.file_name().map(|n| n.to_owned()), cur.parent().map(Path::to_path_buf)) {
             (Some(n), Some(p)) => {
@@ -1083,6 +1086,21 @@ fn resolve(path: &Path) -> PathBuf {
             _ => return path.to_path_buf(),
         }
     }
+}
+
+/// Drop the Windows `\\?\` / `\\?\UNC\` prefix from a canonical path so git and other tools accept it.
+fn strip_windows_verbatim(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let s = path.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            if let Some(unc) = rest.strip_prefix(r"UNC\") {
+                return PathBuf::from(format!(r"\\{unc}"));
+            }
+            return PathBuf::from(rest);
+        }
+    }
+    path
 }
 
 /// A branch name safe to hand to git later: no leading `-`, and git accepts it as a branch.
@@ -1990,7 +2008,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(ok.pr_base, "release/1.0");
-        assert!(Path::new(&ok.worktree_root).starts_with(p.canonicalize().unwrap()));
+        assert!(Path::new(&ok.worktree_root).starts_with(resolve(&p)));
     }
 
     #[cfg(unix)]

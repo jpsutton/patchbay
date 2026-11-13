@@ -541,9 +541,24 @@ fn git_main_worktree(cwd: &Path) -> Option<PathBuf> {
 
 /// Canonical absolute path for comparisons. **No raw-string fallback** — canonicalize failure is
 /// `None` so the F2 gate can refuse. On macOS map `/tmp` → `/private/tmp` when still present.
+/// On Windows, strip the `\\?\` verbatim prefix so keys match ordinary `%TEMP%` / cwd strings.
 fn path_key(path: &Path) -> Option<PathBuf> {
     let canon = path.canonicalize().ok()?;
-    Some(normalize_macos_tmp(canon))
+    Some(normalize_macos_tmp(strip_windows_verbatim(canon)))
+}
+
+fn strip_windows_verbatim(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let s = path.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            if let Some(unc) = rest.strip_prefix(r"UNC\") {
+                return PathBuf::from(format!(r"\\{unc}"));
+            }
+            return PathBuf::from(rest);
+        }
+    }
+    path
 }
 
 fn normalize_macos_tmp(path: PathBuf) -> PathBuf {

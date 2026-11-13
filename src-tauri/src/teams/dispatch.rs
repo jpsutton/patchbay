@@ -720,7 +720,7 @@ mod tests {
         run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]);
         let (path, branch) = make_worktree(&team, "DM-20261109-01").unwrap();
         assert_eq!(branch, "dm-20261109-01");
-        assert!(path.join(".git").exists() && path.starts_with(d.canonicalize().unwrap().join("proj").join("trees")));
+        assert!(path.join(".git").exists() && path.starts_with(super::super::resolve(&d).join("proj").join("trees")));
         // The same item twice is refused by git (branch exists), not silently shared.
         assert!(make_worktree(&team, "DM-20261109-01").is_err());
         remove_worktree(&team, &path, &branch);
