@@ -489,6 +489,22 @@ fn worker_git_repo_blocks_auto(worktree: &Path, verb: &str) -> bool {
     hooks_dir_has_executable(&hooks_dir, names)
 }
 
+/// Cwd for the worktree gate: a non-empty `rawInput.cwd` from the request, else the worker
+/// session's recorded cwd (Patchbay's Code-session cwd, which for a dispatch is the item
+/// worktree). Empty string counts as missing — Cursor has sent that. Never invent a path from
+/// other agent-supplied fields. Caller still requires the chosen cwd to equal the item worktree.
+fn worker_call_cwd<'a>(tool_call: &'a Value, session_cwd: &'a str) -> Option<&'a str> {
+    if let Some(cwd) = tool_call["rawInput"]["cwd"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(cwd);
+    }
+    let recorded = session_cwd.trim();
+    if recorded.is_empty() {
+        None
+    } else {
+        Some(recorded)
+    }
+}
+
 /// Opt-in worktree allow: active worker on an assigned item, template opted in, cwd is the
 /// assigned worktree, command is a safe git / ls / cat form.
 fn allow_worker_commit(data_dir: &Path, session: &str, tool_call: &Value, options: &Value, session_cwd: &str) -> Option<(String, String)> {
@@ -510,7 +526,7 @@ fn allow_worker_commit(data_dir: &Path, session: &str, tool_call: &Value, option
     }
     let worktree_root = team.effective_worktree_root().ok()?;
     let worktree = worktree_root.join(item_id.to_lowercase());
-    let call_cwd = tool_call["rawInput"]["cwd"].as_str().unwrap_or(session_cwd);
+    let call_cwd = worker_call_cwd(tool_call, session_cwd)?;
     if !paths_equal(Path::new(call_cwd), &worktree) {
         return None;
     }
@@ -686,6 +702,14 @@ mod tests {
 
     fn git_exec(cwd: &str, command: &str) -> Value {
         json!({ "title": command, "kind": "execute", "rawInput": { "command": command, "cwd": cwd } })
+    }
+
+    fn git_exec_no_cwd(command: &str) -> Value {
+        json!({ "title": command, "kind": "execute", "rawInput": { "command": command } })
+    }
+
+    fn git_exec_empty_cwd(command: &str) -> Value {
+        json!({ "title": command, "kind": "execute", "rawInput": { "command": command, "cwd": "" } })
     }
 
     #[test]
@@ -948,5 +972,51 @@ mod tests {
                 "should allow: {cmd}"
             );
         }
+    }
+
+    /// Cursor has sent empty `rawInput.cwd`; fall back to the worker session's recorded cwd.
+    #[test]
+    fn worker_commit_missing_cwd_uses_session_cwd() {
+        let (d, wt, _proj, _item) = worker_commit_fixture(true);
+        std::fs::write(std::path::Path::new(&wt).join("LICENSE"), "x").unwrap();
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec_no_cwd("git commit -m work"), &options(), &wt).is_some(),
+            "omitted cwd + session worktree"
+        );
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec_empty_cwd("git commit -m work"), &options(), &wt).is_some(),
+            "empty-string cwd + session worktree (Cursor)"
+        );
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec_empty_cwd("git add LICENSE"), &options(), &wt).is_some(),
+            "empty cwd git add"
+        );
+    }
+
+    #[test]
+    fn worker_commit_missing_cwd_without_session_record_refuses() {
+        let (d, wt, _proj, _item) = worker_commit_fixture(true);
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec_no_cwd("git commit -m work"), &options(), "").is_none(),
+            "no request cwd and empty session cwd"
+        );
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec_empty_cwd("git commit -m work"), &options(), "   ").is_none(),
+            "whitespace-only session cwd"
+        );
+        let _ = wt;
+    }
+
+    #[test]
+    fn worker_commit_supplied_cwd_mismatch_refuses() {
+        let (d, wt, proj, _item) = worker_commit_fixture(true);
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&proj, "git commit -m work"), &options(), &wt).is_none(),
+            "request cwd is project root, not worktree — even when session_cwd is worktree"
+        );
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec("/tmp", "git commit -m work"), &options(), &wt).is_none(),
+            "request cwd elsewhere"
+        );
     }
 }

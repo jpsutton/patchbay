@@ -302,9 +302,11 @@ fn builtin_roles() -> Vec<Role> {
              reviewed pull requests, and report the verdict to the coordinator. Never merge on a worker's word alone."),
         role_seed("builtin-worker", "Worker", false, none.clone(), Some("builtin-desk"),
             "You are a worker on one item. Do exactly what the brief says, in the folder it names. Your shell \
-             already starts in your assigned worktree; run git add and git commit as single commands, never \
-             chained with && or other compound scripts. Report progress and blockers to the coordinator. Stop \
-             when the brief's definition of done is met and report evidence."),
+             already starts in your assigned worktree. To commit, run exactly two separate plain commands: \
+             `git add <paths>` then `git commit -m \"<one-line message>\"` — no heredoc, no $(...), no multi-line \
+             message, no wrapper or prefix before git (not even `rtk`), no chaining. Only that shape is approved \
+             without a human. Report progress and blockers to the coordinator. Stop when the brief's definition \
+             of done is met and report evidence."),
         role_seed("builtin-verifier", "Verifier", false, none, Some("builtin-lead"),
             "You are a verifier. Check a worker's result independently against the original brief: read the \
              diff, run the tests yourself, and report what you ran and what you saw."),
