@@ -2892,6 +2892,25 @@ pub(crate) const MAX_CREATED_SESSIONS: i64 = 5;
 /// at depth 2 may create.
 const MAX_CREATE_DEPTH: usize = 2;
 
+/// The two folders [`create_agent_session`] canonicalizes, judged BEFORE any canonicalize: the folder the
+/// agent asks for and the one stored for its creator. Either one written as another machine's share (or
+/// a device path), or reaching one through a link in the folder, would make Windows connect to the share
+/// the moment it is canonicalized and offer the user's credentials: a prompt-injected agent can name one
+/// in a tool call, and a seat in Approve-all mode is not asked. The lexical check inside
+/// `foreign_target_with` answers first and asks the reader (the filesystem) nothing for a path written
+/// as a share. A creator whose own folder is on a share keeps working (the share is its own, as in
+/// `inside`); one that is a link to another share is refused.
+fn refuse_foreign_folder(creator_cwd: &str, cwd: &str, links: &dyn patchbay_agent::LinkReader) -> anyhow::Result<()> {
+    let base = std::path::Path::new(creator_cwd);
+    if patchbay_agent::foreign_target_with(base, base, links) {
+        anyhow::bail!("the creating session's folder {creator_cwd} is on another machine's share or a device path, or behind a link to one");
+    }
+    if patchbay_agent::foreign_target_with(base, std::path::Path::new(cwd), links) {
+        anyhow::bail!("{cwd} is on another machine's share or a device path, or behind a link to one");
+    }
+    Ok(())
+}
+
 /// A Code session made by another session's agent: in `cwd` on this computer, with the creator's
 /// agent, model and permission mode unless `agent` or `model` say otherwise, then started and
 /// given `prompt` as its first message. Never more permissive than the creator.
@@ -2923,6 +2942,7 @@ pub(crate) async fn create_agent_session(
     if creator.host_node.as_deref() != Some(state.mesh.node_id()) || creator.archived_at.is_some() {
         anyhow::bail!("only a session running on this computer can create sessions");
     }
+    refuse_foreign_folder(&creator.cwd, cwd, &patchbay_agent::OsLinks)?;
     // Auto mode trusts edits inside a session's own folder, so a child may not reach beyond its creator's.
     let root = std::fs::canonicalize(&creator.cwd)
         .map_err(|e| anyhow::anyhow!("the creating session's folder {} is not usable: {e}", creator.cwd))?;

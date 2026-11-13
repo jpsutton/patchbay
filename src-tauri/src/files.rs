@@ -178,9 +178,9 @@ mod tests {
 
     /// A picture source that names another machine's share (or a device path), in any spelling, is
     /// refused from its TEXT: the filesystem is asked NOTHING, because asking is the connection that offers
-    /// the user's credentials, and this runs for every reply that links a picture, with no click. Spellings
-    /// that `local_path` turns into a path on this machine (`file://host/...` is a RELATIVE path under the
-    /// folder, `file://///host/...` a path on the drive, a `?` ends the path) never leave the machine.
+    /// the user's credentials, and this runs for every reply that links a picture, with no click. The five
+    /// spellings that `local_path` leaves as a share are refused with zero asks; every other spelling is
+    /// measured to become a path on this machine (see the second list), so it is never a share.
     #[test]
     #[cfg(windows)]
     fn session_image_refuses_a_share_in_every_spelling_without_asking_the_filesystem() {
@@ -208,8 +208,12 @@ mod tests {
             assert!(err.contains("another machine"), "{raw}: {err}");
             assert!(spy.0.borrow().is_empty(), "{raw}: the filesystem was asked: {:?}", spy.0.borrow());
         }
-        // Spelled so that they are NOT a share once `local_path` has read them: they are refused or not
-        // found, and everything the walk looked at is a local path.
+        // Spelled so that they are NOT a share once `local_path` has read them, measured (raw in the PR
+        // evidence): `\\?\UNC` and `\??\UNC` end at the `?` and become `C:\`; `file://h/s/a.png` and
+        // `file://localhost//h/s/a.png` are relative to the folder; `file:///h/s`, `file://///h/s`,
+        // `file:///\\h\s` and the `%5C%5C` forms are ROOTED paths with no share, which `join` keeps on the
+        // folder's drive (`C:\h\s\a.png`). They are not found, and everything the reader was asked about is a
+        // local path under `C:`.
         for raw in [
             r"\\?\UNC\192.0.2.1\s\a.png",
             r"\??\UNC\192.0.2.1\s\a.png",

@@ -1255,6 +1255,37 @@ mod tests {
         assert!(!foreign_target_with(cwd, &here.join("a.png"), &local));
     }
 
+    /// The safety of the `\\?\UNC\h\s` and `%5C%5C` spellings of a picture source must not rest on what
+    /// `local_path` happens to do to them (it ends the path at `?` and decodes percent escapes): fed
+    /// STRAIGHT to the walk, in the forms they have after decoding and in the verbatim and NT forms, every
+    /// one is refused and the filesystem is asked nothing, so a later change to `local_path` cannot
+    /// silently reopen them.
+    #[test]
+    #[cfg(windows)]
+    fn the_verbatim_and_decoded_share_spellings_are_refused_at_the_walk_without_a_single_ask() {
+        use std::cell::Cell;
+        struct Spy(Cell<usize>);
+        impl LinkReader for Spy {
+            fn link_target(&self, _: &Path) -> Option<PathBuf> {
+                self.0.set(self.0.get() + 1);
+                None
+            }
+        }
+        let cwd = Path::new(r"C:\Users\x\proj");
+        let spy = Spy(Cell::new(0));
+        for spelling in [
+            r"\\?\UNC\192.0.2.1\s\a.png",
+            r"\??\UNC\192.0.2.1\s\a.png",
+            r"\\192.0.2.1\s\a.png",
+            r"/\\192.0.2.1\s\a.png",
+            r"\\\192.0.2.1\s\a.png",
+            "//192.0.2.1/s/a.png",
+        ] {
+            assert!(foreign_target_with(cwd, Path::new(spelling), &spy), "{spelling}");
+        }
+        assert_eq!(spy.0.get(), 0, "the filesystem was asked about a share-spelled path");
+    }
+
     /// A chain of links longer than the hop limit is REFUSED, never let through to be followed by the
     /// filesystem, and so is a pair of links that point at each other. The chains end on this machine,
     /// so it is the limit, not a share, that refuses them.

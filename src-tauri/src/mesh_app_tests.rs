@@ -167,6 +167,54 @@ async fn desktop_starts_a_session_in_a_remote_folder() {
     assert_eq!(s.host_node.as_deref(), Some(bn.as_str()));
 }
 
+/// A session an agent creates may not name another machine's share, a device path or a link in the
+/// folder that points at one, for the folder it asks for, and its creator's stored folder may not be a link to
+/// one (a creator that is itself ON a share keeps working: the share is its own): refused
+/// from the text (the reader, i.e. the filesystem, is asked NOTHING for a path written as a share), with a
+/// clear error, before the canonicalize that would connect to the share.
+#[cfg(windows)]
+#[test]
+fn a_created_session_may_not_name_another_machines_share_or_a_link_to_one() {
+    use std::cell::RefCell;
+    struct Spy {
+        asked: RefCell<Vec<PathBuf>>,
+        links: Vec<(PathBuf, PathBuf)>,
+    }
+    impl patchbay_agent::LinkReader for Spy {
+        fn link_target(&self, p: &Path) -> Option<PathBuf> {
+            self.asked.borrow_mut().push(p.to_path_buf());
+            self.links.iter().find(|(l, _)| l == p).map(|(_, t)| t.clone())
+        }
+    }
+    let creator = r"C:\Users\x\proj";
+    let none = Spy { asked: RefCell::new(Vec::new()), links: Vec::new() };
+    for share in [r"\\192.0.2.1\s\w", "//192.0.2.1/s/w", r"\\?\UNC\192.0.2.1\s\w", r"\\.\pipe\w"] {
+        let err = refuse_foreign_folder(creator, share, &none).unwrap_err().to_string();
+        assert!(err.contains("another machine's share"), "the folder asked for, {share}: {err}");
+    }
+    // The reader is asked only about the creator's own LOCAL folder (its components), never about the share.
+    assert!(
+        none.asked.borrow().iter().all(|p| p.to_string_lossy().starts_with("C:\\Users") && !patchbay_agent::foreign_location(Path::new(creator), p)),
+        "the filesystem was asked about a share: {:?}",
+        none.asked.borrow()
+    );
+    // A creator whose own folder is on a share keeps working (the share is its own, as in `inside`): a folder
+    // on that same share is accepted, a folder on ANOTHER share is refused.
+    let own = r"\\192.0.2.1\s\w";
+    assert!(refuse_foreign_folder(own, r"\\192.0.2.1\s\w\sub", &none).is_ok());
+    assert!(refuse_foreign_folder(own, r"\\192.0.2.2\s\w", &none).is_err());
+    // A link in the folder that points at a share, as the folder asked for and as the creator's own.
+    let link = PathBuf::from(r"C:\Users\x\proj\to_share");
+    let spy = Spy { asked: RefCell::new(Vec::new()), links: vec![(link.clone(), PathBuf::from(r"\\192.0.2.1\s"))] };
+    let err = refuse_foreign_folder(creator, &link.join("sub").to_string_lossy(), &spy).unwrap_err().to_string();
+    assert!(err.contains("another machine's share"), "{err}");
+    let err = refuse_foreign_folder(&link.to_string_lossy(), creator, &spy).unwrap_err().to_string();
+    assert!(err.contains("another machine's share"), "{err}");
+    // The control: a folder on this machine is accepted.
+    let local = Spy { asked: RefCell::new(Vec::new()), links: Vec::new() };
+    assert!(refuse_foreign_folder(creator, r"C:\Users\x\proj\src", &local).is_ok());
+}
+
 /// A remote `code.image` request (a phone or another computer asking this host for a picture a reply
 /// linked) for a source on another machine's share, in any spelling, or behind a link in the session
 /// folder that points at one, is refused before the host's filesystem is asked: asking connects to the
