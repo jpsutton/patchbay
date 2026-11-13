@@ -47,7 +47,10 @@ Then push and PR are David's decision.
 - Never touch David's live app (4420, 9797), his test site 4521 (`~/patchbay-teams-ui`, `/tmp/pb-teams-ui`), or the old `/tmp/pb-live` (a Nov 10 run).
 - Stop on any Patchbay usage refusal, release the workers and report. Never run on credits or API keys, and nothing on David's Claude Pro account (the "Claude Code login") while its 5-hour window is capped.
 - Verify every worker report yourself:
-  - Rust: `cargo test --lib` in a throwaway `git worktree add --detach /tmp/pb-verify-x <sha>`, with `CARGO_TARGET_DIR=/Users/dfrazer/patchbay/src-tauri/target`.
+  - Rust: every review/verify must run **both** locked feature legs (same as CI / pre-push), not only default `cargo test --lib`:
+    - `cargo test --lib --locked --features ipc-test`
+    - `cargo test --lib --locked --no-default-features --features web`
+    Prefer a throwaway `git worktree add --detach /tmp/pb-verify-x <sha>`. `CARGO_TARGET_DIR=/Users/dfrazer/patchbay/src-tauri/target` is fine for speed, but correctness must not depend on it (hook runs without CTD).
   - UI: tsc and `node scripts/selftests.mjs`, with node_modules symlinked from the live tree.
   - Read the diff.
 - Security review (`claude-routing:security-reviewer`, diff file plus source) for anything that starts sessions, touches permissions, or feeds text to agents.

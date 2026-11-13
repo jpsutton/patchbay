@@ -2314,18 +2314,22 @@ time.sleep(60)
         // give a moment for signals
         std::thread::sleep(std::time::Duration::from_millis(150));
         let gpid: i32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
-        // Poll up to ~2s (SIGKILL async). Zombie-aware: kill -0 succeeds for zombies; on Linux
+        // Poll up to ~2s (SIGKILL async). Zombie-aware: kill(pid,0) succeeds for zombies; on Linux
         // /proc/<pid>/stat state 'Z' means not a live leak. Missing/zombie => gone.
+        // Use libc (not shell `kill`) so ESRCH does not print "kill: …: No such process".
         let is_live = || {
-            let sig0 = std::process::Command::new("kill")
-                .args(["-0", &gpid.to_string()])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !sig0 { return false; }
+            let sig0 = unsafe { libc::kill(gpid, 0) == 0 };
+            if !sig0 {
+                return false;
+            }
             match std::fs::read_to_string(format!("/proc/{gpid}/stat")) {
-                Ok(stat) => !stat.split(')').nth(1).and_then(|r| r.trim_start().chars().next()).map(|c| c == 'Z').unwrap_or(false),
-                Err(_) => sig0, // no /proc (e.g. macOS): fall back to kill -0
+                Ok(stat) => !stat
+                    .split(')')
+                    .nth(1)
+                    .and_then(|r| r.trim_start().chars().next())
+                    .map(|c| c == 'Z')
+                    .unwrap_or(false),
+                Err(_) => sig0, // no /proc (e.g. macOS): fall back to kill(pid, 0)
             }
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
@@ -2335,7 +2339,9 @@ time.sleep(60)
             alive = is_live();
         }
         if alive {
-            let _ = std::process::Command::new("kill").args(["-9", &gpid.to_string()]).status();
+            unsafe {
+                let _ = libc::kill(gpid, libc::SIGKILL);
+            }
         }
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!alive, "grandchild pid {gpid} leaked (live, not zombie) after probe returned ({err})");
@@ -3117,7 +3123,12 @@ time.sleep(60)
     #[test]
     fn codex_worker_workspace_write_blocked_probe_failure() {
         let id = crate::db::new_id();
-        let not_repo = f2_non_temp_fixture(&format!("norepo-{id}"));
+        // Orphan under $TMPDIR — not under CARGO_TARGET_DIR / any checkout. A dir inside a linked
+        // worktree still resolves via parent git (git-dir≠common, paths outside cwd) so F2 allows;
+        // this case needs `git rev-parse` to truly fail.
+        let not_repo = std::env::temp_dir().join(format!("pb-f2-norepo-{id}"));
+        let _ = std::fs::remove_dir_all(&not_repo);
+        std::fs::create_dir_all(&not_repo).unwrap();
         assert_eq!(
             codex_worker_workspace_write_blocked(&not_repo),
             Some(CODEX_WORKER_TEMP_READONLY_HINT),
