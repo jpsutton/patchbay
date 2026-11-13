@@ -2801,7 +2801,8 @@ time.sleep(60)
     ///
     /// Must stay **outside** `/tmp`, `/private/tmp`, and `$TMPDIR` — F2 correctly refuses those
     /// for workspace-write. Prefer `CARGO_TARGET_DIR` (writable in CI/restricted sandboxes) over
-    /// a hard-coded home path like `~/patchbay-teams-data`.
+    /// a hard-coded home path like `~/patchbay-teams-data`. Nested `git init` under target is fine
+    /// for ALLOW (own repo). Temp refuse tests intentionally use `temp_dir` instead.
     fn f2_non_temp_fixture(id: &str) -> PathBuf {
         let base = std::env::var_os("CARGO_TARGET_DIR")
             .map(PathBuf::from)
@@ -2809,7 +2810,28 @@ time.sleep(60)
         let root = base.join("f2-fixtures").join(id);
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("trees")).unwrap();
+        // Assert: ALLOW fixtures must never land under temp roots (CTD may be inside a worktree).
+        if let (Some(key), Some(roots)) = (path_key(&root), temp_writable_roots()) {
+            for r in &roots {
+                assert!(
+                    !path_under(&key, r),
+                    "f2_non_temp_fixture must not sit under temp root {r:?} (got {key:?})"
+                );
+            }
+        }
         root
+    }
+
+    /// Write an invalid gitfile so hardened `git rev-parse` fails regardless of parent ancestry /
+    /// whether the path sits under CTD, a linked worktree, or a real checkout.
+    fn f2_broken_git_dir(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        let id = crate::db::new_id();
+        std::fs::write(
+            dir.join(".git"),
+            format!("gitdir: /nonexistent/pb-f2-gitdir-{id}\n"),
+        )
+        .unwrap();
     }
 
     fn f2_git_init_commit(dir: &Path, file: &str, contents: &str) {
@@ -3123,16 +3145,15 @@ time.sleep(60)
     #[test]
     fn codex_worker_workspace_write_blocked_probe_failure() {
         let id = crate::db::new_id();
-        // Orphan under $TMPDIR — not under CARGO_TARGET_DIR / any checkout. A dir inside a linked
-        // worktree still resolves via parent git (git-dir≠common, paths outside cwd) so F2 allows;
-        // this case needs `git rev-parse` to truly fail.
-        let not_repo = std::env::temp_dir().join(format!("pb-f2-norepo-{id}"));
-        let _ = std::fs::remove_dir_all(&not_repo);
-        std::fs::create_dir_all(&not_repo).unwrap();
+        // Broken gitfile under f2_non_temp_fixture (INSIDE target/CTD — even a linked worktree).
+        // Invalid gitdir makes hardened rev-parse fail; must not depend on orphan-temp location.
+        let base = f2_non_temp_fixture(&format!("broken-git-{id}"));
+        let broken = base.join("orphan");
+        f2_broken_git_dir(&broken);
         assert_eq!(
-            codex_worker_workspace_write_blocked(&not_repo),
+            codex_worker_workspace_write_blocked(&broken),
             Some(CODEX_WORKER_TEMP_READONLY_HINT),
-            "not a git repo => refuse"
+            "invalid gitfile => refuse (location-independent)"
         );
 
         // Real linked worktree, but git binary missing => probe fails closed.
@@ -3150,8 +3171,36 @@ time.sleep(60)
             Some(CODEX_WORKER_TEMP_READONLY_HINT),
             "git missing => refuse"
         );
-        let _ = std::fs::remove_dir_all(&not_repo);
+        let _ = std::fs::remove_dir_all(&base);
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// Linked worktree + subdirectory cwd (not worktree root).
+    ///
+    /// Product dispatch always uses `worktree_root.join(item_id.to_lowercase())` — never a
+    /// subdirectory — so this is not a dispatch path. Gate still evaluates the subdirectory as
+    /// cwd: same linked-worktree topology (common/main outside), non-temp → currently ALLOW.
+    /// Writable root would be that subdirectory if a mis-set cwd ever reached prepare.
+    #[test]
+    fn codex_worker_workspace_write_blocked_linked_worktree_subdirectory() {
+        let id = crate::db::new_id();
+        let home = f2_non_temp_fixture(&format!("proj-subdir-{id}"));
+        f2_git_init_commit(&home, "README", "x");
+        let wt = home.join("trees/wt1");
+        let wt_s = wt.to_string_lossy().into_owned();
+        f2_add_worktree(&home, "wt1", &wt);
+        let sub = wt.join("nested/deep");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(
+            codex_worker_workspace_write_blocked(&sub),
+            None,
+            "linked worktree subdirectory (non-temp) => currently ALLOW"
+        );
+        let _ = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force", "--", &wt_s])
+            .current_dir(&home)
+            .status();
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// A team member's role instructions reach the prompt hook of each agent that has one, and
