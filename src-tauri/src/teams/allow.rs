@@ -16,7 +16,7 @@
 //! normal prompt. Repo hooks/fsmonitor/config gates remain as defense in depth.
 //!
 //! Git auto-approve is further limited by agent kind: only Codex with a proven non-persisting
-//! tool-shell (`agent_shell_export_persists` = `Some(false)`, version-pinned) and whose repo
+//! tool-shell (`agent_shell_export_persists` = `Some(false)`, runtime ACP version recorded) and whose repo
 //! common config, `config.worktree`, gitdir, `info/attributes`, and every effective config
 //! origin (includes) all lie **outside** the workspace-write writable set (worktree cwd + temp;
 //! see sbx-probe-home). Any effective `filter.*.clean|smudge|process` refuses `add`/`commit`.
@@ -336,25 +336,22 @@ fn split_git_hardening<'a>(tokens: &'a [String], hooks_path: &Path) -> Option<&'
 /// Human-visible warning appended when a worker `git` command is not auto-approved.
 pub const WORKER_GIT_HOOKS_PROMPT: &str = "runs this repository's git hooks and config";
 
-/// live22 RESULT observed adapter pin (`CODEX_ACP_PACKAGE` / docs). Any other version ⇒ unproven.
-pub const LIVE22_CODEX_ACP_VERSION: &str = "2.2.2";
+/// ACP `agentInfo.version` values with live evidence that Codex tool-shell `export` does not
+/// persist across separate execute calls (live22/live23). The allow decision compares the
+/// **session's recorded handshake version** to this list — never the build-time package pin.
+pub const PROVEN_CODEX_NO_EXPORT_PERSIST: &[&str] = &["2.2.2"];
 
-/// True when the in-tree Codex ACP package pin still matches the live22-proven version.
-pub(crate) fn codex_acp_version_matches_live22() -> bool {
-    crate::code::agents::CODEX_ACP_PACKAGE
-        .rsplit_once('@')
-        .is_some_and(|(_, v)| v == LIVE22_CODEX_ACP_VERSION)
-}
-
-/// Live22+ evidence: whether each agent's tool-shell persists `export` across commands.
+/// Live evidence: whether each agent's tool-shell persists `export` across commands.
 /// `None` = unproven → no git auto-approve. `Some(true)` = persists → no auto-approve.
-/// `Some(false)` = does not persist → may auto-approve when other gates pass (Codex only, and only
-/// when [`codex_acp_version_matches_live22`] — a package bump without a new live proof ⇒ prompt).
-pub(crate) fn agent_shell_export_persists(agent: &str) -> Option<bool> {
+/// `Some(false)` = does not persist → may auto-approve when other gates pass.
+///
+/// For Codex, `runtime_version` must be the ACP initialize `agentInfo.version` recorded for that
+/// session at spawn. Absent / unknown / not in [`PROVEN_CODEX_NO_EXPORT_PERSIST`] ⇒ `None`.
+pub(crate) fn agent_shell_export_persists(agent: &str, runtime_version: Option<&str>) -> Option<bool> {
     match agent {
-        // live22 export-persist (sandbox 4531) on codex-acp 2.2.2: mark empty → no persist.
         "codex" => {
-            if !codex_acp_version_matches_live22() {
+            let v = runtime_version?;
+            if !PROVEN_CODEX_NO_EXPORT_PERSIST.contains(&v) {
                 return None;
             }
             Some(false)
@@ -368,9 +365,13 @@ pub(crate) fn agent_shell_export_persists(agent: &str) -> Option<bool> {
     }
 }
 
-/// Only Codex with proven non-persisting shell may receive git auto-approve.
-fn agent_may_git_auto_approve(agent: &str) -> bool {
-    agent == "codex" && agent_shell_export_persists(agent) == Some(false)
+/// Only Codex with a recorded, proven non-persisting runtime version may receive git auto-approve.
+fn agent_may_git_auto_approve(agent: &str, data_dir: &Path, session: &str) -> bool {
+    let recorded = TeamsDb::open(data_dir)
+        .ok()
+        .and_then(|t| t.acp_runtime_version(session).ok())
+        .flatten();
+    agent == "codex" && agent_shell_export_persists(agent, recorded.as_deref()) == Some(false)
 }
 
 const SERVER: &str = "patchbay-agent-messaging";
@@ -843,17 +844,26 @@ fn hardened_git(cwd: &Path, args: &[&str]) -> Option<String> {
 /// Parse `git config --show-origin --show-scope --list` lines into (scope, file path or None, key=value).
 /// With both flags git prints `<scope>\t<origin>\t<key>=<value>` (scope first). File origins look
 /// like `file:/path/to/config` or `file:.git/config`; non-file (command/env) → None path.
-fn parse_config_list_origins(raw: &str) -> Vec<(String, Option<PathBuf>, String)> {
+///
+/// Fail closed (R2-4): any non-empty line that cannot be parsed ⇒ `None` (whole list rejected).
+fn parse_config_list_origins(raw: &str) -> Option<Vec<(String, Option<PathBuf>, String)>> {
     let mut out = Vec::new();
     for line in raw.lines() {
+        if line.is_empty() {
+            continue;
+        }
         let parts: Vec<&str> = line.splitn(3, '\t').collect();
         let (scope, origin, kv) = match parts.as_slice() {
             [scope, origin, kv] => ((*scope).to_owned(), *origin, (*kv).to_owned()),
             // `--show-origin` alone: `<origin>\t<key>=<value>`
-            [origin, kv] if origin.starts_with("file:") || origin.starts_with("command:") || origin.starts_with("blob:") => {
+            [origin, kv]
+                if origin.starts_with("file:")
+                    || origin.starts_with("command:")
+                    || origin.starts_with("blob:") =>
+            {
                 (String::new(), *origin, (*kv).to_owned())
             }
-            _ => continue,
+            _ => return None,
         };
         let path = if let Some(p) = origin.strip_prefix("file:") {
             Some(PathBuf::from(p))
@@ -862,7 +872,7 @@ fn parse_config_list_origins(raw: &str) -> Vec<(String, Option<PathBuf>, String)
         };
         out.push((scope, path, kv));
     }
-    out
+    Some(out)
 }
 
 /// Resolve absolute path of a config file origin relative to `worktree` when needed.
@@ -880,7 +890,9 @@ fn worker_git_config_origins_outside_writable(worktree: &Path, writable: &[PathB
     let Some(raw) = hardened_git(worktree, &["config", "--show-origin", "--show-scope", "--list"]) else {
         return false;
     };
-    let entries = parse_config_list_origins(&raw);
+    let Some(entries) = parse_config_list_origins(&raw) else {
+        return false; // unparseable record → reject whole parse (R2-4)
+    };
     if entries.is_empty() {
         // An empty list with a successful probe is unusual; fail closed.
         return false;
@@ -905,7 +917,10 @@ fn worker_git_has_filter_driver(worktree: &Path) -> bool {
     let Some(raw) = hardened_git(worktree, &["config", "--show-origin", "--show-scope", "--list"]) else {
         return true; // fail closed: treat as "has filter" so add/commit prompt
     };
-    for (_scope, _path, kv) in parse_config_list_origins(&raw) {
+    let Some(entries) = parse_config_list_origins(&raw) else {
+        return true; // unparseable → treat as hostile
+    };
+    for (_scope, _path, kv) in entries {
         let key = kv.split_once('=').map(|(k, _)| k).unwrap_or(kv.as_str());
         let lower = key.to_ascii_lowercase();
         if lower.starts_with("filter.")
@@ -1129,7 +1144,7 @@ fn allow_worker_commit(
         return None;
     };
     if tokens.first().map(String::as_str) == Some("git") {
-        if !agent_may_git_auto_approve(agent) {
+        if !agent_may_git_auto_approve(agent, data_dir, session) {
             return None;
         }
         // F-E: attach/restore of an already-running session was never spawn-scrubbed → prompt.
@@ -1164,20 +1179,68 @@ fn allow_worker_commit(
     Some((allow_option(options)?, "Auto-approved: worker commit in worktree".into()))
 }
 
-/// True when `cmd` looks like it may invoke git: any whitespace/shell token whose basename is
-/// `git` (wrappers, absolute paths, `command git`, `env git`, `sh -c '…git…'`). When unsure, true.
+/// Shell/meta forms the fail-closed tokenizer cannot fully classify as a plain argv (R2-3).
+/// Over-warning is acceptable: these always get the hooks/config phrase on a worker execute.
+fn command_not_plain_classified_argv(cmd: &str) -> bool {
+    let lower = cmd.to_ascii_lowercase();
+    if tokenize_worker_command(cmd).is_none() {
+        return true;
+    }
+    // Expansions / substitution / chaining the tokenizer rejects or ignores.
+    if cmd.contains('$')
+        || cmd.contains('`')
+        || cmd.contains(';')
+        || cmd.contains('|')
+        || cmd.contains('&')
+        || cmd.contains('\n')
+    {
+        return true;
+    }
+    // Wrappers that can invoke git without a plain `git` basename as argv0.
+    let first = cmd.split_whitespace().next().unwrap_or("");
+    let base = Path::new(first)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(first)
+        .to_ascii_lowercase();
+    matches!(
+        base.as_str(),
+        "sh" | "bash" | "zsh" | "dash" | "fish" | "env" | "xargs" | "make" | "eval" | "command" | "busybox"
+    ) || lower.contains("sh -c")
+        || lower.contains("bash -c")
+        || lower.contains("zsh -c")
+        || lower.contains("xargs git")
+        || lower.contains("eval ")
+}
+
+/// True when `cmd` looks like it may invoke git, **or** cannot be fully classified as a plain
+/// non-git argv (R2-3 conservative). Wrappers, absolute paths, `g=git; $g status`, `$(which git)`,
+/// `sh -c`, `xargs git`, aliases — when unsure, true.
 pub fn command_may_invoke_git(cmd: &str) -> bool {
     let trimmed = cmd.trim_start();
     if trimmed.is_empty() {
         return false;
+    }
+    if command_not_plain_classified_argv(cmd) {
+        return true;
     }
     // Fast path: tokenizer accepted and first prog is exactly `git`.
     if let Some(tokens) = tokenize_worker_command(cmd) {
         if tokens.first().map(String::as_str) == Some("git") {
             return true;
         }
+        // Absolute / wrapped git basename in argv0.
+        if let Some(prog) = tokens.first() {
+            let base = Path::new(prog)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(prog);
+            if base == "git" || base == "git.exe" {
+                return true;
+            }
+        }
     }
-    // Basename `git` on any path-like token (handles /usr/bin/git, rtk, env prefixes when split).
+    // Basename `git` on any path-like token.
     for tok in cmd.split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&' | '`' | '$' | '(' | ')' | '\'' | '"')) {
         if tok.is_empty() {
             continue;
@@ -1187,11 +1250,16 @@ pub fn command_may_invoke_git(cmd: &str) -> bool {
             return true;
         }
     }
-    // `sh -c` / shell strings: substring heuristic when parsing is ambiguous.
     let lower = cmd.to_ascii_lowercase();
-    lower.contains(" git ") || lower.contains("\tgit ") || lower.contains("`git") || lower.contains("$(git")
-        || lower.starts_with("git ") || lower.contains("/git ") || lower.ends_with("/git")
-        || lower.contains("/git\"") || lower.contains("/git'")
+    lower.contains(" git ")
+        || lower.contains("\tgit ")
+        || lower.contains("`git")
+        || lower.contains("$(git")
+        || lower.starts_with("git ")
+        || lower.contains("/git ")
+        || lower.ends_with("/git")
+        || lower.contains("/git\"")
+        || lower.contains("/git'")
 }
 
 /// When a live worker's execute may invoke git and is about to prompt, enrich `askReason` / allow
@@ -1467,8 +1535,9 @@ mod tests {
         );
         t.attach(&team.id, "w1", "workers").unwrap();
         t.0.execute("UPDATE members SET item_id = ?1 WHERE session_id = 'w1'", [item_id]).unwrap();
-        // Tests model a dispatch-spawned worker (F-E launched-scrubbed fact).
+        // Tests model a dispatch-spawned worker (F-E launched-scrubbed fact + R2-1 handshake version).
         t.mark_git_env_scrubbed("w1").unwrap();
+        t.mark_acp_runtime_version("w1", "2.2.2").unwrap();
         (d, worktree.to_string_lossy().into_owned(), proj.to_string_lossy().into_owned(), item_id.to_owned(), hooks)
     }
 
@@ -2260,16 +2329,75 @@ mod tests {
     }
 
     #[test]
-    fn codex_export_persist_tied_to_live22_acp_version() {
-        assert_eq!(LIVE22_CODEX_ACP_VERSION, "2.2.2");
+    fn codex_export_persist_keys_on_recorded_runtime_version() {
+        assert!(PROVEN_CODEX_NO_EXPORT_PERSIST.contains(&"2.2.2"));
+        assert_eq!(agent_shell_export_persists("codex", Some("2.2.2")), Some(false));
+        assert_eq!(agent_shell_export_persists("codex", None), None);
+        assert_eq!(agent_shell_export_persists("codex", Some("9.9.9")), None);
+        assert_eq!(agent_shell_export_persists("codex", Some("")), None);
+
+        let (d, wt, _proj, _item, safe) = worker_commit_fixture(true);
+        let t = TeamsDb::open(&d).unwrap();
+        let cmd = git_cmd(&safe, "status");
+        // Fixture records 2.2.2 → may auto-approve.
+        assert!(allow_team_tool(&d, "w1", GIT_AGENT, &git_exec(&wt, &cmd), &options(), &wt).is_some());
+        // Absent runtime version ⇒ prompt.
+        t.0.execute("UPDATE members SET acp_runtime_version = NULL WHERE session_id = 'w1'", [])
+            .unwrap();
         assert!(
-            crate::code::agents::CODEX_ACP_PACKAGE.ends_with("@2.2.2"),
-            "bump requires new live proof; package={}",
-            crate::code::agents::CODEX_ACP_PACKAGE
+            allow_team_tool(&d, "w1", GIT_AGENT, &git_exec(&wt, &cmd), &options(), &wt).is_none(),
+            "absent runtime version must not auto-approve"
         );
-        assert!(codex_acp_version_matches_live22());
-        assert_eq!(agent_shell_export_persists("codex"), Some(false));
-        assert!(agent_may_git_auto_approve("codex"));
+        // Mismatched runtime version ⇒ prompt.
+        t.mark_acp_runtime_version("w1", "0.0.0").unwrap();
+        assert!(
+            allow_team_tool(&d, "w1", GIT_AGENT, &git_exec(&wt, &cmd), &options(), &wt).is_none(),
+            "mismatched runtime version must not auto-approve"
+        );
+        // Build-time package pin must not appear in the decision path (R2-1): wrong recorded
+        // version still prompts even when CODEX_ACP_PACKAGE says 2.2.2.
+        assert!(
+            crate::code::agents::CODEX_ACP_PACKAGE.contains("2.2.2"),
+            "package pin is informational only; decision uses recorded version"
+        );
+    }
+
+    #[test]
+    fn parse_config_list_origins_rejects_unparseable_record() {
+        let ok = "global\tfile:/home/u/.gitconfig\tuser.name=Ada\nlocal\tfile:.git/config\tcore.bare=false\n";
+        assert!(parse_config_list_origins(ok).is_some());
+        let bad = "global\tfile:/home/u/.gitconfig\tuser.name=Ada\nthis-line-has-no-tabs-or-origin\n";
+        assert!(
+            parse_config_list_origins(bad).is_none(),
+            "any unparseable non-empty line must fail the whole parse"
+        );
+        assert!(parse_config_list_origins("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn scrub_reinjects_global_commit_identity() {
+        use crate::code::agents::{read_human_commit_identity, scrub_git_env};
+        let Some((name, email)) = read_human_commit_identity() else {
+            // CI / sandboxes without global identity: scrub still leaves the four unset.
+            let mut env = vec![("GIT_SSH_COMMAND".into(), "evil".into())];
+            let mut env_remove = Vec::new();
+            scrub_git_env(&mut env, &mut env_remove);
+            assert!(!env.iter().any(|(k, _)| k.starts_with("GIT_AUTHOR") || k.starts_with("GIT_COMMITTER")));
+            return;
+        };
+        let mut env = vec![
+            ("GIT_SSH_COMMAND".into(), "evil".into()),
+            ("GIT_AUTHOR_NAME".into(), "worker-forged".into()),
+        ];
+        let mut env_remove = Vec::new();
+        scrub_git_env(&mut env, &mut env_remove);
+        assert!(!env.iter().any(|(k, _)| k == "GIT_SSH_COMMAND"));
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("GIT_AUTHOR_NAME"), Some(name.as_str()));
+        assert_eq!(get("GIT_AUTHOR_EMAIL"), Some(email.as_str()));
+        assert_eq!(get("GIT_COMMITTER_NAME"), Some(name.as_str()));
+        assert_eq!(get("GIT_COMMITTER_EMAIL"), Some(email.as_str()));
+        assert_ne!(get("GIT_AUTHOR_NAME"), Some("worker-forged"));
     }
 
     #[test]
@@ -2767,6 +2895,11 @@ mod tests {
             "sh -c 'git status'",
             "sh -c \"git status\"",
             "git status",
+            // R2-3 conservative: expansions / wrappers the tokenizer cannot fully classify.
+            "g=git; $g status",
+            "$(which git) status",
+            "xargs git",
+            "eval git status",
         ];
         for cmd in shapes {
             let mut raw = json!({

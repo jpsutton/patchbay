@@ -502,11 +502,58 @@ const GIT_ENV_REDIRECTORS: &[&str] = &[
     "GIT_CURL_VERBOSE",
 ];
 
+/// Author/committer identity keys Patchbay may re-inject after a worker GIT_* scrub (R2-2).
+/// Never worker-supplied `user.*` `-c` keys — only these four env names.
+const COMMIT_IDENTITY_ENV: &[&str] = &[
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+];
+
+/// Read the human's `user.name` / `user.email` from the real global git config (values only).
+/// Does not use the hardened/scrubbed probe env — `GIT_CONFIG_GLOBAL=/dev/null` would hide them.
+/// Returns `None` when either value is missing; commits then fail with git's own message (no prompt loop).
+pub fn read_human_commit_identity() -> Option<(String, String)> {
+    let get = |key: &str| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .args(["config", "--global", "--get", key])
+            .env_remove("GIT_CONFIG_GLOBAL")
+            .env_remove("GIT_CONFIG_NOSYSTEM")
+            .env_remove("GIT_CONFIG_SYSTEM")
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let v = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        if v.is_empty() {
+            None
+        } else {
+            Some(v)
+        }
+    };
+    Some((get("user.name")?, get("user.email")?))
+}
+
+/// After scrub: inject Patchbay-owned author/committer identity (allow-list only).
+fn inject_commit_identity(env: &mut Vec<(String, String)>, name: &str, email: &str) {
+    env.retain(|(k, _)| !COMMIT_IDENTITY_ENV.contains(&k.as_str()));
+    env.push(("GIT_AUTHOR_NAME".into(), name.to_owned()));
+    env.push(("GIT_AUTHOR_EMAIL".into(), email.to_owned()));
+    env.push(("GIT_COMMITTER_NAME".into(), name.to_owned()));
+    env.push(("GIT_COMMITTER_EMAIL".into(), email.to_owned()));
+}
+
 /// Scrub every `GIT_*` from a child Launch env: remove all names present in the parent plus
 /// known redirectors, then set `GIT_CONFIG_NOSYSTEM=1` and neutralize global config. Used only for
 /// **team worker seat** launches (see [`maybe_scrub_worker_git_env`]); mid-shell `export` by the
 /// agent is not under Patchbay control (see live22+ export-persist proofs).
+///
+/// After the scrub, re-injects [`COMMIT_IDENTITY_ENV`] from the human's real global config when
+/// both name and email exist (R2-2). Missing identity is left unset so `git commit` fails clearly.
 pub fn scrub_git_env(env: &mut Vec<(String, String)>, env_remove: &mut Vec<String>) {
+    let identity = read_human_commit_identity();
     let mut remove: BTreeMap<String, ()> = BTreeMap::new();
     for k in env_remove.iter() {
         remove.insert(k.clone(), ());
@@ -520,6 +567,7 @@ pub fn scrub_git_env(env: &mut Vec<(String, String)>, env_remove: &mut Vec<Strin
         remove.insert((*k).to_owned(), ());
     }
     // Drop any GIT_* we were about to inject except the forced NOSYSTEM / GLOBAL null.
+    // Identity keys are removed here and re-added from Patchbay's read below (never from the worker).
     env.retain(|(k, _)| {
         matches!(k.as_str(), "GIT_CONFIG_NOSYSTEM" | "GIT_CONFIG_GLOBAL") || !k.starts_with("GIT_")
     });
@@ -527,6 +575,11 @@ pub fn scrub_git_env(env: &mut Vec<(String, String)>, env_remove: &mut Vec<Strin
     env.retain(|(k, _)| k != "GIT_CONFIG_NOSYSTEM" && k != "GIT_CONFIG_GLOBAL");
     env.push(("GIT_CONFIG_NOSYSTEM".into(), "1".into()));
     env.push(("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()));
+    if let Some((name, email)) = identity {
+        inject_commit_identity(env, &name, &email);
+        // Keep Patchbay-injected identity out of the remove list (spawn does remove-then-set).
+        env_remove.retain(|k| !COMMIT_IDENTITY_ENV.contains(&k.as_str()));
+    }
 }
 
 /// Scrub GIT_* and record `git_env_scrubbed` only for an active dispatched worker seat.

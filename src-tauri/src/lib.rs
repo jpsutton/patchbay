@@ -1212,6 +1212,12 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
             match &env.event {
                 CodeEvent::Stalled { .. } => live.entry(id).or_default().stalled = Some(ev),
                 CodeEvent::SessionReady { .. } => {
+                    // R2-1: record ACP initialize agentInfo.version for worker git auto-approve.
+                    if let Some(ver) = ev["agentInfo"]["version"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                        if let Ok(tdb) = teams::TeamsDb::open(&state.data_dir) {
+                            let _ = tdb.mark_acp_runtime_version(&id, ver);
+                        }
+                    }
                     let l = live.entry(id).or_default();
                     l.ready = Some(ev);
                     l.auth = None;

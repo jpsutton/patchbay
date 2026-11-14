@@ -86,6 +86,10 @@ ALTER TABLE templates ADD COLUMN allow_worker_commit INTEGER NOT NULL DEFAULT 0;
 -- Recorded at worker-seat spawn when Patchbay scrubbed GIT_* for that process (F-E).
 -- Attach/restore of an already-running session leaves this 0 → no git auto-approve.
 ALTER TABLE members ADD COLUMN git_env_scrubbed INTEGER NOT NULL DEFAULT 0;
+"#, r#"
+-- ACP initialize agentInfo.version recorded at SessionReady for the live member (R2-1).
+-- Git auto-approve keys on this runtime identity, not the build-time package pin.
+ALTER TABLE members ADD COLUMN acp_runtime_version TEXT;
 "#];
 
 /// First line of every exported file; `write_export` never overwrites a file without it.
@@ -580,6 +584,28 @@ impl TeamsDb {
             )
             .optional()?;
         Ok(v == Some(1))
+    }
+
+    /// Record the ACP `agentInfo.version` from initialize for this live member (R2-1).
+    pub fn mark_acp_runtime_version(&self, session_id: &str, version: &str) -> Result<()> {
+        self.0.execute(
+            "UPDATE members SET acp_runtime_version = ?2 WHERE session_id = ?1 AND left_at IS NULL",
+            params![session_id, version],
+        )?;
+        Ok(())
+    }
+
+    /// Handshake version recorded at SessionReady, if any.
+    pub fn acp_runtime_version(&self, session_id: &str) -> Result<Option<String>> {
+        let v: Option<String> = self
+            .0
+            .query_row(
+                "SELECT acp_runtime_version FROM members WHERE session_id = ?1 AND left_at IS NULL",
+                [session_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(v.filter(|s| !s.is_empty()))
     }
 
     /// The live team membership of a session, if any (archived teams don't count).
@@ -1781,6 +1807,7 @@ mod tests {
         // Strip later columns so replaying migrations from v2 does not hit "duplicate column".
         t.0.execute_batch("ALTER TABLE templates DROP COLUMN allow_worker_commit").unwrap();
         t.0.execute_batch("ALTER TABLE members DROP COLUMN git_env_scrubbed").unwrap();
+        t.0.execute_batch("ALTER TABLE members DROP COLUMN acp_runtime_version").unwrap();
         t.0.pragma_update(None, "user_version", 2).unwrap();
         drop(t);
         let t = TeamsDb::open(&d).unwrap();
