@@ -143,16 +143,24 @@ auto-approves Patchbay still reads `core.fsmonitor` and the effective hooks dire
 `post-index-change` only. Hooks not run by these verbs (`pre-push`, `post-checkout`, …) do not
 block. Non-executable hook files are ignored; a missing hooks directory is allowed.
 
-Residual: config-defined clean/smudge filters, textconv, and external diff helpers; unbounded
-`ls -R` is not capped here. The required `-c` prefix closes the auto-approve check-then-exec race
-for opt-in worker git (planted-red: hook+fsmonitor planted after the check do not run under the
-forced flags, and do run without them). Human-approved bare git commands stay racy.
-`GIT_CONFIG_NOSYSTEM` / scrubbed `GIT_*` cannot be forced into the agent shell — cover env-beats-
-config (`GIT_SSH_COMMAND`, `GIT_EXTERNAL_DIFF`, `GIT_PAGER`/`PAGER`, `GIT_EDITOR`, `GIT_ASKPASS`,
-`GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`, `GIT_CONFIG_COUNT`/`KEY`/`VALUE`, `GIT_CONFIG_GLOBAL`): whether
-a worker can set any without a prompt (does the agent shell persist between commands), and whether
-any allowed verb consults it. This does not cover Codex workers under the user's `~/.codex` prefix
-rules (pb-20261111-83).
+The required `-c` prefix stops repo-config hook/fsmonitor changes made after the approval check from
+executing, as long as the Patchbay hooks dir stays protected (re-validated at every approval:
+canonical location outside team cwd / worktree root / item worktree / temp roots; no symlinks in
+the path from `data_dir`; owned by the current user; no write bits on the hooks dir; parents not
+group/world-writable; empty). Planted-red: hook+fsmonitor planted after the check do not run under
+the forced flags, and do run without them.
+
+Residuals (attackers):
+- the worker itself if `data_dir` is temp or under a worktree-writable root (now refused);
+- an outside same-user process for the hooks dir under normal placement (`~/patchbay-teams-data`);
+- inherited git environment — Patchbay cannot scrub; whether a worker can set env without a prompt
+  depends on agent shell persistence (unknown): `GIT_SSH_COMMAND`, `GIT_EXTERNAL_DIFF`,
+  `GIT_PAGER`/`PAGER`, `GIT_EDITOR`, `GIT_ASKPASS`, `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`,
+  `GIT_CONFIG_COUNT`/`KEY`/`VALUE`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM`;
+- human-configured clean/smudge filters on `git add` via `.gitattributes`; textconv / external diff;
+- human-approved bare git stays check-then-exec racy;
+- Codex `~/.codex` approved prefixes never reach the Patchbay permission path (pb-20261111-83).
+Unbounded `ls -R` is not capped here.
 
 ## Team
 

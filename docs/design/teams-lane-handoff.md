@@ -103,7 +103,7 @@ Workers may need a human to approve each `git add` and `git commit` inside their
 
 ## State at handoff (2026-11-13 W/G)
 
-- Director brief W+G landed on `feat/teams`: Windows Codex Auto stays read-only; `\\?\` fail-closed except drive/UNC; omitted cwd → read-only for `codex_mode_for`; worker git auto-approve requires the Patchbay `-c core.hooksPath=…` sequence + `--no-verify` on commit (planted-red covered). See `teams.md` / `approval-modes.md`.
+- Director brief W+G landed on `feat/teams`: Windows Codex Auto stays read-only; `\\?\` fail-closed except drive/UNC (bare `\\?\C:` refused); omitted cwd → read-only for `codex_mode_for`; worker git auto-approve requires the Patchbay `-c core.hooksPath=…` sequence + `--no-verify` on commit (planted-red covered). Hooks dir re-validated at approval (location / symlink / mode / empty); `-c` stops post-check repo-config hook/fsmonitor changes while that dir stays protected — residuals in `teams.md`. See `approval-modes.md`.
 - Any local `dev.patchbay.app` bundle: `lsregister -u` immediately after. No `.app` currently under `target-teams-live` or `target-teams-web`.
 
 ## State at handoff (2026-11-12)
