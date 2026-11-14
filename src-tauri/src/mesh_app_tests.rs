@@ -263,7 +263,27 @@ async fn peer_and_agent_named_paths_on_a_share_are_refused_before_they_are_touch
         assert!(e.contains("another machine's share"), "code.import {share}: {e}");
         let e = crate::agent_messaging::confined_share_path(&n.dir, share).unwrap_err().to_string();
         assert!(e.contains("another machine's share"), "share tool {share}: {e}");
+        let e = take_over_local(&n.state, "no-such-session", share).await.unwrap_err().to_string();
+        assert!(e.contains("another machine's share"), "code.take_over {share}: {e}");
     }
+    // The package a hosting peer offers: its token and file names are plain names or nothing at all.
+    let meta: handoff::Meta = serde_json::from_value(json!({
+        "sessionId": "s", "cwd": "c", "acpSessionId": null, "git": null, "tarball": false, "agent": false,
+        "files": ["meta.json"], "createdAt": 0
+    }))
+    .unwrap();
+    // An absolute local path stands for "anywhere on the disk" (a scratch folder, so that a regression
+    // leaves nothing in a real place).
+    let escape = std::env::temp_dir().join(format!("pb-token-escape-{}", db::new_id())).to_string_lossy().into_owned();
+    for bad in [r"\\192.0.2.1\s\x".to_owned(), escape.clone(), "C:x".to_owned(), "../x".to_owned(), "a/b".to_owned(), ".hidden".to_owned(), String::new()] {
+        let e = fetch_package(&n.state, "peer", &bad, &meta).await.unwrap_err().to_string();
+        assert!(e.contains("has a bad name"), "token {bad:?}: {e}");
+    }
+    assert!(!Path::new(&escape).exists(), "a token that is an absolute path was used as one");
+    let mut named = meta.clone();
+    named.files = vec![r"\\192.0.2.1\s\x".into()];
+    let e = fetch_package(&n.state, "peer", "handoff-ok", &named).await.unwrap_err().to_string();
+    assert!(e.contains("has a bad name"), "file name: {e}");
     assert!(started.elapsed() < Duration::from_secs(2), "refusing took {:?}: the share was reached", started.elapsed());
 }
 

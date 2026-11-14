@@ -3640,8 +3640,20 @@ async fn package_local(state: &AppState, id: &str, kind: &str, have: Vec<String>
     }
 }
 
+/// A name a mesh peer chose for a package folder or a file in it: one plain component, no separator, no
+/// drive letter, not hidden or `..`.
+fn plain_package_name(x: &str) -> bool {
+    !x.is_empty() && !x.contains(['/', '\\', ':']) && !x.starts_with('.')
+}
+
 /// Copy a package's files from `host` into a local inbox directory. A failed copy leaves nothing behind.
 async fn fetch_package(state: &AppState, host: &str, token: &str, meta: &handoff::Meta) -> anyhow::Result<PathBuf> {
+    // The token and the file names are the hosting peer's words: joined as written, an absolute path or
+    // another machine's share would replace the inbox, and `create_dir_all` / `File::create` would
+    // connect to it. Only a plain single name is accepted (the host side already insists on the same).
+    if !plain_package_name(token) || meta.files.iter().any(|n| !plain_package_name(n)) {
+        anyhow::bail!("the package from {host} has a bad name");
+    }
     let dir = handoff::inbox(&state.data_dir).join(token);
     let res = fetch_package_files(state, host, token, meta, &dir).await;
     if res.is_err() {
@@ -3735,6 +3747,8 @@ async fn code_move(state: &AppState, id: String, target: String, cwd: String) ->
 /// comes along: the host's working folder can't be copied while it is offline, so the session
 /// carries on in a folder that already exists on this computer.
 async fn take_over_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Result<Option<String>> {
+    // The folder a mesh peer asked this computer to continue the session in: judged before `is_dir`.
+    refuse_foreign_path(&peer_path_base(), std::path::Path::new(cwd), "the folder", &patchbay_agent::OsLinks)?;
     let s = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("no such session"))?;
     let me = state.mesh.node_id().to_owned();
     let host = s.host_node.clone().filter(|h| h != &me).ok_or_else(|| anyhow::anyhow!("this session already runs here"))?;
