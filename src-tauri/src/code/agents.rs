@@ -559,51 +559,9 @@ fn git_main_worktree(cwd: &Path) -> Option<PathBuf> {
 /// `None` so the F2 gate can refuse. On macOS map `/tmp` → `/private/tmp` when still present.
 /// On Windows, strip an accepted `\\?\` verbatim prefix so keys match ordinary `%TEMP%` / cwd
 /// strings; unknown `\\?\` namespaces fail closed (`None`).
-fn path_key(path: &Path) -> Option<PathBuf> {
+pub(crate) fn path_key(path: &Path) -> Option<PathBuf> {
     let canon = path.canonicalize().ok()?;
-    Some(normalize_macos_tmp(strip_windows_verbatim(canon)?))
-}
-
-/// Strip a Windows `\\?\` verbatim prefix when it names a drive (`\\?\C:\…`) or UNC share
-/// (`\\?\UNC\server\share\…`). Any other `\\?\` namespace (Volume GUID, HarddiskVolume, bare
-/// `\\?\foo`, …) is unresolvable → `None`.
-fn strip_windows_verbatim(path: PathBuf) -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        return strip_windows_verbatim_str(&path.to_string_lossy()).map(PathBuf::from);
-    }
-    #[cfg(not(windows))]
-    {
-        Some(path)
-    }
-}
-
-/// Pure string form of [`strip_windows_verbatim`] (testable on every OS).
-fn strip_windows_verbatim_str(s: &str) -> Option<String> {
-    let Some(rest) = s.strip_prefix(r"\\?\") else {
-        return Some(s.to_owned());
-    };
-    if let Some(unc) = rest.strip_prefix(r"UNC\") {
-        // Require server\share (at least two non-empty components).
-        let mut parts = unc.split('\\');
-        let server = parts.next().unwrap_or("");
-        let share = parts.next().unwrap_or("");
-        if server.is_empty() || share.is_empty() {
-            return None;
-        }
-        return Some(format!(r"\\{unc}"));
-    }
-    // Drive: X:\… or X:/… (optional bare X:).
-    let b = rest.as_bytes();
-    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
-        if b.len() == 2 {
-            return Some(rest.to_owned());
-        }
-        if b[2] == b'\\' || b[2] == b'/' {
-            return Some(rest.to_owned());
-        }
-    }
-    None
+    Some(normalize_macos_tmp(crate::win_path::strip_windows_verbatim(canon)?))
 }
 
 fn normalize_macos_tmp(path: PathBuf) -> PathBuf {
@@ -618,7 +576,7 @@ fn normalize_macos_tmp(path: PathBuf) -> PathBuf {
     path
 }
 
-fn path_under(path: &Path, root: &Path) -> bool {
+pub(crate) fn path_under(path: &Path, root: &Path) -> bool {
     path == root || path.starts_with(root)
 }
 
@@ -631,7 +589,7 @@ fn path_under(path: &Path, root: &Path) -> bool {
 /// Unix: `/tmp` (required) plus `/private/tmp` on macOS (required there; optional elsewhere) and
 /// `$TMPDIR` when set. Windows has no `/tmp` in the Codex policy sense — use `%TEMP%` / `%TMP%`
 /// (at least one must resolve) plus `$TMPDIR` when set; otherwise fail closed.
-fn temp_writable_roots() -> Option<Vec<PathBuf>> {
+pub(crate) fn temp_writable_roots() -> Option<Vec<PathBuf>> {
     temp_writable_roots_from(std::env::var("TMPDIR").ok().as_deref())
 }
 
@@ -2732,6 +2690,7 @@ time.sleep(60)
 
     #[test]
     fn strip_windows_verbatim_accepts_drive_and_unc_refuses_other_namespaces() {
+        use crate::win_path::strip_windows_verbatim_str;
         assert_eq!(
             strip_windows_verbatim_str(r"\\?\C:\Users\x\proj"),
             Some(r"C:\Users\x\proj".into())
@@ -2750,8 +2709,9 @@ time.sleep(60)
         );
         // Not verbatim — leave alone.
         assert_eq!(strip_windows_verbatim_str(r"C:\x"), Some(r"C:\x".into()));
-        // Refuse other \\?\ namespaces.
+        // Refuse bare drive, incomplete UNC, and other \\?\ namespaces.
         for bad in [
+            r"\\?\C:",
             r"\\?\Volume{00000000-0000-0000-0000-000000000000}\x",
             r"\\?\HarddiskVolume1\Windows",
             r"\\?\GLOBALROOT\Device\HarddiskVolume1\x",

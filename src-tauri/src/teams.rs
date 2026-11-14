@@ -1073,13 +1073,14 @@ pub fn preamble_for(data_dir: &Path, db: &Db, session_id: &str) -> Option<String
 ///
 /// On Windows, `canonicalize` returns a `\\?\` verbatim path. Git (and several other tools) reject
 /// those when creating worktrees, so an accepted drive/UNC prefix is stripped before the path is
-/// returned or stored. Unknown `\\?\` namespaces fail closed.
+/// returned or stored. Unknown `\\?\` namespaces fail closed. If no ancestor can be canonicalized,
+/// fail closed (do not return the raw path — that would skip namespace rejection).
 fn resolve(path: &Path) -> Result<PathBuf> {
     let mut tail = Vec::new();
     let mut cur = path.to_path_buf();
     loop {
         if let Ok(c) = cur.canonicalize() {
-            let stripped = strip_windows_verbatim(c)
+            let stripped = crate::win_path::strip_windows_verbatim(c)
                 .ok_or_else(|| anyhow!("unresolvable Windows path namespace for {}", path.display()))?;
             return Ok(tail.iter().rev().fold(stripped, |acc, t| acc.join(t)));
         }
@@ -1088,48 +1089,9 @@ fn resolve(path: &Path) -> Result<PathBuf> {
                 tail.push(n);
                 cur = p;
             }
-            _ => return Ok(path.to_path_buf()),
+            _ => bail!("unresolvable path (no canonical ancestor) for {}", path.display()),
         }
     }
-}
-
-/// Drop an accepted Windows `\\?\` / `\\?\UNC\` prefix from a canonical path so git and other tools
-/// accept it. Other `\\?\` namespaces (Volume GUID, HarddiskVolume, bare) are unresolvable → `None`.
-fn strip_windows_verbatim(path: PathBuf) -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        return strip_windows_verbatim_str(&path.to_string_lossy()).map(PathBuf::from);
-    }
-    #[cfg(not(windows))]
-    {
-        Some(path)
-    }
-}
-
-/// Pure string form of [`strip_windows_verbatim`] (testable on every OS).
-fn strip_windows_verbatim_str(s: &str) -> Option<String> {
-    let Some(rest) = s.strip_prefix(r"\\?\") else {
-        return Some(s.to_owned());
-    };
-    if let Some(unc) = rest.strip_prefix(r"UNC\") {
-        let mut parts = unc.split('\\');
-        let server = parts.next().unwrap_or("");
-        let share = parts.next().unwrap_or("");
-        if server.is_empty() || share.is_empty() {
-            return None;
-        }
-        return Some(format!(r"\\{unc}"));
-    }
-    let b = rest.as_bytes();
-    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
-        if b.len() == 2 {
-            return Some(rest.to_owned());
-        }
-        if b[2] == b'\\' || b[2] == b'/' {
-            return Some(rest.to_owned());
-        }
-    }
-    None
 }
 
 /// A branch name safe to hand to git later: no leading `-`, and git accepts it as a branch.
@@ -2184,6 +2146,7 @@ mod tests {
 
     #[test]
     fn strip_windows_verbatim_accepts_drive_and_unc_refuses_other_namespaces() {
+        use crate::win_path::strip_windows_verbatim_str;
         assert_eq!(
             strip_windows_verbatim_str(r"\\?\D:\trees\item"),
             Some(r"D:\trees\item".into())
@@ -2194,6 +2157,7 @@ mod tests {
         );
         assert_eq!(strip_windows_verbatim_str(r"D:\plain"), Some(r"D:\plain".into()));
         for bad in [
+            r"\\?\C:",
             r"\\?\Volume{11111111-2222-3333-4444-555555555555}\x",
             r"\\?\HarddiskVolume2\foo",
             r"\\?\foo",
@@ -2201,5 +2165,14 @@ mod tests {
         ] {
             assert_eq!(strip_windows_verbatim_str(bad), None, "must refuse {bad}");
         }
+    }
+
+    #[test]
+    fn resolve_fails_closed_when_no_ancestor_canonicalizes() {
+        let err = resolve(Path::new("")).unwrap_err().to_string();
+        assert!(err.contains("unresolvable"), "{err}");
+        let rel = Path::new("pb-no-such-relative-ancestor-xyz/a/b");
+        let err = resolve(rel).unwrap_err().to_string();
+        assert!(err.contains("unresolvable"), "{err}");
     }
 }

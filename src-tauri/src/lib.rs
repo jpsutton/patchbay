@@ -26,6 +26,7 @@ mod speech;
 mod teams;
 mod terminal;
 mod usage;
+mod win_path;
 pub mod web_token;
 pub mod agent_messaging;
 #[cfg(feature = "web")]
