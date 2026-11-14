@@ -381,6 +381,8 @@ pub async fn run(parent: &Arc<Session>, agent: &Arc<SubAgent>, cancel: &Cancella
     let live = &child.live;
     // Replies in a row cut off by the output token limit.
     let mut cut_offs = 0;
+    // The text it wrote beside its tool calls: what it reports if the step limit stops it.
+    let mut progress: Vec<String> = Vec::new();
     for _ in 0..parent.host.settings().limits.subagent_max_steps.max(1) {
         let inbox: Vec<String> = std::mem::take(&mut *agent.inbox.lock().unwrap());
         if !inbox.is_empty() {
@@ -441,6 +443,9 @@ pub async fn run(parent: &Arc<Session>, agent: &Arc<SubAgent>, cancel: &Cancella
             }
             return if text.trim().is_empty() { Err("the subagent finished without a report".into()) } else { Ok(text) };
         }
+        if !text.trim().is_empty() {
+            progress.push(text.trim().to_owned());
+        }
         live.set(format!("running {}", calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")));
         let results = turn::execute(child, &agent.registry, calls, cut_off, cancel, "↳ ").await;
         live.touch();
@@ -449,7 +454,28 @@ pub async fn run(parent: &Arc<Session>, agent: &Arc<SubAgent>, cancel: &Cancella
             return Err("stopped".into());
         }
     }
-    Err("the subagent used up its step limit before it finished".into())
+    Err(out_of_steps(&progress))
+}
+
+/// The most of a subagent's progress notes the main agent is given when it runs out of steps.
+const PROGRESS_KEEP: usize = 6000;
+
+/// The failure for a subagent that used up its steps: what it noted along the way, the latest
+/// notes first kept when there are too many.
+fn out_of_steps(progress: &[String]) -> String {
+    let head = "the subagent used up its step limit before it finished";
+    if progress.is_empty() {
+        return head.into();
+    }
+    let mut notes = progress.join("\n\n");
+    if notes.len() > PROGRESS_KEEP {
+        let mut from = notes.len() - PROGRESS_KEEP;
+        while !notes.is_char_boundary(from) {
+            from += 1;
+        }
+        notes = format!("[earlier notes left out]\n{}", &notes[from..]);
+    }
+    format!("{head}. Its progress notes, which may be incomplete:\n\n{notes}")
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
@@ -515,6 +541,15 @@ pub fn finish_worktree(w: &Worktree) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn running_out_of_steps_hands_over_the_progress_notes() {
+        assert_eq!(out_of_steps(&[]), "the subagent used up its step limit before it finished");
+        let two = out_of_steps(&["found A".into(), "found B".into()]);
+        assert!(two.starts_with("the subagent used up its step limit") && two.contains("found A\n\nfound B"));
+        let long = out_of_steps(&["é".repeat(PROGRESS_KEEP), "last note".into()]);
+        assert!(long.contains("[earlier notes left out]") && long.ends_with("last note"));
+    }
 
     #[test]
     fn notes_become_one_reminder() {
