@@ -846,6 +846,8 @@ fn create_code_session_local(
     // Native folder pickers can return a trailing slash (the KDE portal does); `/a/b` and `/a/b/`
     // are one folder, and the same permission rules and recent-folder entry must serve both.
     let cwd = gateway::folder_key(cwd);
+    // Named by a phone or a mesh peer: judged before `is_dir` touches it.
+    refuse_foreign_path(&peer_path_base(), std::path::Path::new(cwd), "the folder", &patchbay_agent::OsLinks)?;
     if !std::path::Path::new(cwd).is_dir() {
         anyhow::bail!("{cwd} is not a directory");
     }
@@ -2900,6 +2902,23 @@ const MAX_CREATE_DEPTH: usize = 2;
 /// `foreign_target_with` answers first and asks the reader (the filesystem) nothing for a path written
 /// as a share. A creator whose own folder is on a share keeps working (the share is its own, as in
 /// `inside`); one that is a link to another share is refused.
+/// A path that a mesh peer, a phone or an agent named, judged BEFORE anything is canonicalized, statted,
+/// listed or opened: another machine's share or a device path, or a link in a folder that points at one,
+/// is refused (Windows would connect to the share and offer the user's credentials). The lexical check
+/// inside `foreign_target_with` answers first and asks the filesystem nothing for a path written as a
+/// share. `base` only decides which share counts as the path's own (a base on a share keeps working).
+pub(crate) fn refuse_foreign_path(base: &std::path::Path, path: &std::path::Path, what: &str, links: &dyn patchbay_agent::LinkReader) -> anyhow::Result<()> {
+    if patchbay_agent::foreign_target_with(base, path, links) {
+        anyhow::bail!("{what} is on another machine's share or a device path, or behind a link to one");
+    }
+    Ok(())
+}
+
+/// The base for [`refuse_foreign_path`] when a peer names a folder and there is no session folder yet.
+fn peer_path_base() -> std::path::PathBuf {
+    code::agents::home_dir().unwrap_or_default()
+}
+
 fn refuse_foreign_folder(creator_cwd: &str, cwd: &str, links: &dyn patchbay_agent::LinkReader) -> anyhow::Result<()> {
     let base = std::path::Path::new(creator_cwd);
     if patchbay_agent::foreign_target_with(base, base, links) {
@@ -3655,6 +3674,9 @@ async fn fetch_package_files(state: &AppState, host: &str, token: &str, meta: &h
 
 /// Target side: pull session `id` from its host into `cwd` here and take over the lease.
 async fn import_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Result<Option<String>> {
+    // The folder a mesh peer asked this computer to import into: judged before `local_commits`, the
+    // existence checks and the unpack touch it.
+    refuse_foreign_path(&peer_path_base(), std::path::Path::new(cwd), "the folder", &patchbay_agent::OsLinks)?;
     let s = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("no such session"))?;
     let me = state.mesh.node_id().to_owned();
     let host = s.host_node.clone().filter(|h| h != &me).ok_or_else(|| anyhow::anyhow!("this session already runs here"))?;

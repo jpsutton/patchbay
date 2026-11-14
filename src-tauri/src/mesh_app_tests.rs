@@ -215,6 +215,58 @@ fn a_created_session_may_not_name_another_machines_share_or_a_link_to_one() {
     assert!(refuse_foreign_folder(creator, r"C:\Users\x\proj\src", &local).is_ok());
 }
 
+/// `refuse_foreign_path` asks the filesystem nothing about a path written as a share, and judges a link
+/// from where it points.
+#[cfg(windows)]
+#[test]
+fn the_shared_refusal_asks_nothing_about_a_share_and_judges_a_link_by_its_target() {
+    use std::cell::RefCell;
+    struct Spy {
+        asked: RefCell<Vec<PathBuf>>,
+        links: Vec<(PathBuf, PathBuf)>,
+    }
+    impl patchbay_agent::LinkReader for Spy {
+        fn link_target(&self, p: &Path) -> Option<PathBuf> {
+            self.asked.borrow_mut().push(p.to_path_buf());
+            self.links.iter().find(|(l, _)| l == p).map(|(_, t)| t.clone())
+        }
+    }
+    let base = Path::new(r"C:\Users\x");
+    let none = Spy { asked: RefCell::new(Vec::new()), links: Vec::new() };
+    for share in [r"\\192.0.2.1\s\f", "//192.0.2.1/s/f", r"\\?\UNC\192.0.2.1\s\f", r"\\.\pipe\f"] {
+        let err = refuse_foreign_path(base, Path::new(share), "the file", &none).unwrap_err().to_string();
+        assert!(err.contains("another machine's share"), "{share}: {err}");
+    }
+    assert!(none.asked.borrow().is_empty(), "the filesystem was asked about a share: {:?}", none.asked.borrow());
+    let link = PathBuf::from(r"C:\Users\x\to_share");
+    let spy = Spy { asked: RefCell::new(Vec::new()), links: vec![(link.clone(), PathBuf::from(r"\\192.0.2.1\s"))] };
+    assert!(refuse_foreign_path(base, &link.join("f.txt"), "the file", &spy).is_err());
+    assert!(refuse_foreign_path(base, Path::new(r"C:\Users\x\ok\f.txt"), "the file", &Spy { asked: RefCell::new(Vec::new()), links: Vec::new() }).is_ok());
+}
+
+/// Every place a mesh peer, a phone or an agent names a folder or a file to this host refuses another
+/// machine's share before touching it, with the guard's own message (not the OS's "network path was not
+/// found") and without waiting for the network: the folder a phone lists (`fs.dirs`), the folder it
+/// starts a session in (`code.create`), the folder a peer imports a session into (`code.import`), and the
+/// file an agent shares (`confined_share_path`).
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_and_agent_named_paths_on_a_share_are_refused_before_they_are_touched() {
+    let n = node("share-peer");
+    let started = std::time::Instant::now();
+    for share in [r"\\192.0.2.1\s\w", "//192.0.2.1/s/w", r"\\?\UNC\192.0.2.1\s\w"] {
+        let e = gateway::list_dirs_local(Some(share)).unwrap_err().to_string();
+        assert!(e.contains("another machine's share"), "fs.dirs {share}: {e}");
+        let e = create_code_session_local(&n.state, share, None, None).unwrap_err().to_string();
+        assert!(e.contains("another machine's share"), "code.create {share}: {e}");
+        let e = import_local(&n.state, "no-such-session", share).await.unwrap_err().to_string();
+        assert!(e.contains("another machine's share"), "code.import {share}: {e}");
+        let e = crate::agent_messaging::confined_share_path(&n.dir, share).unwrap_err().to_string();
+        assert!(e.contains("another machine's share"), "share tool {share}: {e}");
+    }
+    assert!(started.elapsed() < Duration::from_secs(2), "refusing took {:?}: the share was reached", started.elapsed());
+}
+
 /// A remote `code.image` request (a phone or another computer asking this host for a picture a reply
 /// linked) for a source on another machine's share, in any spelling, or behind a link in the session
 /// folder that points at one, is refused before the host's filesystem is asked: asking connects to the

@@ -664,7 +664,13 @@ fn share_tool_result(ok: &Value) -> String {
 /// `..` escapes, absolute paths outside the folder, directories, missing files and symlinks that
 /// resolve outside the folder are all refused. The registry then reuses the normal token/expiry/
 /// revoke semantics untouched.
-fn confined_share_path(cwd: &Path, input: &str) -> Result<PathBuf> {
+pub(crate) fn confined_share_path(cwd: &Path, input: &str) -> Result<PathBuf> {
+    // The agent names the file: another machine's share, a device path or a link to one is refused
+    // from the text BEFORE either canonicalize (an absolute path is used as written, so it would be
+    // connected to). The walk covers the session folder's own components as well, so a session folder
+    // that is a link to one is refused too.
+    let named = if Path::new(input).is_absolute() { PathBuf::from(input) } else { cwd.join(input) };
+    crate::refuse_foreign_path(cwd, &named, "the file", &patchbay_agent::OsLinks)?;
     let root = cwd.canonicalize().context("session folder does not exist")?;
     if !root.is_dir() {
         bail!("session folder is not a directory");
