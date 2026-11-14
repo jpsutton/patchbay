@@ -503,8 +503,9 @@ const GIT_ENV_REDIRECTORS: &[&str] = &[
 ];
 
 /// Scrub every `GIT_*` from a child Launch env: remove all names present in the parent plus
-/// known redirectors, then set `GIT_CONFIG_NOSYSTEM=1`. Spawn is under Patchbay control; mid-shell
-/// `export` by the agent is not (see live22+ export-persist proofs).
+/// known redirectors, then set `GIT_CONFIG_NOSYSTEM=1` and neutralize global config. Used only for
+/// **team worker seat** launches (see [`maybe_scrub_worker_git_env`]); mid-shell `export` by the
+/// agent is not under Patchbay control (see live22+ export-persist proofs).
 pub fn scrub_git_env(env: &mut Vec<(String, String)>, env_remove: &mut Vec<String>) {
     let mut remove: BTreeMap<String, ()> = BTreeMap::new();
     for k in env_remove.iter() {
@@ -518,15 +519,37 @@ pub fn scrub_git_env(env: &mut Vec<(String, String)>, env_remove: &mut Vec<Strin
     for k in GIT_ENV_REDIRECTORS {
         remove.insert((*k).to_owned(), ());
     }
-    // Drop any GIT_* we were about to inject except the forced NOSYSTEM.
-    env.retain(|(k, _)| k == "GIT_CONFIG_NOSYSTEM" || !k.starts_with("GIT_"));
+    // Drop any GIT_* we were about to inject except the forced NOSYSTEM / GLOBAL null.
+    env.retain(|(k, _)| {
+        matches!(k.as_str(), "GIT_CONFIG_NOSYSTEM" | "GIT_CONFIG_GLOBAL") || !k.starts_with("GIT_")
+    });
     *env_remove = remove.into_keys().collect();
-    env.retain(|(k, _)| k != "GIT_CONFIG_NOSYSTEM");
+    env.retain(|(k, _)| k != "GIT_CONFIG_NOSYSTEM" && k != "GIT_CONFIG_GLOBAL");
     env.push(("GIT_CONFIG_NOSYSTEM".into(), "1".into()));
+    env.push(("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()));
+}
+
+/// Scrub GIT_* and record `git_env_scrubbed` only for an active dispatched worker seat.
+/// Non-worker sessions keep the parent env as before. Returns whether scrub ran (for Launch).
+pub fn maybe_scrub_worker_git_env(
+    data_dir: &Path,
+    session_id: &str,
+    env: &mut Vec<(String, String)>,
+    env_remove: &mut Vec<String>,
+) -> bool {
+    if !crate::teams::is_active_dispatched_worker_in(data_dir, session_id) {
+        return false;
+    }
+    scrub_git_env(env, env_remove);
+    if let Ok(tdb) = crate::teams::TeamsDb::open(data_dir) {
+        let _ = tdb.mark_git_env_scrubbed(session_id);
+    }
+    true
 }
 
 /// Clear inherited git location / config overrides, then ignore global + system config.
-fn apply_hardened_git_env(cmd: &mut std::process::Command) {
+/// Shared by F2 probes and Teams worker-git gate probes ([`crate::teams::allow`]).
+pub fn apply_hardened_git_env(cmd: &mut std::process::Command) {
     for key in GIT_ENV_REDIRECTORS {
         cmd.env_remove(key);
     }
@@ -1116,6 +1139,8 @@ pub struct Launch {
     pub approvals: ApprovalSetup,
     /// Run this agent inside the app instead of spawning `program`.
     pub native: Option<super::acp::NativeAgent>,
+    /// When true, `acp::spawn` re-applies [`scrub_git_env`] (team worker seat launches only).
+    pub scrub_git_env: bool,
 }
 
 /// User overrides from Settings: agent id -> executable path.
@@ -1628,7 +1653,7 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
         env.push(("CLAUDE_CONFIG_DIR".to_owned(), dir));
     }
     let mut env_remove = providers.env_remove;
-    scrub_git_env(&mut env, &mut env_remove);
+    let scrub_git_env = maybe_scrub_worker_git_env(data_dir, &session.id, &mut env, &mut env_remove);
     Ok(Launch {
         program: resolved.program,
         args: resolved.args,
@@ -1648,6 +1673,7 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
             Some(Path::new(&session.cwd)),
         ),
         native: None,
+        scrub_git_env,
     })
 }
 
@@ -1701,7 +1727,7 @@ fn prepare_patchbay(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSess
         .map(grok_config::model_key);
     let mut env = Vec::new();
     let mut env_remove = Vec::new();
-    scrub_git_env(&mut env, &mut env_remove);
+    let scrub_git_env = maybe_scrub_worker_git_env(data_dir, &session.id, &mut env, &mut env_remove);
     Ok(Launch {
         program: PathBuf::new(),
         args: Vec::new(),
@@ -1721,6 +1747,7 @@ fn prepare_patchbay(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSess
         login_hint: AgentKind::Patchbay.login_hint(),
         approvals: ApprovalSetup::for_agent(AgentKind::Patchbay),
         native: Some(super::native::launcher(db.clone(), data_dir)),
+        scrub_git_env,
     })
 }
 
@@ -1760,7 +1787,7 @@ fn prepare_grok(
     .collect();
     env.extend(rendered.env);
     let mut env_remove = vec!["XAI_API_KEY".into(), "GROK_CODE_XAI_API_KEY".into()];
-    scrub_git_env(&mut env, &mut env_remove);
+    let scrub_git_env = maybe_scrub_worker_git_env(data_dir, &session.id, &mut env, &mut env_remove);
     Ok(Launch {
         program: resolved.program,
         args,
@@ -1772,6 +1799,7 @@ fn prepare_grok(
         login_hint: "",
         approvals: ApprovalSetup::for_agent(AgentKind::Grok),
         native: None,
+        scrub_git_env,
     })
 }
 
@@ -2981,7 +3009,7 @@ time.sleep(60)
     ///
     /// Must stay **outside** `/tmp`, `/private/tmp`, and `$TMPDIR` — F2 correctly refuses those
     /// for workspace-write. Prefer `CARGO_TARGET_DIR` (writable in CI/restricted sandboxes) over
-    /// a hard-coded home path like `~/patchbay-teams-data`. Nested `git init` under target is fine
+    /// a hard-coded home path like `~/…/data`. Nested `git init` under target is fine
     /// for ALLOW (own repo). Temp refuse tests intentionally use `temp_dir` instead.
     fn f2_non_temp_fixture(id: &str) -> PathBuf {
         let base = std::env::var_os("CARGO_TARGET_DIR")

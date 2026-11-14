@@ -1676,10 +1676,13 @@ async fn run(
         login_hint,
         approvals,
         native,
+        scrub_git_env,
     } = launch;
-    // Every Code agent spawn: strip GIT_* from the child env (prefix + known redirectors) and
-    // force GIT_CONFIG_NOSYSTEM=1. Mid-shell export by the agent is a separate residual.
-    crate::code::agents::scrub_git_env(&mut env, &mut env_remove);
+    // Team worker seat launches only: re-apply scrub (prepare already did + recorded the fact).
+    // Other Code sessions keep their env as before (F-E).
+    if scrub_git_env {
+        crate::code::agents::scrub_git_env(&mut env, &mut env_remove);
+    }
     emit(&sink, &csid, CodeEvent::Status { state: "starting".into(), message: None });
 
     // Patchbay's own agent and Grok Build each name their rewind methods in their own namespace.
@@ -3370,6 +3373,7 @@ for line in sys.stdin:
                 login_hint,
                 approvals,
                 native: None,
+                scrub_git_env: false,
             },
             cwd: dir.to_owned(),
             data_dir: dir.to_owned(),
