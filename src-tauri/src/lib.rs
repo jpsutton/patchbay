@@ -3640,10 +3640,21 @@ async fn package_local(state: &AppState, id: &str, kind: &str, have: Vec<String>
     }
 }
 
-/// A name a mesh peer chose for a package folder or a file in it: one plain component, no separator, no
-/// drive letter, not hidden or `..`.
+/// A name a mesh peer chose for a package folder or a file in it, as an ALLOW-LIST of the shape: 1 to 200
+/// characters of `A-Z a-z 0-9 . - _`, starting with a letter or a digit (so never `.`, `..` or a hidden
+/// name), not ending in `.`, and not a Windows device name (`CON`, `NUL`, `COM1`, `LPT1`, with or without an
+/// extension). That is one plain component and nothing else: no separator of either kind, no drive letter or
+/// stream (`:`), no absolute, UNC, verbatim (`\\?\`), device or NT (`\??\`) form, no empty name, no NUL, no space.
+/// A real host only sends `<kind>-<uuid>-<uuid>`, `workspace.bundle`, `workspace.tar` and `agent.tar`.
 fn plain_package_name(x: &str) -> bool {
-    !x.is_empty() && !x.contains(['/', '\\', ':']) && !x.starts_with('.')
+    let stem = x.split('.').next().unwrap_or("").to_ascii_lowercase();
+    let numbered = |p: &str| stem.len() == 4 && stem.starts_with(p) && stem.as_bytes()[3].is_ascii_digit();
+    let device = matches!(stem.as_str(), "con" | "prn" | "aux" | "nul" | "conin$" | "conout$") || numbered("com") || numbered("lpt");
+    (1..=200).contains(&x.len())
+        && x.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+        && x.as_bytes()[0].is_ascii_alphanumeric()
+        && !x.ends_with('.')
+        && !device
 }
 
 /// Copy a package's files from `host` into a local inbox directory. A failed copy leaves nothing behind.
@@ -3949,7 +3960,7 @@ impl mesh::RpcHandler for MeshRpc {
             }
             "code.fetch" => {
                 let (token, name) = (param(&p, "token")?, param(&p, "name")?);
-                if [token, name].iter().any(|x| x.contains(['/', '\\']) || x.starts_with('.')) {
+                if [token, name].iter().any(|x| !plain_package_name(x)) {
                     anyhow::bail!("bad name");
                 }
                 let path = handoff::outbox(&state.data_dir).join(token).join(name);
@@ -3957,7 +3968,7 @@ impl mesh::RpcHandler for MeshRpc {
             }
             "code.package_done" => {
                 let token = param(&p, "token")?;
-                if !token.contains(['/', '\\']) && !token.starts_with('.') {
+                if plain_package_name(token) {
                     let _ = tokio::fs::remove_dir_all(handoff::outbox(&state.data_dir).join(token)).await;
                 }
                 if p["moved"].as_bool() == Some(false) && token.starts_with("handoff-") {

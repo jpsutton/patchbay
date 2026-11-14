@@ -287,6 +287,117 @@ async fn peer_and_agent_named_paths_on_a_share_are_refused_before_they_are_touch
     assert!(started.elapsed() < Duration::from_secs(2), "refusing took {:?}: the share was reached", started.elapsed());
 }
 
+/// What a package name may be, class by class: one plain component and nothing else. Runs on every OS.
+#[test]
+fn a_package_name_is_one_plain_component_and_nothing_else() {
+    let classes: &[(&str, &[&str])] = &[
+        ("absolute (unix)", &["/etc/passwd", "/tmp/x", "/"]),
+        ("absolute (drive)", &[r"C:\Users\x", "C:/x", r"c:\"]),
+        ("UNC", &[r"\\192.0.2.1\s\x", "//192.0.2.1/s/x", r"\\h\s"]),
+        ("verbatim, device and NT forms", &[r"\\?\C:\x", r"\\?\UNC\h\s\x", r"\\.\pipe\x", r"\\.\PhysicalDrive0", r"\??\C:\x"]),
+        ("dot-dot", &["..", "../x", r"..\x", "a/../b", "...", "..."]),
+        ("dot and hidden", &[".", ".hidden", ".env", "-lead", "_lead"]),
+        ("separator", &["a/b", r"a\b", "a/", r"\a"]),
+        ("drive-relative and stream", &["C:x", "c:", "a:b", "x:y.txt"]),
+        ("empty", &[""]),
+        ("NUL and control", &["a\0b", "\0", "a\nb", "a\tb"]),
+        ("Windows device names", &["CON", "nul.txt", "COM1", "lpt9.log", "Aux", "COM9.tar"]),
+        ("trailing dot or space, space inside", &["a.", "a ", "a b", " a"]),
+        ("not plain ASCII", &["\u{e9}", "a\u{202e}b", "caf\u{e9}.tar"]),
+    ];
+    for (class, names) in classes {
+        for n in *names {
+            assert!(!plain_package_name(n), "{class}: {n:?} was accepted");
+        }
+    }
+    assert!(!plain_package_name(&"a".repeat(201)), "longer than 200 was accepted");
+    // What a real host sends is accepted.
+    for ok in [
+        "workspace.bundle",
+        "workspace.tar",
+        "agent.tar",
+        "handoff-0f8fad5b-d9cb-469f-a165-70867728950e-7c9e6679-7425-40de-944b-e07fc1f90ae7",
+        "a",
+        "com10",
+        "console.tar",
+    ] {
+        assert!(plain_package_name(ok), "{ok:?} was refused");
+    }
+    assert!(plain_package_name(&"a".repeat(200)));
+}
+
+/// A hostile HOSTING peer: the importing node must create nothing outside its own inbox whatever token or
+/// file name the host sends, on every OS (an absolute path on macOS or Linux reaches `~/.zshrc` or a launch
+/// agent; on Windows a share). Two linked nodes; the importer is asked to fetch from the real host with an
+/// absolute token, a `..` token and an absolute or `..` file name, and every one is refused before the host
+/// is asked for anything and before anything is created.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hostile_host_cannot_make_the_importer_create_anything_outside_its_inbox() {
+    let (a, b) = (node("alpha-pkg"), node("bravo-pkg"));
+    link(&a, &b).await;
+    let host = a.state.mesh.node_id().to_owned();
+    let scratch = std::env::temp_dir().join(format!("pb-pkg-escape-{}", db::new_id()));
+    let inbox = handoff::inbox(&b.dir);
+    let beside = inbox.parent().unwrap().join("escaped");
+    let meta: handoff::Meta = serde_json::from_value(json!({
+        "sessionId": "s", "cwd": "c", "acpSessionId": null, "git": null, "tarball": false, "agent": false,
+        "files": ["agent.tar"], "createdAt": 0
+    }))
+    .unwrap();
+    let sep = std::path::MAIN_SEPARATOR;
+    let tokens = [
+        scratch.to_string_lossy().into_owned(),
+        scratch.join("deeper").to_string_lossy().into_owned(),
+        "../escaped".to_owned(),
+        "..".to_owned(),
+        format!("..{sep}escaped"),
+        "/".to_owned(),
+    ];
+    for token in &tokens {
+        let e = fetch_package(&b.state, &host, token, &meta).await.unwrap_err().to_string();
+        assert!(e.contains("has a bad name"), "token {token:?}: {e}");
+    }
+    let names = [scratch.join("file").to_string_lossy().into_owned(), "../escaped".to_owned(), format!("..{sep}escaped"), "/etc/hosts".to_owned()];
+    for name in &names {
+        let mut m = meta.clone();
+        m.files = vec![name.clone()];
+        let e = fetch_package(&b.state, &host, "handoff-fine", &m).await.unwrap_err().to_string();
+        assert!(e.contains("has a bad name"), "file name {name:?}: {e}");
+    }
+    // The REAL host refuses the same names when a hostile importer asks for them (the host side and the
+    // importer share one validator), a `:` form included.
+    let ask = |token: String, name: String| {
+        let (b, host) = (&b, &host);
+        async move { b.state.mesh.rpc(host, "code.fetch", json!({ "token": token, "name": name, "offset": 0 })).await.unwrap_err().to_string() }
+    };
+    for token in tokens.iter().cloned().chain(["C:x".to_owned(), "x:y".to_owned(), "a:b".to_owned()]) {
+        let e = ask(token.clone(), "agent.tar".into()).await;
+        assert!(e.contains("bad name"), "host, token {token:?}: {e}");
+    }
+    for name in names.iter().cloned().chain(["x:y".to_owned(), "C:x".to_owned()]) {
+        let e = ask("handoff-fine".into(), name.clone()).await;
+        assert!(e.contains("bad name"), "host, file name {name:?}: {e}");
+    }
+    // `code.package_done` removes a package folder only for a plain token: a `:` token names a folder that
+    // exists (drive-relative on Windows, an ordinary folder elsewhere) and must be left alone.
+    let tag = db::new_id();
+    let (colon_token, victim) = if cfg!(windows) {
+        let cwd = std::env::current_dir().unwrap();
+        let drive: String = cwd.to_string_lossy().chars().take(2).collect();
+        (format!("{drive}pb-victim-{tag}"), cwd.join(format!("pb-victim-{tag}")))
+    } else {
+        (format!("x:pb-victim-{tag}"), handoff::outbox(&a.dir).join(format!("x:pb-victim-{tag}")))
+    };
+    std::fs::create_dir_all(&victim).unwrap();
+    b.state.mesh.rpc(&host, "code.package_done", json!({ "id": "none", "token": colon_token, "moved": true })).await.unwrap();
+    let survived = victim.exists();
+    let _ = std::fs::remove_dir_all(&victim);
+    assert!(survived, "package_done removed the folder a `:` token names");
+    assert!(!scratch.exists(), "an absolute token or file name was used as one");
+    assert!(!beside.exists(), "a `..` token or file name left the inbox");
+    assert!(!inbox.join("handoff-fine").exists(), "something was created in the inbox before the names were judged");
+}
+
 /// A remote `code.image` request (a phone or another computer asking this host for a picture a reply
 /// linked) for a source on another machine's share, in any spelling, or behind a link in the session
 /// folder that points at one, is refused before the host's filesystem is asked: asking connects to the
