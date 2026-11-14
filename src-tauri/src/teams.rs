@@ -82,6 +82,10 @@ UPDATE decisions SET class = 'coordinator' WHERE class = 'desk' AND team_id IN (
 "#, dispatch::MIGRATION, r#"
 -- Opt-in: workers may git add/commit inside their assigned worktree without a prompt (F2).
 ALTER TABLE templates ADD COLUMN allow_worker_commit INTEGER NOT NULL DEFAULT 0;
+"#, r#"
+-- Recorded at worker-seat spawn when Patchbay scrubbed GIT_* for that process (F-E).
+-- Attach/restore of an already-running session leaves this 0 → no git auto-approve.
+ALTER TABLE members ADD COLUMN git_env_scrubbed INTEGER NOT NULL DEFAULT 0;
 "#];
 
 /// First line of every exported file; `write_export` never overwrites a file without it.
@@ -357,8 +361,9 @@ fn builtin_roles() -> Vec<Role> {
              dispatch brief (the required `-c core.hooksPath=… -c core.fsmonitor=false -c core.sshCommand= \
              -c protocol.ext.allow=never` prefix before each git verb, and `--no-verify` on commit) — no heredoc, \
              no $(...), no multi-line message, no wrapper or prefix before git (not even `rtk`), no chaining, no \
-             extra -c flags. Single read-only `ls` / `cat` and the brief's git prefix with status / diff / log in \
-             the worktree are also fine. Report progress and blockers to the coordinator. Stop when the brief's \
+             extra -c flags. Single read-only `ls` / `cat` and the brief's git prefix with status / \
+             `diff --no-ext-diff --no-textconv` / `log --no-ext-diff --no-textconv` in the worktree are also fine. \
+             Report progress and blockers to the coordinator. Stop when the brief's \
              definition of done is met and report evidence."),
         role_seed("builtin-verifier", "Verifier", false, none, Some("builtin-lead"),
             "You are a verifier. Check a worker's result independently against the original brief: read the \
@@ -553,6 +558,28 @@ impl TeamsDb {
                 })
             })?
             .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Mark that this member's agent process was launched with `scrub_git_env` (worker seat only).
+    pub fn mark_git_env_scrubbed(&self, session_id: &str) -> Result<()> {
+        self.0.execute(
+            "UPDATE members SET git_env_scrubbed = 1 WHERE session_id = ?1 AND left_at IS NULL",
+            [session_id],
+        )?;
+        Ok(())
+    }
+
+    /// True when the live member row was recorded as launched with a scrubbed GIT_* env.
+    pub fn git_env_scrubbed(&self, session_id: &str) -> Result<bool> {
+        let v: Option<i64> = self
+            .0
+            .query_row(
+                "SELECT git_env_scrubbed FROM members WHERE session_id = ?1 AND left_at IS NULL",
+                [session_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(v == Some(1))
     }
 
     /// The live team membership of a session, if any (archived teams don't count).
@@ -1753,6 +1780,7 @@ mod tests {
         t.0.execute_batch("DROP TABLE dispatches").unwrap();
         // Strip later columns so replaying migrations from v2 does not hit "duplicate column".
         t.0.execute_batch("ALTER TABLE templates DROP COLUMN allow_worker_commit").unwrap();
+        t.0.execute_batch("ALTER TABLE members DROP COLUMN git_env_scrubbed").unwrap();
         t.0.pragma_update(None, "user_version", 2).unwrap();
         drop(t);
         let t = TeamsDb::open(&d).unwrap();

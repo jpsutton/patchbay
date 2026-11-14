@@ -16,11 +16,13 @@
 //! normal prompt. Repo hooks/fsmonitor/config gates remain as defense in depth.
 //!
 //! Git auto-approve is further limited by agent kind: only Codex with a proven non-persisting
-//! tool-shell (`agent_shell_export_persists` = `Some(false)`) and whose repo common config,
-//! `config.worktree`, gitdir, and `info/attributes` all lie **outside** the workspace-write
-//! writable set (worktree cwd + temp roots; see sbx-probe-home). OpenCode, Cursor, Claude Code,
-//! and other unsandboxed / unproven kinds always prompt for git. Spawn strips every `GIT_*` from
-//! the child env (`scrub_git_env`); mid-shell `export` is not under Patchbay control.
+//! tool-shell (`agent_shell_export_persists` = `Some(false)`, version-pinned) and whose repo
+//! common config, `config.worktree`, gitdir, `info/attributes`, and every effective config
+//! origin (includes) all lie **outside** the workspace-write writable set (worktree cwd + temp;
+//! see sbx-probe-home). Any effective `filter.*.clean|smudge|process` refuses `add`/`commit`.
+//! OpenCode, Cursor, Claude Code, and other unsandboxed / unproven kinds always prompt for git.
+//! Team worker seat spawn strips every `GIT_*` (`scrub_git_env`); mid-shell `export` is not under
+//! Patchbay control. Diff/log auto-approve requires `--no-ext-diff` and `--no-textconv`.
 //!
 //! The `-c` prefix stops repo-config hook/fsmonitor changes made after the approval check from
 //! executing, as long as the Patchbay hooks dir stays protected (`worker_safe_hooks_dir_ok` at
@@ -334,13 +336,29 @@ fn split_git_hardening<'a>(tokens: &'a [String], hooks_path: &Path) -> Option<&'
 /// Human-visible warning appended when a worker `git` command is not auto-approved.
 pub const WORKER_GIT_HOOKS_PROMPT: &str = "runs this repository's git hooks and config";
 
+/// live22 RESULT observed adapter pin (`CODEX_ACP_PACKAGE` / docs). Any other version ⇒ unproven.
+pub const LIVE22_CODEX_ACP_VERSION: &str = "2.2.2";
+
+/// True when the in-tree Codex ACP package pin still matches the live22-proven version.
+pub(crate) fn codex_acp_version_matches_live22() -> bool {
+    crate::code::agents::CODEX_ACP_PACKAGE
+        .rsplit_once('@')
+        .is_some_and(|(_, v)| v == LIVE22_CODEX_ACP_VERSION)
+}
+
 /// Live22+ evidence: whether each agent's tool-shell persists `export` across commands.
 /// `None` = unproven → no git auto-approve. `Some(true)` = persists → no auto-approve.
-/// `Some(false)` = does not persist → may auto-approve when other gates pass (Codex only).
+/// `Some(false)` = does not persist → may auto-approve when other gates pass (Codex only, and only
+/// when [`codex_acp_version_matches_live22`] — a package bump without a new live proof ⇒ prompt).
 pub(crate) fn agent_shell_export_persists(agent: &str) -> Option<bool> {
     match agent {
-        // live22 export-persist (sandbox 4531): mark empty after separate export+printf → no persist.
-        "codex" => Some(false),
+        // live22 export-persist (sandbox 4531) on codex-acp 2.2.2: mark empty → no persist.
+        "codex" => {
+            if !codex_acp_version_matches_live22() {
+                return None;
+            }
+            Some(false)
+        }
         // live22: mark empty after separate export+printf → no persist (still unsandboxed → no git auto-approve).
         "opencode" => Some(false),
         // live22: mark="persists" after separate export+printf → persists → no git auto-approve.
@@ -535,8 +553,16 @@ fn tokenize_worker_command(cmd: &str) -> Option<Vec<String>> {
 /// Option allow-lists (unknown option ⇒ not auto-approvable).
 const GIT_ADD_OPTS: &[&str] = &["-A", "--all", "-u", "--update", "--"];
 const GIT_STATUS_OPTS: &[&str] = &["-s", "--short", "-b", "--branch", "--porcelain", "--long"];
-const GIT_DIFF_OPTS: &[&str] =
-    &["--stat", "--name-only", "--name-status", "--cached", "--staged", "--no-ext-diff", "--no-textconv"];
+const GIT_DIFF_OPTS: &[&str] = &[
+    "--stat",
+    "--name-only",
+    "--name-status",
+    "--cached",
+    "--staged",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--",
+];
 const GIT_LOG_OPTS: &[&str] = &[
     "--oneline",
     "--decorate",
@@ -552,7 +578,16 @@ const GIT_LOG_OPTS: &[&str] = &[
     "--max-count=2",
     "--max-count=5",
     "--max-count=10",
+    // Required on every auto-approved log (patches / textconv / external diff).
+    "--no-ext-diff",
+    "--no-textconv",
 ];
+
+/// Auto-approved `diff` / `log` must carry both flags (textconv + external diff stay off).
+fn requires_no_ext_diff_and_no_textconv(rest: &[String]) -> bool {
+    let has = |flag: &str| rest.iter().any(|t| t == flag);
+    has("--no-ext-diff") && has("--no-textconv")
+}
 const LS_OPTS: &[&str] = &["-l", "-a", "-A", "-1", "-h", "-R", "-la", "-al", "-lh", "-hl", "-lah", "-alh", "-hla"];
 
 fn resolve_against(root: &Path, p: &str) -> Option<PathBuf> {
@@ -727,7 +762,7 @@ fn parse_git_verb(verb_and_rest: &[String], worktree: &Path) -> bool {
                     paths.push(t.clone());
                 }
             }
-            all_path_args_ok(worktree, &paths)
+            requires_no_ext_diff_and_no_textconv(rest) && all_path_args_ok(worktree, &paths)
         }
         "log" => {
             let mut paths = Vec::new();
@@ -740,7 +775,7 @@ fn parse_git_verb(verb_and_rest: &[String], worktree: &Path) -> bool {
                     paths.push(t.clone());
                 }
             }
-            all_path_args_ok(worktree, &paths)
+            requires_no_ext_diff_and_no_textconv(rest) && all_path_args_ok(worktree, &paths)
         }
         _ => false,
     }
@@ -789,14 +824,12 @@ fn is_safe_worker_command(cmd: &str, worktree: &Path, hooks_path: &Path) -> bool
 
 /// Read-only git probe in `cwd`. No `-c` overrides: they would make `config --get` lie about the
 /// keys we are inspecting. These subcommands do not run hooks or fsmonitor.
+/// Inherits the same scrub as F2 via [`crate::code::agents::apply_hardened_git_env`] so daemon-side
+/// `GIT_DIR` / `GIT_CONFIG_*` cannot redirect the probe away from the real repo.
 fn hardened_git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(cwd)
-        .args(args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .ok()?;
+    let mut cmd = std::process::Command::new("git");
+    crate::code::agents::apply_hardened_git_env(&mut cmd);
+    let out = cmd.args(["-C"]).arg(cwd).args(args).output().ok()?;
     if !out.status.success() {
         // `config --get` exits 1 when unset — treat as empty.
         if args.first() == Some(&"config") && out.status.code() == Some(1) {
@@ -805,6 +838,83 @@ fn hardened_git(cwd: &Path, args: &[&str]) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// Parse `git config --show-origin --show-scope --list` lines into (scope, file path or None, key=value).
+/// With both flags git prints `<scope>\t<origin>\t<key>=<value>` (scope first). File origins look
+/// like `file:/path/to/config` or `file:.git/config`; non-file (command/env) → None path.
+fn parse_config_list_origins(raw: &str) -> Vec<(String, Option<PathBuf>, String)> {
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
+        let (scope, origin, kv) = match parts.as_slice() {
+            [scope, origin, kv] => ((*scope).to_owned(), *origin, (*kv).to_owned()),
+            // `--show-origin` alone: `<origin>\t<key>=<value>`
+            [origin, kv] if origin.starts_with("file:") || origin.starts_with("command:") || origin.starts_with("blob:") => {
+                (String::new(), *origin, (*kv).to_owned())
+            }
+            _ => continue,
+        };
+        let path = if let Some(p) = origin.strip_prefix("file:") {
+            Some(PathBuf::from(p))
+        } else {
+            None
+        };
+        out.push((scope, path, kv));
+    }
+    out
+}
+
+/// Resolve absolute path of a config file origin relative to `worktree` when needed.
+fn resolve_config_origin_path(worktree: &Path, path: &Path) -> Option<PathBuf> {
+    if path.is_absolute() {
+        return path_key(path).or_else(|| Some(path.to_path_buf()));
+    }
+    // Relative origins (e.g. `.git/config`) are relative to the worktree cwd of the probe.
+    let joined = worktree.join(path);
+    path_key(&joined).or_else(|| Some(joined))
+}
+
+/// Effective config contributing files must all lie outside the writable set; unresolvable → refuse.
+fn worker_git_config_origins_outside_writable(worktree: &Path, writable: &[PathBuf]) -> bool {
+    let Some(raw) = hardened_git(worktree, &["config", "--show-origin", "--show-scope", "--list"]) else {
+        return false;
+    };
+    let entries = parse_config_list_origins(&raw);
+    if entries.is_empty() {
+        // An empty list with a successful probe is unusual; fail closed.
+        return false;
+    }
+    for (_scope, path, _kv) in &entries {
+        let Some(p) = path else {
+            // command:/env: origins — no file to place; fail closed (cannot prove outside writable).
+            return false;
+        };
+        let Some(abs) = resolve_config_origin_path(worktree, p) else {
+            return false;
+        };
+        if path_under_any(&abs, writable) {
+            return false;
+        }
+    }
+    true
+}
+
+/// True when any effective `filter.*.clean|smudge|process` is defined (any origin).
+fn worker_git_has_filter_driver(worktree: &Path) -> bool {
+    let Some(raw) = hardened_git(worktree, &["config", "--show-origin", "--show-scope", "--list"]) else {
+        return true; // fail closed: treat as "has filter" so add/commit prompt
+    };
+    for (_scope, _path, kv) in parse_config_list_origins(&raw) {
+        let key = kv.split_once('=').map(|(k, _)| k).unwrap_or(kv.as_str());
+        let lower = key.to_ascii_lowercase();
+        if lower.starts_with("filter.")
+            && (lower.ends_with(".clean") || lower.ends_with(".smudge") || lower.ends_with(".process"))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -1022,16 +1132,30 @@ fn allow_worker_commit(
         if !agent_may_git_auto_approve(agent) {
             return None;
         }
+        // F-E: attach/restore of an already-running session was never spawn-scrubbed → prompt.
+        if !tdb.git_env_scrubbed(session).ok().unwrap_or(false) {
+            return None;
+        }
         let Some(writable) = worker_git_writable_roots(agent, &worktree) else {
             return None;
         };
+        // Meta paths (common config / worktree config / gitdir / info/attributes) + every
+        // effective config origin (includes local/worktree/include/includeIf/global/system).
         if !worker_git_meta_outside_writable(&worktree, &writable) {
+            return None;
+        }
+        if !worker_git_config_origins_outside_writable(&worktree, &writable) {
             return None;
         }
         let Some(verb_rest) = split_git_hardening(&tokens, &hooks_path) else {
             return None;
         };
         let verb = verb_rest.first().map(String::as_str).unwrap_or("");
+        // Fail closed: any clean/smudge/process filter (any origin) blocks add/commit —
+        // worker-writable .gitattributes can select human-defined filters.
+        if matches!(verb, "add" | "commit") && worker_git_has_filter_driver(&worktree) {
+            return None;
+        }
         // Defense in depth: still refuse when the repo's own hooks/fsmonitor look hostile.
         if worker_git_repo_blocks_auto(&worktree, verb) {
             return None;
@@ -1040,8 +1164,39 @@ fn allow_worker_commit(
     Some((allow_option(options)?, "Auto-approved: worker commit in worktree".into()))
 }
 
-/// When a live worker's `git` execute is about to prompt, enrich `askReason` / allow option names
-/// with [`WORKER_GIT_HOOKS_PROMPT`]. Host-controlled (ACP permission path).
+/// True when `cmd` looks like it may invoke git: any whitespace/shell token whose basename is
+/// `git` (wrappers, absolute paths, `command git`, `env git`, `sh -c '…git…'`). When unsure, true.
+pub fn command_may_invoke_git(cmd: &str) -> bool {
+    let trimmed = cmd.trim_start();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Fast path: tokenizer accepted and first prog is exactly `git`.
+    if let Some(tokens) = tokenize_worker_command(cmd) {
+        if tokens.first().map(String::as_str) == Some("git") {
+            return true;
+        }
+    }
+    // Basename `git` on any path-like token (handles /usr/bin/git, rtk, env prefixes when split).
+    for tok in cmd.split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&' | '`' | '$' | '(' | ')' | '\'' | '"')) {
+        if tok.is_empty() {
+            continue;
+        }
+        let base = Path::new(tok).file_name().and_then(|s| s.to_str()).unwrap_or(tok);
+        if base == "git" || base == "git.exe" {
+            return true;
+        }
+    }
+    // `sh -c` / shell strings: substring heuristic when parsing is ambiguous.
+    let lower = cmd.to_ascii_lowercase();
+    lower.contains(" git ") || lower.contains("\tgit ") || lower.contains("`git") || lower.contains("$(git")
+        || lower.starts_with("git ") || lower.contains("/git ") || lower.ends_with("/git")
+        || lower.contains("/git\"") || lower.contains("/git'")
+}
+
+/// When a live worker's execute may invoke git and is about to prompt, enrich `askReason` / allow
+/// option names with [`WORKER_GIT_HOOKS_PROMPT`]. Host-controlled (ACP permission path) so the UI
+/// still shows the sentence when the agent supplies its own title.
 pub fn enrich_worker_git_permission(data_dir: &Path, session: &str, raw: &mut Value) {
     let tool_call = &raw["toolCall"];
     if tool_call["kind"].as_str() != Some("execute") {
@@ -1050,10 +1205,7 @@ pub fn enrich_worker_git_permission(data_dir: &Path, session: &str, raw: &mut Va
     let Some(cmd) = command_of(tool_call) else {
         return;
     };
-    let is_git = tokenize_worker_command(&cmd)
-        .and_then(|t| t.first().map(|s| s.as_str() == "git"))
-        .unwrap_or_else(|| cmd.trim_start().starts_with("git "));
-    if !is_git && !cmd.trim_start().starts_with("git") {
+    if !command_may_invoke_git(&cmd) {
         return;
     }
     if !data_dir.join("teams.db").is_file() {
@@ -1315,6 +1467,8 @@ mod tests {
         );
         t.attach(&team.id, "w1", "workers").unwrap();
         t.0.execute("UPDATE members SET item_id = ?1 WHERE session_id = 'w1'", [item_id]).unwrap();
+        // Tests model a dispatch-spawned worker (F-E launched-scrubbed fact).
+        t.mark_git_env_scrubbed("w1").unwrap();
         (d, worktree.to_string_lossy().into_owned(), proj.to_string_lossy().into_owned(), item_id.to_owned(), hooks)
     }
 
@@ -1362,7 +1516,15 @@ mod tests {
         assert!(hit.1.contains("worker commit"));
         assert!(allow_team_tool(&d, "w1", GIT_AGENT, &git_exec(&wt, &git_cmd(&safe, "add LICENSE")), &options(), &wt).is_some());
         assert!(allow_team_tool(&d, "w1", GIT_AGENT, &git_exec(&wt, &git_cmd(&safe, "status")), &options(), &wt).is_some());
-        assert!(allow_team_tool(&d, "w1", GIT_AGENT, &git_exec(&wt, &git_cmd(&safe, "diff")), &options(), &wt).is_some());
+        assert!(allow_team_tool(
+            &d,
+            "w1",
+            GIT_AGENT,
+            &git_exec(&wt, &git_cmd(&safe, "diff --no-ext-diff --no-textconv")),
+            &options(),
+            &wt
+        )
+        .is_some());
         assert!(allow_team_tool(
             &d,
             "w1",
@@ -1390,11 +1552,32 @@ mod tests {
                 "should allow: {cmd}"
             );
         }
-        for rest in ["log", "log -1", "status", "diff", "status -s -b"] {
+        for rest in [
+            "log --no-ext-diff --no-textconv",
+            "log -1 --no-ext-diff --no-textconv",
+            "status",
+            "diff --no-ext-diff --no-textconv",
+            "status -s -b",
+        ] {
             let cmd = git_cmd(&safe, rest);
             assert!(
                 allow_team_tool(&d, "w1", GIT_AGENT, &git_exec(&wt, &cmd), &options(), &wt).is_some(),
                 "should allow: {cmd}"
+            );
+        }
+        // Missing either flag → prompt.
+        for rest in [
+            "diff",
+            "diff --no-ext-diff",
+            "diff --no-textconv",
+            "log",
+            "log --no-ext-diff",
+            "log --no-textconv",
+        ] {
+            let cmd = git_cmd(&safe, rest);
+            assert!(
+                allow_team_tool(&d, "w1", GIT_AGENT, &git_exec(&wt, &cmd), &options(), &wt).is_none(),
+                "should refuse without both flags: {cmd}"
             );
         }
     }
@@ -1663,7 +1846,12 @@ mod tests {
                 "should refuse: {cmd}"
             );
         }
-        for rest in ["commit --no-verify -m work", "add LICENSE", "status", "diff"] {
+        for rest in [
+            "commit --no-verify -m work",
+            "add LICENSE",
+            "status",
+            "diff --no-ext-diff --no-textconv",
+        ] {
             let cmd = git_cmd(&safe, rest);
             assert!(
                 allow_team_tool(&d, "w1", GIT_AGENT, &git_exec(&wt, &cmd), &options(), &wt).is_some(),
@@ -2021,6 +2209,7 @@ mod tests {
         );
         t.attach(&team_temp.id, "wtmp", "workers").unwrap();
         t.0.execute("UPDATE members SET item_id = ?1 WHERE session_id = 'wtmp'", [item]).unwrap();
+        t.mark_git_env_scrubbed("wtmp").unwrap();
         assert!(
             !worker_safe_hooks_dir_ok(&temp_d, &team_temp, &wt_temp, &hooks_temp),
             "temp data_dir must refuse"
@@ -2056,6 +2245,34 @@ mod tests {
     }
 
     #[test]
+    fn worker_git_auto_approve_requires_launched_scrubbed_fact() {
+        let (d, wt, _proj, _item, safe) = worker_commit_fixture(true);
+        let t = TeamsDb::open(&d).unwrap();
+        t.0.execute("UPDATE members SET git_env_scrubbed = 0 WHERE session_id = 'w1'", [])
+            .unwrap();
+        let cmd = git_cmd(&safe, "status");
+        assert!(
+            allow_team_tool(&d, "w1", GIT_AGENT, &git_exec(&wt, &cmd), &options(), &wt).is_none(),
+            "attach/restore without spawn scrub must prompt"
+        );
+        t.mark_git_env_scrubbed("w1").unwrap();
+        assert!(allow_team_tool(&d, "w1", GIT_AGENT, &git_exec(&wt, &cmd), &options(), &wt).is_some());
+    }
+
+    #[test]
+    fn codex_export_persist_tied_to_live22_acp_version() {
+        assert_eq!(LIVE22_CODEX_ACP_VERSION, "2.2.2");
+        assert!(
+            crate::code::agents::CODEX_ACP_PACKAGE.ends_with("@2.2.2"),
+            "bump requires new live proof; package={}",
+            crate::code::agents::CODEX_ACP_PACKAGE
+        );
+        assert!(codex_acp_version_matches_live22());
+        assert_eq!(agent_shell_export_persists("codex"), Some(false));
+        assert!(agent_may_git_auto_approve("codex"));
+    }
+
+    #[test]
     fn worker_commit_message_file_inside_worktree_accepted() {
         let (d, wt, _proj, _item, safe) = worker_commit_fixture(true);
         let root = Path::new(&wt);
@@ -2085,11 +2302,12 @@ mod tests {
         );
     }
 
-    /// PLANTED-RED (b): `.gitattributes` clean filter when repo config sits inside the writable
-    /// set (in-worktree git) must fall to prompt.
+    /// PLANTED-RED (b / F-B i): in-tree filter.clean — gate prompts; with guard (filter unset) add
+    /// runs marker-absent; without guard the clean filter RUNS and marker is present.
+    #[cfg(unix)]
     #[test]
-    fn planted_red_gitattributes_when_config_writable_prompts() {
-        let d = allow_non_temp_data_dir("planted-b");
+    fn planted_red_filter_in_tree_runs_without_guard() {
+        let d = allow_non_temp_data_dir("planted-b-intree");
         let proj = d.join("proj");
         let trees = proj.join("trees");
         let item_id = "G-20261112-01";
@@ -2119,7 +2337,6 @@ mod tests {
             })
             .unwrap();
         let safe = ensure_worker_safe_hooks_dir(&d, &team.id).unwrap();
-        // In-worktree git ⇒ config/gitdir under Codex writable set.
         assert!(
             std::process::Command::new("git")
                 .args(["-c", "init.defaultBranch=main", "init", "-q"])
@@ -2137,14 +2354,16 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        std::fs::write(wt.join(".gitattributes"), "* filter=evil\n").unwrap();
+        let marker = d.join("FILTER_MARKER");
         let filter = d.join("evil-clean.sh");
-        std::fs::write(&filter, "#!/bin/sh\ncat\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&filter, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        std::fs::write(
+            &filter,
+            format!("#!/bin/sh\necho planted-red-filter >> {}\ncat\n", marker.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&filter, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(wt.join(".gitattributes"), "* filter=evil\n").unwrap();
         assert!(
             std::process::Command::new("git")
                 .args(["-C", wt.to_str().unwrap(), "config", "filter.evil.clean", filter.to_str().unwrap()])
@@ -2154,34 +2373,279 @@ mod tests {
         );
         t.attach(&team.id, "w1", "workers").unwrap();
         t.0.execute("UPDATE members SET item_id = ?1 WHERE session_id = 'w1'", [item_id]).unwrap();
+        t.mark_git_env_scrubbed("w1").unwrap();
         std::fs::write(wt.join("LICENSE"), "x").unwrap();
         let wt_s = wt.to_string_lossy().into_owned();
         let cmd = git_cmd(&safe, "add LICENSE");
-        let with_gate = allow_team_tool(&d, "w1", GIT_AGENT, &git_exec(&wt_s, &cmd), &options(), &wt_s);
-        // Contrast: tokenizer alone would accept; gate refuses because meta is writable.
         assert!(is_safe_worker_command(&cmd, &wt, &safe), "tokenizer alone accepts");
-        let raw_path = d.join("pb-planted-red-b-raws.txt");
-        let doc = format!(
-            "PLANTED-RED (b) config-writable gitattributes\n\
-             worktree={wt_s}\ncmd={cmd}\n\
-             tokenizer_ok=true\nallow={with_gate:?}\n\
-             without_writable_set_gate_would_auto_approve; with_gate→None/prompt\n"
+        let with_gate = allow_team_tool(&d, "w1", GIT_AGENT, &git_exec(&wt_s, &cmd), &options(), &wt_s);
+        assert!(with_gate.is_none(), "in-tree filter/config must prompt");
+
+        // With guard: unset filter — add must not write marker.
+        let _ = std::fs::remove_file(&marker);
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", &wt_s, "config", "--unset", "filter.evil.clean"])
+                .status()
+                .unwrap()
+                .success()
         );
+        let with_guard = std::process::Command::new("git")
+            .args(["-C", &wt_s, "add", "LICENSE"])
+            .output()
+            .unwrap();
+        let with_guard_raw = format!(
+            "status={:?}\nstdout={}\nstderr={}",
+            with_guard.status.code(),
+            String::from_utf8_lossy(&with_guard.stdout),
+            String::from_utf8_lossy(&with_guard.stderr)
+        );
+        let marker_with = std::fs::read_to_string(&marker).unwrap_or_default();
+        assert!(marker_with.is_empty(), "marker ABSENT with filter unset: {with_guard_raw}");
+
+        // Without guard: restore filter — add RUNS clean filter → marker PRESENT.
+        // Clear any inherited GIT_DIR so -C is honored (parallel tests must not leak process env).
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", &wt_s, "config", "filter.evil.clean", filter.to_str().unwrap()])
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .status()
+                .unwrap()
+                .success()
+        );
+        let _ = std::fs::remove_file(&marker);
+        // Need a change so clean filter runs again.
+        std::fs::write(wt.join("LICENSE"), "y").unwrap();
+        let without = std::process::Command::new("git")
+            .args(["-C", &wt_s, "add", "LICENSE"])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .unwrap();
+        let without_raw = format!(
+            "status={:?}\nstdout={}\nstderr={}",
+            without.status.code(),
+            String::from_utf8_lossy(&without.stdout),
+            String::from_utf8_lossy(&without.stderr)
+        );
+        let marker_without = std::fs::read_to_string(&marker).unwrap_or_default();
+        let doc = format!(
+            "PLANTED-RED (F-B i) filter in-tree\nallow={with_gate:?}\nwith_guard:\n{with_guard_raw}\n\
+             marker_with={marker_with:?}\n\nwithout_guard:\n{without_raw}\nmarker_without={marker_without:?}\n"
+        );
+        let raw_path = d.join("pb-planted-red-b-intree-raws.txt");
         std::fs::write(&raw_path, &doc).unwrap();
         eprintln!("{doc}");
-        assert!(with_gate.is_none(), "config inside writable set must prompt; raws={}", raw_path.display());
-        // Raw without gate: document that meta paths sit under worktree.
-        let meta = worker_git_meta_paths(&wt).expect("meta");
-        let writable = worker_git_writable_roots(GIT_AGENT, &wt).expect("writable");
-        let without_doc = format!(
-            "PLANTED-RED (b) without gate (meta under writable)\nmeta={meta:?}\nwritable={writable:?}\n\
-             meta_outside={}\n",
-            worker_git_meta_outside_writable(&wt, &writable)
+        assert!(
+            marker_without.contains("planted-red-filter"),
+            "marker PRESENT without guard; raws={}",
+            raw_path.display()
         );
-        let raw2 = d.join("pb-planted-red-b-without-gate-raws.txt");
-        std::fs::write(&raw2, &without_doc).unwrap();
-        assert!(!worker_git_meta_outside_writable(&wt, &writable));
-        assert!(raw2.is_file());
+    }
+
+    /// PLANTED-RED (b / F-B ii): `include.path` into the worktree — origin gate prompts; filter
+    /// via include RUNS without guard.
+    #[cfg(unix)]
+    #[test]
+    fn planted_red_filter_via_include_into_worktree() {
+        let (d, wt, proj, _item, safe) = worker_commit_fixture(true);
+        let marker = d.join("FILTER_INCLUDE_MARKER");
+        let filter = d.join("evil-include-clean.sh");
+        std::fs::write(
+            &filter,
+            format!("#!/bin/sh\necho planted-red-include-filter >> {}\ncat\n", marker.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&filter, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Include file lives inside the worktree (writable set); main config stays outside.
+        let include = Path::new(&wt).join("evil-gitconfig");
+        std::fs::write(
+            &include,
+            format!("[filter \"evil\"]\n\tclean = {}\n", filter.display()),
+        )
+        .unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", &proj, "config", "include.path", include.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(Path::new(&wt).join(".gitattributes"), "* filter=evil\n").unwrap();
+        std::fs::write(Path::new(&wt).join("LICENSE"), "x").unwrap();
+        let cmd = git_cmd(&safe, "add LICENSE");
+        assert!(is_safe_worker_command(&cmd, Path::new(&wt), &safe));
+        let with_gate = allow_team_tool(&d, "w1", GIT_AGENT, &git_exec(&wt, &cmd), &options(), &wt);
+        assert!(
+            with_gate.is_none(),
+            "include.path into worktree must refuse auto-approve (origin or filter)"
+        );
+
+        // With guard: remove include — add marker-absent.
+        let _ = std::fs::remove_file(&marker);
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", &proj, "config", "--unset", "include.path"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let with_guard = std::process::Command::new("git")
+            .args(["-C", &wt, "add", "LICENSE"])
+            .output()
+            .unwrap();
+        let with_guard_raw = format!(
+            "status={:?}\nstdout={}\nstderr={}",
+            with_guard.status.code(),
+            String::from_utf8_lossy(&with_guard.stdout),
+            String::from_utf8_lossy(&with_guard.stderr)
+        );
+        let marker_with = std::fs::read_to_string(&marker).unwrap_or_default();
+        assert!(marker_with.is_empty(), "ABSENT with include removed: {with_guard_raw}");
+
+        // Without guard: restore include — filter RUNS.
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", &proj, "config", "include.path", include.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let _ = std::fs::remove_file(&marker);
+        std::fs::write(Path::new(&wt).join("LICENSE"), "z").unwrap();
+        let without = std::process::Command::new("git")
+            .args(["-C", &wt, "add", "LICENSE"])
+            .output()
+            .unwrap();
+        let without_raw = format!(
+            "status={:?}\nstdout={}\nstderr={}",
+            without.status.code(),
+            String::from_utf8_lossy(&without.stdout),
+            String::from_utf8_lossy(&without.stderr)
+        );
+        let marker_without = std::fs::read_to_string(&marker).unwrap_or_default();
+        let doc = format!(
+            "PLANTED-RED (F-B ii) filter via include into worktree\nallow={with_gate:?}\n\
+             with_guard:\n{with_guard_raw}\nmarker_with={marker_with:?}\n\n\
+             without_guard:\n{without_raw}\nmarker_without={marker_without:?}\n"
+        );
+        let raw_path = d.join("pb-planted-red-b-include-raws.txt");
+        std::fs::write(&raw_path, &doc).unwrap();
+        eprintln!("{doc}");
+        assert!(
+            marker_without.contains("planted-red-include-filter"),
+            "marker PRESENT without guard; raws={}",
+            raw_path.display()
+        );
+    }
+
+    /// PLANTED-RED (F-A): configured textconv marker ABSENT with `--no-ext-diff --no-textconv`,
+    /// PRESENT without those flags. Raws under the fixture dir (not /tmp).
+    #[cfg(unix)]
+    #[test]
+    fn planted_red_diff_textconv_absent_with_flags() {
+        let (d, wt, _proj, _item, safe) = worker_commit_fixture(true);
+        let root = Path::new(&wt);
+        let marker = d.join("TEXTCONV_MARKER");
+        let _ = std::fs::remove_file(&marker);
+        let driver = d.join("evil-textconv.sh");
+        std::fs::write(
+            &driver,
+            format!("#!/bin/sh\necho planted-red-textconv >> {}\ncat \"$1\"\n", marker.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&driver, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", &wt, "config", "diff.evil.textconv", driver.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(root.join(".gitattributes"), "*.bin diff=evil\n").unwrap();
+        std::fs::write(root.join("blob.bin"), "v1").unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", &wt, "add", "blob.bin", ".gitattributes"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "-C",
+                    &wt,
+                    "-c",
+                    &format!("core.hooksPath={}", path_for_git_c_flag(&safe)),
+                    "-c",
+                    "core.fsmonitor=false",
+                    "commit",
+                    "--no-verify",
+                    "-m",
+                    "bin",
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(root.join("blob.bin"), "v2").unwrap();
+
+        let with_flags = format!(
+            "{} diff --no-ext-diff --no-textconv -- blob.bin",
+            git_pfx(&safe)
+        );
+        assert!(
+            allow_team_tool(&d, "w1", GIT_AGENT, &git_exec(&wt, &with_flags), &options(), &wt).is_some(),
+            "both flags required for auto-approve"
+        );
+        let _ = std::fs::remove_file(&marker);
+        let out_with = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&with_flags)
+            .current_dir(&wt)
+            .output()
+            .unwrap();
+        let with_raw = format!(
+            "status={:?}\nstdout={}\nstderr={}",
+            out_with.status.code(),
+            String::from_utf8_lossy(&out_with.stdout),
+            String::from_utf8_lossy(&out_with.stderr)
+        );
+        let marker_with = std::fs::read_to_string(&marker).unwrap_or_default();
+        assert!(
+            marker_with.is_empty(),
+            "marker must be ABSENT with --no-ext-diff --no-textconv; marker={marker_with:?}; raw={with_raw}"
+        );
+
+        let _ = std::fs::remove_file(&marker);
+        let without = std::process::Command::new("git")
+            .args(["-C", &wt, "diff", "--", "blob.bin"])
+            .output()
+            .unwrap();
+        let without_raw = format!(
+            "status={:?}\nstdout={}\nstderr={}",
+            without.status.code(),
+            String::from_utf8_lossy(&without.stdout),
+            String::from_utf8_lossy(&without.stderr)
+        );
+        let marker_without = std::fs::read_to_string(&marker).unwrap_or_default();
+        let doc = format!(
+            "PLANTED-RED (F-A) diff textconv\nwith_flags:\n{with_raw}\nmarker_with={marker_with:?}\n\n\
+             without_flags:\n{without_raw}\nmarker_without={marker_without:?}\n"
+        );
+        let doc_path = d.join("pb-planted-red-textconv-raws.txt");
+        std::fs::write(&doc_path, &doc).unwrap();
+        eprintln!("{doc}");
+        assert!(
+            marker_without.contains("planted-red-textconv"),
+            "marker must be PRESENT without flags; raws={}",
+            doc_path.display()
+        );
+        assert!(doc_path.is_file());
     }
 
     /// PLANTED-RED (c): spawn scrub removes inherited GIT_*; with guard removed the marker appears.
@@ -2209,6 +2673,10 @@ mod tests {
         assert_eq!(
             env.iter().find(|(k, _)| k == "GIT_CONFIG_NOSYSTEM").map(|(_, v)| v.as_str()),
             Some("1")
+        );
+        assert_eq!(
+            env.iter().find(|(k, _)| k == "GIT_CONFIG_GLOBAL").map(|(_, v)| v.as_str()),
+            Some("/dev/null")
         );
         let _ = std::fs::remove_file(&marker);
         let mut child = std::process::Command::new("sh");
@@ -2271,7 +2739,8 @@ mod tests {
             "toolCall": {
                 "kind": "execute",
                 "rawInput": { "command": "git status", "cwd": wt },
-                "askReason": "needs shell"
+                "askReason": "needs shell",
+                "title": "agent-supplied title"
             },
             "options": [
                 { "kind": "allow_once", "optionId": "once", "name": "Allow" },
@@ -2284,5 +2753,99 @@ mod tests {
         assert!(raw["options"][0]["name"].as_str().unwrap().contains(WORKER_GIT_HOOKS_PROMPT));
         assert_eq!(raw["options"][1]["name"].as_str().unwrap(), "Deny");
         let _ = safe;
+    }
+
+    #[test]
+    fn enrich_worker_git_permission_covers_wrapped_and_absolute_shapes() {
+        let (d, wt, _proj, _item, _safe) = worker_commit_fixture(true);
+        let shapes = [
+            "rtk git status",
+            "/usr/bin/git status",
+            "command git status",
+            "env git status",
+            "env -i HOME=/tmp git status",
+            "sh -c 'git status'",
+            "sh -c \"git status\"",
+            "git status",
+        ];
+        for cmd in shapes {
+            let mut raw = json!({
+                "toolCall": {
+                    "kind": "execute",
+                    "title": "agent own title",
+                    "rawInput": { "command": cmd, "cwd": wt },
+                    "askReason": ""
+                },
+                "options": [{ "kind": "allow_once", "optionId": "once", "name": "Allow" }]
+            });
+            assert!(command_may_invoke_git(cmd), "classify: {cmd}");
+            enrich_worker_git_permission(&d, "w1", &mut raw);
+            let reason = raw["toolCall"]["askReason"].as_str().unwrap_or("");
+            assert!(
+                reason.contains(WORKER_GIT_HOOKS_PROMPT),
+                "askReason must carry hooks phrase for {cmd:?}; got {reason:?}"
+            );
+            assert!(
+                raw["options"][0]["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains(WORKER_GIT_HOOKS_PROMPT),
+                "option name must carry hooks phrase for {cmd:?}"
+            );
+        }
+        // Non-git must not get the phrase.
+        let mut raw = json!({
+            "toolCall": {
+                "kind": "execute",
+                "rawInput": { "command": "ls -la", "cwd": wt },
+                "askReason": "list"
+            },
+            "options": [{ "kind": "allow_once", "optionId": "once", "name": "Allow" }]
+        });
+        enrich_worker_git_permission(&d, "w1", &mut raw);
+        assert_eq!(raw["toolCall"]["askReason"].as_str().unwrap(), "list");
+        assert_eq!(raw["options"][0]["name"].as_str().unwrap(), "Allow");
+    }
+
+    #[test]
+    fn hardened_git_ignores_daemon_git_dir_and_config_parameters() {
+        let (d, wt, _proj, _item, _safe) = worker_commit_fixture(true);
+        let decoy = d.join("decoy.git");
+        std::fs::create_dir_all(&decoy).unwrap();
+
+        // Unhardened child with daemon-like redirectors: GIT_DIR wins over -C.
+        let poisoned = std::process::Command::new("git")
+            .args(["-C", &wt, "rev-parse", "--is-inside-work-tree"])
+            .env("GIT_DIR", &decoy)
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_PARAMETERS", "'core.hooksPath=/tmp/evil'")
+            .output()
+            .unwrap();
+        let poisoned_out = String::from_utf8_lossy(&poisoned.stdout);
+        assert!(
+            !poisoned.status.success() || poisoned_out.trim() != "true",
+            "unhardened probe must not see the real worktree under GIT_DIR; out={poisoned_out:?}"
+        );
+
+        // Same redirectors on the Command, then apply_hardened_git_env clears them (F-C).
+        let mut cmd = std::process::Command::new("git");
+        cmd.env("GIT_DIR", &decoy)
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_PARAMETERS", "'core.hooksPath=/tmp/evil'");
+        crate::code::agents::apply_hardened_git_env(&mut cmd);
+        let cleared = cmd
+            .args(["-C", &wt, "rev-parse", "--is-inside-work-tree"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&cleared.stdout).trim(),
+            "true",
+            "hardened env must inspect the real repo; stderr={}",
+            String::from_utf8_lossy(&cleared.stderr)
+        );
+        assert_eq!(
+            hardened_git(Path::new(&wt), &["rev-parse", "--is-inside-work-tree"]).as_deref(),
+            Some("true")
+        );
     }
 }
