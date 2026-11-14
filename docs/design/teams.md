@@ -122,17 +122,19 @@ must carry, in this fixed order after `git` and before the verb (`--no-pager` be
 
 Any other `-c`, missing piece, or different value → normal prompt (no auto-approve). `git commit`
 also requires `--no-verify` plus `-m` / `--message` or `-F` / `--file` (path inside the worktree).
-`ls` / `cat` do not need the prefix. Git auto-approve is Codex-only (proven non-persisting shell +
-writable-set gate); other agents always prompt for git, and the permission prompt includes
-`runs this repository's git hooks and config`.
+`ls` / `cat` do not need the prefix. Git auto-approve is Codex-only (proven non-persisting shell on
+the live22-pinned `codex-acp` version + writable-set / effective-config-origin gate + spawn-scrub
+fact); other agents always prompt for git. The permission prompt (including wrappers / absolute
+`git` / `env` / `command` / `sh -c`) includes `runs this repository's git hooks and config` in a
+host-controlled field.
 
 - `git commit`: `--no-verify` and `-m` / `--message` or `-F` / `--file` (required; no `-q`/`-v`/`--template`/amend).
 - `git add`: paths and/or `-A` / `--all` / `-u` / `--update` / `--` (no `-f`, no `--pathspec-from-file`).
 - `git status`: `-s` / `--short` / `-b` / `--branch` / `--porcelain` / `--long`, plus relative paths.
-- `git diff`: `--stat` / `--name-only` / `--name-status` / `--cached` / `--staged` / `--no-ext-diff` /
-  `--no-textconv`, plus relative paths.
-- `git log`: `--oneline` / `--decorate` / `--stat` / `--reverse` / `-1`…`-5` / `-10` /
-  `--max-count=1|2|5|10`, plus relative paths.
+- `git diff`: must include both `--no-ext-diff` and `--no-textconv`; optional `--stat` /
+  `--name-only` / `--name-status` / `--cached` / `--staged`, plus relative paths.
+- `git log`: must include both `--no-ext-diff` and `--no-textconv`; optional `--oneline` /
+  `--decorate` / `--stat` / `--reverse` / `-1`…`-5` / `-10` / `--max-count=1|2|5|10`, plus relative paths.
 - `ls`: `-l` / `-a` / `-A` / `-1` / `-h` / `-R` / `-la` / `-al` / `-lh` / `-hl` / `-lah` / `-alh` /
   `-hla`, plus relative paths.
 - `cat`: one or more relative paths required (no bare `cat`, no `-`).
@@ -161,15 +163,19 @@ Residuals (attackers):
   atomic) under normal placement (a non-temp, non-worktree `data_dir`); ancestors above `data_dir` are not
   lstat-checked; Windows owner/ACL enforcement is best-effort readonly metadata and Windows
   behaviour is unexecuted reasoning;
-- mid-shell `export GIT_*` after spawn: Patchbay scrubs every `GIT_*` from the child env at
-  Launch/spawn (`scrub_git_env` + `GIT_CONFIG_NOSYSTEM=1`). Mid-shell set is not under Patchbay
-  control; kinds where the tool-shell persists `export` across commands (or is unproven) never get
-  git auto-approve. Codex with proven non-persist may auto-approve only when repo common config,
-  `config.worktree`, gitdir, and `info/attributes` are outside the workspace-write writable set
-  (worktree cwd + temp; sbx-probe-home). OpenCode and unsandboxed kinds always prompt for git;
-- clean/smudge filters via `.gitattributes` when config/attributes are writable (writable-set gate
-  refuses auto-approve); textconv/external diff residuals remain for human-approved bare git;
-- human-approved bare git stays check-then-exec racy;
+- mid-shell `export GIT_*` after spawn: Patchbay scrubs every `GIT_*` (and sets
+  `GIT_CONFIG_NOSYSTEM=1` + `GIT_CONFIG_GLOBAL=/dev/null`) only for **team worker seat** launches,
+  recording a server-side `git_env_scrubbed` fact; attach/restore of an already-running session
+  keeps the prior env and never gets git auto-approve. Mid-shell set is not under Patchbay
+  control; kinds where the tool-shell persists `export` (or is unproven / wrong `codex-acp`
+  version vs live22's 2.2.2) never get git auto-approve. Codex may auto-approve only when every
+  effective config origin (local / worktree / include / includeIf) and common config /
+  `config.worktree` / gitdir / `info/attributes` sit outside the workspace-write writable set
+  (worktree cwd + temp; sbx-probe-home). Any effective `filter.*.clean|smudge|process` refuses
+  `add`/`commit` (strict: even human-global filters would, except spawn/probe neutralize global).
+  Diff/log require `--no-ext-diff` and `--no-textconv`. OpenCode and unsandboxed kinds always
+  prompt for git;
+- human-approved bare git stays check-then-exec racy (textconv / external diff / filters / hooks);
 - Codex `~/.codex` approved prefixes never reach the Patchbay permission path (pb-20261111-83).
 Unbounded `ls -R` is not capped here.
 
