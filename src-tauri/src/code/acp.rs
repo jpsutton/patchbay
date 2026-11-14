@@ -742,6 +742,8 @@ pub struct SpawnSpec {
     pub agent: String,
     pub launch: Launch,
     pub cwd: PathBuf,
+    /// Patchbay data dir (teams.db); used to enrich worker git permission prompts.
+    pub data_dir: PathBuf,
     /// Existing ACP session to `session/load`; `None` creates a new one.
     pub resume: Option<String>,
     pub pending: PendingPermissions,
@@ -756,6 +758,7 @@ pub struct SpawnSpec {
 struct UiClient {
     sink: Sink,
     code_session_id: String,
+    data_dir: PathBuf,
     pending: PendingPermissions,
     questions: PendingQuestions,
     auto_approve: AutoApprove,
@@ -935,7 +938,12 @@ impl UiClient {
         let (Some(current), Some(fixed)) = (current, self.approvals.select_mode.as_ref()) else { return };
         // Codex: the mode the session's approval mode implies right now, read-only when it can't be read.
         let want = if self.approvals.follows_approval {
-            super::agents::codex_mode_for((self.permission_mode)().as_deref()).to_owned()
+            super::agents::codex_mode_for(
+                (self.permission_mode)().as_deref(),
+                self.approvals.dispatched_worker,
+                self.approvals.session_cwd.as_deref(),
+            )
+            .to_owned()
         } else if self.approvals.hide_modes.contains(&current) {
             fixed.clone()
         } else {
@@ -1036,6 +1044,7 @@ mod tool_call_tests {
         let client = UiClient {
             sink: Arc::new(|_| {}),
             code_session_id: "c".into(),
+            data_dir: std::env::temp_dir().join("pb-acp-test-no-teams"),
             pending: Arc::default(),
             questions: Arc::default(),
             auto_approve: Arc::new(|_, _| None),
@@ -1188,6 +1197,7 @@ mod tool_call_tests {
         let client = UiClient {
             sink,
             code_session_id: "c".into(),
+            data_dir: std::env::temp_dir().join("pb-acp-test-no-teams"),
             pending,
             questions: Arc::default(),
             auto_approve: Arc::new(|_, _| None),
@@ -1400,6 +1410,8 @@ impl UiClient {
             );
             return json!({ "outcome": { "outcome": "selected", "optionId": option_id } });
         }
+        // Worker git that was not auto-approved: warn that allow runs hooks/config.
+        crate::teams::enrich_worker_git_permission(&self.data_dir, &self.code_session_id, &mut raw);
         let request_id = crate::db::new_id();
         let (tx, rx) = oneshot::channel();
         self.pending
@@ -1684,6 +1696,7 @@ async fn run(
         agent,
         launch,
         cwd,
+        data_dir,
         resume,
         pending,
         questions,
@@ -1695,8 +1708,8 @@ async fn run(
     let Launch {
         program,
         args,
-        env,
-        env_remove,
+        mut env,
+        mut env_remove,
         ext: mut extensions,
         session_meta,
         initial_model,
@@ -1704,6 +1717,9 @@ async fn run(
         approvals,
         native,
     } = launch;
+    // Every Code agent spawn: strip GIT_* from the child env (prefix + known redirectors) and
+    // force GIT_CONFIG_NOSYSTEM=1. Mid-shell export by the agent is a separate residual.
+    crate::code::agents::scrub_git_env(&mut env, &mut env_remove);
     emit(&sink, &csid, CodeEvent::Status { state: "starting".into(), message: None });
 
     // Patchbay's own agent and Grok Build each name their rewind methods in their own namespace.
@@ -1773,6 +1789,7 @@ async fn run(
     let client = UiClient {
         sink: sink.clone(),
         code_session_id: csid.clone(),
+        data_dir,
         pending: pending.clone(),
         questions: questions.clone(),
         auto_approve,
@@ -1923,7 +1940,14 @@ async fn run(
     // Agents with approval policies of their own: start in the one that asks.
     let start_mode = if approvals.follows_approval {
         // Read now, not at launch: the approval mode may have changed while the agent started.
-        Some(super::agents::codex_mode_for(permission_mode().as_deref()).to_owned())
+        Some(
+            super::agents::codex_mode_for(
+                permission_mode().as_deref(),
+                approvals.dispatched_worker,
+                approvals.session_cwd.as_deref(),
+            )
+            .to_owned(),
+        )
     } else {
         approvals.select_mode.clone()
     };
@@ -1955,7 +1979,11 @@ async fn run(
             config_options: cfg.extra.clone(),
             extensions,
             approval_gaps: if approvals.follows_approval {
-                super::agents::codex_gaps_for(permission_mode().as_deref())
+                super::agents::codex_gaps_for(
+                    permission_mode().as_deref(),
+                    approvals.dispatched_worker,
+                    approvals.session_cwd.as_deref(),
+                )
             } else {
                 approvals.gaps
             },
@@ -3393,6 +3421,7 @@ for line in sys.stdin:
                 native: None,
             },
             cwd: dir.to_owned(),
+            data_dir: dir.to_owned(),
             resume: None,
             pending: Arc::default(),
             questions: Arc::default(),

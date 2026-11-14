@@ -897,11 +897,13 @@ mod tests {
         let (a, b) = (temp_db(), temp_db());
         let mut p = load(&a);
         p.group_by_project = true;
+        p.group_by_team = true;
         p.theme = "dark".into();
         save(&a, &p).unwrap();
         sync(&a, &b);
         let got = load(&b);
         assert!(got.group_by_project);
+        assert!(got.group_by_team);
         assert_eq!(got.theme, "system");
         // Saving an unrelated setting doesn't write the synced ones again.
         let mut q = got.clone();
@@ -909,7 +911,7 @@ mod tests {
         save(&b, &q).unwrap();
         let back = sync(&b, &a);
         assert!(back.rows.is_empty(), "{:?}", back.rows);
-        assert_eq!(b.list_ui_prefs().unwrap().len(), 1);
+        assert_eq!(b.list_ui_prefs().unwrap().len(), 2);
     }
 
     /// pb-20261111-22: `active_turn_since` is the host's local liveness flag. It must never

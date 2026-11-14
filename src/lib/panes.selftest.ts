@@ -18,6 +18,7 @@ import {
   restorePanes,
   rowsFor,
   selectPane,
+  swapPane,
   swapPanes,
   type PaneState,
 } from "./panes.ts";
@@ -112,6 +113,15 @@ eq(openInSplit(st(["a", "b"], "a"), "c", "right", 2), st(["a", "c"], "c"), "remo
 eq(openInSplit(st(["a", "b"], "b"), "c", "left", 2), st(["c", "b"], "c"), "remote: replace left at max 2");
 // No left neighbour of the first pane: replace the other pane instead.
 eq(openInSplit(st(["a", "b"], "a"), "c", "left", 2), st(["a", "c"], "c"), "remote: replace other when no left neighbour");
+
+// Swapping in place on restart:
+eq(swapPane(st([], "a"), "a", "b"), st([], "b"), "swapPane: unsplit + open");
+const unsplitOther = st([], "c");
+assert(swapPane(unsplitOther, "a", "b") === unsplitOther, "swapPane: unsplit + other open returns same object");
+eq(swapPane(st(["a", "c"], "c"), "a", "b"), st(["b", "c"], "c"), "swapPane: split with old in non-focused slot");
+eq(swapPane(st(["a", "c"], "a"), "a", "b"), st(["b", "c"], "b"), "swapPane: split with old focused");
+const notPresent = st(["x", "y"], "x");
+assert(swapPane(notPresent, "a", "b") === notPresent, "swapPane: old not present returns same object");
 eq(insertPaneAt(st(["a", "b"], "a"), "c", 1, 2), st(["a", "b"], "a"), "remote: insert at max 2 does not add");
 eq(restorePanes(["a", "b", "c"], live, 2), ["a", "b"], "remote: restore caps at 2");
 

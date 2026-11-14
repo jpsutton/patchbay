@@ -233,6 +233,7 @@ impl CodeManager {
             agent: session.agent.clone(),
             launch,
             cwd: PathBuf::from(&session.cwd),
+            data_dir: data_dir.to_path_buf(),
             resume: session.acp_session_id.clone(),
             pending: self.pending.clone(),
             questions: self.questions.clone(),
@@ -253,7 +254,14 @@ impl CodeManager {
             auto_approve: {
                 let db = db.clone();
                 let cwd = session.cwd.clone();
+                let data_dir = data_dir.to_path_buf();
                 Arc::new(move |tool_call, options| {
+                    // A live team member's call to a team tool needs no prompt (teams/allow.rs).
+                    if let Some(agent) = db.get_code_session(&csid).ok().flatten().map(|s| s.agent)
+                        && let Some(hit) = crate::teams::allow_team_tool(&data_dir, &csid, &agent, tool_call, options, &cwd)
+                    {
+                        return Some(hit);
+                    }
                     // Read fresh each time so rules and the session's Ask/Auto/Always apply at once.
                     let rules = db.list_permission_rules().ok()?;
                     let mode = db

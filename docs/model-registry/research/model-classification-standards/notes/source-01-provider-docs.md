@@ -1,0 +1,7 @@
+# Provider docs — notes
+Read 2026-11-10 (index + live fetch where noted).
+
+- OpenAI, "Reasoning models", https://platform.openai.com/docs/guides/reasoning — VERIFIED LIVE 2026-11-10 20:33 UTC. Reasoning models use internal reasoning tokens; reasoning.effort none/minimal/low/medium/high/xhigh/max, model-dependent defaults (gpt-5.5 defaults medium); reasoning tokens billed as output, occupy context. GPT-6 Astra recommended start; gpt-5.6-terra lower cost, luna lowest cost/latency. Pro mode (standard/pro) independent of effort.
+- Anthropic, "Models overview", https://platform.claude.com/docs/en/models/overview?ref=toolarium.ru — INDEX (search result 2026-11-10). Start with Opus 5.5 most workloads; Fable 5.2 demanding reasoning/long-horizon agentic; Sonnet 5.5 best speed+intelligence; Haiku 5.5 high-volume latency-sensitive classification/extraction/routing. Prices $8/$40, $4/$20, $2/$10, from $0.10/$0.50. All 1M context, Jun 2026 cutoff.
+- Anthropic Claude Code, "Model configuration", https://code.claude.com/docs/en/model-config — VERIFIED LIVE 2026-11-10. Aliases opus/sonnet/haiku/fable/best/opusplan; aliases resolve to newest version and update over time; pin with full model name e.g. claude-opus-5-5. opusplan = Opus in plan mode, Sonnet in execution. Fable most capable, no default.
+- Anthropic adaptive thinking docs (via mirror) https://github.com/sullivan-street-projects/anthropic-docs-local/blob/HEAD/api/adaptive-thinking.md — effort low/medium/high/xhigh/max; adaptive thinking lets Claude decide whether/how much to think per request.

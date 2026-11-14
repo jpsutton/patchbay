@@ -8,10 +8,11 @@ import { DiagnosticsPage } from "./DiagnosticsPage";
 import { McpPage } from "./McpPage";
 import { MeshPage } from "./MeshPage";
 import { PromptsPage } from "./PromptsPage";
+import { TeamsPage } from "./TeamsPage";
 import { UsagePage } from "./UsagePage";
 import { ReadAloudSettings } from "./ReadAloudSettings";
 
-export type PrefSection = "general" | "chat" | "prompts" | "agents" | "agent-prompt" | "mcp" | "terminal" | "mesh" | "usage" | "diagnostics";
+export type PrefSection = "general" | "chat" | "prompts" | "agents" | "agent-prompt" | "mcp" | "terminal" | "mesh" | "teams" | "usage" | "diagnostics";
 
 export const PREF_SECTIONS: { id: PrefSection; label: string }[] = [
   { id: "general", label: "General" },
@@ -22,6 +23,7 @@ export const PREF_SECTIONS: { id: PrefSection; label: string }[] = [
   { id: "mcp", label: "MCP servers" },
   { id: "terminal", label: "Terminal" },
   { id: "mesh", label: "Mesh" },
+  { id: "teams", label: "Teams" },
   { id: "usage", label: "Usage" },
   { id: "diagnostics", label: "Diagnostics" },
 ];
@@ -213,6 +215,9 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
         >
           <Toggle label="Group Code sessions by project name" checked={prefs.groupByProject} onChange={(v) => set("groupByProject", v)} />
         </Row>
+        <Row label="Group Code sessions by team">
+          <Toggle label="Group Code sessions by team" checked={prefs.groupByTeam} onChange={(v) => set("groupByTeam", v)} />
+        </Row>
         <Row label="Open on launch">
           <Choice
             value={prefs.launchTab}
@@ -275,6 +280,7 @@ export function PreferencesPage({ section }: { section: PrefSection }) {
   if (section === "prompts") return <PromptsPage />;
   if (section === "mcp") return <McpPage />;
   if (section === "mesh") return <MeshPage />;
+  if (section === "teams") return <TeamsPage />;
   if (section === "usage") return <UsagePage />;
   if (section === "diagnostics") return <DiagnosticsPage />;
 

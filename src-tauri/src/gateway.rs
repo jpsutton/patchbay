@@ -252,7 +252,7 @@ pub(crate) fn list_dirs_local(path: Option<&str>) -> Result<Value> {
 pub(crate) fn create_local(state: &AppState, p: &Value) -> Result<crate::db::CodeSession> {
     let cwd = p["cwd"].as_str().ok_or_else(|| anyhow!("missing cwd"))?;
     let agent = p["agent"].as_str().map(str::to_owned);
-    crate::create_code_session_local(state, cwd, p["modelRef"].as_str(), agent)
+    crate::create_code_session_local(state, cwd, p["modelRef"].as_str(), agent, p["permissionMode"].as_str())
 }
 
 /// Conversations, Code sessions with what each is doing now, the Code sidebar's layout of groups

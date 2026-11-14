@@ -28,6 +28,7 @@ import type {
   AgentId,
   AgentInfo,
   AuthChoice,
+  SessionRole,
   WireFrame,
   WireLogStatus,
 } from "../lib/ipc";
@@ -1104,6 +1105,23 @@ const CLAUDE_SESSIONS = [
   { id: "c3", cwd: "/home/demo/projects/old-worktree", cwdExists: false, title: "Refactor parser", preview: "Split the parser into a lexer and a parser", modified: Date.now() - 86_400_000 * 20, size: 90_000, imported: null, configDir: "/home/demo/.claude", archived: true },
 ];
 
+const fakeTemplate = {
+  id: "builtin-triage-desk", name: "Triage desk", routing: [],
+  seats: [
+    { seat: "coordinator", roleId: "builtin-desk", agent: "claude-code", model: "sonnet", permissionMode: "default", count: 1 },
+    { seat: "advisor", roleId: "builtin-advisor", agent: "claude-code", model: "opus", permissionMode: "default", count: 1 },
+    { seat: "lead", roleId: "builtin-lead", agent: "claude-code", model: "sonnet", permissionMode: "default", count: 1 },
+    { seat: "workers", roleId: "builtin-worker", agent: "claude-code", model: "sonnet", permissionMode: "default", count: 4 },
+  ],
+};
+const noCaps = { writesItems: false, dispatches: false, decides: false, merges: false };
+let fakeRoles: any[] = ["Coordinator", "Advisor", "Ship Lead", "Worker", "Verifier"].map((name, i) => ({
+  id: `builtin-${["desk", "advisor", "lead", "worker", "verifier"][i]}`, name, standing: i < 3, instructions: `You are the ${name.toLowerCase()}.`, caps: noCaps, reportsTo: null, builtin: true,
+}));
+let fakeTemplates: any[] = [fakeTemplate];
+let fakeTeams: any[] = [];
+let fakeMembers: any[] = [];
+
 export function install() {
   mockWindows("main");
   if (phoneApp) {
@@ -1561,6 +1579,7 @@ export function install() {
         }
         case "create_code_session": {
           const prefs = JSON.parse(db.settings.preferences ?? "{}") as { defaultAgent?: AgentId; permissionMode?: CodeSession["permissionMode"] };
+          const mode = (a.permissionMode as CodeSession["permissionMode"] | null) ?? prefs.permissionMode ?? "default";
           const s: CodeSession = {
             id: id(),
             cwd: a.cwd as string,
@@ -1575,7 +1594,7 @@ export function install() {
             agentModel: null,
             hostNode: (a.host as string | null) ?? ME,
             epoch: 0,
-            permissionMode: prefs.permissionMode ?? "default",
+            permissionMode: mode,
           };
           db.code.push(s);
           return s;
@@ -1771,6 +1790,99 @@ export function install() {
         case "apply_sidebar_layout": {
           db.sidebarLayout = applyChange(db.sidebarLayout, { put: a.put as SidebarEntry[], remove: a.remove as string[] });
           return null;
+        }
+        case "team_board": return { statuses: ["noticed", "triaged", "dispatched", "done"], items: [], decisions: [], events: [] };
+        case "team_decision_answer": return null;
+        case "list_roles": return fakeRoles;
+        case "save_role": {
+          const i = a.input as any;
+          const r = { ...i, id: i.id ?? id(), builtin: false };
+          fakeRoles = [...fakeRoles.filter((x) => x.id !== r.id), r];
+          return r;
+        }
+        case "delete_role": fakeRoles = fakeRoles.filter((r) => r.id !== a.id); return null;
+        case "save_template": {
+          const i = a.input as any;
+          const t = { ...i, id: i.id ?? id() };
+          fakeTemplates = [...fakeTemplates.filter((x) => x.id !== t.id), t];
+          return t;
+        }
+        case "delete_template": fakeTemplates = fakeTemplates.filter((t) => t.id !== a.id); return null;
+        case "team_session_roles": {
+          const map: Record<string, SessionRole> = {};
+          for (const m of fakeMembers) {
+            if (m.status === "reserved") continue;
+            const team = fakeTeams.find((t) => t.id === m.teamId);
+            if (!team || team.archivedAt != null) continue;
+            const role = fakeRoles.find((r) => r.id === m.roleId)?.name ?? "member";
+            const template = fakeTemplates.find((t) => t.id === team.templateId) ?? fakeTemplate;
+            const seatIdx = template.seats.findIndex((s: { seat: string }) => s.seat === m.seat);
+            map[m.sessionId] = {
+              role,
+              teamId: team.id,
+              teamName: team.slug,
+              seatOrder: seatIdx >= 0 ? seatIdx : 999999,
+              joinedAt: now(),
+            };
+          }
+          return map;
+        }
+        case "list_team_templates": return fakeTemplates;
+        case "list_teams": return fakeTeams;
+        case "create_team": {
+          const i = a.input as { slug: string; cwd: string; templateId: string; projectRules?: string };
+          const t = { id: id(), slug: i.slug, templateId: i.templateId, cwd: i.cwd, idPrefix: i.slug, prBase: "main", worktreeRoot: "", projectRules: i.projectRules ?? "", exportDir: `~/.hub/desks/${i.slug}`, createdAt: now(), archivedAt: null };
+          fakeTeams.push(t);
+          return t;
+        }
+        case "team_attach": fakeMembers.push({ teamId: a.teamId as string, sessionId: a.sessionId as string, seat: a.seat as string, roleId: fakeTemplate.seats.find((s) => s.seat === a.seat)!.roleId, status: "active", itemId: null }); return null;
+        case "team_detach": fakeMembers = fakeMembers.filter((m) => !(m.teamId === a.teamId && m.sessionId === a.sessionId)); return null;
+        case "team_restart_member": {
+          const oldSessionId = a.sessionId as string;
+          const oldSession = db.code.find((c) => c.id === oldSessionId);
+          const newSessionId = id();
+          const newSession: CodeSession = {
+            id: newSessionId,
+            cwd: oldSession?.cwd ?? "/",
+            acpSessionId: null,
+            title: oldSession ? `${oldSession.title} (restarted)` : "Restarted session",
+            modelRef: oldSession?.modelRef ?? null,
+            pinned: false,
+            createdAt: now(),
+            updatedAt: now(),
+            activity: null,
+            agent: oldSession?.agent ?? "patchbay",
+            agentModel: oldSession?.agentModel ?? null,
+            hostNode: oldSession?.hostNode ?? ME,
+            epoch: 0,
+            archivedAt: null,
+            permissionMode: oldSession?.permissionMode ?? "default",
+          };
+          if (oldSession) {
+            oldSession.archivedAt = now();
+          }
+          db.code.push(newSession);
+          const member = fakeMembers.find((m) => m.teamId === a.teamId && m.sessionId === oldSessionId);
+          if (member) {
+            member.sessionId = newSessionId;
+            return member;
+          }
+          const fresh = { teamId: a.teamId as string, sessionId: newSessionId, seat: "worker", roleId: fakeRoles[0]?.id ?? "r1", status: "active", itemId: null };
+          fakeMembers.push(fresh);
+          return fresh;
+        }
+        case "team_archive": fakeTeams = fakeTeams.filter((t) => t.id !== a.teamId); return null;
+        case "team_detail": {
+          const roles = fakeRoles;
+          return {
+            team: fakeTeams.find((t) => t.id === a.teamId),
+            template: fakeTemplate,
+            roles,
+            members: fakeMembers.filter((m) => m.teamId === a.teamId).map((m) => {
+              const s = db.code.find((c) => c.id === m.sessionId);
+              return { member: m, role: roles.find((r) => r.id === m.roleId)?.name ?? null, title: s?.title ?? null, agent: s?.agent ?? null, model: null, activity: "idle" };
+            }),
+          };
         }
         case "list_prompts": return [...db.prompts].sort((x, y) => x.name.localeCompare(y.name));
         case "save_prompt": {

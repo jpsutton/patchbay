@@ -15,6 +15,7 @@ const KEY: &str = "preferences";
 /// the machine (its shortcut, shell, title bar, agent paths) or the screen (theme, text size).
 pub const SYNCED: &[&str] = &[
     "groupByProject",
+    "groupByTeam",
     "sendKey",
     "launchTab",
     "expandReasoning",
@@ -48,6 +49,8 @@ pub struct Preferences {
     /// Code sidebar: group sessions by project (folder) name, whichever computer hosts them
     /// (UI-only). Off = one group per folder per computer.
     pub group_by_project: bool,
+    /// Code sidebar: group sessions by team at the top of the sidebar.
+    pub group_by_team: bool,
 
     // ---- Chat ----
     /// Copied into each new conversation; editable per conversation afterwards.
@@ -223,6 +226,7 @@ impl Default for Preferences {
             quick_entry_shortcut: String::new(),
             title_bar: "system".into(),
             group_by_project: false,
+            group_by_team: false,
             default_system_prompt: String::new(),
             expand_reasoning: false,
             generate_titles: true,
@@ -431,6 +435,7 @@ mod tests {
         assert!(p.background_summaries);
         assert!(p.generate_titles);
         assert!(!p.group_by_project);
+        assert!(!p.group_by_team);
         assert!(p.claude_config.skills && p.claude_config.hooks);
         assert_eq!(p.usage_limit, super::UsageLimit { enabled: true, percent: 95, auto_resume: false });
         assert_eq!(p.cursor_usage_limit, super::UsageLimit::cursor_default());

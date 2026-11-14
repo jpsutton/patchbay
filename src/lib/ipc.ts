@@ -358,6 +358,69 @@ export interface PermissionRule {
   createdAt: number;
 }
 
+export interface TeamCaps { writesItems: boolean; dispatches: boolean; decides: boolean; merges: boolean }
+export interface TeamRole { id: string; name: string; standing: boolean; instructions: string; caps: TeamCaps; reportsTo: string | null; builtin: boolean }
+export interface TeamSeat {
+  seat: string; roleId: string; agent: string; model: string | null; permissionMode: string; count: number;
+  choices?: { agent: string; model: string | null }[];
+  /** The user's acknowledgement that workers may run agents that act without asking; lapses when the seat's agent, model, choices or mode change. */
+  allowUnasked?: boolean;
+  /** Read-only, from the backend: what each agent in the seat does without asking. */
+  gaps?: { agent: string; gaps: string[] }[];
+  /** Read-only, from the backend: agents in the seat whose team-tool calls still wait on a prompt. */
+  prompts?: string[];
+}
+export interface TeamTemplate {
+  id: string;
+  name: string;
+  seats: TeamSeat[];
+  routing: { class: string; goesTo: string; examples: string }[];
+  /** Opt-in: workers may git add/commit inside their assigned worktree without a prompt. */
+  allowWorkerCommit?: boolean;
+}
+export interface Team {
+  id: string; slug: string; templateId: string; cwd: string; idPrefix: string; prBase: string;
+  worktreeRoot: string; projectRules: string; exportDir: string; createdAt: number; archivedAt: number | null;
+}
+export interface TeamMember {
+  teamId: string; sessionId: string; seat: string; roleId: string; status: string; itemId: string | null;
+}
+export interface TeamMemberRow {
+  member: TeamMember;
+  role: string | null; title: string | null; agent: string | null; model: string | null;
+  /** running / waiting / stalled / idle / stopped; null for a session on another computer. */
+  activity: string | null;
+}
+export type TeamTemplateInput = {
+  id?: string;
+  name: string;
+  seats: TeamSeat[];
+  routing: TeamTemplate["routing"];
+  allowWorkerCommit?: boolean;
+};
+export type TeamRoleInput = Omit<TeamRole, "id" | "builtin"> & { id?: string };
+export interface TeamItem {
+  teamId: string; id: string; title: string; type: string; severity: string; status: string;
+  memberSession: string | null; plan: string; prUrl: string | null; createdAt: number; updatedAt: number;
+}
+export interface TeamEvent { id: number; itemId: string; at: number; actorSession: string | null; kind: string; text: string }
+export interface TeamDecision {
+  teamId: string; id: string; itemId: string | null; question: string; options: string[]; recommendation: string | null;
+  class: string; openedBy: string | null; advisorVerdict: string | null; advisorChoice: string | null; advisorText: string | null;
+  userAnswer: string | null; status: "awaiting_advisor" | "awaiting_user" | "cleared" | "resolved"; disagrees: boolean;
+  createdAt: number; resolvedAt: number | null;
+}
+export interface TeamBoard { statuses: string[]; items: TeamItem[]; decisions: TeamDecision[]; events: TeamEvent[] }
+export interface TeamDetail { team: Team; template: TeamTemplate; roles: TeamRole[]; members: TeamMemberRow[] }
+export interface SessionRole {
+  role: string;
+  teamId: string;
+  teamName: string;
+  seatOrder: number;
+  joinedAt: number;
+}
+export interface NewTeam { templateId: string; slug: string; cwd: string; projectRules?: string; exportDir?: string; worktreeRoot?: string }
+
 export interface Prompt {
   id: string;
   name: string;
@@ -985,6 +1048,8 @@ export interface Preferences {
   titleBar: "system" | "app";
   /** Code sidebar: group sessions by project name, whichever computer hosts them. */
   groupByProject: boolean;
+  /** Code sidebar: group sessions by team at the top of the sidebar. */
+  groupByTeam: boolean;
   defaultSystemPrompt: string;
   expandReasoning: boolean;
   generateTitles: boolean;
@@ -1044,6 +1109,7 @@ export const defaultPreferences: Preferences = {
   quickEntryShortcut: "",
   titleBar: "system",
   groupByProject: false,
+  groupByTeam: false,
   defaultSystemPrompt: "",
   expandReasoning: false,
   generateTitles: true,
@@ -1268,8 +1334,20 @@ export const api = {
 
   listCodeSessions: () => invoke<CodeSession[]>("list_code_sessions"),
   /** With `host`, the session runs on that computer, in its folder `cwd`. */
-  createCodeSession: (cwd: string, modelRef: string | null, agent?: AgentId, host?: string | null) =>
-    invoke<CodeSession>("create_code_session", { cwd, modelRef, agent: agent ?? null, host: host ?? null }),
+  createCodeSession: (
+    cwd: string,
+    modelRef: string | null,
+    agent?: AgentId,
+    host?: string | null,
+    permissionMode?: "default" | "auto" | "always-approve" | null,
+  ) =>
+    invoke<CodeSession>("create_code_session", {
+      cwd,
+      modelRef,
+      agent: agent ?? null,
+      host: host ?? null,
+      permissionMode: permissionMode ?? null,
+    }),
   /** Claude Code's sessions on this computer, from every account. */
   listClaudeSessions: () => invoke<ClaudeSession[]>("list_claude_sessions"),
   /** Make Code sessions from Claude Code's, continued by `agent` (default: the preferred one). */
@@ -1339,6 +1417,25 @@ export const api = {
 
   listSidebarLayout: () => invoke<SidebarEntry[]>("list_sidebar_layout"),
   applySidebarLayout: (put: SidebarEntry[], remove: string[]) => invoke<void>("apply_sidebar_layout", { put, remove }),
+
+  listRoles: () => invoke<TeamRole[]>("list_roles"),
+  saveRole: (input: TeamRoleInput) => invoke<TeamRole>("save_role", { input }),
+  deleteRole: (id: string) => invoke<void>("delete_role", { id }),
+  saveTemplate: (input: TeamTemplateInput) => invoke<TeamTemplate>("save_template", { input }),
+  deleteTemplate: (id: string) => invoke<void>("delete_template", { id }),
+  /** Role and team information by session id, for sessions on live teams. */
+  teamSessionRoles: () => invoke<Record<string, SessionRole>>("team_session_roles"),
+  listTeamTemplates: () => invoke<TeamTemplate[]>("list_team_templates"),
+  listTeams: () => invoke<Team[]>("list_teams"),
+  createTeam: (input: NewTeam) => invoke<Team>("create_team", { input }),
+  teamDetail: (teamId: string) => invoke<TeamDetail>("team_detail", { teamId }),
+  teamBoard: (teamId: string) => invoke<TeamBoard>("team_board", { teamId }),
+  teamDecisionAnswer: (teamId: string, decisionId: string, answer: string) =>
+    invoke<TeamDecision>("team_decision_answer", { teamId, decisionId, answer }),
+  teamAttach: (teamId: string, sessionId: string, seat: string) => invoke<unknown>("team_attach", { teamId, sessionId, seat }),
+  teamDetach: (teamId: string, sessionId: string) => invoke<void>("team_detach", { teamId, sessionId }),
+  teamRestartMember: (teamId: string, sessionId: string) => invoke<TeamMember>("team_restart_member", { teamId, sessionId }),
+  teamArchive: (teamId: string) => invoke<void>("team_archive", { teamId }),
 
   listPrompts: () => invoke<Prompt[]>("list_prompts"),
   savePrompt: (input: { id?: string; name: string; content: string }) => invoke<Prompt>("save_prompt", input),

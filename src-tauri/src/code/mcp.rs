@@ -151,6 +151,12 @@ pub fn list_redacted(db: &Db) -> Result<Vec<McpServer>> {
 }
 
 /// ACP server names must match `^[a-zA-Z0-9_-]+$` for agents with strict schemas (e.g. Antigravity).
+/// Names a user server may not take: Patchbay's own messaging server's, and anything starting
+/// with it (agents build tool titles from the server name, so a prefix could imitate it).
+fn is_reserved_name(acp_name: &str) -> bool {
+    acp_name.to_ascii_lowercase().starts_with("patchbay-agent-messaging")
+}
+
 pub fn acp_server_name(name: &str) -> String {
     let slug: String = name
         .chars()
@@ -180,6 +186,11 @@ pub fn acp_servers(db: &Db, support: McpSupport) -> Result<(Vec<Value>, Vec<Stri
                 .collect()
         };
         let acp_name = acp_server_name(&s.name);
+        // The auto-approve rule for team tools trusts this name (teams/allow.rs); only Patchbay's own server may use it.
+        if is_reserved_name(&acp_name) {
+            skipped.push(format!("{} (name reserved)", s.name));
+            continue;
+        }
         match cfg.transport.as_str() {
             "stdio" => out.push(json!({
                 "name": acp_name,
@@ -246,6 +257,16 @@ mod tests {
         assert_eq!(acp_server_name("my_server-1"), "my_server-1");
         assert_eq!(acp_server_name("  spaced  server  "), "spaced--server");
         assert_eq!(acp_server_name("!@#$%"), "mcp-server");
+    }
+
+    #[test]
+    fn the_messaging_server_name_and_its_prefixes_are_reserved() {
+        for n in ["patchbay-agent-messaging", "Patchbay-Agent-Messaging", "patchbay-agent-messaging-send_agent_message", &acp_server_name("Patchbay agent messaging")] {
+            assert!(is_reserved_name(n), "{n}");
+        }
+        for n in ["patchbay-agent", "my-patchbay-agent-messaging", "fs"] {
+            assert!(!is_reserved_name(n), "{n}");
+        }
     }
 
     #[test]

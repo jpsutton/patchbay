@@ -101,6 +101,8 @@ unicode-normalization = "0.1"
 rand = "0.8"
 tar = "0.4"
 urlencoding = "2"
+# Already in the lockfile via reqwest; direct dep for prUrl format checks (teams items).
+url = "2.5"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws", "query"] }
 zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
 # Lists this computer's addresses, so a wildcard listen address binds only private ones (`net_bind`).
@@ -119,7 +121,8 @@ tray-icon = { version = "0.25", default-features = false, features = ["ksni"], o
 # the dialog plugin already links).
 ashpd = { version = "0.11", default-features = false, features = ["tokio"], optional = true }
 
-# libc: process-group kill (probe cleanup) in lib, open-file limit at startup (see `fd_limit`) and in tests.
+# libc: process-group kill (probe cleanup), open-file limit at startup (see `fd_limit`) and in tests,
+# and O_NOFOLLOW for team export; the tests raise the open-file limit (see `test_support`).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
