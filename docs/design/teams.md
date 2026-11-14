@@ -152,12 +152,18 @@ the forced flags, and do run without them.
 
 Residuals (attackers):
 - the worker itself if `data_dir` is temp or under a worktree-writable root (now refused);
-- an outside same-user process for the hooks dir under normal placement (`~/patchbay-teams-data`);
+- an outside same-UID process can race the safe hooks directory (validation and exec are not
+  atomic) under normal placement (`~/patchbay-teams-data`); ancestors above `data_dir` are not
+  lstat-checked; Windows owner/ACL enforcement is best-effort readonly metadata and Windows
+  behaviour is unexecuted reasoning;
 - inherited git environment — Patchbay cannot scrub; whether a worker can set env without a prompt
-  depends on agent shell persistence (unknown): `GIT_SSH_COMMAND`, `GIT_EXTERNAL_DIFF`,
+  depends on agent shell persistence (unknown). Repository/index redirectors:
+  `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_CONFIG_PARAMETERS`; also
+  `GIT_CONFIG_COUNT`/`KEY`/`VALUE`, `GIT_CONFIG_GLOBAL`, `GIT_SSH_COMMAND`, `GIT_EXTERNAL_DIFF`,
   `GIT_PAGER`/`PAGER`, `GIT_EDITOR`, `GIT_ASKPASS`, `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`,
-  `GIT_CONFIG_COUNT`/`KEY`/`VALUE`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM`;
-- human-configured clean/smudge filters on `git add` via `.gitattributes`; textconv / external diff;
+  `GIT_CONFIG_NOSYSTEM`;
+- human-configured clean/smudge filters, textconv and external diff still run, and a worker can
+  select an existing filter via `.gitattributes`;
 - human-approved bare git stays check-then-exec racy;
 - Codex `~/.codex` approved prefixes never reach the Patchbay permission path (pb-20261111-83).
 Unbounded `ls -R` is not capped here.
