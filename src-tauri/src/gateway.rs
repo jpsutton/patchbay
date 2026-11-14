@@ -223,7 +223,11 @@ pub(crate) fn list_dirs_local(path: Option<&str>) -> Result<Value> {
         .ok_or_else(|| anyhow!("no home folder"))?
         .canonicalize()?;
     let dir = match path.filter(|p| !p.is_empty()) {
-        Some(p) => std::path::Path::new(p).canonicalize()?,
+        Some(p) => {
+            // Named by a phone or a mesh peer: judged before the canonicalize that would touch it.
+            crate::refuse_foreign_path(&home, std::path::Path::new(p), "that folder", &patchbay_agent::OsLinks)?;
+            std::path::Path::new(p).canonicalize()?
+        }
         None => home.clone(),
     };
     if !dir.starts_with(&home) {

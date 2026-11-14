@@ -269,7 +269,77 @@ pub fn foreign_location(cwd: &Path, p: &Path) -> bool {
 /// Every path-taking tool calls it first in `run`, so it holds however the tool was reached; the
 /// dispatcher refuses the same paths before any hook or approval (`turn.rs`).
 pub fn foreign_refusal(session: &Session, raw: &str) -> Option<String> {
-    foreign_location(&session.cwd, Path::new(raw)).then(|| session.prompts().msg("foreign_location", &[("path", raw)]))
+    foreign_target(&session.cwd, Path::new(raw)).then(|| session.prompts().msg("foreign_location", &[("path", raw)]))
+}
+
+/// Most links followed in [`foreign_target`]; a chain longer than that is refused, not followed.
+const LINK_HOPS: usize = 16;
+
+/// [`foreign_location`] for the path AND for where any link on the way to it points: a link in the
+/// project whose target is another machine's share (or a device path) is refused exactly like the
+/// share written out, because the first thing Windows does with such a path (a canonicalize, a stat,
+/// the search that walks it) is connect to the share and send the user's credentials.
+///
+/// LOCAL and lexical: each component is read with `symlink_metadata` (the link itself, never what it
+/// points at) and `read_link`, and the TEXT of a target is judged; nothing is opened through a link,
+/// and the walk stops at the first link that leads off the machine, so no component behind it is
+/// touched. Links to links are followed up to [`LINK_HOPS`]. This is the one check every caller uses:
+/// the dispatcher (`turn.rs`), each tool's own `foreign_refusal`, and the permission classifier
+/// (`src-tauri/src/code/permissions.rs`).
+pub fn foreign_target(cwd: &Path, p: &Path) -> bool {
+    foreign_target_with(cwd, p, &OsLinks)
+}
+
+/// What a link on the way to a path points at. The one question the walk asks the filesystem, so a
+/// test can hand in a reader that records every question and see that a path on another machine's
+/// share (or a device path) is refused from its text without any.
+pub trait LinkReader {
+    /// Where `p` points when it is a symlink; `None` when it is not one or cannot be read.
+    fn link_target(&self, p: &Path) -> Option<PathBuf>;
+}
+
+/// The operating system's answer: `symlink_metadata` (the link itself, never what it points at) and
+/// `read_link`.
+pub struct OsLinks;
+
+impl LinkReader for OsLinks {
+    fn link_target(&self, p: &Path) -> Option<PathBuf> {
+        if !std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+            return None;
+        }
+        std::fs::read_link(p).ok()
+    }
+}
+
+/// [`foreign_target`] with the reader given. The LEXICAL [`foreign_location`] comes first and
+/// answers for a path written as another machine's share without asking the reader anything:
+/// `symlink_metadata` on a component of such a path would itself connect to the share.
+pub fn foreign_target_with(cwd: &Path, p: &Path, links: &dyn LinkReader) -> bool {
+    foreign_location(cwd, p) || (cfg!(windows) && link_leads_off_machine(cwd, p, LINK_HOPS, links))
+}
+
+fn link_leads_off_machine(cwd: &Path, p: &Path, hops: usize, links: &dyn LinkReader) -> bool {
+    let p = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
+    let mut real = PathBuf::new();
+    for c in p.components() {
+        match c {
+            // Windows folds `..` in the text before it opens anything.
+            Component::ParentDir => {
+                real.pop();
+            }
+            Component::CurDir => {}
+            Component::Normal(name) => {
+                real.push(name);
+                let Some(target) = links.link_target(&real) else { continue };
+                let target = if target.is_absolute() { target } else { real.parent().map(|d| d.join(&target)).unwrap_or(target) };
+                if foreign_location(cwd, &target) || hops == 0 || link_leads_off_machine(cwd, &target, hops - 1, links) {
+                    return true;
+                }
+            }
+            other => real.push(other.as_os_str()),
+        }
+    }
+    false
 }
 
 /// What a path's prefix names, for comparing two of them: `C:` and `\\?\C:` are one drive,
@@ -1120,6 +1190,131 @@ mod tests {
             }
             Err(e) => skip(&format!("cannot create a directory symlink here ({e})")),
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A link whose target is another machine's share is refused like the share written out, from the
+    /// link's own text, before anything is opened through it; a link that stays on the machine is not.
+    #[test]
+    #[cfg(windows)]
+    fn a_link_to_another_machines_share_is_a_foreign_target() {
+        let root = root_on_the_current_drive("link-target");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        if let Err(e) = std::os::windows::fs::symlink_dir(r"\\192.0.2.1\share", root.join("to_share")) {
+            skip(&format!("cannot create a directory symlink here ({e})"));
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        std::os::windows::fs::symlink_dir(root.join("to_share"), root.join("hop")).unwrap();
+        std::os::windows::fs::symlink_dir(root.join("src"), root.join("local")).unwrap();
+        let started = std::time::Instant::now();
+        for p in [root.join("to_share"), root.join("to_share").join("x.txt"), root.join("hop"), root.join("hop").join("a").join("b.txt")] {
+            assert!(foreign_target(&root, &p), "a link to another machine's share was not refused: {}", p.display());
+        }
+        assert!(foreign_target(&root, Path::new("to_share")), "the relative spelling");
+        for p in [root.join("local"), root.join("local").join("a.txt"), root.join("src").join("a.txt"), root.join("new.txt")] {
+            assert!(!foreign_target(&root, &p), "a path that stays on this machine was refused: {}", p.display());
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "judging links took {:?}: a network attempt", started.elapsed());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A path written as another machine's share is refused from its text alone: the walk asks the
+    /// filesystem NOTHING about it (asking is the connection). A link is judged from the target the
+    /// reader reports, and nothing behind the first foreign link is asked about.
+    #[test]
+    #[cfg(windows)]
+    fn the_link_walk_asks_the_filesystem_nothing_about_a_foreign_path() {
+        use std::cell::RefCell;
+        struct Spy {
+            asked: RefCell<Vec<PathBuf>>,
+            links: Vec<(PathBuf, PathBuf)>,
+        }
+        impl LinkReader for Spy {
+            fn link_target(&self, p: &Path) -> Option<PathBuf> {
+                self.asked.borrow_mut().push(p.to_path_buf());
+                self.links.iter().find(|(l, _)| l == p).map(|(_, t)| t.clone())
+            }
+        }
+        let cwd = Path::new(r"C:\Users\x\proj");
+        let none = Spy { asked: RefCell::new(Vec::new()), links: Vec::new() };
+        for foreign in [r"\\192.0.2.1\s\a.png", r"\\?\UNC\192.0.2.1\s\a.png", r"\\.\pipe\x", "//192.0.2.1/s/a.png", r"\??\UNC\192.0.2.1\s\a.png"] {
+            assert!(foreign_target_with(cwd, Path::new(foreign), &none), "{foreign}");
+        }
+        assert!(none.asked.borrow().is_empty(), "the filesystem was asked about a foreign path: {:?}", none.asked.borrow());
+        // Through a link: judged from where the reader says it points; nothing behind it is asked about.
+        let link = PathBuf::from(r"C:\Users\x\proj\to_share");
+        let spy = Spy { asked: RefCell::new(Vec::new()), links: vec![(link.clone(), PathBuf::from(r"\\192.0.2.1\s"))] };
+        assert!(foreign_target_with(cwd, &link.join("deep").join("a.png"), &spy));
+        let asked = spy.asked.borrow();
+        assert_eq!(asked.last().unwrap(), &link, "{asked:?}");
+        assert!(!asked.iter().any(|p| p.ends_with("deep")), "{asked:?}");
+        // A link that stays on this machine is not refused.
+        let here = PathBuf::from(r"C:\Users\x\proj\here");
+        let local = Spy { asked: RefCell::new(Vec::new()), links: vec![(here.clone(), PathBuf::from(r"C:\Users\x\other"))] };
+        assert!(!foreign_target_with(cwd, &here.join("a.png"), &local));
+    }
+
+    /// The safety of the `\\?\UNC\h\s` and `%5C%5C` spellings of a picture source must not rest on what
+    /// `local_path` happens to do to them (it ends the path at `?` and decodes percent escapes): fed
+    /// STRAIGHT to the walk, in the forms they have after decoding and in the verbatim and NT forms, every
+    /// one is refused and the filesystem is asked nothing, so a later change to `local_path` cannot
+    /// silently reopen them.
+    #[test]
+    #[cfg(windows)]
+    fn the_verbatim_and_decoded_share_spellings_are_refused_at_the_walk_without_a_single_ask() {
+        use std::cell::Cell;
+        struct Spy(Cell<usize>);
+        impl LinkReader for Spy {
+            fn link_target(&self, _: &Path) -> Option<PathBuf> {
+                self.0.set(self.0.get() + 1);
+                None
+            }
+        }
+        let cwd = Path::new(r"C:\Users\x\proj");
+        let spy = Spy(Cell::new(0));
+        for spelling in [
+            r"\\?\UNC\192.0.2.1\s\a.png",
+            r"\??\UNC\192.0.2.1\s\a.png",
+            r"\\192.0.2.1\s\a.png",
+            r"/\\192.0.2.1\s\a.png",
+            r"\\\192.0.2.1\s\a.png",
+            "//192.0.2.1/s/a.png",
+        ] {
+            assert!(foreign_target_with(cwd, Path::new(spelling), &spy), "{spelling}");
+        }
+        assert_eq!(spy.0.get(), 0, "the filesystem was asked about a share-spelled path");
+    }
+
+    /// A chain of links longer than the hop limit is REFUSED, never let through to be followed by the
+    /// filesystem, and so is a pair of links that point at each other. The chains end on this machine,
+    /// so it is the limit, not a share, that refuses them.
+    #[test]
+    #[cfg(windows)]
+    fn a_chain_of_links_past_the_hop_limit_and_a_cycle_are_refused() {
+        let root = root_on_the_current_drive("link-hops");
+        std::fs::create_dir_all(root.join("end")).unwrap();
+        let chain = |n: usize| {
+            // l1 -> l2 -> ... -> l<n> -> end
+            for i in 1..=n {
+                let target = if i == n { root.join("end") } else { root.join(format!("c{n}_l{}", i + 1)) };
+                std::os::windows::fs::symlink_dir(target, root.join(format!("c{n}_l{i}"))).unwrap();
+            }
+            root.join(format!("c{n}_l1")).join("x.txt")
+        };
+        if let Err(e) = std::os::windows::fs::symlink_dir(root.join("end"), root.join("probe")) {
+            skip(&format!("cannot create a directory symlink here ({e})"));
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        let at_the_limit = chain(LINK_HOPS);
+        assert!(!foreign_target(&root, &at_the_limit), "{LINK_HOPS} links on this machine are within the limit");
+        let past_the_limit = chain(LINK_HOPS + 1);
+        assert!(foreign_target(&root, &past_the_limit), "{} links were not refused", LINK_HOPS + 1);
+        // Two links that point at each other.
+        std::os::windows::fs::symlink_dir(root.join("cycle_b"), root.join("cycle_a")).unwrap();
+        std::os::windows::fs::symlink_dir(root.join("cycle_a"), root.join("cycle_b")).unwrap();
+        assert!(foreign_target(&root, &root.join("cycle_a").join("x.txt")), "a cycle of links was not refused");
         let _ = std::fs::remove_dir_all(&root);
     }
 

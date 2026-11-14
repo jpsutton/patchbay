@@ -467,6 +467,18 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
+/// The arguments of the `git worktree add` for a subagent. On Windows a repo's committed symlinks
+/// must not become real links in a worktree an agent works in (a link to a share would make the OS
+/// connect to it), so there they are checked out as text with `core.symlinks=false`.
+fn worktree_add_args<'a>(branch: &'a str, path: &'a str, windows: bool) -> Vec<&'a str> {
+    let mut args = Vec::new();
+    if windows {
+        args.extend(["-c", "core.symlinks=false"]);
+    }
+    args.extend(["worktree", "add", "-q", "-b", branch, path, "HEAD"]);
+    args
+}
+
 /// Check out a worktree for a subagent, from the current commit. Returns it and the directory in
 /// it that matches `cwd`.
 pub fn create_worktree(cwd: &Path, data_dir: &Path, agent_id: &str) -> Result<(Worktree, PathBuf), String> {
@@ -478,7 +490,8 @@ pub fn create_worktree(cwd: &Path, data_dir: &Path, agent_id: &str) -> Result<(W
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    git(&top, &["worktree", "add", "-q", "-b", &branch, &path.to_string_lossy(), "HEAD"])?;
+    let path_text = path.to_string_lossy();
+    git(&top, &worktree_add_args(&branch, &path_text, cfg!(windows)))?;
     let inner = cwd.strip_prefix(&top).map(|r| path.join(r)).unwrap_or_else(|_| path.clone());
     Ok((Worktree { path, branch, repo: top, base }, inner))
 }
@@ -573,6 +586,15 @@ mod tests {
         assert!(a.find("x").is_none());
         assert_eq!((a.next_id().as_str(), a.next_id().as_str()), ("agent_1", "agent_2"));
         assert_eq!(a.pending(), 0);
+    }
+
+    #[test]
+    fn a_windows_worktree_is_checked_out_without_real_symlinks() {
+        let win = worktree_add_args("b", "p", true);
+        assert_eq!(&win[..3], ["-c", "core.symlinks=false", "worktree"], "{win:?}");
+        assert_eq!(&win[3..], ["add", "-q", "-b", "b", "p", "HEAD"]);
+        let other = worktree_add_args("b", "p", false);
+        assert_eq!(other, ["worktree", "add", "-q", "-b", "b", "p", "HEAD"]);
     }
 
     #[test]

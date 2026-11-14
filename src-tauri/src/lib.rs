@@ -846,6 +846,8 @@ fn create_code_session_local(
     // Native folder pickers can return a trailing slash (the KDE portal does); `/a/b` and `/a/b/`
     // are one folder, and the same permission rules and recent-folder entry must serve both.
     let cwd = gateway::folder_key(cwd);
+    // Named by a phone or a mesh peer: judged before `is_dir` touches it.
+    refuse_foreign_path(&peer_path_base(), std::path::Path::new(cwd), "the folder", &patchbay_agent::OsLinks)?;
     if !std::path::Path::new(cwd).is_dir() {
         anyhow::bail!("{cwd} is not a directory");
     }
@@ -2892,6 +2894,42 @@ pub(crate) const MAX_CREATED_SESSIONS: i64 = 5;
 /// at depth 2 may create.
 const MAX_CREATE_DEPTH: usize = 2;
 
+/// The two folders [`create_agent_session`] canonicalizes, judged BEFORE any canonicalize: the folder the
+/// agent asks for and the one stored for its creator. Either one written as another machine's share (or
+/// a device path), or reaching one through a link in the folder, would make Windows connect to the share
+/// the moment it is canonicalized and offer the user's credentials: a prompt-injected agent can name one
+/// in a tool call, and a seat in Approve-all mode is not asked. The lexical check inside
+/// `foreign_target_with` answers first and asks the reader (the filesystem) nothing for a path written
+/// as a share. A creator whose own folder is on a share keeps working (the share is its own, as in
+/// `inside`); one that is a link to another share is refused.
+/// A path that a mesh peer, a phone or an agent named, judged BEFORE anything is canonicalized, statted,
+/// listed or opened: another machine's share or a device path, or a link in a folder that points at one,
+/// is refused (Windows would connect to the share and offer the user's credentials). The lexical check
+/// inside `foreign_target_with` answers first and asks the filesystem nothing for a path written as a
+/// share. `base` only decides which share counts as the path's own (a base on a share keeps working).
+pub(crate) fn refuse_foreign_path(base: &std::path::Path, path: &std::path::Path, what: &str, links: &dyn patchbay_agent::LinkReader) -> anyhow::Result<()> {
+    if patchbay_agent::foreign_target_with(base, path, links) {
+        anyhow::bail!("{what} is on another machine's share or a device path, or behind a link to one");
+    }
+    Ok(())
+}
+
+/// The base for [`refuse_foreign_path`] when a peer names a folder and there is no session folder yet.
+fn peer_path_base() -> std::path::PathBuf {
+    code::agents::home_dir().unwrap_or_default()
+}
+
+fn refuse_foreign_folder(creator_cwd: &str, cwd: &str, links: &dyn patchbay_agent::LinkReader) -> anyhow::Result<()> {
+    let base = std::path::Path::new(creator_cwd);
+    if patchbay_agent::foreign_target_with(base, base, links) {
+        anyhow::bail!("the creating session's folder {creator_cwd} is on another machine's share or a device path, or behind a link to one");
+    }
+    if patchbay_agent::foreign_target_with(base, std::path::Path::new(cwd), links) {
+        anyhow::bail!("{cwd} is on another machine's share or a device path, or behind a link to one");
+    }
+    Ok(())
+}
+
 /// A Code session made by another session's agent: in `cwd` on this computer, with the creator's
 /// agent, model and permission mode unless `agent` or `model` say otherwise, then started and
 /// given `prompt` as its first message. Never more permissive than the creator.
@@ -2923,6 +2961,7 @@ pub(crate) async fn create_agent_session(
     if creator.host_node.as_deref() != Some(state.mesh.node_id()) || creator.archived_at.is_some() {
         anyhow::bail!("only a session running on this computer can create sessions");
     }
+    refuse_foreign_folder(&creator.cwd, cwd, &patchbay_agent::OsLinks)?;
     // Auto mode trusts edits inside a session's own folder, so a child may not reach beyond its creator's.
     let root = std::fs::canonicalize(&creator.cwd)
         .map_err(|e| anyhow::anyhow!("the creating session's folder {} is not usable: {e}", creator.cwd))?;
@@ -3601,8 +3640,31 @@ async fn package_local(state: &AppState, id: &str, kind: &str, have: Vec<String>
     }
 }
 
+/// A name a mesh peer chose for a package folder or a file in it, as an ALLOW-LIST of the shape: 1 to 200
+/// characters of `A-Z a-z 0-9 . - _`, starting with a letter or a digit (so never `.`, `..` or a hidden
+/// name), not ending in `.`, and not a Windows device name (`CON`, `NUL`, `COM1`, `LPT1`, with or without an
+/// extension). That is one plain component and nothing else: no separator of either kind, no drive letter or
+/// stream (`:`), no absolute, UNC, verbatim (`\\?\`), device or NT (`\??\`) form, no empty name, no NUL, no space.
+/// A real host only sends `<kind>-<uuid>-<uuid>`, `workspace.bundle`, `workspace.tar` and `agent.tar`.
+fn plain_package_name(x: &str) -> bool {
+    let stem = x.split('.').next().unwrap_or("").to_ascii_lowercase();
+    let numbered = |p: &str| stem.len() == 4 && stem.starts_with(p) && stem.as_bytes()[3].is_ascii_digit();
+    let device = matches!(stem.as_str(), "con" | "prn" | "aux" | "nul" | "conin$" | "conout$") || numbered("com") || numbered("lpt");
+    (1..=200).contains(&x.len())
+        && x.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+        && x.as_bytes()[0].is_ascii_alphanumeric()
+        && !x.ends_with('.')
+        && !device
+}
+
 /// Copy a package's files from `host` into a local inbox directory. A failed copy leaves nothing behind.
 async fn fetch_package(state: &AppState, host: &str, token: &str, meta: &handoff::Meta) -> anyhow::Result<PathBuf> {
+    // The token and the file names are the hosting peer's words: joined as written, an absolute path or
+    // another machine's share would replace the inbox, and `create_dir_all` / `File::create` would
+    // connect to it. Only a plain single name is accepted (the host side already insists on the same).
+    if !plain_package_name(token) || meta.files.iter().any(|n| !plain_package_name(n)) {
+        anyhow::bail!("the package from {host} has a bad name");
+    }
     let dir = handoff::inbox(&state.data_dir).join(token);
     let res = fetch_package_files(state, host, token, meta, &dir).await;
     if res.is_err() {
@@ -3635,6 +3697,9 @@ async fn fetch_package_files(state: &AppState, host: &str, token: &str, meta: &h
 
 /// Target side: pull session `id` from its host into `cwd` here and take over the lease.
 async fn import_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Result<Option<String>> {
+    // The folder a mesh peer asked this computer to import into: judged before `local_commits`, the
+    // existence checks and the unpack touch it.
+    refuse_foreign_path(&peer_path_base(), std::path::Path::new(cwd), "the folder", &patchbay_agent::OsLinks)?;
     let s = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("no such session"))?;
     let me = state.mesh.node_id().to_owned();
     let host = s.host_node.clone().filter(|h| h != &me).ok_or_else(|| anyhow::anyhow!("this session already runs here"))?;
@@ -3693,6 +3758,8 @@ async fn code_move(state: &AppState, id: String, target: String, cwd: String) ->
 /// comes along: the host's working folder can't be copied while it is offline, so the session
 /// carries on in a folder that already exists on this computer.
 async fn take_over_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Result<Option<String>> {
+    // The folder a mesh peer asked this computer to continue the session in: judged before `is_dir`.
+    refuse_foreign_path(&peer_path_base(), std::path::Path::new(cwd), "the folder", &patchbay_agent::OsLinks)?;
     let s = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("no such session"))?;
     let me = state.mesh.node_id().to_owned();
     let host = s.host_node.clone().filter(|h| h != &me).ok_or_else(|| anyhow::anyhow!("this session already runs here"))?;
@@ -3893,7 +3960,7 @@ impl mesh::RpcHandler for MeshRpc {
             }
             "code.fetch" => {
                 let (token, name) = (param(&p, "token")?, param(&p, "name")?);
-                if [token, name].iter().any(|x| x.contains(['/', '\\']) || x.starts_with('.')) {
+                if [token, name].iter().any(|x| !plain_package_name(x)) {
                     anyhow::bail!("bad name");
                 }
                 let path = handoff::outbox(&state.data_dir).join(token).join(name);
@@ -3901,7 +3968,7 @@ impl mesh::RpcHandler for MeshRpc {
             }
             "code.package_done" => {
                 let token = param(&p, "token")?;
-                if !token.contains(['/', '\\']) && !token.starts_with('.') {
+                if plain_package_name(token) {
                     let _ = tokio::fs::remove_dir_all(handoff::outbox(&state.data_dir).join(token)).await;
                 }
                 if p["moved"].as_bool() == Some(false) && token.starts_with("handoff-") {

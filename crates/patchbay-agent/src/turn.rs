@@ -757,7 +757,7 @@ async fn run_call(
     if let Some(loc) = tool
         .locations(&call.arguments, &session)
         .into_iter()
-        .find(|l| crate::tools::foreign_location(&session.cwd, std::path::Path::new(l)))
+        .find(|l| crate::tools::foreign_target(&session.cwd, std::path::Path::new(l)))
     {
         return fail(&session, session.prompts().msg("foreign_location", &[("path", &loc)]));
     }
