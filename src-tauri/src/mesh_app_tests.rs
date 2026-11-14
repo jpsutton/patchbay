@@ -364,6 +364,9 @@ async fn a_hostile_host_cannot_make_the_importer_create_anything_outside_its_inb
         let e = fetch_package(&b.state, &host, "handoff-fine", &m).await.unwrap_err().to_string();
         assert!(e.contains("has a bad name"), "file name {name:?}: {e}");
     }
+    // The link can take a moment after the join to be usable in this direction (on a loaded runner the
+    // first call said "a is offline"); the host checks below are only meaningful over a live link.
+    until("the importer reaches the host", 15, || b.state.mesh.connected(&host)).await;
     // The REAL host refuses the same names when a hostile importer asks for them (the host side and the
     // importer share one validator), a `:` form included.
     let ask = |token: String, name: String| {
