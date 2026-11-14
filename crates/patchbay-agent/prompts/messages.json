@@ -123,6 +123,10 @@
     "full": "You are a fork of the main agent: its conversation above is yours to read, but you are a separate run. Do exactly the directive below and then stop. Do not start subagents. Finish with a short report of what you found or did; that report is all the main agent sees.",
     "min": "You are fork of main agent: conversation above is yours to read, but you are separate run. Do exactly directive below, then stop. No subagents. Finish with short report of what you found/did; report is all main agent sees."
   },
+  "step_budget": {
+    "full": "# Step budget\n\nYou have at most {steps} steps. A step is one model request, and each batch of tool calls costs one. When the budget is gone, the run stops and you cannot write a report. So record your progress as you go: with each batch of tool calls, write one or two lines of text on what you found or did and what is left. If the budget cuts you off, the main agent receives these lines, and nothing else. Keep a few steps in hand for your final report.",
+    "min": "# Step budget\n\nAt most {steps} steps. Step = one model request; each batch of tool calls costs one. Budget gone: run stops, no report possible. So record progress as you go: with each batch of tool calls, write one or two lines of text on what you found/did and what is left. Budget cuts you off: main agent receives these lines, nothing else. Keep few steps in hand for final report."
+  },
   "fork_refused": {
     "full": "{name} is not available to a fork. Do the directive with the other tools, and put anything for the user or the main agent in your report.",
     "min": "{name} unavailable to fork. Do directive with other tools; put anything for user or main agent in report."

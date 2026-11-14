@@ -233,6 +233,7 @@ do with one Grep or Read."
             });
             registry
         };
+        let steps = settings.limits.subagent_max_steps.max(1).to_string();
         let extras = prompt::Extras { claude: settings.claude.clone(), skills: &setup.skills };
 
         let model_id = parent.state.lock().await.model_id.clone();
@@ -247,6 +248,8 @@ do with one Grep or Read."
             }
             _ => {
                 let mut persona = custom.as_ref().map_or_else(|| p.subagent().trim().to_owned(), |c| c.prompt.clone());
+                persona.push_str("\n\n");
+                persona.push_str(&p.msg("step_budget", &[("steps", &steps)]));
                 if let Some(terse) = p.terse() {
                     persona.push_str("\n\n");
                     persona.push_str(terse.trim());
@@ -257,7 +260,11 @@ do with one Grep or Read."
             }
         };
         let first = if kind == Kind::Fork {
-            Message::with_parts(Role::User, vec![Part::Text(prompt::reminder(&p.msg("fork_note", &[]))), Part::Text(task.to_owned())])
+            Message::with_parts(Role::User, vec![
+                    Part::Text(prompt::reminder(&p.msg("fork_note", &[]))),
+                    Part::Text(prompt::reminder(&p.msg("step_budget", &[("steps", &steps)]))),
+                    Part::Text(task.to_owned()),
+                ])
         } else {
             Message::user(task)
         };
