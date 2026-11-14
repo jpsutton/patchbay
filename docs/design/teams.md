@@ -114,14 +114,19 @@ therefore always prompt for worker git commands under this rule.
 **Git auto-approve requires an exact command prefix** (David, #449): at dispatch Patchbay creates a
 team-scoped empty read-only hooks directory under `data_dir/teams-safe/<team_id>/hooks` (outside
 worktrees), and the worker brief / role text give the real path. Every auto-approved `git` command
-must carry, in this fixed order before the verb:
+must carry, in this fixed order after `git` and before the verb (`--no-pager` before every `-c`):
 
-`-c core.hooksPath=<that dir> -c core.fsmonitor=false -c core.sshCommand= -c protocol.ext.allow=never`
+`git --no-pager -c core.hooksPath=<that dir> -c core.fsmonitor=false -c core.sshCommand=
+-c protocol.ext.allow=never -c commit.gpgSign=false -c core.editor=: -c credential.helper=
+-c core.askPass=`
 
 Any other `-c`, missing piece, or different value → normal prompt (no auto-approve). `git commit`
-also requires `--no-verify` (plus `-m` / `--message`). `ls` / `cat` do not need the prefix.
+also requires `--no-verify` plus `-m` / `--message` or `-F` / `--file` (path inside the worktree).
+`ls` / `cat` do not need the prefix. Git auto-approve is Codex-only (proven non-persisting shell +
+writable-set gate); other agents always prompt for git, and the permission prompt includes
+`runs this repository's git hooks and config`.
 
-- `git commit`: `--no-verify` and `-m` / `--message` (required; no `-q`/`-v`/`-F`/`--template`/amend).
+- `git commit`: `--no-verify` and `-m` / `--message` or `-F` / `--file` (required; no `-q`/`-v`/`--template`/amend).
 - `git add`: paths and/or `-A` / `--all` / `-u` / `--update` / `--` (no `-f`, no `--pathspec-from-file`).
 - `git status`: `-s` / `--short` / `-b` / `--branch` / `--porcelain` / `--long`, plus relative paths.
 - `git diff`: `--stat` / `--name-only` / `--name-status` / `--cached` / `--staged` / `--no-ext-diff` /
@@ -156,14 +161,14 @@ Residuals (attackers):
   atomic) under normal placement (`~/patchbay-teams-data`); ancestors above `data_dir` are not
   lstat-checked; Windows owner/ACL enforcement is best-effort readonly metadata and Windows
   behaviour is unexecuted reasoning;
-- inherited git environment — Patchbay cannot scrub; whether a worker can set env without a prompt
-  depends on agent shell persistence (unknown). Repository/index redirectors:
-  `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_CONFIG_PARAMETERS`; also
-  `GIT_CONFIG_COUNT`/`KEY`/`VALUE`, `GIT_CONFIG_GLOBAL`, `GIT_SSH_COMMAND`, `GIT_EXTERNAL_DIFF`,
-  `GIT_PAGER`/`PAGER`, `GIT_EDITOR`, `GIT_ASKPASS`, `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`,
-  `GIT_CONFIG_NOSYSTEM`;
-- human-configured clean/smudge filters, textconv and external diff still run, and a worker can
-  select an existing filter via `.gitattributes`;
+- mid-shell `export GIT_*` after spawn: Patchbay scrubs every `GIT_*` from the child env at
+  Launch/spawn (`scrub_git_env` + `GIT_CONFIG_NOSYSTEM=1`). Mid-shell set is not under Patchbay
+  control; kinds where the tool-shell persists `export` across commands (or is unproven) never get
+  git auto-approve. Codex with proven non-persist may auto-approve only when repo common config,
+  `config.worktree`, gitdir, and `info/attributes` are outside the workspace-write writable set
+  (worktree cwd + temp; sbx-probe-home). OpenCode and unsandboxed kinds always prompt for git;
+- clean/smudge filters via `.gitattributes` when config/attributes are writable (writable-set gate
+  refuses auto-approve); textconv/external diff residuals remain for human-approved bare git;
 - human-approved bare git stays check-then-exec racy;
 - Codex `~/.codex` approved prefixes never reach the Patchbay permission path (pb-20261111-83).
 Unbounded `ls -R` is not capped here.

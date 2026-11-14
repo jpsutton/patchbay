@@ -472,13 +472,66 @@ pub(crate) fn codex_worker_workspace_write_blocked(cwd: &Path) -> Option<&'stati
     } // cfg(not(windows))
 }
 
+/// Known `GIT_*` redirectors / overrides removed even when absent from the parent env.
+const GIT_ENV_REDIRECTORS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_ASKPASS",
+    "GIT_TERMINAL_PROMPT",
+    "GIT_EXTERNAL_DIFF",
+    "GIT_DIFF_OPTS",
+    "GIT_PAGER",
+    "GIT_EDITOR",
+    "GIT_SEQUENCE_EDITOR",
+    "GIT_EXEC_PATH",
+    "GIT_TEMPLATE_DIR",
+    "GIT_CONFIG",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_TRACE",
+    "GIT_TRACE2",
+    "GIT_CURL_VERBOSE",
+];
+
+/// Scrub every `GIT_*` from a child Launch env: remove all names present in the parent plus
+/// known redirectors, then set `GIT_CONFIG_NOSYSTEM=1`. Spawn is under Patchbay control; mid-shell
+/// `export` by the agent is not (see live22+ export-persist proofs).
+pub fn scrub_git_env(env: &mut Vec<(String, String)>, env_remove: &mut Vec<String>) {
+    let mut remove: BTreeMap<String, ()> = BTreeMap::new();
+    for k in env_remove.iter() {
+        remove.insert(k.clone(), ());
+    }
+    for (k, _) in std::env::vars() {
+        if k.starts_with("GIT_") {
+            remove.insert(k, ());
+        }
+    }
+    for k in GIT_ENV_REDIRECTORS {
+        remove.insert((*k).to_owned(), ());
+    }
+    // Drop any GIT_* we were about to inject except the forced NOSYSTEM.
+    env.retain(|(k, _)| k == "GIT_CONFIG_NOSYSTEM" || !k.starts_with("GIT_"));
+    *env_remove = remove.into_keys().collect();
+    env.retain(|(k, _)| k != "GIT_CONFIG_NOSYSTEM");
+    env.push(("GIT_CONFIG_NOSYSTEM".into(), "1".into()));
+}
+
 /// Clear inherited git location / config overrides, then ignore global + system config.
 fn apply_hardened_git_env(cmd: &mut std::process::Command) {
-    for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"] {
+    for key in GIT_ENV_REDIRECTORS {
         cmd.env_remove(key);
     }
     for (k, _) in std::env::vars() {
-        if k.starts_with("GIT_CONFIG_") {
+        if k.starts_with("GIT_") {
             cmd.env_remove(k);
         }
     }
@@ -1574,11 +1627,13 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
     {
         env.push(("CLAUDE_CONFIG_DIR".to_owned(), dir));
     }
+    let mut env_remove = providers.env_remove;
+    scrub_git_env(&mut env, &mut env_remove);
     Ok(Launch {
         program: resolved.program,
         args: resolved.args,
         env,
-        env_remove: providers.env_remove,
+        env_remove,
         ext: Extensions {
             force_steers: kind == AgentKind::ClaudeCode,
             ..Extensions::default()
@@ -1644,11 +1699,14 @@ fn prepare_patchbay(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSess
         .as_deref()
         .filter(|r| db.get_model(r).ok().flatten().is_some())
         .map(grok_config::model_key);
+    let mut env = Vec::new();
+    let mut env_remove = Vec::new();
+    scrub_git_env(&mut env, &mut env_remove);
     Ok(Launch {
         program: PathBuf::new(),
         args: Vec::new(),
-        env: Vec::new(),
-        env_remove: Vec::new(),
+        env,
+        env_remove,
         ext: Extensions {
             patchbay_models: true,
             rewind: true,
@@ -1701,11 +1759,13 @@ fn prepare_grok(
     .map(|(k, v)| (k.to_owned(), v.to_owned()))
     .collect();
     env.extend(rendered.env);
+    let mut env_remove = vec!["XAI_API_KEY".into(), "GROK_CODE_XAI_API_KEY".into()];
+    scrub_git_env(&mut env, &mut env_remove);
     Ok(Launch {
         program: resolved.program,
         args,
         env,
-        env_remove: vec!["XAI_API_KEY".into(), "GROK_CODE_XAI_API_KEY".into()],
+        env_remove,
         ext: Extensions { status_line: true, rewind: true, fork: false, patchbay_models: true, interject: true, steering: false, force_send: false, cancel_tool: false, force_steers: false, background_tools: false },
         session_meta,
         initial_model: None,

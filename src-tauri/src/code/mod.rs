@@ -233,6 +233,7 @@ impl CodeManager {
             agent: session.agent.clone(),
             launch,
             cwd: PathBuf::from(&session.cwd),
+            data_dir: data_dir.to_path_buf(),
             resume: session.acp_session_id.clone(),
             pending: self.pending.clone(),
             questions: self.questions.clone(),
