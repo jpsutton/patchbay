@@ -165,10 +165,13 @@ Residuals (attackers):
   behaviour is unexecuted reasoning;
 - mid-shell `export GIT_*` after spawn: Patchbay scrubs every `GIT_*` (and sets
   `GIT_CONFIG_NOSYSTEM=1` + `GIT_CONFIG_GLOBAL=/dev/null`) only for **team worker seat** launches,
-  recording a server-side `git_env_scrubbed` fact; attach/restore of an already-running session
-  keeps the prior env and never gets git auto-approve. Mid-shell set is not under Patchbay
-  control; kinds where the tool-shell persists `export` (or is unproven / wrong `codex-acp`
-  version vs live22's 2.2.2) never get git auto-approve. Codex may auto-approve only when every
+  then re-injects Patchbay-owned `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` /
+  `GIT_COMMITTER_NAME` / `GIT_COMMITTER_EMAIL` from the human's real global config when both
+  exist (never worker-supplied `user.*` `-c` keys), recording a server-side `git_env_scrubbed`
+  fact; attach/restore of an already-running session keeps the prior env and never gets git
+  auto-approve. Mid-shell set is not under Patchbay control; kinds where the tool-shell persists
+  `export` (or is unproven / whose recorded ACP `agentInfo.version` is not in the live-proven
+  set, currently 2.2.2) never get git auto-approve. Codex may auto-approve only when every
   effective config origin (local / worktree / include / includeIf) and common config /
   `config.worktree` / gitdir / `info/attributes` sit outside the workspace-write writable set
   (worktree cwd + temp; sbx-probe-home). Any effective `filter.*.clean|smudge|process` refuses
@@ -176,7 +179,8 @@ Residuals (attackers):
   Diff/log require `--no-ext-diff` and `--no-textconv`. OpenCode and unsandboxed kinds always
   prompt for git;
 - human-approved bare git stays check-then-exec racy (textconv / external diff / filters / hooks);
-- Codex `~/.codex` approved prefixes never reach the Patchbay permission path (pb-20261111-83).
+- Codex `~/.codex` approved prefixes never reach the Patchbay permission path (pb-20261111-83;
+  live19/live20: workspace-write can complete add/commit without a Patchbay prompt).
 Unbounded `ls -R` is not capped here.
 
 ## Team
