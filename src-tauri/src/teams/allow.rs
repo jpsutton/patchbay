@@ -12,10 +12,18 @@
 //! `git commit` also requires `--no-verify`. Any other `-c`, missing piece, or different value falls
 //! through to a normal prompt. Repo hooks/fsmonitor/config gates remain as defense in depth.
 //!
-//! Residual: config-defined filters / textconv / external diff; human-approved bare git stays
-//! check-then-exec racy; scrubbed `GIT_*` / `GIT_CONFIG_NOSYSTEM` cannot be forced into the agent
-//! shell (env-beats-config). This does not cover Codex workers under the user's `~/.codex` prefix
-//! rules (pb-20261111-83).
+//! The `-c` prefix stops repo-config hook/fsmonitor changes made after the approval check from
+//! executing, as long as the Patchbay hooks dir stays protected (`worker_safe_hooks_dir_ok` at
+//! every approval). Residuals (attackers):
+//! - the worker itself if `data_dir` is temp/worktree-writable (refused by location checks);
+//! - an outside same-user process for the hooks dir under normal placement;
+//! - inherited git environment (Patchbay cannot scrub; whether a worker can set env without a
+//!   prompt depends on agent shell persistence — unknown): `GIT_SSH_COMMAND`, `GIT_EXTERNAL_DIFF`,
+//!   `GIT_PAGER`/`PAGER`, `GIT_EDITOR`, `GIT_ASKPASS`, `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`,
+//!   `GIT_CONFIG_COUNT`/`KEY`/`VALUE`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM`;
+//! - human-configured clean/smudge filters on `git add` via `.gitattributes`; textconv/external diff;
+//! - human-approved bare git stays check-then-exec racy;
+//! - Codex `~/.codex` approved prefixes never reach the Patchbay permission path (pb-20261111-83).
 //!
 //! Not a `permission_rules` row: those match a tool kind and a command prefix, and MCP calls are
 //! kind `other`, so a rule would approve every MCP tool of every server. This runs in the
@@ -31,7 +39,8 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use super::TeamsDb;
+use super::{Team, TeamsDb};
+use crate::code::agents::{path_key, path_under, temp_writable_roots};
 use crate::code::permissions::{allow_option, command_of};
 
 /// Patchbay-owned empty hooks directory for this team (outside worktrees and temp roots).
@@ -41,16 +50,18 @@ pub(crate) fn worker_safe_hooks_dir(data_dir: &Path, team_id: &str) -> PathBuf {
 
 /// Forward-slash form for `git -c core.hooksPath=` (works on Windows git too; avoids `\\` tokens).
 /// Canonicalize when possible so Windows short names (`RUNNER~1`) become long paths — `~` is
-/// forbidden in unquoted tokens (tilde expansion).
+/// forbidden in unquoted tokens (tilde expansion). Unknown `\\?\` namespaces are not returned
+/// unstripped (prefer the non-canonical input over a Volume GUID path).
 pub(crate) fn path_for_git_c_flag(path: &Path) -> String {
     let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     #[cfg(windows)]
     {
         let s = resolved.to_string_lossy();
-        if let Some(stripped) = strip_windows_verbatim_for_c(&s) {
-            return stripped.replace('\\', "/");
-        }
-        return s.replace('\\', "/");
+        let usable = match crate::win_path::strip_windows_verbatim_str(&s) {
+            Some(stripped) => stripped,
+            None => path.to_string_lossy().into_owned(),
+        };
+        return usable.replace('\\', "/");
     }
     #[cfg(not(windows))]
     {
@@ -58,15 +69,161 @@ pub(crate) fn path_for_git_c_flag(path: &Path) -> String {
     }
 }
 
-#[cfg(windows)]
-fn strip_windows_verbatim_for_c(s: &str) -> Option<String> {
-    let Some(rest) = s.strip_prefix(r"\\?\") else {
-        return Some(s.to_owned());
+/// True when `path` (canonical) lies under any Codex/F2 temp-writable root.
+fn under_temp_writable_root(path: &Path) -> bool {
+    let Some(key) = path_key(path) else {
+        return true; // unresolvable → treat as unsafe
     };
-    if let Some(unc) = rest.strip_prefix(r"UNC\") {
-        return Some(format!(r"\\{unc}"));
+    let Some(roots) = temp_writable_roots() else {
+        return true; // cannot enumerate temps → refuse
+    };
+    roots.iter().any(|r| path_under(&key, r))
+}
+
+/// Refuse auto-approve when hooks dir or data_dir sits under a worker-writable root:
+/// team cwd, worktree root, item worktree, or temp (`/tmp`, `/private/tmp`, `$TMPDIR`, `%TEMP%`/`%TMP%`).
+fn hooks_location_ok(data_dir: &Path, team: &Team, item_worktree: &Path, hooks_path: &Path) -> bool {
+    if under_temp_writable_root(data_dir) || under_temp_writable_root(hooks_path) {
+        return false;
     }
-    Some(rest.to_owned())
+    let Some(data_key) = path_key(data_dir) else {
+        return false;
+    };
+    let Some(hooks_key) = path_key(hooks_path) else {
+        return false;
+    };
+    let Ok(cwd) = Path::new(&team.cwd).canonicalize() else {
+        return false;
+    };
+    let Ok(wt_root) = team.effective_worktree_root() else {
+        return false;
+    };
+    let Some(wt_key) = path_key(&wt_root) else {
+        return false;
+    };
+    let Some(item_key) = path_key(item_worktree) else {
+        return false;
+    };
+    let cwd_key = path_key(&cwd).unwrap_or(cwd);
+    for root in [&cwd_key, &wt_key, &item_key] {
+        if path_under(&hooks_key, root) || path_under(&data_key, root) {
+            return false;
+        }
+    }
+    true
+}
+
+/// lstat each component from `data_dir` through `hooks_path`; refuse symlinks and divergent resolves.
+fn hooks_path_no_symlinks(data_dir: &Path, hooks_path: &Path) -> bool {
+    let Ok(rel) = hooks_path.strip_prefix(data_dir) else {
+        return false;
+    };
+    let Ok(mut expected) = data_dir.canonicalize() else {
+        return false;
+    };
+    // data_dir itself must not be a symlink (compare lstat path to canonical).
+    {
+        let Ok(meta) = std::fs::symlink_metadata(data_dir) else {
+            return false;
+        };
+        if meta.file_type().is_symlink() {
+            return false;
+        }
+    }
+    for c in rel.components() {
+        expected.push(c);
+        let Ok(meta) = std::fs::symlink_metadata(&expected) else {
+            return false;
+        };
+        if meta.file_type().is_symlink() {
+            return false;
+        }
+        let Ok(canon) = expected.canonicalize() else {
+            return false;
+        };
+        // Walk stays on the expected path (no symlink redirect). Normalize macOS /tmp.
+        let left = path_key(&canon).unwrap_or(canon);
+        let right = path_key(&expected).unwrap_or_else(|| expected.clone());
+        if left != right {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(unix)]
+fn hooks_unix_owner_and_mode_ok(data_dir: &Path, hooks_path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let uid = unsafe { libc::getuid() };
+    let Ok(hooks_meta) = std::fs::metadata(hooks_path) else {
+        return false;
+    };
+    if hooks_meta.uid() != uid {
+        return false;
+    }
+    // No write bits for owner/group/other (0o555-like).
+    if hooks_meta.mode() & 0o222 != 0 {
+        return false;
+    }
+    // Parents up through data_dir: not group/world-writable.
+    let mut cur = hooks_path.to_path_buf();
+    loop {
+        let Some(parent) = cur.parent().map(Path::to_path_buf) else {
+            return false;
+        };
+        let Ok(meta) = std::fs::metadata(&parent) else {
+            return false;
+        };
+        if meta.mode() & 0o022 != 0 {
+            return false;
+        }
+        if paths_equal(&parent, data_dir) {
+            return true;
+        }
+        cur = parent;
+    }
+}
+
+#[cfg(windows)]
+fn hooks_unix_owner_and_mode_ok(_data_dir: &Path, hooks_path: &Path) -> bool {
+    // Best-effort: skip owner ACL; require the readonly bit ensure_worker_safe_hooks_dir sets.
+    let Ok(meta) = std::fs::metadata(hooks_path) else {
+        return false;
+    };
+    meta.is_dir() && meta.permissions().readonly()
+}
+
+/// Re-validate the Patchbay hooks dir at every approval (not only at dispatch create time).
+pub(crate) fn worker_safe_hooks_dir_ok(data_dir: &Path, team: &Team, item_worktree: &Path, hooks_path: &Path) -> bool {
+    if !hooks_location_ok(data_dir, team, item_worktree, hooks_path) {
+        return false;
+    }
+    if !hooks_path_no_symlinks(data_dir, hooks_path) {
+        return false;
+    }
+    let Ok(meta) = std::fs::symlink_metadata(hooks_path) else {
+        return false;
+    };
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return false;
+    }
+    // `symlink_metadata` on a non-symlink dir: confirm it's a directory via metadata too.
+    let Ok(dir_meta) = std::fs::metadata(hooks_path) else {
+        return false;
+    };
+    if !dir_meta.is_dir() {
+        return false;
+    }
+    if !hooks_unix_owner_and_mode_ok(data_dir, hooks_path) {
+        return false;
+    }
+    let Ok(mut entries) = std::fs::read_dir(hooks_path) else {
+        return false;
+    };
+    if entries.next().is_some() {
+        return false;
+    }
+    true
 }
 
 /// `core.hooksPath=…` argument as it should appear in a brief / command.
@@ -695,8 +852,8 @@ fn allow_worker_commit(data_dir: &Path, session: &str, tool_call: &Value, option
         return None;
     }
     let hooks_path = worker_safe_hooks_dir(data_dir, &team.id);
-    // Fail closed if the Patchbay hooks dir was never created/verified for this team.
-    if !hooks_path.is_dir() {
+    // Re-validate at every approval: location, no symlinks, owner/mode, empty.
+    if !worker_safe_hooks_dir_ok(data_dir, &team, &worktree, &hooks_path) {
         return None;
     }
     let cmd = command_of(tool_call)?;
@@ -818,8 +975,28 @@ mod tests {
         assert!(allow_team_tool(&d, "s1", "claude-code", &tc, &options, "/tmp").is_none(), "released");
     }
 
+    /// Fixture data_dir outside `/tmp` / `$TMPDIR` (R1a refuses temp data_dir). Prefer
+    /// `CARGO_TARGET_DIR` like F2's `f2_non_temp_fixture`.
+    fn allow_non_temp_data_dir(tag: &str) -> PathBuf {
+        let base = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+        let d = base.join("allow-fixtures").join(format!("{tag}-{}", crate::db::new_id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        if let (Some(key), Some(roots)) = (path_key(&d), temp_writable_roots()) {
+            for r in &roots {
+                assert!(
+                    !path_under(&key, r),
+                    "allow fixture must not sit under temp root {r:?} (got {key:?})"
+                );
+            }
+        }
+        d
+    }
+
     fn worker_commit_fixture(opt_in: bool) -> (std::path::PathBuf, String, String, String, PathBuf) {
-        let d = std::env::temp_dir().join(format!("pb-allow-git-{}", crate::db::new_id()));
+        let d = allow_non_temp_data_dir("git");
         let proj = d.join("proj");
         let trees = proj.join("trees");
         std::fs::create_dir_all(&trees).unwrap();
@@ -1435,13 +1612,162 @@ mod tests {
              PLANTED-RED without forced -c flags raw output:\n{without_c_raw}\n\n\
              marker_after_c={marker_after_c:?}\nmarker_after_bare={marker_after_bare:?}\n"
         );
-        let doc_path = std::path::PathBuf::from("/tmp/pb-planted-red-raws.txt");
+        let doc_path = d.join("pb-planted-red-raws.txt");
         std::fs::write(&doc_path, &doc).unwrap();
-        eprintln!("{doc}");
+        eprintln!("planted-red raws path: {}\n{doc}", doc_path.display());
         assert!(
             marker_after_bare.contains("planted-red"),
             "marker must appear without forced -c; marker={marker_after_bare:?}; raw={without_c_raw}"
         );
         assert!(doc_path.is_file(), "planted-red raws written to {}", doc_path.display());
+
+        // R1: after planting, a loosened Patchbay hooks dir must refuse auto-approval.
+        std::fs::set_permissions(&safe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &approved), &options(), &wt).is_none(),
+            "loosened hooks mode must refuse auto-approval"
+        );
+        // Restore empty read-only, then replace hooks dir with a symlink → refuse.
+        std::fs::set_permissions(&safe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&safe);
+        let decoy = d.join("hooks-decoy");
+        std::fs::create_dir_all(&decoy).unwrap();
+        std::os::unix::fs::symlink(&decoy, &safe).unwrap();
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &approved), &options(), &wt).is_none(),
+            "symlinked hooks dir must refuse auto-approval"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_safe_hooks_dir_ok_refuses_symlink_planted_file_mode_and_temp_data() {
+        use std::os::unix::fs::PermissionsExt;
+        let (d, wt, _proj, _item, safe) = worker_commit_fixture(true);
+        let tdb = TeamsDb::open(&d).unwrap();
+        let (team, _) = tdb.membership("w1").unwrap().unwrap();
+        let wt_path = Path::new(&wt);
+        let commit = git_cmd(&safe, "commit --no-verify -m x");
+        assert!(
+            allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &commit), &options(), &wt).is_some(),
+            "baseline must approve"
+        );
+        assert!(worker_safe_hooks_dir_ok(&d, &team, wt_path, &safe));
+
+        // File planted inside hooks dir.
+        std::fs::set_permissions(&safe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(safe.join("pre-commit"), "#!/bin/sh\n").unwrap();
+        assert!(!worker_safe_hooks_dir_ok(&d, &team, wt_path, &safe));
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &commit), &options(), &wt).is_none());
+        std::fs::remove_file(safe.join("pre-commit")).unwrap();
+        std::fs::set_permissions(&safe, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(worker_safe_hooks_dir_ok(&d, &team, wt_path, &safe));
+
+        // Mode loosened (owner write).
+        std::fs::set_permissions(&safe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!worker_safe_hooks_dir_ok(&d, &team, wt_path, &safe));
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &commit), &options(), &wt).is_none());
+        std::fs::set_permissions(&safe, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Hooks dir replaced by symlink.
+        let parent = safe.parent().unwrap();
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir(&safe);
+        let decoy = d.join("decoy-hooks");
+        std::fs::create_dir_all(&decoy).unwrap();
+        std::os::unix::fs::symlink(&decoy, &safe).unwrap();
+        assert!(!worker_safe_hooks_dir_ok(&d, &team, wt_path, &safe));
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &commit), &options(), &wt).is_none());
+        let _ = std::fs::remove_file(&safe);
+        // Restore a real safe dir for the parent-symlink case.
+        let hooks = ensure_worker_safe_hooks_dir(&d, &team.id).unwrap();
+
+        // Parent (team_id dir) replaced by symlink.
+        let team_dir = hooks.parent().unwrap().to_path_buf();
+        let teams_safe = team_dir.parent().unwrap().to_path_buf();
+        std::fs::set_permissions(&teams_safe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let backup = d.join("team-dir-backup");
+        // Move contents aside: remove hooks first (readonly), then rename team_dir.
+        std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&hooks);
+        std::fs::rename(&team_dir, &backup).unwrap();
+        std::os::unix::fs::symlink(&backup, &team_dir).unwrap();
+        let hooked = worker_safe_hooks_dir(&d, &team.id);
+        // Recreate hooks under the symlinked parent — path walk must still refuse.
+        std::fs::create_dir_all(&hooked).unwrap();
+        std::fs::set_permissions(&hooked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(
+            !worker_safe_hooks_dir_ok(&d, &team, wt_path, &hooked),
+            "parent symlink must refuse"
+        );
+        assert!(allow_team_tool(&d, "w1", "claude-code", &git_exec(&wt, &git_cmd(&hooked, "commit --no-verify -m x")), &options(), &wt).is_none());
+
+        // data_dir under temp root → location refuse (separate fixture).
+        let temp_d = std::env::temp_dir().join(format!("pb-allow-temp-{}", crate::db::new_id()));
+        std::fs::create_dir_all(temp_d.join("proj/trees")).unwrap();
+        let t = TeamsDb::open(&temp_d).unwrap();
+        let builtin = t.template("builtin-triage-desk").unwrap();
+        let tpl = t
+            .save_template(super::super::TemplateInput {
+                id: None,
+                name: "temp-data".into(),
+                seats: builtin.seats,
+                routing: builtin.routing,
+                allow_worker_commit: true,
+            })
+            .unwrap();
+        let team_temp = t
+            .create_team(super::super::NewTeam {
+                template_id: tpl.id,
+                slug: "tmpd".into(),
+                cwd: temp_d.join("proj").to_string_lossy().into_owned(),
+                id_prefix: Some("T".into()),
+                pr_base: None,
+                worktree_root: Some(temp_d.join("proj/trees").to_string_lossy().into_owned()),
+                project_rules: None,
+                export_dir: Some(temp_d.join("out").to_string_lossy().into_owned()),
+            })
+            .unwrap();
+        let hooks_temp = ensure_worker_safe_hooks_dir(&temp_d, &team_temp.id).unwrap();
+        let item = "T-20261113-01";
+        let wt_temp = temp_d.join("proj/trees").join(item.to_lowercase());
+        std::fs::create_dir_all(&wt_temp).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["-c", "init.defaultBranch=main", "init", "-q"])
+                .current_dir(&wt_temp)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let empty = wt_temp.join(".pb-test-hooks-empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["-C", wt_temp.to_str().unwrap(), "config", "core.hooksPath", empty.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        t.attach(&team_temp.id, "wtmp", "workers").unwrap();
+        t.0.execute("UPDATE members SET item_id = ?1 WHERE session_id = 'wtmp'", [item]).unwrap();
+        assert!(
+            !worker_safe_hooks_dir_ok(&temp_d, &team_temp, &wt_temp, &hooks_temp),
+            "temp data_dir must refuse"
+        );
+        let cmd = git_cmd(&hooks_temp, "commit --no-verify -m x");
+        assert!(
+            allow_team_tool(
+                &temp_d,
+                "wtmp",
+                "claude-code",
+                &git_exec(wt_temp.to_str().unwrap(), &cmd),
+                &options(),
+                wt_temp.to_str().unwrap()
+            )
+            .is_none(),
+            "temp data_dir auto-approve must refuse"
+        );
+        let _ = std::fs::remove_dir_all(&temp_d);
     }
 }
