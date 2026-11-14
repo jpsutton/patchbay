@@ -106,4 +106,4 @@ Facts about an agent or MCP server live with that agent or server: the Agents an
 2. Model capabilities for agents that pick their own model come from a cached models.dev snapshot. No match means "unknown", never "missing".
 3. Agent facts (`subagents`, `web_*`, `computer_use`) are declared in the Rust table. Settings displays them, with no per-agent user override.
 
-Sequencing: per the director (4fc0a3d8), this comes after the real-backend end-to-end loop works (dispatch, decision, release).
+Sequencing: per the director, this comes after the real-backend end-to-end loop works (dispatch, decision, release).

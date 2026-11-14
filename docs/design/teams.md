@@ -158,7 +158,7 @@ the forced flags, and do run without them.
 Residuals (attackers):
 - the worker itself if `data_dir` is temp or under a worktree-writable root (now refused);
 - an outside same-UID process can race the safe hooks directory (validation and exec are not
-  atomic) under normal placement (`~/patchbay-teams-data`); ancestors above `data_dir` are not
+  atomic) under normal placement (a non-temp, non-worktree `data_dir`); ancestors above `data_dir` are not
   lstat-checked; Windows owner/ACL enforcement is best-effort readonly metadata and Windows
   behaviour is unexecuted reasoning;
 - mid-shell `export GIT_*` after spawn: Patchbay scrubs every `GIT_*` from the child env at
@@ -359,7 +359,7 @@ Routing: the three classes in the table above, with the reference desk's example
 
 - Branch `feat/teams` in the worktree `~/patchbay-teams`, tracking `origin/staging`. Sync with
   `git fetch origin staging && git merge origin/staging`. Never pushed.
-- Run the branch as `patchbayd --data-dir ~/patchbay-teams-data` (empty folder). Mesh keychain
+- Run the branch as `patchbayd --data-dir <data-dir>` (empty folder). Mesh keychain
   entries are scoped by data folder (`mesh/keys.rs` `keyring_scope`), so it gets its own mesh
   identity. Test teams work in a throwaway clone, never the real checkout.
 - Container (Colima) isolation is deferred to the unattended-dispatch tests in phase 4.

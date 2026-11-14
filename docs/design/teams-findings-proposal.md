@@ -2,12 +2,12 @@
 
 **Author:** Teams Lane Coordinator (Antigravity)  
 **Date:** 2026-11-12  
-**Target:** David / Director (`4fc0a3d8-fdcc-44bd-afe7-bf576fe62f1b`)  
+**Target:** product owner / director  
 **Scope:** Architecture, security, and state machine invariants across `feat/teams`
 
 ---
 
-## David's Decisions (2026-11-12)
+## Product-owner decisions (2026-11-12)
 
 1. **F5 ("Hard block for team members")**: `create_agent_session` refuses when the caller is an active team member, with a message pointing to `dispatch_item` and to raising the blocker with the user.
 2. **F6 ("Role text + dispatch-required guard")**: `builtin-desk` role text specifies that the coordinator never edits project files or implements items; `item_set` refuses `awaiting-review` and `done` unless the item has a dispatch row.

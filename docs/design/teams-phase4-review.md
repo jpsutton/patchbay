@@ -4,7 +4,7 @@ Design review of phase 4 (dispatch) before it is built, 2026-11-09, by a read-on
 `security-reviewer` against `docs/design/teams.md` at `572488b2` and the phase 1-3 code. One
 finding (export symlinks) was re-checked by hand. Line numbers are from that commit.
 
-## Decisions already made (David)
+## Decisions already made (product owner)
 
 - Members call `send_agent_message` and the team tools without a prompt; every other tool
   follows the seat's permission mode.
@@ -83,14 +83,13 @@ finding (export symlinks) was re-checked by hand. Line numbers are from that com
 
 ## Handoff
 
-- Branch `feat/teams`, worktree `~/patchbay-teams`, tracking `origin/staging`, never pushed.
+- Branch `feat/teams`, worktree `<repo>`, tracking `origin/staging`.
 - Phases 1-3 built and verified (`cargo test --lib` 317 passed at `3f265eeb`).
-- Phase 3 worker `4f7ecee6-3616-43f0-b6d4-4bde3caa1ed3` is on hold; it can answer questions
-  about the code but should not take phase 4.
-- Rules for every worker: never push; run only `patchbayd --data-dir ~/patchbay-teams-data`;
-  test teams only in `/tmp/teams-sandbox`; `CARGO_TARGET_DIR=/Users/dfrazer/patchbay/src-tauri/target`;
-  small hooks in the busy shared files; every claim backed by raw output.
+- Earlier phase workers stay on hold for questions only; they should not take phase 4.
+- Rules for every worker: never push; run only `patchbayd --data-dir <data-dir>`;
+  test teams only under a temp sandbox project; `CARGO_TARGET_DIR=<repo-or-main>/src-tauri/target`
+  (reused); small hooks in busy shared files; every claim backed by raw output.
 - Order: step 0 fixes (one commit), then phase 4 as in `teams.md` with the requirements above,
   then a security review of the diff before any real (non-sandbox) use.
-- Still owed to David: a look at the Settings > Teams screens in a browser (editors, board,
+- Still owed: a look at the Settings > Teams screens in a browser (editors, board,
   decision queue, badge); nobody has seen them rendered.
