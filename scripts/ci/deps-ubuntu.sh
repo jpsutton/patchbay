@@ -8,15 +8,22 @@
 # only fires on silence. So each phase runs under a hard limit, every line of output is timestamped
 # (to see which phase and package stalled), and a retry first switches to another mirror.
 #
+# Seen on a real runner: the image reads its mirror from /etc/apt/apt-mirrors.txt (an EC2-hosted
+# mirror there), not from azure.archive.ubuntu.com, and it can be slow instead of dead: 124 MB took
+# more than 12 minutes, with single packages taking minutes. apt keeps each finished .deb, so every
+# attempt resumes where the last stopped.
+#
 # Environment (all optional):
 #   APT_ARCHIVES       Directory that keeps the downloaded .deb files between runs. The
 #                      .github/actions/deps-ubuntu action caches it, so a warm run downloads nothing.
 #   APT_UPDATE_LIMIT   Hard limit for `apt-get update` (default 90s).
-#   APT_INSTALL_LIMIT  Hard limit for `apt-get install` (default 4m).
+#   APT_INSTALL_LIMIT  Hard limit for `apt-get install` (default 5m).
+#   APT_SOURCES_DIR    Where apt's sources live (default /etc/apt). For tests.
 set -euo pipefail
 
 update_limit=${APT_UPDATE_LIMIT:-90s}
-install_limit=${APT_INSTALL_LIMIT:-4m}
+install_limit=${APT_INSTALL_LIMIT:-5m}
+sources_dir=${APT_SOURCES_DIR:-/etc/apt}
 archives=${APT_ARCHIVES:-}
 
 apt=(sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
@@ -54,11 +61,19 @@ run() {
   return "$rc"
 }
 
-# GitHub's Ubuntu images point apt at Azure's mirror, which is the one that stalls.
+# Point every Ubuntu archive entry (the image's mirror list, Azure's or an EC2 regional mirror)
+# at <url>. The security archive is another host and stays.
 use_fallback_mirror() {
-  local files=(/etc/apt/sources.list /etc/apt/sources.list.d/*)
-  echo "deps-ubuntu: switching from azure.archive.ubuntu.com to archive.ubuntu.com"
-  sudo sed -i 's#//azure\.archive\.ubuntu\.com/#//archive.ubuntu.com/#g' "${files[@]}" 2>/dev/null || true
+  local url=$1
+  local files=("$sources_dir"/sources.list "$sources_dir"/sources.list.d/*)
+  local re='(mirror\+file:[^ ]*apt-mirrors\.txt|https?://([a-z0-9-]+\.)*archive\.ubuntu\.com/ubuntu/?)'
+  if ! grep -qE "$re" "${files[@]}" 2>/dev/null; then
+    echo "deps-ubuntu: no Ubuntu archive entry in the apt sources to switch; leaving them as they are"
+    return 0
+  fi
+  echo "deps-ubuntu: switching the apt mirror to $url"
+  sudo sed -i -E "s#$re#$url#g" "${files[@]}" 2>/dev/null || true
+  grep -hE '^(URIs:|deb )' "${files[@]}" 2>/dev/null | sort -u | sed 's/^/deps-ubuntu:   /' || true
 }
 
 # A killed install can leave dpkg half-way through a package; finish it before trying again.
@@ -75,9 +90,11 @@ finish() {
   fi
 }
 
+# Attempt 1 uses the image's own mirror. The next two try the main archive, then Azure's.
+mirrors=("" http://archive.ubuntu.com/ubuntu/ http://azure.archive.ubuntu.com/ubuntu/)
 for attempt in 1 2 3; do
   if [ "$attempt" -ge 2 ]; then
-    use_fallback_mirror
+    use_fallback_mirror "${mirrors[attempt - 1]}"
     recover
   fi
   if run "apt-get update" "$update_limit" "${apt[@]}" update &&
