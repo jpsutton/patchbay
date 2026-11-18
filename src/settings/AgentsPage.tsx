@@ -716,7 +716,7 @@ export function AgentPage({ id, list }: { id: AgentId; list: AgentList }) {
   const [installError, setInstallError] = useState<string | null>(null);
   useEffect(list.want, []);
   const a = list.agents?.find((x) => x.id === id);
-  const onPlanLogin = providers.some((p) => p.authMode === "claude_login" || p.authMode === "grok_login");
+  const onPlanLogin = providers.some((p) => p.authMode === "claude_login" || p.authMode === "grok_login" || p.authMode === "antigravity_login");
 
   const setPath = async (path: string) => {
     const agentPaths = { ...prefs.agentPaths };

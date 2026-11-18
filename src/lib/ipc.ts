@@ -6,7 +6,7 @@ import { isRemoteApp } from "./platform";
 import type { CodeLive } from "./sessionLive";
 
 export type ProviderKind = "openai_chat" | "openai_responses" | "anthropic" | "gemini";
-export type AuthMode = "api_key" | "claude_login" | "grok_login";
+export type AuthMode = "api_key" | "claude_login" | "grok_login" | "antigravity_login";
 
 /** Names of a provider's extra headers and query parameters. Values never leave the backend. */
 export interface ProviderExtraNames {
@@ -31,6 +31,8 @@ export interface Provider {
   claudeConfigDir?: string | null;
   /** For Grok login: the Grok home directory whose login to use (null: $GROK_HOME, else ~/.grok). */
   grokHome?: string | null;
+  /** For Antigravity login: the Gemini home whose login to use (null: $GEMINI_HOME, else ~/.gemini). */
+  geminiHome?: string | null;
 }
 
 /** USD per 1M tokens. */
@@ -1237,6 +1239,7 @@ export const api = {
     authMode?: AuthMode;
     claudeConfigDir?: string;
     grokHome?: string;
+    geminiHome?: string;
   }) => invoke<Provider>("save_provider", { input }),
   deleteProvider: (id: string) => invoke<void>("delete_provider", { id }),
   providerExtras: (id: string) => invoke<ProviderExtraNames>("provider_extras", { id }),

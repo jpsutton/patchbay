@@ -1,6 +1,8 @@
 //! The HTTP client: request, retry, idle timeout, cancellation.
 
 use std::time::Duration;
+use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
 
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -26,6 +28,12 @@ pub struct Config {
     pub session_headers: Vec<String>,
     /// A header that carries a fresh id on every attempt (Grok's `x-grok-req-id`).
     pub request_id_header: Option<String>,
+    /// Use Google's internal Cloud Code `v1internal` envelope for Gemini requests.
+    pub cloud_code: bool,
+    /// Optional Workspace project required by Cloud Code, cached per Antigravity login.
+    pub cloud_code_project: Option<String>,
+    /// Stable local login identity used only as the in-memory project-cache key.
+    pub cloud_code_login_id: Option<String>,
     pub max_output_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
@@ -82,6 +90,9 @@ impl Config {
             extra_query: Vec::new(),
             session_headers: Vec::new(),
             request_id_header: None,
+            cloud_code: false,
+            cloud_code_project: None,
+            cloud_code_login_id: None,
             max_output_tokens: None,
             temperature: None,
             top_p: None,
@@ -118,7 +129,7 @@ fn request_headers(cfg: &Config, session: Option<&str>) -> Vec<(String, String)>
 
 /// A random id in UUID layout. It needs no uniqueness guarantee beyond "different each time", so
 /// it draws on the standard library's per-process random hasher keys instead of a new dependency.
-fn request_id() -> String {
+pub(crate) fn request_id() -> String {
     use std::hash::{BuildHasher, Hasher};
     let word = || std::collections::hash_map::RandomState::new().build_hasher().finish();
     let (a, b) = (word(), word());
@@ -169,11 +180,25 @@ impl Client {
         let mut body = wire::body(cfg, req);
         let url = wire::url(cfg);
         let mut attempt = 0u32;
+        let mut project_fallback_attempted = false;
         loop {
             let mut emitted = false;
             match self.attempt(&url, &body, req.cache_key.as_deref(), cancel, &mut emitted, &mut on_event).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) if e.cancelled => return Err(e),
+                Err(e)
+                    if cfg.cloud_code
+                        && cfg.cloud_code_project.as_deref().is_none_or(str::is_empty)
+                        && !project_fallback_attempted
+                        && project_required(&e) =>
+                {
+                    project_fallback_attempted = true;
+                    let Some(project) = self.load_code_assist_project().await? else {
+                        return Err(e);
+                    };
+                    body["project"] = serde_json::Value::String(project);
+                    continue;
+                }
                 // Some Anthropic models refuse adaptive thinking; ask again with a token budget.
                 Err(e)
                     if cfg.format == WireFormat::Anthropic
@@ -349,6 +374,69 @@ impl Client {
         }
         Ok(response)
     }
+
+    async fn load_code_assist_project(&self) -> Result<Option<String>> {
+        let cfg = &self.config;
+        if let Some(login) = cfg.cloud_code_login_id.as_deref()
+            && let Some(project) = cloud_code_project_cache().lock().unwrap_or_else(|e| e.into_inner()).get(login).cloned()
+        {
+            return Ok(Some(project));
+        }
+        let url = format!("{}/v1internal:loadCodeAssist", cfg.base_url.trim_end_matches('/'));
+        let metadata = serde_json::json!({
+            "ideType": "ANTIGRAVITY",
+            "platform": "PLATFORM_UNSPECIFIED",
+            "pluginType": "GEMINI"
+        });
+        let mut request = self
+            .http
+            .post(&url)
+            .header("content-type", "application/json")
+            .json(&serde_json::json!({"metadata": metadata}));
+        if let Some(token) = cfg.key.as_deref().filter(|s| !s.is_empty()) {
+            request = request.bearer_auth(token);
+        }
+        for (name, value) in &cfg.extra_headers {
+            request = request.header(name, value);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| Error::new(format!("loadCodeAssist request failed: {}", e.without_url())))?;
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+        let value: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| Error::new(format!("parse loadCodeAssist response: {}", e.without_url())))?;
+        let project = value
+            .pointer("/cloudaicompanionProject/id")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| value.get("cloudaicompanionProject").and_then(serde_json::Value::as_str))
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        if let (Some(login), Some(project)) = (cfg.cloud_code_login_id.as_deref(), project.as_ref()) {
+            cloud_code_project_cache()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(login.to_owned(), project.clone());
+        }
+        Ok(project)
+    }
+}
+
+fn cloud_code_project_cache() -> &'static Mutex<BTreeMap<String, String>> {
+    static PROJECTS: OnceLock<Mutex<BTreeMap<String, String>>> = OnceLock::new();
+    PROJECTS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn project_required(error: &Error) -> bool {
+    if !matches!(error.status, Some(400 | 403)) {
+        return false;
+    }
+    let message = error.message.to_ascii_lowercase();
+    message.contains("project") && (message.contains("required") || message.contains("missing") || message.contains("provide"))
 }
 
 #[cfg(test)]
