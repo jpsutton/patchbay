@@ -7,7 +7,8 @@ import { sessionPlanRows, type InfoRow } from "../lib/sessionInfo";
 const nowSecs = () => Math.floor(Date.now() / 1000);
 
 function planKindLabel(plan: SessionPlanUsage): string {
-  if (plan.kind === "claude") return "Claude plan";
+  // `claude` also carries a Grok seat's usage (accounts keyed `grok:…`); name the plan it is.
+  if (plan.kind === "claude") return plan.account.startsWith("grok:") ? "Grok plan" : "Claude plan";
   if (plan.kind === "cursor") return "Cursor plan";
   return "Antigravity plan";
 }
