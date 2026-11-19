@@ -150,8 +150,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - run: scripts/ci/deps-ubuntu.sh
-        timeout-minutes: 20
+      - uses: ./.github/actions/deps-ubuntu
+        timeout-minutes: 25
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -266,8 +266,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - run: scripts/ci/deps-ubuntu.sh
-        timeout-minutes: 20
+      - uses: ./.github/actions/deps-ubuntu
+        timeout-minutes: 25
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

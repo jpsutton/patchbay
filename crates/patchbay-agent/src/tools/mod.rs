@@ -249,6 +249,9 @@ pub fn foreign_location(cwd: &Path, p: &Path) -> bool {
     if !cfg!(windows) {
         return false;
     }
+    if is_network_url(&p.to_string_lossy()) {
+        return true; // below the guard: Windows only, where a network URL can reach a share
+    }
     let n = p.to_string_lossy().replace('/', "\\");
     if n.starts_with(r"\??\") {
         return true; // the NT object namespace, which CreateFile passes straight through
@@ -262,6 +265,20 @@ pub fn foreign_location(cwd: &Path, p: &Path) -> bool {
     }
     let cwd_n = cwd.to_string_lossy().replace('/', "\\");
     !(key.starts_with("unc:") && key == prefix_key(Path::new(&cwd_n)))
+}
+
+/// A path written as a network URL: `smb:` anything, or `file:` with a host that is not empty and not
+/// `localhost` (`file://host/share`, `file://host:445/share`), or with an empty host and a path that
+/// itself opens with a pair of separators (`file:////host/share`). `file:///x`, `file://localhost/x` and
+/// `file:///C:/x` are this machine. Case does not matter and a backslash counts as a slash. LEXICAL.
+fn is_network_url(s: &str) -> bool {
+    let t = s.replace('\\', "/").to_ascii_lowercase();
+    if t.starts_with("smb:") {
+        return true;
+    }
+    let Some(rest) = t.strip_prefix("file://") else { return false };
+    let (host, path) = rest.split_once('/').map_or((rest, ""), |(h, p)| (h, p));
+    if host.is_empty() { path.starts_with('/') } else { host != "localhost" }
 }
 
 /// The refusal for a raw path argument that names a network location or a device path
@@ -661,7 +678,9 @@ mod tests {
 
     #[cfg(windows)]
     fn junction(link: &Path, target: &Path) {
-        // `mklink /J` makes a directory junction and needs no privilege.
+        // `mklink /J` makes a directory junction and needs no privilege. Audited for
+        // pb-20261111-10 (cmd /C quote escaping): paths cannot contain `"`, and the /C tail
+        // starts with `mklink`, never a quote — std's quoting reaches cmd intact here.
         let out = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(link).arg(target).output().unwrap();
         assert!(out.status.success(), "mklink /J failed: {} {}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     }
@@ -1332,6 +1351,50 @@ mod tests {
         assert!(inside(&root, &root.join("ok.txt")), "the control");
     }
 
+
+    /// The URL reader: `smb:` anything, `file:` with a host other than empty or `localhost`, `file:////host`;
+    /// case and backslashes do not matter. Runs everywhere (it only reads text); `foreign_location` uses it
+    /// on Windows only.
+    #[test]
+    fn network_urls_are_told_from_local_ones() {
+        for url in [
+            "smb://203.0.113.1/share",
+            "SMB://203.0.113.1/share",
+            "Smb://example.test/share/a.png",
+            "smb:",
+            "file://203.0.113.1/share/a.png",
+            "FILE://Example.Test/share",
+            "file://example.test:445/share",
+            "file:////203.0.113.1/share/a.png",
+            r"file://\\203.0.113.1\share",
+        ] {
+            assert!(is_network_url(url), "not caught: {url}");
+        }
+        for local in [
+            "file:///x",
+            "file:///C:/x",
+            "file://localhost/x",
+            "FILE://LOCALHOST/C:/x",
+            "file:/x",
+            "a/b.txt",
+            "smbfile.txt",
+            "dir/smb://x",
+        ] {
+            assert!(!is_network_url(local), "wrongly caught: {local}");
+        }
+    }
+
+    /// On Windows a network URL is foreign like a UNC path; off Windows `foreign_location` is unchanged.
+    #[test]
+    fn foreign_location_knows_network_urls_on_windows_only() {
+        let cwd = Path::new("/w/proj");
+        for url in ["smb://203.0.113.1/share", "file://example.test/share/a.png", "file:////203.0.113.1/share/a.png"] {
+            assert_eq!(foreign_location(cwd, Path::new(url)), cfg!(windows), "{url}");
+        }
+        for local in ["file:///x", "file://localhost/x", "file:///C:/x"] {
+            assert!(!foreign_location(cwd, Path::new(local)), "wrongly caught: {local}");
+        }
+    }
 
     /// `foreign_location` reads only the text of a path, whatever the separators.
     #[test]

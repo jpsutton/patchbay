@@ -682,6 +682,9 @@ mod tests {
             let r = cwd.display();
             assert!(!s.may_read(std::path::Path::new(&format!("{r}\\src/..\\../stolen.txt"))), "mixed separators");
             // A junction in the cwd that points outside it.
+            // Audited for pb-20261111-10 (cmd /C quote escaping): mklink's arguments are paths,
+            // which cannot contain `"`, and the /C tail starts with `mklink`, never a quote — so
+            // std's own quoting of the paths is exactly what cmd needs; nothing is mangled here.
             let out = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(cwd.join("link")).arg(&outside).output().unwrap();
             assert!(out.status.success(), "mklink /J failed");
             assert!(!s.may_read(&cwd.join("link/secret.txt")), "a file behind a junction");

@@ -642,6 +642,15 @@ fn apply_row(conn: &Connection, t: &Table, k: &str, ops: &[&Op], defaults: &dyn 
         .is_some();
 
     if let Some(del) = ops.iter().filter(|o| o.c == TOMBSTONE).max_by_key(|o| (o.h, o.o.clone())) {
+        // Only the host deletes a Code session everywhere; another node's remove stays there.
+        if t.name == "code_sessions" && exists {
+            let me = node_id(conn)?;
+            let host: Option<String> =
+                conn.query_row("SELECT host_node FROM code_sessions WHERE id = ?1", [k], |r| r.get(0))?;
+            if host.as_deref() == Some(me.as_str()) && del.o != me {
+                return Ok(RowOutcome::Unchanged);
+            }
+        }
         let had_tombstone = clock(conn, t.name, k, TOMBSTONE)?.is_some();
         if exists {
             conn.execute(&format!("DELETE FROM {} WHERE {}", t.name, pk_where(t)), params_from_iter(pk_vals.iter()))?;
@@ -820,6 +829,26 @@ mod tests {
         assert!(a.get_conversation(&c.id).unwrap().is_none());
         assert!(b.get_conversation(&c.id).unwrap().is_none());
         assert!(b.list_messages(&c.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn remote_delete_leaves_the_hosts_session() {
+        // A node that doesn't host a Code session can't delete it from the host: removing it there
+        // (a stale copy from an earlier pairing, say) must not wipe a live session elsewhere.
+        let (a, b) = (temp_db(), temp_db());
+        let id = a.create_code_session("/work/proj", None, "patchbay", "default").unwrap().id;
+        both(&a, &b);
+        b.delete_code_session(&id).unwrap();
+        both(&a, &b);
+        assert!(a.get_code_session(&id).unwrap().is_some(), "the host keeps its session");
+        assert!(b.get_code_session(&id).unwrap().is_none(), "the remover no longer lists it");
+        // The host can still delete it everywhere.
+        let other = a.create_code_session("/work/proj", None, "patchbay", "default").unwrap().id;
+        both(&a, &b);
+        a.delete_code_session(&other).unwrap();
+        both(&a, &b);
+        assert!(a.get_code_session(&other).unwrap().is_none());
+        assert!(b.get_code_session(&other).unwrap().is_none());
     }
 
     #[test]

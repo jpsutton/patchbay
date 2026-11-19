@@ -552,6 +552,8 @@ pub struct Hook {
     pub event: String,
     /// Tool-name pattern for tool events; empty or `*` matches every tool.
     pub matcher: String,
+    /// The command as configured; `expand_plugin_root` substitutes `${CLAUDE_PLUGIN_ROOT}`
+    /// into it immediately before the hook runs.
     pub command: String,
     pub timeout_secs: u64,
     /// The plugin's directory, set as `CLAUDE_PLUGIN_ROOT` for its hooks.
@@ -787,16 +789,31 @@ fn short(command: &str) -> String {
     if c.len() < command.len() { format!("{c}…") } else { c }
 }
 
+/// `${CLAUDE_PLUGIN_ROOT}` in a hook's command, replaced with the plugin's directory — this is
+/// the substitution Claude Code performs when a plugin hook fires, and it has to happen before
+/// the command runs: `cmd` has no `${...}` expansion at all (it only knows `%VAR%`), and even
+/// `sh -c` misses the placeholder inside single quotes. Setting the `CLAUDE_PLUGIN_ROOT` env
+/// var (as `run_one` does) covers the shell-expandable spellings; this covers the text itself.
+fn expand_plugin_root(command: &str, root: Option<&Path>) -> String {
+    match root {
+        Some(root) => command.replace("${CLAUDE_PLUGIN_ROOT}", &root.to_string_lossy()),
+        None => command.to_owned(),
+    }
+}
+
 /// Run one hook: exit code (`None` if killed), stdout, stderr.
 async fn run_one<'a>(hook: &'a Hook, stdin: &str, cwd: &Path) -> (&'a Hook, Result<(Option<i32>, String, String), String>) {
     use tokio::io::AsyncWriteExt;
+    // Substitute ${CLAUDE_PLUGIN_ROOT} in the command text before anything spawns, then hand the
+    // script to the shell so cmd receives its quotes un-mangled (pb-20261111-10).
+    let command = expand_plugin_root(&hook.command, hook.plugin_root.as_deref());
     let mut cmd = if cfg!(windows) {
         let mut c = tokio::process::Command::new("cmd");
-        c.arg("/C").arg(&hook.command);
+        crate::proc::apply_script_args(&mut c, "/C", &command);
         c
     } else {
         let mut c = tokio::process::Command::new("sh");
-        c.arg("-c").arg(&hook.command);
+        crate::proc::apply_script_args(&mut c, "-c", &command);
         c
     };
     cmd.current_dir(cwd)
@@ -1034,6 +1051,71 @@ mod tests {
         }];
         let out = run_hooks(&hooks, "UserPromptSubmit", None, json!({"prompt": "hi"}), &dir).await;
         assert_eq!(out.context.first().map(String::as_str), crate::proc::child_path(None).as_deref(), "the hook's PATH");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The substitution point itself: `${CLAUDE_PLUGIN_ROOT}` out of the command text, on any OS.
+    #[test]
+    fn plugin_root_is_substituted_into_the_hook_command() {
+        let root = Path::new("/opt/pb-plugin");
+        assert_eq!(
+            expand_plugin_root("${CLAUDE_PLUGIN_ROOT}/bin/srv --port 9", Some(root)),
+            "/opt/pb-plugin/bin/srv --port 9"
+        );
+        // Every occurrence goes; nothing else in the command is touched — the rest stays for
+        // the shell to expand as it always did.
+        assert_eq!(
+            expand_plugin_root("a ${CLAUDE_PLUGIN_ROOT} b ${CLAUDE_PLUGIN_ROOT} ${HOME}", Some(root)),
+            "a /opt/pb-plugin b /opt/pb-plugin ${HOME}"
+        );
+        // No plugin root: the placeholder is left as configured, nothing to substitute.
+        assert_eq!(expand_plugin_root("${CLAUDE_PLUGIN_ROOT}/x", None), "${CLAUDE_PLUGIN_ROOT}/x");
+    }
+
+    /// End to end through `run_one`: the placeholder is inside single quotes, so the shell
+    /// cannot be the one expanding it — only the pre-spawn substitution can.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_plugin_root_reaches_a_quoted_hook_command() {
+        let dir = tmp();
+        let root = dir.join("plugin");
+        std::fs::create_dir_all(&root).unwrap();
+        let hooks = vec![Hook {
+            event: "UserPromptSubmit".into(),
+            matcher: String::new(),
+            command: r#"printf %s '${CLAUDE_PLUGIN_ROOT}/bin'"#.into(),
+            timeout_secs: 5,
+            plugin_root: Some(root.clone()),
+            source: Source::Plugin("demo".into()),
+        }];
+        let out = run_hooks(&hooks, "UserPromptSubmit", None, json!({"prompt": "hi"}), &dir).await;
+        assert_eq!(out.context, [format!("{}/bin", root.display())], "{out:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The same wiring on Windows (runs on CI's windows job): `cmd` never expands `${...}`, so
+    /// this only prints the plugin's path if the substitution happened before the spawn. The
+    /// directory stays un-canonicalized: `cmd` cannot `cd` into a verbatim `\\?\` path.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_plugin_root_reaches_a_cmd_hook() {
+        let dir = std::env::temp_dir().join(format!("pb-plugin-root-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.join("plugin");
+        std::fs::create_dir_all(&root).unwrap();
+        let hooks = vec![Hook {
+            event: "UserPromptSubmit".into(),
+            matcher: String::new(),
+            command: "echo ${CLAUDE_PLUGIN_ROOT}\\bin".into(),
+            timeout_secs: 5,
+            plugin_root: Some(root.clone()),
+            source: Source::Plugin("demo".into()),
+        }];
+        let out = run_hooks(&hooks, "UserPromptSubmit", None, json!({"prompt": "hi"}), &dir).await;
+        assert!(
+            out.context.iter().any(|c| c.contains(&root.display().to_string())),
+            "the plugin root must be substituted before cmd runs: {out:?}"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -147,8 +147,7 @@ fn spawn_shell(
         _ => command.to_owned(),
     };
     let mut cmd = tokio::process::Command::new(program);
-    cmd.arg(flag)
-        .arg(script)
+    crate::proc::apply_script_args(&mut cmd, flag, &script)
         .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

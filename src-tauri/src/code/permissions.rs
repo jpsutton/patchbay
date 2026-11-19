@@ -228,7 +228,10 @@ fn all_inside(cwd: &str, paths: &[String]) -> Option<bool> {
     for p in paths {
         // Before anything is resolved: a path that is, or goes through a link to, another machine's
         // share is outside, and canonicalizing it would connect to that share.
-        if patchbay_agent::foreign_target(Path::new(cwd), Path::new(p.strip_prefix("file://").unwrap_or(p))) {
+        // The URL as written too: stripping `file://` turns `file://host/share` into a relative name.
+        if patchbay_agent::foreign_target(Path::new(cwd), Path::new(p))
+            || patchbay_agent::foreign_target(Path::new(cwd), Path::new(p.strip_prefix("file://").unwrap_or(p)))
+        {
             return Some(false);
         }
         let real = resolve(&root, p)?;
@@ -427,6 +430,21 @@ mod tests {
         std::os::unix::fs::symlink(&outside, root.join("out")).unwrap();
         let cwd = root.to_string_lossy().into_owned();
         (dir, cwd, outside)
+    }
+
+    /// A network URL is outside the project, whether or not `file://` is stripped first:
+    /// `file://host/share` stripped is a relative name that would read as inside.
+    #[test]
+    #[cfg(windows)]
+    fn a_network_url_is_outside_the_project() {
+        let dir = std::env::temp_dir().join(format!("pb-url-outside-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = dir.to_string_lossy().into_owned();
+        for url in ["smb://203.0.113.1/share/a", "file://example.test/share/a", "file:////203.0.113.1/share/a"] {
+            assert_eq!(all_inside(&cwd, &[url.to_string()]), Some(false), "{url} must be outside");
+        }
+        assert_eq!(all_inside(&cwd, &["a.txt".to_string()]), Some(true), "control: a file in the project");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A path that goes through a link to another machine's share is outside the project and is

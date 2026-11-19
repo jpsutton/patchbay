@@ -5276,3 +5276,57 @@ async fn dispatch_item_temp_project_keeps_codex_worker_read_only_with_hint_note(
 
     let _ = std::fs::remove_dir_all(&proj);
 }
+
+/// Team in a temp repo with a live coordinator running in the team folder, plus a worker seat
+/// that accepts a Patchbay session. Returns (node, team id, project folder).
+#[cfg(unix)]
+async fn team_with_live_coordinator(name: &str) -> (Node, String, PathBuf) {
+    let a = node(name);
+    let p = a.dir.join("proj");
+    repo(&p);
+    let cwd = p.to_string_lossy().into_owned();
+    let coord = a.state.db.create_code_session(&cwd, None, "opencode", "default").unwrap();
+    std::mem::forget(a.state.code.attach_test_agent(&coord.id));
+    let builtin = teams::list_team_templates(&a.state).await.unwrap().into_iter().find(|t| t.id == "builtin-triage-desk").unwrap();
+    let mut value = serde_json::to_value(&builtin).unwrap();
+    for seat in value["seats"].as_array_mut().unwrap() {
+        if seat["seat"] == "workers" {
+            seat["agent"] = json!("patchbay");
+            seat["model"] = Value::Null;
+            seat["choices"] = json!([]);
+            seat["allowUnasked"] = json!(true);
+        }
+    }
+    value["id"] = Value::Null;
+    value["name"] = json!(name);
+    let template = teams::save_template(&a.state, serde_json::from_value(value).unwrap()).await.unwrap();
+    let team = teams::create_team(&a.state, serde_json::from_value(json!({
+        "templateId": template.id, "slug": "wl", "cwd": cwd,
+        "exportDir": a.dir.join("out").to_string_lossy(),
+    })).unwrap()).await.unwrap();
+    teams::team_attach(&a.state, team.id.clone(), coord.id.clone(), "coordinator".into()).await.unwrap();
+    (a, team.id, p)
+}
+
+// pb-20261117-03: a worker session rooted in the team folder holds the live coordinator inside its
+// writable tree. That refusal stays, but it must say why and what to do.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn worker_attach_in_team_folder_is_refused_with_a_clear_message() {
+    let (a, team, p) = team_with_live_coordinator("wl-folder").await;
+    let worker = a.state.db.create_code_session(&p.to_string_lossy(), None, "patchbay", "default").unwrap();
+    let err = teams::team_attach(&a.state, team, worker.id, "workers".into()).await.unwrap_err().0;
+    assert!(err.contains("worker start refused: live session root"), "{err}");
+    assert!(err.contains("can't be the team's project folder; a worker runs in its own worktree"), "{err}");
+}
+
+// pb-20261117-03: the same attach succeeds for a session rooted in its own worktree.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn worker_in_own_worktree_attaches_beside_a_live_coordinator() {
+    let (a, team, p) = team_with_live_coordinator("wl-tree").await;
+    let tree = p.join(".trees").join("w1");
+    git(&p, &["worktree", "add", "-q", "-b", "w1", "--", &tree.to_string_lossy(), "HEAD"]);
+    let worker = a.state.db.create_code_session(&tree.to_string_lossy(), None, "patchbay", "default").unwrap();
+    teams::team_attach(&a.state, team, worker.id, "workers".into()).await.unwrap();
+}

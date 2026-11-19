@@ -515,7 +515,10 @@ pub(crate) fn gate_session_root(
         if other.id == session_id || other.archived_at.is_some() || !manager.is_running(&other.id) { continue; }
         let other_root = real_session_root(&other.cwd)?;
         if other_root.starts_with(&root) {
-            bail!("worker start refused: live session root {} is inside this worktree", other_root.display());
+            bail!(
+                "worker start refused: live session root {} is inside this worktree. A worker session folder can't be the team's project folder; a worker runs in its own worktree, so start it from one under the team's worktree folder",
+                other_root.display()
+            );
         }
     }
 

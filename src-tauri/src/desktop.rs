@@ -410,7 +410,7 @@ fn local_path_exists(path: String, cwd: Option<String>) -> bool {
 /// NEVER probed: `exists` on a UNC path makes Windows connect to it, and this runs for every path any
 /// agent's transcript mentions, with no click (text from a web page that an agent echoes is enough).
 /// The lexical check comes first, on the text as written and on the resolved path; such a path reads
-/// as existing so its link is drawn, and a click asks first (`open_local_path`).
+/// as existing so its link is drawn, and a click copies the path (`open_local_path`).
 fn path_exists_with(path: &str, cwd: Option<&str>, exists: impl Fn(&std::path::Path) -> bool) -> bool {
     let home = std::path::Path::new(cwd.unwrap_or(""));
     if patchbay_agent::foreign_target(home, std::path::Path::new(path)) {
@@ -435,17 +435,23 @@ enum ClickPlan {
     Copy(String),
 }
 
-/// Decide what a click does, from the text of the path alone: no filesystem call. The raw text and
-/// the resolved path are both judged, so `\\host` alone (not absolute, so joined to the folder) is
-/// still caught.
+/// Decide what a click does, with no call that follows a link: the raw text and the resolved path
+/// are both judged, so `\\host` alone (not absolute, so joined to the folder) is still caught, and so
+/// is a link in the folder whose target is another machine's share (`foreign_target`, which reads
+/// links but never opens through them; the same check that decides whether the link is drawn).
 fn plan_open(path: &str, cwd: Option<&str>) -> Option<ClickPlan> {
+    plan_open_with(path, cwd, &patchbay_agent::OsLinks)
+}
+
+/// [`plan_open`] with the link reader handed in, so a test can see what is asked of the filesystem.
+fn plan_open_with(path: &str, cwd: Option<&str>, links: &dyn patchbay_agent::LinkReader) -> Option<ClickPlan> {
     let home = std::path::Path::new(cwd.unwrap_or(""));
     // The raw text first: `\??\UNC\...` is not "absolute" to std, so it may not resolve at all.
-    if patchbay_agent::foreign_location(home, std::path::Path::new(path)) {
+    if patchbay_agent::foreign_target_with(home, std::path::Path::new(path), links) {
         return Some(ClickPlan::Copy(path.to_string()));
     }
     let p = resolve_mentioned(path, cwd)?;
-    Some(if patchbay_agent::foreign_location(home, &p) { ClickPlan::Copy(path.to_string()) } else { ClickPlan::Open(p) })
+    Some(if patchbay_agent::foreign_target_with(home, &p, links) { ClickPlan::Copy(path.to_string()) } else { ClickPlan::Open(p) })
 }
 
 /// What a click did, for the toast the page shows.
@@ -1180,6 +1186,104 @@ mod file_link_tests {
             let _ = std::fs::remove_dir(&link);
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// A link in the project whose target is another machine's share is copied, never opened: the
+    /// click used to judge only the text, so the link read as local and `open` followed it, which
+    /// connects to the share and sends the user's credentials. The reader is a recording stand-in
+    /// (no real link is made, nothing is connected to; 203.0.113.1 is a documentation address).
+    /// The link walk is Windows-only, so the Copy half is asserted there; elsewhere the same call
+    /// must still plan an open (the control).
+    #[test]
+    fn a_link_to_a_share_is_copied_not_opened() {
+        struct Links(std::cell::RefCell<Vec<std::path::PathBuf>>, std::path::PathBuf, std::path::PathBuf);
+        impl patchbay_agent::LinkReader for Links {
+            fn link_target(&self, p: &std::path::Path) -> Option<std::path::PathBuf> {
+                self.0.borrow_mut().push(p.to_path_buf());
+                (p == self.1).then(|| self.2.clone())
+            }
+        }
+        let proj = if cfg!(windows) { std::path::PathBuf::from(r"C:\Users\x\proj") } else { std::env::temp_dir().join("proj") };
+        let link = proj.join("to_share");
+        let links = Links(Default::default(), link.clone(), std::path::PathBuf::from(r"\\203.0.113.1\share"));
+        let cwd = proj.to_string_lossy().into_owned();
+        for mention in ["to_share/a.png".to_string(), link.join("a.png").to_string_lossy().into_owned()] {
+            let plan = plan_open_with(&mention, Some(&cwd), &links).unwrap();
+            if cfg!(windows) {
+                assert_eq!(plan, ClickPlan::Copy(mention.clone()), "a click on {mention} must copy, not open");
+            } else {
+                assert!(matches!(plan, ClickPlan::Open(_)), "control: {mention} is local off Windows");
+            }
+        }
+        assert!(links.0.borrow().iter().all(|p| !p.starts_with(r"\\203.0.113.1")), "the share itself was asked about");
+        // A share written out is decided from its text alone, whatever the case or slash: the
+        // reader is never asked, so nothing is stat'ed on the way.
+        let asked = links.0.borrow().len();
+        for unc in [r"\\EXAMPLE.TEST\Share\a.png", "//example.test/share/a.png", r"\\Example.Test\SHARE"] {
+            let plan = plan_open_with(unc, Some(&cwd), &links).unwrap();
+            if cfg!(windows) {
+                assert_eq!(plan, ClickPlan::Copy(unc.to_string()), "{unc} must copy");
+            }
+        }
+        assert_eq!(links.0.borrow().len(), asked, "a share written out was looked at");
+    }
+
+    /// A network URL in an agent's text. On Windows it is copied as written, never opened (`foreign_location`
+    /// knows it, so no filesystem call is made). Elsewhere nothing changes, and this pins that the opener
+    /// is never handed a URL: the text is a relative name joined to the project folder (a path that does
+    /// not exist, so nothing remote happens), or with no folder there is nothing to open. Hosts are
+    /// documentation addresses.
+    #[test]
+    fn a_network_url_is_copied_or_never_reaches_the_opener() {
+        #[derive(Default)]
+        struct Mock {
+            copied: Vec<String>,
+            opened: Vec<std::path::PathBuf>,
+        }
+        impl ClickOps for Mock {
+            fn copy(&mut self, text: &str) -> anyhow::Result<()> {
+                self.copied.push(text.to_string());
+                Ok(())
+            }
+            fn open(&mut self, p: &std::path::Path) -> anyhow::Result<()> {
+                self.opened.push(p.to_path_buf());
+                Ok(())
+            }
+        }
+        let proj = std::env::temp_dir().join("pb-url-proj");
+        let cwd = proj.to_string_lossy().into_owned();
+        for url in [
+            "smb://203.0.113.1/share/a.png",
+            "SMB://203.0.113.1/share",
+            "file://203.0.113.1/share/a.png",
+            "file://example.test:445/share",
+            "file:////203.0.113.1/share/a.png",
+        ] {
+            for cwd in [None, Some(cwd.as_str())] {
+                let mut ops = Mock::default();
+                let done = click(url, cwd, &mut ops);
+                if cfg!(windows) {
+                    assert_eq!(done.unwrap(), ClickDone::Copied, "{url} must copy");
+                    assert_eq!(ops.copied, vec![url.to_string()]);
+                    assert!(ops.opened.is_empty(), "{url} was handed to the opener");
+                } else {
+                    // Not copied is fine; what must never happen is the opener getting the URL.
+                    for p in &ops.opened {
+                        assert!(p.starts_with(&proj), "{url} opened outside the project: {}", p.display());
+                        let text = p.to_string_lossy().to_ascii_lowercase();
+                        assert!(!text.starts_with("smb:") && !text.starts_with("file:"), "{url} reached the opener as a URL: {text}");
+                        assert!(!p.exists(), "{url} opened an existing path: {}", p.display());
+                    }
+                    if cwd.is_none() {
+                        assert!(done.is_err() && ops.opened.is_empty(), "{url} with no folder must not open anything");
+                    }
+                }
+            }
+        }
+        // This computer's own file URLs are not network locations (the control).
+        let mut ops = Mock::default();
+        let _ = click("file:///x", Some(&cwd), &mut ops);
+        assert!(ops.copied.is_empty());
     }
 
     #[test]

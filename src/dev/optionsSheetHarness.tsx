@@ -1,8 +1,12 @@
-// Dev-only page (`/options-sheet-harness.html`): a narrow Composer whose footer chips live in the
-// options sheet, for scripts/e2e-options-sheet.mjs to drive with real key events. Not part of any build.
+// Dev-only page (`/options-sheet-harness.html`): a Composer whose footer chips live in the options
+// sheet, for scripts/e2e-options-sheet.mjs to drive with real key events. Not part of any build.
+// Only the phone app uses the sheet (a desktop composer moves what doesn't fit into an overflow
+// menu), so the page claims to be the phone app.
 import { createRoot } from "react-dom/client";
 import { Composer } from "../components/Composer";
 import "../index.css";
+
+(window as { __PATCHBAY_REMOTE__?: boolean }).__PATCHBAY_REMOTE__ = true;
 
 function Harness() {
   return (

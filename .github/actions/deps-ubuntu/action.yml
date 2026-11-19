@@ -1,0 +1,22 @@
+name: Ubuntu build dependencies
+description: >
+  Installs the system packages Patchbay needs on an Ubuntu runner (scripts/ci/deps-ubuntu.sh), with
+  the downloaded .deb files cached between runs so a warm run does not depend on the mirror.
+  Run actions/checkout first: the key and the script come from the repo.
+
+runs:
+  using: composite
+  steps:
+    - id: image
+      shell: bash
+      # The runner image version is an OS variable, not part of the `env` context. A new image
+      # means new package versions, so the cache starts over with it.
+      run: echo "version=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/apt-archives
+        key: apt-archives-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.version }}-${{ hashFiles('scripts/ci/deps-ubuntu.sh') }}
+    - shell: bash
+      run: '"$GITHUB_WORKSPACE/scripts/ci/deps-ubuntu.sh"'
+      env:
+        APT_ARCHIVES: ${{ runner.temp }}/apt-archives
