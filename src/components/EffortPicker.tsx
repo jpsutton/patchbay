@@ -1,5 +1,4 @@
-import { useContext } from "react";
-import { ChipRows, ChipSelect } from "./ChipSelect";
+import { ChipSelect, useChipLabelled } from "./ChipSelect";
 import { ActivityIcon } from "./icons";
 
 const EFFORTS = ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -14,12 +13,12 @@ export function EffortPicker({
   modelDefault: string | null;
   onChange: (v: string) => void;
 }) {
-  // The options sheet labels the row, so its values drop the "Thinking:" prefix.
-  const prefix = useContext(ChipRows) ? "" : "Thinking: ";
+  // The options sheet and the overflow menu label the row, so their values drop the "Thinking:" prefix.
+  const prefix = useChipLabelled() ? "" : "Thinking: ";
   return (
     <ChipSelect
       lead={<ActivityIcon size={14} />}
-      className="max-w-44"
+      className="max-w-44 shrink-0"
       value={value}
       onChange={(e) => onChange(e.target.value)}
       title={`Reasoning effort for the next messages${modelDefault ? ` (model default: ${modelDefault})` : ""}. Models without reasoning ignore it.`}

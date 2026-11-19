@@ -86,7 +86,7 @@ import {
   TerminalIcon,
   XIcon,
 } from "../components/icons";
-import { ChipRows, ChipSelect, ChipText } from "../components/ChipSelect";
+import { ChipOverflow, ChipRows, ChipSelect, ChipText, useChipLabelled } from "../components/ChipSelect";
 import { Toggle } from "../components/Toggle";
 import { AgentImage, AttachedImage } from "../components/AgentImage";
 import { ModelRing } from "../lib/cable";
@@ -142,11 +142,11 @@ function ConfigChip({
   onSet: (o: AcpConfigOption, value: string) => void;
 }) {
   const thinking = o.category === "thought_level";
-  const prefix = thinking && !useContext(ChipRows) ? "Thinking: " : "";
+  const prefix = thinking && !useChipLabelled() ? "Thinking: " : "";
   return (
     <ChipSelect
       lead={thinking ? <ActivityIcon size={14} /> : undefined}
-      className="max-w-44"
+      className="max-w-44 shrink-0"
       value={o.currentValue}
       disabled={disabled}
       title={o.description ?? o.name}
@@ -177,6 +177,7 @@ function MoreOptions({
   onSet: (o: AcpConfigOption, value: string) => void;
 }) {
   const rows = useContext(ChipRows);
+  const overflow = useContext(ChipOverflow);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   // The popup is 20rem wide and opens rightward from the button; in a narrow window (a tiled
@@ -212,13 +213,13 @@ function MoreOptions({
     };
   }, [open]);
   if (options.length === 0) return null;
-  // The phone's options sheet already lists every option on its own labeled row.
-  if (rows) return options.map((o) => <ConfigChip key={o.id} option={o} disabled={disabled} onSet={onSet} />);
+  // The phone's options sheet and the composer's overflow menu already list every option on its own labeled row.
+  if (rows || overflow) return options.map((o) => <ConfigChip key={o.id} option={o} disabled={disabled} onSet={onSet} />);
   const names = options.map(optionName).join(", ");
   return (
     <div ref={ref} className="relative shrink-0">
       <button
-        className={`flex h-8 w-8 items-center justify-center rounded-[9px] border border-border hover:bg-panel-2/60 hover:text-fg ${
+        className={`flex h-9 w-9 items-center justify-center rounded-[10px] border border-border hover:bg-panel-2/60 hover:text-fg ${
           open ? "bg-panel-2 text-fg" : "text-muted"
         }`}
         onClick={() => setOpen(!open)}
@@ -307,10 +308,11 @@ function SessionAgentPicker({
   const usable = agents.filter((a) => a.available || a.id === session.agent);
   const rows = useContext(ChipRows);
   const label = (id: string) => agents.find((a) => a.id === id)?.label ?? AGENT_LABELS[id as AgentId] ?? id;
-  if (usable.length < 2) return rows ? <ChipText label="Agent">{label(session.agent)}</ChipText> : null;
+  const overflow = useContext(ChipOverflow);
+  if (usable.length < 2) return rows || overflow ? <ChipText label="Agent">{label(session.agent)}</ChipText> : null;
   return (
     <ChipSelect
-      className="max-w-44"
+      className="max-w-44 shrink-0"
       value={session.agent}
       disabled={disabled}
       title="Agent for this session"

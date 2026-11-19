@@ -8,6 +8,7 @@ import { PaneContext, ViewActive } from "../lib/shortcuts";
 import { fuzzyPaths } from "../lib/fuzzy";
 import { ArrowUpIcon, PaperclipIcon, SlidersIcon } from "./icons";
 import { ChipRows } from "./ChipSelect";
+import { ComposerFooterRow, footerItems } from "./ComposerFooter";
 import { focusables, trapTarget } from "../lib/focusTrap";
 import { isRemoteApp, isWeb } from "../lib/platform";
 
@@ -15,9 +16,6 @@ const MAX_ATTACHMENTS = 10;
 /** How long fetched slash commands are reused, and how soon an empty answer is asked again. */
 const SLASH_TTL_MS = 60_000;
 const SLASH_EMPTY_RETRY_MS = 3_000;
-/** Inner width (px) the fullest footer needs: three chips at their minimum widths, the options button and the
- *  listen button squeezed to its icon (14), Stop and Send both showing. Below it the chips go behind settings. */
-const NARROW_COMPOSER_PX = 412;
 
 function fmtSize(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -243,25 +241,14 @@ export function Composer({
   const [files, setFiles] = useState<string[] | null>(null);
   const filesAt = useRef(0);
   const menuRef = useRef<HTMLDivElement>(null);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const [narrow, setNarrow] = useState(false);
-  // The phone, and a desktop composer in a narrow pane, keep the footer's chips in a sheet behind
-  // one button; a row of them doesn't fit.
-  const sheetFooter = (isRemoteApp() || narrow) && !!footer;
+  // The phone keeps the footer's chips in a sheet behind one button. A desktop composer keeps them in
+  // a row and moves the ones that don't fit into an overflow menu (ComposerFooterRow).
+  const sheetFooter = isRemoteApp() && !!footer;
   const [optionsOpen, setOptionsOpen] = useState(false);
   const optionsBtnRef = useRef<HTMLButtonElement>(null);
   const sheetRef = useRef<HTMLDivElement>(null);
 
-  useLayoutEffect(() => {
-    const el = rootRef.current;
-    if (!el) return;
-    setNarrow(el.clientWidth < NARROW_COMPOSER_PX);
-    const ro = new ResizeObserver(([e]) => setNarrow(e.contentRect.width < NARROW_COMPOSER_PX));
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
-  // The sheet unmounts when the composer widens; don't let it reopen by itself on the next narrowing.
+  // The sheet unmounts when the footer goes away; don't let it reopen by itself when it returns.
   useEffect(() => {
     if (!sheetFooter) setOptionsOpen(false);
   }, [sheetFooter]);
@@ -655,7 +642,6 @@ export function Composer({
 
   return (
     <div
-      ref={rootRef}
       className={`relative rounded-2xl border bg-raised shadow-raised transition-colors focus-within:border-fg/20 ${
         dragging ? "border-accent" : "border-border"
       }`}
@@ -793,10 +779,9 @@ export function Composer({
           );
         }}
       />
-      {/* In the narrowest desktop panes Stop and Send don't fit beside the other buttons; wrap, or Send lands in the next pane. */}
-      <div className={`flex items-center gap-1.5 px-2.5 pb-2.5${narrow && !isRemoteApp() ? " flex-wrap justify-end" : ""}`}>
+      <div className="flex items-center gap-1.5 px-2.5 pb-2.5">
         <button
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] border border-border text-muted hover:bg-panel-2/60 hover:text-fg disabled:opacity-40"
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-border text-muted hover:bg-panel-2/60 hover:text-fg disabled:opacity-40"
           onClick={pick}
           disabled={disabled || atts.length >= MAX_ATTACHMENTS}
           title="Attach files (images, PDFs, text)"
@@ -828,7 +813,7 @@ export function Composer({
         {sheetFooter ? (
           <>
             <button
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] border border-border text-muted hover:bg-panel-2/60 hover:text-fg"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-border text-muted hover:bg-panel-2/60 hover:text-fg"
               ref={optionsBtnRef}
               onClick={() => setOptionsOpen(true)}
               title={footerLabel}
@@ -840,7 +825,7 @@ export function Composer({
             <div className="flex-1" />
           </>
         ) : (
-          <div className="flex min-w-0 flex-1 items-center gap-1.5">{footer}</div>
+          <ComposerFooterRow items={footerItems(footer)} label={footerLabel} />
         )}
         {trailing}
         {busy && (

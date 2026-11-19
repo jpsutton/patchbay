@@ -24,9 +24,25 @@ import { CheckIcon, ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon } from ".
  */
 export const ChipRows = createContext(false);
 
+/**
+ * True inside the desktop composer's overflow menu, where a chip that did not fit the footer row
+ * shows as a labelled row: the label on the left, the same chip on the right. The chip keeps its
+ * own list (a native `<select>` popup would open off the bottom of the window).
+ */
+export const ChipOverflow = createContext(false);
+
+/** True where a chip sits on a labelled row (phone sheet or overflow menu), so its value goes bare. */
+export function useChipLabelled(): boolean {
+  const rows = useContext(ChipRows);
+  const overflow = useContext(ChipOverflow);
+  return rows || overflow;
+}
+
 /** Read-only text among the chips, e.g. a model the agent doesn't let you change. */
 export function ChipText({ label, children }: { label: string; children: ReactNode }) {
-  if (useContext(ChipRows)) {
+  const sheet = useContext(ChipRows);
+  const overflow = useContext(ChipOverflow);
+  if (sheet) {
     return (
       <div className="flex h-14 items-center gap-3 px-3">
         <span className="shrink-0 text-[15px] text-fg">{label}</span>
@@ -34,7 +50,16 @@ export function ChipText({ label, children }: { label: string; children: ReactNo
       </div>
     );
   }
-  return <span className="flex min-w-0 items-center gap-2 px-1 font-mono text-[12px] text-muted">{children}</span>;
+  if (overflow) {
+    return (
+      <div className="flex items-center justify-between gap-3 rounded-md px-2.5 py-2">
+        <span className="shrink-0 text-[13px] text-fg">{label}</span>
+        <span className="flex min-w-0 items-center gap-2 font-mono text-[12px] text-muted">{children}</span>
+      </div>
+    );
+  }
+  // min-w-20: the footer row measures this as its floor, and the value truncates down to it.
+  return <span className="flex min-w-20 items-center gap-2 px-1 font-mono text-[12px] text-muted">{children}</span>;
 }
 
 type ChipOption = Pick<MenuItem, "value" | "label" | "group">;
@@ -104,6 +129,7 @@ type ChipProps = SelectHTMLAttributes<HTMLSelectElement> & {
  */
 export function ChipSelect({ lead, mono, label, twoLevel, className = "", children, ...rest }: ChipProps) {
   const rows = useContext(ChipRows);
+  const overflow = useContext(ChipOverflow);
   if (rows) {
     return (
       <label className={`flex h-14 items-center gap-3 px-3 ${rest.disabled ? "opacity-50" : ""}`}>
@@ -123,6 +149,16 @@ export function ChipSelect({ lead, mono, label, twoLevel, className = "", childr
           </span>
         </span>
       </label>
+    );
+  }
+  if (overflow) {
+    return (
+      <div className="flex items-center justify-between gap-3 rounded-md px-2.5 py-1.5">
+        <span className="shrink-0 text-[13px] text-fg">{label ?? rest["aria-label"]}</span>
+        <DesktopChip lead={lead} mono={mono} twoLevel={twoLevel} className={className} {...rest}>
+          {children}
+        </DesktopChip>
+      </div>
     );
   }
   return (
@@ -395,7 +431,7 @@ function DesktopChip({ lead, mono, twoLevel, className = "", children, value, on
   // The floor is the button's side padding plus room for about two characters of the label, so the icon, label and chevron never overlap.
   return (
     <span
-      className={`relative inline-flex h-8 shrink items-center rounded-[9px] border border-border text-muted focus-within:border-accent hover:bg-panel-2/60 hover:text-fg ${lead ? "min-w-18" : "min-w-14"} ${
+      className={`relative inline-flex h-9 shrink items-center rounded-[10px] border border-border text-muted focus-within:border-accent hover:bg-panel-2/60 hover:text-fg ${/(^|\s)min-w-/.test(className) ? "" : lead ? "min-w-18" : "min-w-14"} ${
         disabled ? "pointer-events-none opacity-50" : ""
       } ${className}`}
     >

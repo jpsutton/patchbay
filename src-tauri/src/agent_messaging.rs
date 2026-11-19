@@ -259,10 +259,12 @@ pub fn set_injected_mcp_server_name_for_test(session: &str, name: &str) {
         .insert(session.to_owned(), name.to_owned());
 }
 
+/// Forgets the name stored for one session. Only that session: the map is process-wide and tests
+/// run in parallel, so emptying all of it would pull the nonce out from under another test.
 #[cfg(test)]
-pub fn clear_injected_mcp_server_names_for_test() {
+pub fn clear_injected_mcp_server_name_for_test(session: &str) {
     if let Ok(mut g) = session_mcp_names().lock() {
-        g.clear();
+        g.remove(session);
     }
 }
 

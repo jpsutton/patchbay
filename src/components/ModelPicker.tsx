@@ -26,7 +26,7 @@ export function ModelPicker({
       lead={<ModelRing id={value} />}
       mono
       aria-label="Model"
-      className="max-w-64"
+      className="max-w-64 min-w-28"
       value={value ?? ""}
       disabled={disabled}
       onChange={(e) => onChange(e.target.value)}

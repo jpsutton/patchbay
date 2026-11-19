@@ -4347,7 +4347,7 @@ mod tests {
             "Claude coordinator must match dispatch_item title form with stored nonce"
         );
         // Advisor (d): no stored nonce ⇒ fail closed; fixed name stored on a member ⇒ still no match.
-        crate::agent_messaging::clear_injected_mcp_server_names_for_test();
+        crate::agent_messaging::clear_injected_mcp_server_name_for_test(&worker.id);
         assert!(
             matched_tool(&d, "codex", &worker.id, &item_note).is_none(),
             "advisor (d) no nonce ⇒ no match"
