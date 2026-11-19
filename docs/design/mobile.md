@@ -93,10 +93,12 @@ The phone keeps points in memory only. If Android ends the app, its views start 
 
 ### Missed events
 
-Three things can leave the phone with a hole in a session even while its own connection stays up, and nothing later may say so: the agent waits on an approval and sends nothing more.
+These can leave the phone with a hole in what it shows even while its own connection stays up, and nothing later may say so: the agent waits on an approval and sends nothing more.
 
 - **The gateway's link to the host dropped.** Events sent meanwhile never reach the gateway. The gateway marks the ring stale. While the host stays unreachable a stale ring still answers a resume (nothing better exists). When the link returns, the gateway sends each phone following a stale session `remote://stale` for its topic, and the phone starts that view over from a snapshot, which takes the host's record (above). A subscribe that arrives while the ring is stale and the host is reachable gets a snapshot, never an empty delta.
 - **Numbers skipped.** The phone checks each live event's point against the last applied. A skip within a stream, or a new stream that doesn't start at 1, means events went missing between the host and the phone; the client then emits `remote://resync` for the topic, and the view starts over.
+- **A chat reply lost text.** The same point check covers chat topics. On a skip, or when a chat topic comes back from a reconnect as a snapshot, the phone backend asks the gateway for the reply so far (`remote.streams`) and gives it to the view as a `snapshot` event, which replaces the text shown. A reply that came from another computer and that the gateway no longer tracks is marked done. When a streamer drops mid-reply and the gateway finishes it as interrupted, the phones following that chat get the same `error` and `done` events as the gateway's own window.
+- **The session list went stale.** A gateway builds each session's list state (mid-turn, open requests) from events, so a missed event leaves it wrong for every phone. When the link to a host returns, the gateway asks it for the state of the sessions it hosts (`code.live`) and replaces its own, telling phones following the index about each change (`remote://live`).
 - **The page was asleep.** A hidden WebView runs late or not at all, and the backend's events are not queued for it. When the app comes back after more than 5 seconds out of sight, each open session with a live agent starts over from a snapshot.
 
 Starting over is `code_attach` again: transcript, host state, open requests and the turn so far. Triggers that arrive while one is running are dropped, since the running one takes the newest state.

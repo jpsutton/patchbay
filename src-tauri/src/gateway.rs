@@ -305,6 +305,19 @@ pub(crate) fn live_map(
     live
 }
 
+/// What the session list shows for the sessions this node hosts. A gateway that lost its link to
+/// this node asks for it when the link returns: the events it missed may have changed any of it
+/// (a permission request opened or answered, a turn ended).
+pub(crate) fn live_hosted_here(state: &AppState) -> Result<Value> {
+    let me = state.mesh.node_id().to_owned();
+    let sessions: Vec<_> =
+        state.db.list_code_sessions()?.into_iter().filter(|s| s.host_node.as_deref().is_none_or(|h| h == me)).collect();
+    let mut live = live_map(state, &sessions);
+    let hosted: std::collections::HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+    live.retain(|id, _| hosted.contains(id.as_str()));
+    Ok(json!(live))
+}
+
 /// Longest a chat turn passed from a gateway waits for what it needs to sync here.
 const SYNC_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 

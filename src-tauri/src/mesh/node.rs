@@ -1574,6 +1574,28 @@ impl Inner {
         }
     }
 
+    /// Replace the live state this node holds for the sessions `node` hosts with `node`'s own
+    /// (`code.live`), and tell the phones following the list about each that differs. Events
+    /// sent while the link was down never arrived, and the live state is built from events.
+    async fn reconcile_live(self: Arc<Self>, node: String) {
+        let Ok(v) = self.rpc(&node, "code.live", Value::Null, RPC_TIMEOUT).await else { return };
+        let Ok(theirs) = serde_json::from_value::<HashMap<String, Live>>(v) else { return };
+        let Ok(sessions) = self.db.list_code_sessions() else { return };
+        // Only what that node hosts: it speaks for no other session.
+        let hosted: HashSet<String> =
+            sessions.into_iter().filter(|s| s.host_node.as_deref() == Some(node.as_str())).map(|s| s.id).collect();
+        let mut st = self.st.lock().unwrap();
+        for (id, live) in theirs.into_iter().filter(|(id, _)| hosted.contains(id)) {
+            if st.live.get(&id).is_some_and(|cur| cur.same_as_shown(&live)) {
+                continue;
+            }
+            st.live.insert(id.clone(), live.clone());
+            for r in st.remotes.values().filter(|r| r.subs.contains(rmt::TOPIC_INDEX)) {
+                let _ = r.tx.send(Msg::Event { name: rmt::EV_LIVE.into(), payload: json!({ "id": id, "live": live }) });
+            }
+        }
+    }
+
     fn to_phones(&self, m: Msg) {
         for r in self.st.lock().unwrap().remotes.values() {
             let _ = r.tx.send(m.clone());
@@ -1778,6 +1800,9 @@ impl Inner {
         self.emit_status();
         self.send_links();
         self.notify_stale(&node);
+        // The events missed while the link was down may have changed what the session list
+        // shows for its sessions: take that from the host, as it knows best.
+        tokio::spawn(self.clone().reconcile_live(node.clone()));
 
         // Everything from here on runs inside `res`, so a failure anywhere (the peer dropping the
         // link mid-greeting, say) still reaches the cleanup below. Returning early would leave a
@@ -2818,9 +2843,14 @@ impl Inner {
                 tracing::warn!("mesh: saving interrupted reply: {e:#}");
             }
             let base = json!({ "conversationId": s.conversation_id, "streamer": s.streamer, "streamerName": s.streamer_name });
+            let topic = rmt::chat_topic(&s.conversation_id);
             for ev in [json!({ "type": "error", "message": msg }), json!({ "type": "done", "stopReason": "interrupted", "usage": null })] {
                 let mut p = base.clone();
                 p["event"] = ev;
+                // The phones following this reply never see the streamer's own events end.
+                for r in self.st.lock().unwrap().remotes.values().filter(|r| r.subs.contains(&topic)) {
+                    let _ = r.tx.send(Msg::Event { name: rmt::EV_CHAT.into(), payload: p.clone() });
+                }
                 self.ui("mesh://chat", p);
             }
         }

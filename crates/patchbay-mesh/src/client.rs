@@ -1069,7 +1069,8 @@ impl Inner {
                 // Numbers skipped: events went missing between the host and this phone (the
                 // gateway's link to the host dropped, say). Nothing later says so, so start the
                 // view over from a snapshot instead of showing a transcript with a hole in it.
-                if topic.starts_with("session:") && sub.as_ref().is_some_and(|last| remote::is_gap(last, &p)) {
+                // A chat reply's text has the same problem.
+                if sub.as_ref().is_some_and(|last| remote::is_gap(last, &p)) {
                     gap = Some(topic.clone());
                 }
                 *sub = Some(p);

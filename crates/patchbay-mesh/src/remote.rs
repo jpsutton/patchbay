@@ -309,6 +309,15 @@ pub struct Live {
 }
 
 impl Live {
+    /// Whether the session list would show the same for both: everything but the time.
+    pub fn same_as_shown(&self, other: &Live) -> bool {
+        self.status == other.status
+            && self.busy == other.busy
+            && self.permissions == other.permissions
+            && self.questions == other.questions
+            && self.stalled == other.stalled
+    }
+
     /// Fold one Code event in. Returns whether what the list shows changed.
     pub fn apply(&mut self, payload: &Value, now: i64) -> bool {
         let before = (self.status.clone(), self.busy, self.permissions.len(), self.questions.len(), self.stalled);
@@ -375,6 +384,16 @@ mod tests {
         let pc = point_of(&c).unwrap();
         assert_eq!(pc.n, 1);
         assert_ne!(pc.s, pa.s);
+    }
+
+    #[test]
+    fn live_state_compares_without_the_time() {
+        let a = Live { status: "ready".into(), busy: true, permissions: ["p1".to_string()].into(), last: 5, ..Live::default() };
+        let mut b = a.clone();
+        b.last = 99;
+        assert!(a.same_as_shown(&b));
+        b.permissions.clear();
+        assert!(!a.same_as_shown(&b));
     }
 
     #[test]
