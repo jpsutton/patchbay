@@ -85,11 +85,21 @@ Every full member keeps a ring of each topic's current stream, in memory, up to 
 `remote.subscribe` names each topic with the last point the phone applied, or none. The gateway registers the topic at once, so live events follow the reply in order, and answers each topic with:
 
 - **Delta**, when the point is in the ring's stream and the ring still reaches back to it: the events since, merged (below).
-- **Snapshot** otherwise. For a session: the host's attach replay (ready state, open permission requests, usage), plus the ring's events since the last finished turn (the `tail`, prompts marked `replay`). The phone lays these over the transcript cache, which a window saves at the end of each turn. A `covered: false` tail started after the ring lost its beginning, and the phone notes that earlier output is missing. For a chat: the stream so far.
+- **Snapshot** otherwise. For a session: the host's attach replay (ready state, open permission requests, usage), plus the ring's events since the last finished turn (the `tail`, prompts marked `replay`). The phone lays these over the transcript cache, which a window saves at the end of each turn. A `covered: false` tail started after the ring lost its beginning. When the gateway's ring has a hole (or none: the gateway linked to the host after the turn began), the gateway asks the session's host for its own record instead (`remote.snapshot` with `catchUp`, answered by the host's `code.attach` catch-up): that answer carries the turn so far with the open requests folded in, the tail stays empty, and the snapshot's point is the host's newest. Only when the host is unreachable does the phone note that earlier output is missing. For a chat: the stream so far.
 
 The phone holds back live events for a topic while its subscribe is in flight, then applies those after the answer's point. The desktop's own windows hold back events the same way while they attach to a running session, which also fixes a race they had.
 
 The phone keeps points in memory only. If Android ends the app, its views start over anyway.
+
+### Missed events
+
+Three things can leave the phone with a hole in a session even while its own connection stays up, and nothing later may say so: the agent waits on an approval and sends nothing more.
+
+- **The gateway's link to the host dropped.** Events sent meanwhile never reach the gateway. The gateway marks the ring stale. While the host stays unreachable a stale ring still answers a resume (nothing better exists). When the link returns, the gateway sends each phone following a stale session `remote://stale` for its topic, and the phone starts that view over from a snapshot, which takes the host's record (above). A subscribe that arrives while the ring is stale and the host is reachable gets a snapshot, never an empty delta.
+- **Numbers skipped.** The phone checks each live event's point against the last applied. A skip within a stream, or a new stream that doesn't start at 1, means events went missing between the host and the phone; the client then emits `remote://resync` for the topic, and the view starts over.
+- **The page was asleep.** A hidden WebView runs late or not at all, and the backend's events are not queued for it. When the app comes back after more than 5 seconds out of sight, each open session with a live agent starts over from a snapshot.
+
+Starting over is `code_attach` again: transcript, host state, open requests and the turn so far. Triggers that arrive while one is running are dropped, since the running one takes the newest state.
 
 ### Merging
 

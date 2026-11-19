@@ -104,7 +104,10 @@ pub(crate) async fn call(state: &AppState, from: &str, method: &str, p: &Value) 
         "remote.snapshot" => {
             let id = s("id")?;
             let has = db.code_transcript(&id)?.is_some_and(|t| !t.is_empty());
-            json!({ "attach": attach_any(state, &id).await, "hasTranscript": has })
+            // `catchUp`: this gateway's own record of the turn has holes, so the session's host
+            // adds what happened since its last finished turn (`caughtUp` when it did).
+            let (attach, caught_up) = attach_any(state, &id, p["catchUp"] == true).await;
+            json!({ "attach": attach, "hasTranscript": has, "caughtUp": caught_up })
         }
         "remote.code" => forward_code(state, from, p).await?,
         "remote.usage" => json!(db.code_usage(&s("id")?)?.view()),
@@ -345,14 +348,25 @@ fn show_here(state: &AppState, phone: &str, conv: &str) -> chat::ChatSink {
 }
 
 /// What a window opening the session needs, from wherever it runs.
-async fn attach_any(state: &AppState, id: &str) -> Value {
+async fn attach_any(state: &AppState, id: &str, catch_up: bool) -> (Value, bool) {
     let offline = json!({ "running": false, "busy": false, "events": [], "offline": true });
     match remote_host(state, id) {
-        Ok(None) => code_attach_local(state, id),
+        Ok(None) => (code_attach_local(state, id), false),
         Ok(Some(host)) if state.mesh.connected(&host) => {
-            state.mesh.rpc(&host, "code.attach", json!({ "id": id })).await.unwrap_or(offline)
+            // The host's own event ring holds its turn whole, which this gateway's may not (its
+            // link to the host dropped, or it started after the turn did). The answer then
+            // carries the events since the last finished turn, and the host's point to continue from.
+            let p = json!({ "id": id, "catchUp": catch_up, "history": false });
+            match state.mesh.rpc(&host, "code.attach", p).await {
+                // An older host ignores the request and answers without a point.
+                Ok(v) => {
+                    let caught = catch_up && v.get("point").is_some();
+                    (v, caught)
+                }
+                Err(_) => (offline, false),
+            }
         }
-        _ => offline,
+        _ => (offline, false),
     }
 }
 

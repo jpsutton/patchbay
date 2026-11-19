@@ -1558,6 +1558,22 @@ impl Inner {
         all
     }
 
+    /// The link to `node` is back. What it fed to this node's event rings went quiet while it
+    /// was away, so a phone following one of those sessions may be missing events (a permission
+    /// request, say) and nothing later would tell it. Send the phones that follow them a notice;
+    /// each starts that view over from a snapshot, which takes the host's own record of the turn.
+    fn notify_stale(&self, node: &str) {
+        let st = self.st.lock().unwrap();
+        for (topic, (ring, _, src)) in &st.rings {
+            if !topic.starts_with("session:") || !ring.is_stale() || src.as_deref() != Some(node) {
+                continue;
+            }
+            for r in st.remotes.values().filter(|r| r.subs.contains(topic)) {
+                let _ = r.tx.send(Msg::Event { name: rmt::EV_STALE.into(), payload: json!({ "topic": topic }) });
+            }
+        }
+    }
+
     fn to_phones(&self, m: Msg) {
         for r in self.st.lock().unwrap().remotes.values() {
             let _ = r.tx.send(m.clone());
@@ -1761,6 +1777,7 @@ impl Inner {
         tracing::info!("mesh: connected to {name}{}", via.as_ref().map(|v| format!(" via {v}")).unwrap_or_default());
         self.emit_status();
         self.send_links();
+        self.notify_stale(&node);
 
         // Everything from here on runs inside `res`, so a failure anywhere (the peer dropping the
         // link mid-greeting, say) still reaches the cleanup below. Returning early would leave a
@@ -2575,7 +2592,15 @@ impl Inner {
             let point: Option<rmt::Point> = serde_json::from_value(r["point"].clone()).ok();
             let ring = st.rings.get(&topic).map(|(r, _, _)| r);
             let last = ring.and_then(Ring::last);
+            // A stale ring can't say that nothing came after its last event, so "nothing newer"
+            // could be wrong. Reachable source: a snapshot (with the host's catch-up) gives the
+            // truth. Unreachable: there is nothing better to resume from, and the phone is told
+            // (`remote://stale`) when the source comes back.
+            let resumable = st.rings.get(&topic).is_none_or(|(r, _, src)| {
+                !r.is_stale() || src.as_ref().is_none_or(|n| !st.sessions.contains_key(n))
+            });
             if let (Some(p), Some(ring)) = (&point, ring)
+                && resumable
                 && let Some(events) = ring.since(p)
             {
                 plans.push(Plan {
@@ -2596,6 +2621,9 @@ impl Inner {
                     let (all, complete) = ring.tail(|_, _| false);
                     (tail, covered, (complete && !all.is_empty()).then_some(all))
                 }
+                // No record of this session's events here (this node started after its turn did, or
+                // dropped the ring when it sat idle): the host fills in what the turn has done.
+                None if topic.starts_with("session:") => (Vec::new(), false, None),
                 _ => (Vec::new(), true, None),
             };
             plans.push(Plan { topic, delta: None, tail, covered, full, point: last });
@@ -2614,13 +2642,28 @@ impl Inner {
             }
             let mut snapshot = Value::Null;
             let mut tail = p.tail;
+            let mut covered = p.covered;
+            let mut point = p.point;
             if let Some(id) = p.topic.strip_prefix("session:") {
                 let h = self.handler.read().unwrap().clone();
                 if let Some(h) = h {
-                    snapshot = h.call(from.to_owned(), "remote.snapshot".into(), json!({ "id": id })).await.unwrap_or(Value::Null);
+                    // This node's events for the session have a hole (or none): the host's own
+                    // record of the turn replaces them.
+                    let req = json!({ "id": id, "catchUp": !covered });
+                    snapshot = h.call(from.to_owned(), "remote.snapshot".into(), req).await.unwrap_or(Value::Null);
+                }
+                let caught_up = snapshot["caughtUp"] == true;
+                if caught_up {
+                    // The host's answer carries the turn so far, deduplicated and marked as a
+                    // replay, and the point of its newest event: the stream goes on from there.
+                    tail = Vec::new();
+                    covered = true;
+                    let host_point: Option<rmt::Point> = serde_json::from_value(snapshot["attach"]["point"].clone()).ok().flatten();
+                    point = host_point.or(point);
                 }
                 // Without a saved transcript the earlier turns of this run would be missing.
-                if snapshot["hasTranscript"] == false
+                if !caught_up
+                    && snapshot["hasTranscript"] == false
                     && let Some(full) = p.full
                 {
                     tail = full;
@@ -2650,8 +2693,8 @@ impl Inner {
                 "mode": "snapshot",
                 "snapshot": snapshot,
                 "tail": tail,
-                "covered": p.covered,
-                "point": p.point,
+                "covered": covered,
+                "point": point,
             }));
         }
         json!({ "results": results })
