@@ -413,9 +413,13 @@ const DEMO_COMMANDS = [
   { name: "context", description: "Show context window usage" },
   { name: "model", description: "Switch model", input: { hint: "<model>" } },
   { name: "review", description: "Review the current changes", input: { hint: "[focus]" } },
+  { name: "goal", description: "Work on an objective across rounds until an independent check confirms it is done", input: { hint: "<objective> [--budget 500k] | pause | resume | clear" } },
 ];
 
 const cancelled = new Set<string>();
+
+/** The `/goal` each fake session has, for the demo. */
+const fakeGoals = new Map<string, Record<string, unknown>>();
 
 function send<T>(ch: unknown, msg: T) {
   (ch as Channel<T>).onmessage(msg);
@@ -890,6 +894,59 @@ async function fakeAgentTurn(csid: string, text: string, mentions: string[] = []
   }
   // OpenCode's (and Kilo's) to-do list: `todowrite` tool calls, not ACP plans. The first write
   // completes, the second is rejected, the third saves a list with a cancelled step.
+  // `/goal <objective>`: two rounds, an independent check after each, then done. `pause`, `resume`
+  // and `clear` answer at once. Stop pauses a running goal.
+  if (text.startsWith("/goal")) {
+    const arg = text.slice(5).trim();
+    const goal = (g: Record<string, unknown> | null) =>
+      codeEmit(csid, { type: "update", update: { sessionUpdate: "goal_update", goal: g } });
+    const view = (objective: string, status: string, rounds: number, extra: Record<string, unknown> = {}) => ({
+      objective, status, reason: "", rounds, stretchRounds: rounds, maxRounds: 20, tokensUsed: rounds * 4200, budget: null, lastGaps: "", ...extra,
+    });
+    const last = fakeGoals.get(csid);
+    if (arg === "clear" || arg === "pause" || arg === "resume" || arg === "" || arg === "status") {
+      if (arg === "clear") {
+        fakeGoals.delete(csid);
+        goal(null);
+        await say("Goal cleared.");
+      } else if (!last) {
+        await say("No goal is set.");
+      } else if (arg === "resume") {
+        fakeGoals.set(csid, view(last.objective as string, "active", last.rounds as number));
+        goal(fakeGoals.get(csid)!);
+        await say("Picking the work back up.");
+      } else {
+        await say(`Goal: ${last.objective}\nStatus: ${last.status}`);
+      }
+      codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
+      return;
+    }
+    fakeStopped.delete(csid);
+    const objective = arg.replace(/\s+--budget\s+\S+$/, "");
+    const set = (v: Record<string, unknown>) => {
+      fakeGoals.set(csid, v);
+      goal(v);
+    };
+    set(view(objective, "active", 0));
+    await say("Working on it: reading the code and making the change.\n");
+    for (let t0 = 0; t0 < 1500; t0 += 100) {
+      await sleep(100);
+      if (fakeStopped.has(csid)) {
+        fakeStopped.delete(csid);
+        set(view(objective, "paused", 0, { reason: "stopped by the user" }));
+        codeEmit(csid, { type: "promptDone", stopReason: "cancelled" });
+        return;
+      }
+    }
+    set(view(objective, "active", 1, { lastGaps: "no test covers the new path" }));
+    turnEmit({ type: "update", update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Goal check, round 1: not complete yet: no test covers the new path\n" } } });
+    await say("Adding a test for the new path and running the suite.\n");
+    await sleep(800);
+    set(view(objective, "complete", 2, { reason: "cargo test passed, 41 tests, including the new one" }));
+    await say("\n\nGoal complete after 2 round(s): cargo test passed, 41 tests, including the new one");
+    codeEmit(csid, { type: "promptDone", stopReason: "end_turn" });
+    return;
+  }
   if (text.startsWith("/todos")) {
     const write = async (todos: { content: string; status: string; priority: string }[], ok: boolean) => {
       const tid = id();

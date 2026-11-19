@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::claude;
 use crate::cache;
 use crate::compact;
+use crate::goal;
 use crate::host::ModelClient;
 use crate::prompt;
 use crate::reqlog::ReqTimer;
@@ -140,6 +141,7 @@ async fn reminders(session: &Session, model_name: &str) -> Option<Part> {
         let list: Vec<String> = st.todos.iter().map(|t| format!("- [{}] {}", t.status, t.content)).collect();
         notes.push(p.msg("todo_stale", &[("list", &list.join("\n"))]));
     }
+    notes.extend(goal::reminder(session));
     (!notes.is_empty()).then(|| Part::Text(prompt::reminder(&notes.join("\n\n"))))
 }
 
@@ -309,6 +311,11 @@ async fn keepwarm(session: &Arc<Session>, args: &str, cancel: &CancellationToken
 
 pub async fn run_turn(session: Arc<Session>, prompt_blocks: &Value, cancel: CancellationToken) -> Result<TurnResult, String> {
     let mut result = run_turn_inner(&session, prompt_blocks, cancel).await;
+    // A goal that is still active here was cut short: the check ends it any other way.
+    goal::interrupted(&session, match &result {
+        Ok(r) => r.stop_reason,
+        Err(_) => "error",
+    });
     if let Ok(r) = &mut result {
         let mut extra = session.extra_usage.lock().unwrap();
         r.usage.input += extra.input;
@@ -342,6 +349,17 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
     if let Some(args) = keepwarm_command(&parts) {
         return Ok(keepwarm(&session, &args, &cancel).await);
     }
+    let mut goal_note: Option<String> = None;
+    if let Some(cmd) = goal::parse(&parts) {
+        let mode = session.state.lock().await.mode;
+        match goal::command(&session, cmd, mode) {
+            goal::Outcome::Reply(text) => {
+                session.text_chunk("agent_message_chunk", &text);
+                return Ok(TurnResult { stop_reason: "end_turn", usage: Totals::default() });
+            }
+            goal::Outcome::Start(note) => goal_note = Some(note),
+        }
+    }
     note_cold_cache(&session).await;
     if session.reload_claude() {
         session.announce_commands();
@@ -370,6 +388,9 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
     }
     for c in context {
         parts.push(Part::Text(prompt::reminder(&p.msg("hook_context", &[("text", &c)]))));
+    }
+    if let Some(note) = &goal_note {
+        parts.push(Part::Text(prompt::reminder(note)));
     }
     let model_name = {
         let id = session.state.lock().await.model_id.clone();
@@ -406,6 +427,10 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
     let mut cut_offs = 0;
     // Replies in a row paused by a hosted tool.
     let mut pauses = 0;
+    // The step the current round of a `/goal` began at: each round gets the whole step allowance.
+    let mut round_start = 0usize;
+    // Tokens of this turn that goal checks have counted already.
+    let mut goal_seen = 0u64;
     'steps: for step in 0usize.. {
         if cancel.is_cancelled() {
             return Ok(TurnResult { stop_reason: "cancelled", usage: totals });
@@ -418,7 +443,7 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
         let mc = session.model_client(&model_id).await?;
         // Checked at the top so every way of going on (tool results, a cut-off reply, a Stop hook)
         // counts. The cap follows the model in use: a plan-guarded one has none unless set.
-        if step >= settings.limits.steps(mc.plan_guarded) {
+        if step - round_start >= settings.limits.steps(mc.plan_guarded) {
             return Ok(TurnResult { stop_reason: "max_turn_requests", usage: totals });
         }
         let percent = mc
@@ -567,6 +592,16 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
                             stop_rounds += 1;
                             let note = session.prompts().msg("hook_stop", &[("reason", &reason)]);
                             push_user(&session, vec![Part::Text(prompt::reminder(&note))]).await;
+                            continue 'steps;
+                        }
+                    }
+                    // A goal is not done because the model stops: an independent check decides.
+                    match goal::round_end(&session, mode, &totals, &mut goal_seen, &cancel).await {
+                        goal::RoundEnd::Done => {}
+                        goal::RoundEnd::Cancelled => return Ok(TurnResult { stop_reason: "cancelled", usage: totals }),
+                        goal::RoundEnd::Continue(directive) => {
+                            push_user(&session, vec![Part::Text(prompt::reminder(&directive))]).await;
+                            round_start = step + 1;
                             continue 'steps;
                         }
                     }

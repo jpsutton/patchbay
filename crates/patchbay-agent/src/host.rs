@@ -66,14 +66,19 @@ pub struct Limits {
     pub subagent_max_steps: usize,
     /// Shell commands time out after this long unless the model asks for another timeout.
     pub shell_timeout_ms: u64,
+    /// Checks one start or resume of a `/goal` may make before it pauses.
+    pub goal_max_rounds: usize,
 }
 
 /// Model requests one prompt may make when the user sets no limit and nothing else guards the turn.
 pub const DEFAULT_MAX_STEPS: usize = 100;
 
+/// Checks one start or resume of a `/goal` may make when nothing sets another cap.
+pub const DEFAULT_GOAL_ROUNDS: usize = 20;
+
 impl Default for Limits {
     fn default() -> Self {
-        Limits { max_steps: None, subagent_max_steps: 100, shell_timeout_ms: 120_000 }
+        Limits { max_steps: None, subagent_max_steps: 100, shell_timeout_ms: 120_000, goal_max_rounds: DEFAULT_GOAL_ROUNDS }
     }
 }
 

@@ -462,7 +462,7 @@ export function CodeSidebar() {
         busy={row.busy}
         attention={row.attention}
         stalled={row.stalled}
-        meta={fmtShort(s.updatedAt)}
+        meta={st?.goal?.status === "active" ? `goal · ${fmtShort(s.updatedAt)}` : fmtShort(s.updatedAt)}
         host={prefs.groupByProject ? hostLabel(s) : undefined}
         pinned={s.pinned}
         status={row.running ? "running" : "idle"}
