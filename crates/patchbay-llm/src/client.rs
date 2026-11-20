@@ -132,14 +132,150 @@ fn request_id() -> String {
     )
 }
 
-/// How long to wait before retry `attempt` (1-based). A `Retry-After` from the server wins over the
-/// guess: on a 429 the window it asks for is the real one, while 1s, 2s, 4s... may land inside it and
-/// burn a retry. Both are capped, so a bad header cannot stall the turn for long.
-fn backoff(attempt: u32, retry_after: Option<u64>) -> Duration {
-    match retry_after {
-        Some(s) => Duration::from_secs(s.min(60)),
-        None => Duration::from_millis((1000u64 << (attempt - 1)).min(20_000)),
+/// How long the server wants us to wait, in milliseconds, from whatever it told us.
+///
+/// The `Retry-After` header first (seconds, or an HTTP date). Then the body: providers name a
+/// reset time in their own shape, and a 429 body often says more than the header does, e.g.
+/// `{"error":{"code":"rate_limit","reset_at":...}}`, `{"retry_after_ms":...}`, or Gemini's
+/// `RetryInfo` detail `{"retryDelay":"12s"}`. Last, a "try again in 12.5s" / "reset in 30 seconds"
+/// phrase in the error text. Zero hints are dropped: they mean "no idea", not "now".
+fn retry_hint(headers: &reqwest::header::HeaderMap, body: &str, message: &str) -> Option<u64> {    let header = headers.get("retry-after").and_then(|v| v.to_str().ok());
+    let from_header = header.and_then(|v| {
+        if let Ok(s) = v.trim().parse::<u64>() {
+            return Some(s);
+        }
+        // The header may be an HTTP date instead of a number of seconds.
+        let when = http_date_epoch(v)?;
+        let now = unix_now_secs();
+        when.checked_sub(now)
+    });
+    if let Some(s) = from_header.filter(|s| *s > 0) {
+        return Some(s.saturating_mul(1000));
     }
+    // Any key whose name says "retry after" or "reset", at any nesting depth: provider shapes differ.
+    let json: Option<serde_json::Value> = serde_json::from_str(body).ok();
+    let numeric = json.as_ref().and_then(|j| {
+        let mut found = None;
+        walk(j, &mut |value| {
+            if found.is_some() {
+                return;
+            }
+            let Some(obj) = value.as_object() else { return };
+            for (k, v) in obj {
+                let k = k.to_ascii_lowercase();
+                let n = v.as_u64().or_else(|| v.as_f64().map(|f| f as u64));
+                if k.contains("retry_after_ms") {
+                    found = n;
+                } else if k.contains("retry_after") || k.contains("retrydelay") || k.contains("reset_after") {
+                    found = n.map(|s| s.saturating_mul(1000));
+                } else if k.contains("reset") && (k.contains("at") || k.contains("in")) {
+                    // Epoch seconds, epoch ms or a plain duration: only a timestamp is that large.
+                    let now = unix_now_secs();
+                    found = n.map(|n| {
+                        if n > 1_000_000_000_000 {
+                            n.saturating_sub(now * 1000)
+                        } else if n > 1_000_000_000 {
+                            n.saturating_sub(now).saturating_mul(1000)
+                        } else {
+                            n.saturating_mul(1000)
+                        }
+                    });
+                }
+            }
+        });
+        found
+    });
+    if let Some(ms) = numeric.filter(|ms| *ms > 0) {
+        return Some(ms);
+    }
+    // Last resort: a number in the message, when the message talks about retrying or a reset.
+    let lower = message.to_ascii_lowercase();
+    if !(lower.contains("retry") || lower.contains("reset") || lower.contains("try again")) {
+        return None;
+    }
+    let secs = message
+        .split(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .filter_map(|w| w.parse::<f64>().ok())
+        .next();
+    secs.filter(|s| *s > 0.0).map(|s| (s * 1000.0) as u64)
+}
+
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Visit every value of the JSON tree, depth first.
+fn walk(v: &serde_json::Value, f: &mut impl FnMut(&serde_json::Value)) {
+    f(v);
+    match v {
+        serde_json::Value::Object(o) => o.values().for_each(|c| walk(c, f)),
+        serde_json::Value::Array(a) => a.iter().for_each(|c| walk(c, f)),
+        _ => {}
+    }
+}
+
+/// Seconds since the epoch for an IMF-fixdate ("Sun, 06 Nov 1994 08:49:37 GMT"), the date form
+/// `Retry-After` allows. No date crate here, so the arithmetic is spelled out.
+fn http_date_epoch(s: &str) -> Option<u64> {
+    fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+        let y = if m <= 2 { y - 1 } else { y };
+        let era = if y >= 0 { y } else { y - 399 } / 400;
+        let yoe = y - era * 400;
+        let mp = (m + 9) % 12;
+        let doy = (153 * mp + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        era * 146_097 + doe - 719_468
+    }
+    let s = s.trim();
+    // "Sun, 06 Nov 1994 08:49:37 GMT": the weekday and the zone are not needed. The weekday may be
+    // missing, so the day is the first plain number.
+    let mut words = s.split_whitespace();
+    let first = words.next()?;
+    let d: u32 = match first.parse() {
+        Ok(d) => d,
+        Err(_) => words.next()?.parse().ok()?,
+    };
+    let mon = match words.next()? {
+        "Jan" => 1,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        _ => return None,
+    };
+    let y: i64 = words.next()?.parse().ok()?;
+    let mut hms = words.next()?.split(':').filter_map(|n| n.parse::<i64>().ok());
+    let (h, m, sec) = (hms.next()?, hms.next().unwrap_or(0), hms.next().unwrap_or(0));
+    let days = days_from_civil(y, mon, d);
+    u64::try_from(days * 86_400 + h * 3600 + m * 60 + sec).ok()
+}
+
+/// How long to wait before retry `attempt` (1-based), for an error with status `status`.
+///
+/// A hint from the server wins over the guess: the `Retry-After` header, or a reset time in the body
+/// (`retry_after_ms`, `retryDelay`, `reset_at`...). On a 429 the window it names is the real one,
+/// while a guess may land inside it and burn a retry.
+///
+/// Without a hint: exponential from a floor. A rate limit is a per-minute window, so a 1s first try
+/// is always wasted: a 429 starts at 30s and doubles to a 60s cap (30s, 60s), which outlasts one
+/// window even with two retries. Other errors start at 1s and cap at 20s.
+/// Every wait is capped, so a bad header cannot stall the turn for long.
+fn backoff(attempt: u32, status: Option<u16>, hint: Option<u64>) -> Duration {
+    if let Some(ms) = hint {
+        return Duration::from_millis(ms.min(60_000));
+    }
+    let (floor, cap) = if status == Some(429) { (30_000u64, 60_000u64) } else { (1_000, 20_000) };
+    Duration::from_millis((floor << (attempt - 1)).min(cap))
 }
 
 #[derive(Clone)]
@@ -189,7 +325,7 @@ impl Client {
                         max: cfg.max_retries,
                         reason: e.to_string(),
                     });
-                    let wait = backoff(attempt, e.retry_after);
+                    let wait = backoff(attempt, e.status, e.retry_after);
                     tokio::select! {
                         _ = cancel.cancelled() => return Err(Error::cancelled()),
                         _ = tokio::time::sleep(wait) => {}
@@ -267,16 +403,12 @@ impl Client {
         };
         let status = resp.status();
         if !status.is_success() {
-            let retry_after = resp
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok());
+            let headers = resp.headers().clone();
             let text = resp.text().await.unwrap_or_default();
             let mut e = Error::http(status.as_u16(), wire::error_message(&text));
             // Carried on the error instead of slept here: only `complete` knows whether the call is
             // retried at all, and it can be cancelled while it waits.
-            e.retry_after = retry_after.filter(|s| *s > 0).filter(|_| e.retryable);
+            e.retry_after = retry_hint(&headers, &text, &e.message).filter(|_| e.retryable);
             e.message = e.message.trim().to_owned();
             return Err(e);
         }
@@ -478,14 +610,50 @@ mod tests {
         assert!(request_headers(&cfg, Some("")).is_empty());
     }
 
-    /// A 429 window is longer than a 1s/2s guess, so `Retry-After` wins when the server sends it.
+    /// A 429 window is longer than a 1s/2s guess, so a hint wins when the server sends one, and a
+    /// 429 without one starts from a floor a per-minute limit can actually clear.
     #[test]
-    fn retry_after_wins_over_the_exponential_guess() {
-        assert_eq!(backoff(1, Some(12)), Duration::from_secs(12));
-        assert_eq!(backoff(1, None), Duration::from_secs(1));
-        assert_eq!(backoff(3, None), Duration::from_secs(4));
-        assert_eq!(backoff(9, None), Duration::from_secs(20), "the guess is capped");
-        assert_eq!(backoff(1, Some(3600)), Duration::from_secs(60), "and so is a wild header");
+    fn a_hint_wins_and_a_429_waits_longer_than_other_errors() {
+        assert_eq!(backoff(1, Some(429), Some(12_000)), Duration::from_secs(12));
+        assert_eq!(backoff(3, Some(429), Some(500)), Duration::from_millis(500));
+        assert_eq!(backoff(1, Some(429), None), Duration::from_secs(30), "a 429 starts at 30s");
+        assert_eq!(backoff(2, Some(429), None), Duration::from_secs(60));
+        assert_eq!(backoff(4, Some(429), None), Duration::from_secs(60), "capped at one window");
+        assert_eq!(backoff(1, Some(503), None), Duration::from_secs(1), "other errors keep a 1s floor");
+        assert_eq!(backoff(3, Some(503), None), Duration::from_secs(4));
+        assert_eq!(backoff(1, Some(429), Some(3_600_000)), Duration::from_secs(60), "and a wild hint is capped");
+    }
+
+    /// Every shape a provider uses to say when the limit resets: header, body keys at any depth,
+    /// and the message text. A body with nothing useful yields no hint, so the guess applies.
+    #[test]
+    fn the_retry_hint_is_read_from_the_header_then_the_body_then_the_message() {
+        use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+        let mut h = HeaderMap::new();
+        h.insert(RETRY_AFTER, HeaderValue::from_static("7"));
+        assert_eq!(retry_hint(&h, "", ""), Some(7_000), "the header, in ms");
+        assert_eq!(retry_hint(&HeaderMap::new(), "", ""), None, "nothing said, nothing assumed");
+
+        let body = r#"{"error":{"code":"rate_limit_exceeded","retry_after_ms":2500}}"#;
+        assert_eq!(retry_hint(&HeaderMap::new(), body, "rate limited"), Some(2_500));
+
+        let gemini = r#"{"error":{"code":429,"details":[{"@type":"RetryInfo","retryDelay":"12s"}]}}"#;
+        assert_eq!(retry_hint(&HeaderMap::new(), gemini, "quota"), Some(12_000));
+
+        let reset_at = format!(r#"{{"error":{{"reset_at":{}}}}}"#, unix_now_secs() + 30);
+        let got = retry_hint(&HeaderMap::new(), &reset_at, "").unwrap();
+        assert!((29_000..=30_000).contains(&got), "an epoch reset becomes a wait: {got}");
+
+        assert_eq!(
+            retry_hint(&HeaderMap::new(), "", "Input tokens per minute limit exceeded for model 'x' (HTTP 429)"),
+            None,
+            "no time in the message, no hint invented from its numbers"
+        );
+        assert_eq!(
+            retry_hint(&HeaderMap::new(), "", "Rate limited, try again in 12.5s"),
+            Some(12_500),
+            "a phrase with a time is used"
+        );
     }
 
     #[test]
