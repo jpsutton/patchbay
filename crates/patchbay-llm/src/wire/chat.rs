@@ -235,6 +235,7 @@ impl Parser for ChatParser {
                 status: None,
                 retryable: true,
                 cancelled: false,
+                retry_after: None,
             });
         }
         let stop = match self.finish.as_deref() {

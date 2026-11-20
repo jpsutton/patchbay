@@ -391,15 +391,17 @@ pub struct Error {
     pub status: Option<u16>,
     pub retryable: bool,
     pub cancelled: bool,
+    /// The server's `Retry-After`, in seconds: it knows when the limit resets, a backoff only guesses.
+    pub retry_after: Option<u64>,
 }
 
 impl Error {
     pub fn new(message: impl Into<String>) -> Self {
-        Error { message: message.into(), status: None, retryable: false, cancelled: false }
+        Error { message: message.into(), status: None, retryable: false, cancelled: false, retry_after: None }
     }
 
     pub fn cancelled() -> Self {
-        Error { message: "cancelled".into(), status: None, retryable: false, cancelled: true }
+        Error { message: "cancelled".into(), status: None, retryable: false, cancelled: true, retry_after: None }
     }
 
     pub fn http(status: u16, message: impl Into<String>) -> Self {
@@ -413,6 +415,7 @@ impl Error {
             status: Some(status),
             retryable: matches!(status, 408 | 409 | 425 | 429) || status >= 500,
             cancelled: false,
+            retry_after: None,
         }
     }
 }
