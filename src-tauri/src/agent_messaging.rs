@@ -634,6 +634,8 @@ const PAIR_WINDOW: std::time::Duration = std::time::Duration::from_secs(3600);
 /// Identical body from the same source to the same target within this window is not re-prompted.
 const DEDUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
 
+const SEND_NEXT: &str = "sending another message";
+
 /// Per-session and per-pair send budgets before the bridge calls into the mesh.
 pub(crate) fn check_send_limits(source_session_id: &str, target_session_id: &str) -> Result<()> {
     check_rate(source_session_id)?;
@@ -641,18 +643,27 @@ pub(crate) fn check_send_limits(source_session_id: &str, target_session_id: &str
     Ok(())
 }
 
-/// A send refused by a budget. It says how long until a slot frees, so the caller waits that long
-/// instead of guessing. The bridge passes the wait on as `retryAfterSecs`, and the MCP server turns
-/// that into the `_meta` key the harness reads.
+/// A call refused by a budget (a message send, a team dispatch). It says how long until a slot
+/// frees, so the caller waits that long instead of guessing. The bridge passes the wait on as
+/// `retryAfterSecs`, and the MCP server turns that into the `_meta` key the harness reads. The
+/// refusal always comes before the call has any effect, so calling again after the wait is safe.
 #[derive(Debug)]
 pub(crate) struct RateLimited {
     what: String,
+    /// What the caller may do after the wait: `sending another message`.
+    next: &'static str,
     pub(crate) retry_after_secs: u64,
+}
+
+impl RateLimited {
+    pub(crate) fn new(what: String, next: &'static str, retry_after_secs: u64) -> Self {
+        RateLimited { what, next, retry_after_secs }
+    }
 }
 
 impl std::fmt::Display for RateLimited {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "rate limit: {}. Wait {} seconds before sending another message.", self.what, self.retry_after_secs)
+        write!(f, "rate limit: {}. Wait {} seconds before {}.", self.what, self.retry_after_secs, self.next)
     }
 }
 
@@ -677,10 +688,11 @@ fn check_rate(session_id: &str) -> Result<()> {
     let recent = sends.entry(session_id.to_owned()).or_default();
     recent.retain(|t| now.duration_since(*t) < RATE_WINDOW);
     if recent.len() >= RATE_MAX {
-        return Err(RateLimited {
-            what: format!("at most {RATE_MAX} agent messages per 10 minutes per session"),
-            retry_after_secs: wait_secs(recent, RATE_MAX, RATE_WINDOW, now),
-        }
+        return Err(RateLimited::new(
+            format!("at most {RATE_MAX} agent messages per 10 minutes per session"),
+            SEND_NEXT,
+            wait_secs(recent, RATE_MAX, RATE_WINDOW, now),
+        )
         .into());
     }
     recent.push(now);
@@ -698,10 +710,11 @@ fn check_pair_rate(source_session_id: &str, target_session_id: &str) -> Result<(
     let recent = pairs.entry(key).or_default();
     recent.retain(|t| now.duration_since(*t) < PAIR_WINDOW);
     if recent.len() >= PAIR_MAX {
-        return Err(RateLimited {
-            what: format!("at most {PAIR_MAX} agent messages per hour to the same session"),
-            retry_after_secs: wait_secs(recent, PAIR_MAX, PAIR_WINDOW, now),
-        }
+        return Err(RateLimited::new(
+            format!("at most {PAIR_MAX} agent messages per hour to the same session"),
+            SEND_NEXT,
+            wait_secs(recent, PAIR_MAX, PAIR_WINDOW, now),
+        )
         .into());
     }
     recent.push(now);
