@@ -37,6 +37,8 @@ const TOOL_ACCEPT_QUEUED: &str = "accept_queued_agent_message";
 const TOOL_CREATE: &str = "create_agent_session";
 /// Share an artifact the agent generated inside its session folder (pb-20261105-18).
 const TOOL_SHARE: &str = "share_artifact";
+/// Send a file to another session over the mesh; Patchbay moves it in the background.
+const TOOL_SEND_FILE: &str = "send_file";
 const MAX_LINE: usize = 64 * 1024;
 
 /// Env var carrying the child-side lifecycle log path (pb-20261109-03). Optional:
@@ -589,6 +591,16 @@ async fn handle_bridge(
                 let info = state.shares.create(&canonical.to_string_lossy(), None, None)?;
                 Ok(serde_json::to_value(info)?)
             }
+            // File transfer to another session, possibly on another node (file_transfer.rs). The
+            // file is confined to the sender's folder like a share; Patchbay then moves it.
+            "send_file" => {
+                let args = request.arguments.as_ref().ok_or_else(|| anyhow!("arguments are required"))?;
+                let path = args["path"].as_str().ok_or_else(|| anyhow!("path is required"))?;
+                let target = args["targetSessionId"].as_str().ok_or_else(|| anyhow!("targetSessionId is required"))?;
+                let canonical = confined_share_path(Path::new(&source.cwd), path)?;
+                check_send_limits(&request.source_session_id, target)?;
+                crate::file_transfer::send_file(&state, &request.source_session_id, target, canonical, args["note"].as_str()).await
+            }
             // Team tools (teams.rs): every call is checked against the caller's role there.
             "team_member" => Ok(json!(crate::teams::is_member(&state, &request.source_session_id))),
             name if crate::teams::is_tool(name) => {
@@ -894,6 +906,20 @@ fn tools_list_for(can_steer: bool) -> Value {
             "additionalProperties": false
         }
     }));
+    tools.push(json!({
+        "name": TOOL_SEND_FILE,
+        "description": "Send a file to another Patchbay Code session in this mesh, including one on another computer that has no direct network route to this one. Use it instead of scp, magic-wormhole or other tools: nothing needs to be installed. Call it ONCE per file. Patchbay moves the file in the background, in chunks, and checks its SHA-256; do not poll or repeat the call. The target agent is messaged when the file has arrived and names the path it was saved at (the target session's folder, under .patchbay/inbox/); an existing file there is never overwritten. If the transfer fails you receive a message from the target session. The file must be a regular file inside this session's folder, at most 1 GiB. Find targetSessionId with list_agent_sessions. Send only files the user asked for or the work needs.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "targetSessionId": { "type": "string", "description": "The Patchbay Code session ID from list_agent_sessions." },
+                "path": { "type": "string", "description": "Path of the file to send, absolute or relative to this session's folder." },
+                "note": { "type": "string", "description": "Optional short note delivered to the target agent with the file (at most 2 KiB), for example what the file is for." }
+            },
+            "required": ["targetSessionId", "path"],
+            "additionalProperties": false
+        }
+    }));
     if !can_steer {
         tools.push(json!({
             "name": TOOL_LIST_QUEUED,
@@ -1157,6 +1183,7 @@ pub(crate) async fn call_tool(
         t if crate::teams::is_tool(t) => (t, None, None, None),
         TOOL_CREATE => ("create", None, None, None),
         TOOL_SHARE => ("share", None, None, None),
+        TOOL_SEND_FILE => ("send_file", None, None, None),
         TOOL_LIST_SESSIONS => ("list", None, None, None),
         TOOL_LIST_QUEUED => ("list_queued", None, None, None),
         TOOL_ACCEPT_QUEUED => (
@@ -1182,7 +1209,7 @@ pub(crate) async fn call_tool(
         "targetSessionId": target_session_id,
         "message": message,
         "messageId": message_id,
-        "arguments": (matches!(name, TOOL_CREATE | TOOL_SHARE) || crate::teams::is_tool(name)).then(|| params["arguments"].clone()),
+        "arguments": (matches!(name, TOOL_CREATE | TOOL_SHARE | TOOL_SEND_FILE) || crate::teams::is_tool(name)).then(|| params["arguments"].clone()),
     });
     write.write_all(request.to_string().as_bytes()).await?;
     write.write_all(b"\n").await?;
@@ -1724,6 +1751,23 @@ time.sleep(3600)
                 .expect("create tool listed");
             assert_eq!(tool["inputSchema"]["required"], json!(["cwd", "prompt"]));
             for k in ["cwd", "prompt", "title", "agent", "model"] {
+                assert!(tool["inputSchema"]["properties"][k].is_object(), "{k}");
+            }
+        }
+    }
+
+    #[test]
+    fn tools_list_offers_send_file_in_both_modes() {
+        for can_steer in [true, false] {
+            let list = tools_list_for(can_steer);
+            let tool = list["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == TOOL_SEND_FILE)
+                .expect("send_file listed");
+            assert_eq!(tool["inputSchema"]["required"], json!(["targetSessionId", "path"]));
+            for k in ["targetSessionId", "path", "note"] {
                 assert!(tool["inputSchema"]["properties"][k].is_object(), "{k}");
             }
         }

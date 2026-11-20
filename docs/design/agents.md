@@ -95,6 +95,27 @@ source within 10 minutes as `delivery: "duplicate"` without re-prompting. Tool r
 injected prompt say that `sent` / `steered` / `queued` / `duplicate` all mean accepted — agents
 must not resend because delivery was queued.
 
+### Sending a file
+
+`send_file` (`targetSessionId`, `path`, optional `note`) moves one file to another session's computer
+with no tool installed on either host and no direct route between them. The agent calls it once;
+Patchbay does the rest, so the model never drives the chunking and a long transfer cannot hit a
+tool-call timeout. The code is `src-tauri/src/file_transfer.rs`.
+
+- **Offer.** The bridge confines `path` to the sender's folder (as `share_artifact` does), hashes the file
+  and registers an offer: a random token, the file, the target host's node id, a one-hour expiry. It sends
+  `code.file_offer` to the target host (an ordinary mesh RPC, so it follows a relay circuit when the two
+  nodes cannot reach each other) and returns as soon as that host accepts.
+- **Pull.** The target host checks the offer the way an agent message is checked (the source session
+  belongs to the sending member, the target is local, unarchived and not moving), reserves a file in
+  `<target folder>/.patchbay/inbox/` (with a `.gitignore`; a taken name gets `-1`, `-2`; nothing is
+  overwritten) and pulls 4 MiB chunks with `code.file_chunk`. The source serves a chunk only to the node the
+  offer names. The host checks size and SHA-256 and deletes the partial file on any failure. Then it sends
+  `code.file_done` so the source forgets the offer.
+- **Notice.** On success the target agent gets an attributed message naming the saved path. On failure the
+  sending agent gets a message from the target session. Each transfer also counts against the send budgets.
+- **Limits.** One regular file, at most 1 GiB. The name is reduced to `A-Z a-z 0-9 . - _`.
+
 ### Creating a session
 
 `create_agent_session` (`cwd`, `prompt`, optional `title`, `agent`, `model`) lets an agent start a
