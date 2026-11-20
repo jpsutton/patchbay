@@ -1641,6 +1641,9 @@ export const useStore = create<Store>((set, get) => ({
     if (replay.length) get().applyCodeEvents(id, replay);
   },
   attachAgent: async (id) => {
+    // Two attaches at once would each reset the held events and apply the other's, showing
+    // what the snapshot already carried twice. The running one takes the newest state.
+    if (attaching.has(id)) return;
     flushCodeEvents(id);
     // Live events that arrive while the catch-up is in flight wait, so none is lost or doubled.
     attaching.set(id, []);
