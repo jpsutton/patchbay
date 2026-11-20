@@ -125,6 +125,10 @@ impl CodeUsageState {
         if let Some(p) = update["_meta"]["autoCompactPercent"].as_u64() {
             self.auto_compact_percent = Some(p);
         }
+        // An explicit null: the agent's model has no cache clock, so a saved one is stale.
+        if update["_meta"].get("cache").is_some_and(Value::is_null) {
+            self.cache = None;
+        }
         if let Some(ttl_secs) = update["_meta"]["cache"]["ttlSecs"].as_u64().filter(|t| *t > 0) {
             let c = &update["_meta"]["cache"];
             self.cache = Some(CacheClock { last_at: c["lastAt"].as_u64(), ttl_secs, auto: c["auto"].as_bool().unwrap_or(false) });
@@ -251,6 +255,10 @@ mod tests {
         // Updates without a clock (other agents) leave it as it was, and old saved state loads.
         s.apply_context(&serde_json::json!({ "used": 200 }));
         assert_eq!(s.view().cache, Some(CacheClock { last_at: None, ..want }));
+        // An explicit null clock (Patchbay's agent on a model with no cache lifetime) drops it.
+        s.apply_context(&serde_json::json!({ "used": 300, "_meta": { "cache": null } }));
+        assert_eq!(s.view().cache, None);
+        s.apply_context(&serde_json::json!({ "_meta": { "cache": { "lastAt": null, "ttlSecs": 3600, "auto": true } } }));
         let old: CodeUsageState = serde_json::from_str(r#"{"contextTokens": 5}"#).unwrap();
         assert_eq!(old.cache, None);
         // A restarted agent has auto keep-warm off, but the cache is as warm as it was.
