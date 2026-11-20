@@ -113,6 +113,7 @@ impl Host for AppHost {
                 max_steps: e.max_steps.map(|n| n.clamp(1, 10_000) as usize),
                 subagent_max_steps: e.subagent_max_steps.map_or(d.subagent_max_steps, |n| n.clamp(1, 10_000) as usize),
                 shell_timeout_ms: e.shell_timeout_secs.map_or(d.shell_timeout_ms, |s| u64::from(s.clamp(1, 600)) * 1000),
+                goal_max_rounds: d.goal_max_rounds,
             },
             claude: agent_claude_config(c, self.team_worker),
         }

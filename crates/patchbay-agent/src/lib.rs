@@ -9,6 +9,7 @@ mod agent;
 mod cache;
 mod compact;
 mod extract;
+mod goal;
 mod history;
 mod host;
 mod mcp;

@@ -1846,6 +1846,8 @@ fn unknown_update(update: &Value) -> Option<String> {
         // Patchbay's own agent: how its subagents are doing (`patchbay-agent`'s `publish_agents`).
         "subagents_update" if update["agents"].is_array() => None,
         "subagents_update" => Some("The agent sent a subagent list Patchbay can't show".into()),
+        // Patchbay's own agent: the state of its `/goal` (`patchbay-agent`'s `goal::announce`).
+        "goal_update" => None,
         // Cursor ACP (and Grok): a child session announced on the parent. The UI folds these into
         // the subagent rows; child traffic still streams under its own session id and is dropped.
         "subagent_spawned"

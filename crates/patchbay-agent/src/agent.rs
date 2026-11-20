@@ -469,7 +469,9 @@ impl Agent {
         *s.effort.lock().unwrap() = restored.effort;
         *s.prompts.lock().unwrap() = session::prompts_of(&restored.messages);
         s.state.lock().await.messages = restored.messages;
+        *s.goal.lock().unwrap() = restored.goal;
         s.replay(&entries);
+        crate::goal::announce(&s);
         self.start_claude(&s, "resume").await;
         self.attach_mcp(&s, params).await;
         self.sessions.lock().unwrap().insert(id, s.clone());

@@ -755,6 +755,48 @@ async fn snapshot_leaves_out_a_turn_cut_off_from_its_host() {
     assert_eq!(snap["covered"], false);
 }
 
+/// A gateway that has no events of a turn (it linked to the host after the turn began) must not
+/// answer a phone's snapshot with nothing: the host's own record of the turn goes in, and the
+/// phone continues from the host's newest point.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn snapshot_takes_the_hosts_record_when_the_gateway_missed_the_turn() {
+    let (a, b) = (node("alpha10"), node("bravo10"));
+    let proj = a.dir.join("proj");
+    repo(&proj);
+    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok", "default").unwrap();
+    // A turn is under way on A while B isn't linked to it.
+    emit(&a, &s.id, code::acp::CodeEvent::Status { state: "starting".into(), message: None });
+    emit(&a, &s.id, chunk("before B"));
+    link(&a, &b).await;
+    until("session reaches B", 10, || b.state.db.get_code_session(&s.id).unwrap().is_some()).await;
+
+    let p = phone();
+    let url = format!("127.0.0.1:{}", b.state.mesh.bound_port().unwrap());
+    p.client.join(&url, PASS, "pocket").unwrap();
+    let pid = p.client.node_id();
+    until("phone's join request", 10, || {
+        b.state.mesh.status()["pending"].as_array().unwrap().iter().any(|r| r["nodeId"] == pid)
+    })
+    .await;
+    b.state.mesh.approve(&pid).await.unwrap();
+    until("phone online", 10, || p.client.status()["phase"] == "online").await;
+
+    let topic = format!("session:{}", s.id);
+    let snap = p.client.subscribe(&topic, true).await.unwrap();
+    assert_eq!(snap["mode"], "snapshot", "{snap}");
+    assert_eq!(snap["snapshot"]["caughtUp"], true, "{snap}");
+    assert_eq!(snap["covered"], true, "{snap}");
+    // The turn so far is in the host's answer, not in a tail B lacks.
+    assert!(snap["tail"].as_array().unwrap().is_empty(), "{snap}");
+    let has = snap["snapshot"]["attach"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["update"]["content"]["text"] == "before B");
+    assert!(has, "{snap}");
+    assert_eq!(snap["point"]["n"], 2, "{snap}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn phone_starts_a_session_on_another_computer() {
     let (a, b) = (node("alpha4"), node("bravo4"));

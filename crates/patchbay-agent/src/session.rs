@@ -136,6 +136,8 @@ pub struct Session {
     pub start_context: Mutex<Vec<String>>,
     /// When the provider's prompt cache was last used (see `cache.rs`).
     pub cache: Mutex<crate::cache::CacheState>,
+    /// The standing `/goal`, if one is set (see `goal.rs`).
+    pub goal: Mutex<Option<crate::goal::Goal>>,
 }
 
 /// Messages steered into a running turn, waiting for the next step.
@@ -198,6 +200,7 @@ impl Session {
             claude: Mutex::default(),
             start_context: Mutex::default(),
             cache: Mutex::default(),
+            goal: Mutex::new(None),
         })
     }
 
@@ -260,6 +263,11 @@ impl Session {
             "name": "keepwarm",
             "description": "Refresh the prompt cache now; \"auto\" toggles automatic refresh",
             "input": {"hint": "auto"},
+        }));
+        list.push(json!({
+            "name": "goal",
+            "description": "Work on an objective across rounds until an independent check confirms it is done",
+            "input": {"hint": "<objective> [--budget 500k] | pause | resume | clear"},
         }));
         for c in &setup.commands {
             let mut v = json!({"name": c.name, "description": c.description});
@@ -345,6 +353,7 @@ impl Session {
             claude: Mutex::new(self.claude()),
             start_context: Mutex::default(),
             cache: Mutex::default(),
+            goal: Mutex::new(None),
         })
     }
 
@@ -430,7 +439,9 @@ pub(crate) fn entry_updates(e: &Entry) -> Vec<Value> {
             "agent_message_chunk",
             &format!("— Earlier conversation summarized —\n{}", summary.text()),
         )],
-        Entry::Meta { .. } | Entry::Truncate { .. } | Entry::Req(_) => Vec::new(),
+        // The goal reaches a client through `goal::announce`, not as history: an old state in an
+        // older page of history must not replace the current one.
+        Entry::Meta { .. } | Entry::Truncate { .. } | Entry::Req(_) | Entry::Goal { .. } => Vec::new(),
     }
 }
 
@@ -456,6 +467,7 @@ pub struct Restored {
     pub model: Option<String>,
     pub mode: Option<Mode>,
     pub messages: Vec<Message>,
+    pub goal: Option<crate::goal::Goal>,
 }
 
 /// A message the user wrote, as opposed to tool results and compaction summaries.
@@ -481,7 +493,7 @@ pub fn prompts_of(messages: &[Message]) -> Vec<PromptRec> {
 }
 
 pub fn restore(entries: &[Entry]) -> Restored {
-    let mut r = Restored { minify: None, effort: None, cwd: None, model: None, mode: None, messages: Vec::new() };
+    let mut r = Restored { minify: None, effort: None, cwd: None, model: None, mode: None, messages: Vec::new(), goal: None };
     for e in &effective(entries) {
         match e {
             Entry::Meta { cwd, model, mode, minify, effort } => {
@@ -495,8 +507,16 @@ pub fn restore(entries: &[Entry]) -> Restored {
             Entry::Compacted { summary } => {
                 r.messages = vec![summary.clone()];
             }
+            Entry::Goal { goal } => r.goal = goal.clone(),
             Entry::Tool { .. } | Entry::Truncate { .. } | Entry::Req(_) => {}
         }
+    }
+    // No turn survives a restart, so a goal that was running is paused.
+    if let Some(g) = r.goal.as_mut()
+        && g.status == crate::goal::GoalStatus::Active
+    {
+        g.status = crate::goal::GoalStatus::Paused;
+        g.reason = "the session was closed while it ran".into();
     }
     answer_dangling_calls(&mut r.messages);
     r

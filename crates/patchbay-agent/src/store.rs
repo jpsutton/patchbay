@@ -33,6 +33,9 @@ pub enum Entry {
     /// How one model call went. Diagnostics only: replay and restore skip it, and a build that
     /// predates it skips the line.
     Req(ReqRec),
+    /// The session's `/goal`; the last one wins, and `None` is a goal that was cleared. A build
+    /// that predates it skips the line.
+    Goal { goal: Option<crate::goal::Goal> },
 }
 
 /// What happened to one model call, written when it ends, whichever way. A call that never ends
@@ -305,6 +308,34 @@ mod tests {
         ] {
             assert!(!valid_session_id(bad), "{bad:?} should not be a session id");
         }
+    }
+
+    #[test]
+    fn the_last_goal_entry_wins_and_survives_a_reload() {
+        use crate::goal::{Goal, GoalStatus};
+        let dir = std::env::temp_dir().join(format!("pb-store-{}", uuid::Uuid::new_v4()));
+        let s = Store::new(&dir, "goal");
+        let mut g = Goal::new("make the tests pass".into(), Some(500_000), 20);
+        s.append(&Entry::Goal { goal: Some(g.clone()) });
+        s.append(&Entry::Msg { m: Message::user("hi") });
+        g.status = GoalStatus::Paused;
+        g.reason = "reached the round cap (20)".into();
+        g.rounds = 20;
+        s.append(&Entry::Goal { goal: Some(g.clone()) });
+        let entries = Store::new(&dir, "goal").load();
+        let r = crate::session::restore(&entries);
+        assert_eq!(r.goal, Some(g.clone()));
+        // A goal that was running when the app stopped comes back paused.
+        let mut running = g.clone();
+        running.status = GoalStatus::Active;
+        let r = crate::session::restore(&[Entry::Goal { goal: Some(running) }]);
+        assert_eq!(r.goal.map(|g| g.status), Some(GoalStatus::Paused));
+        // Clearing it leaves none.
+        s.append(&Entry::Goal { goal: None });
+        assert_eq!(crate::session::restore(&Store::new(&dir, "goal").load()).goal, None);
+        // History shows no goal state: a client gets it from `goal_update`, not from old pages.
+        assert!(crate::session::entry_updates(&Entry::Goal { goal: Some(g) }).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

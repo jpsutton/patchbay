@@ -103,6 +103,7 @@ mod tests {
             status: None,
             retryable: true,
             cancelled: false,
+            retry_after: None,
         });
         let rec = ReqTimer::start().finish(&cfg(), Some("compact"), &err);
         assert_eq!(rec.outcome, ReqOutcome::Error);

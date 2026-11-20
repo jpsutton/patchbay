@@ -108,6 +108,18 @@ def calls_of(plan):
 
 def _decide(user_text, images, after_tool, tools):
     """Return ("text", str) or ("tool", name, args_dict)."""
+    # The completion check of a `/goal`: one plain-text call whose reply is a JSON verdict. It says
+    # "continue" until the transcript holds three assistant replies, then "complete". `!gstuck` in
+    # the goal never gets past "continue" with the same gap; `!gbad` answers in prose.
+    if "<goal>" in user_text and "Give your verdict as the JSON object" in user_text:
+        if "!gbad" in user_text:
+            return ("text", "I think it is probably done!")
+        if "!gstuck" in user_text:
+            return ("text", json.dumps({"decision": "continue", "gaps": ["still failing"], "next_step": "try again"}))
+        n = user_text.count("ASSISTANT:")
+        if n >= 3:
+            return ("text", json.dumps({"decision": "complete", "evidence": "cargo test passed"}))
+        return ("text", json.dumps({"decision": "continue", "gaps": [f"gap {n}"], "next_step": "fix it"}))
     if after_tool:
         # Long enough for two subagent reports, each ending with its transcript path, and for a fork's
         # echo, which repeats the fork note and step budget before its "tools offered" line.

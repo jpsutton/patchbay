@@ -56,6 +56,7 @@ import { ExportMenu } from "../components/ExportMenu";
 import { WidthMenu } from "../components/WidthMenu";
 import { codeToJson, codeToMarkdown, saveExport, type ExportFormat } from "../lib/export";
 import { ContextMenu, type ItemAction } from "../components/ItemMenu";
+import { GoalChip } from "./GoalChip";
 import { PaneContext, useViewAction, ViewActive } from "../lib/shortcuts";
 import { usePaneSession } from "../lib/pane";
 import { useRememberedOpen } from "../lib/rowMemory";
@@ -1867,6 +1868,16 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     </button>
   );
 
+  const goalChip = s?.goal && (
+    <GoalChip
+      goal={s.goal}
+      working={working}
+      ready={ready}
+      onCommand={(text) => void send(text, [])}
+      onStop={stopTurn}
+    />
+  );
+
   const showMove = !remote && !!mesh?.member && mesh.members.filter((m) => m.state !== "removed").length > 1;
   const exportAs = (f: ExportFormat) =>
     s &&
@@ -1957,6 +1968,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
         </div>
         {!remote && level === 0 && (
           <>
+            {goalChip}
             {modeControl}
             {approvalControl}
             {gapsButton}
@@ -2060,6 +2072,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
         <div className="flex shrink-0 flex-wrap items-center gap-y-1 border-b border-line px-3 py-1.5">
           {level >= 2 && agentLabel}
           {level >= 2 && <HostBadge session={session} />}
+          {goalChip}
           {modeControl}
           {approvalControl}
           {gapsButton}
@@ -2313,6 +2326,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                 />
                 {remote && (
                   <>
+                    {goalChip && <div className="px-3 pb-2">{goalChip}</div>}
                     {modeControl}
                     <div>
                       {approvalControl}

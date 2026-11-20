@@ -342,6 +342,7 @@ impl Parser for AnthropicParser {
                 status: None,
                 retryable: true,
                 cancelled: false,
+                retry_after: None,
             });
         }
         let mut parts = Vec::new();

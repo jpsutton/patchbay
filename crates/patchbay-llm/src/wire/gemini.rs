@@ -222,6 +222,7 @@ impl Parser for GeminiParser {
                 status: None,
                 retryable: true,
                 cancelled: false,
+                retry_after: None,
             });
         }
         let has_calls = self.calls > 0;

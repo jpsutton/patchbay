@@ -16,6 +16,9 @@ pub const EV_CHAT: &str = "mesh://chat";
 pub const EV_LIVE: &str = "remote://live";
 /// Gateway to remote: conversations or Code sessions changed; refetch the lists.
 pub const EV_INDEX: &str = "remote://index-changed";
+/// Gateway to remote: the gateway lost its feed for a topic (`topic`) and may have missed events
+/// since. The phone starts that view over, as for a gap in the points.
+pub const EV_STALE: &str = "remote://stale";
 /// The topic carrying [`EV_LIVE`] and [`EV_INDEX`].
 pub const TOPIC_INDEX: &str = "index";
 /// Where an event's point sits in its payload.
@@ -51,6 +54,12 @@ pub fn topic_of(name: &str, payload: &Value) -> Option<String> {
 
 pub fn point_of(payload: &Value) -> Option<Point> {
     serde_json::from_value(payload.get(POINT_KEY)?.clone()).ok()
+}
+
+/// Whether `next` follows `last` with events missing between them: numbers skipped in one
+/// stream, or a new stream that doesn't begin at its first event.
+pub fn is_gap(last: &Point, next: &Point) -> bool {
+    if last.s == next.s { next.n > last.n + 1 } else { next.n > 1 }
 }
 
 /// Whether this event begins a new stream on its origin: an agent starting, or a reply starting.
@@ -137,7 +146,15 @@ impl Ring {
         self.events.back().map(|(n, _, _)| Point { s: self.stream.clone(), n: *n })
     }
 
-    /// The events after `pt`, when this ring still holds all of them.
+    /// Whether what fed the ring went away and the stream hasn't continued since: events may be
+    /// missing after [`Ring::last`].
+    pub fn is_stale(&self) -> bool {
+        self.stale
+    }
+
+    /// The events after `pt`, when this ring still holds all of them. While the ring is stale
+    /// it can't tell that nothing came after its last event; the caller decides whether that
+    /// answer is good enough (see `plan_subscribe`).
     pub fn since(&self, pt: &Point) -> Option<Vec<(String, Value)>> {
         if pt.s != self.stream {
             return None;
@@ -292,6 +309,15 @@ pub struct Live {
 }
 
 impl Live {
+    /// Whether the session list would show the same for both: everything but the time.
+    pub fn same_as_shown(&self, other: &Live) -> bool {
+        self.status == other.status
+            && self.busy == other.busy
+            && self.permissions == other.permissions
+            && self.questions == other.questions
+            && self.stalled == other.stalled
+    }
+
     /// Fold one Code event in. Returns whether what the list shows changed.
     pub fn apply(&mut self, payload: &Value, now: i64) -> bool {
         let before = (self.status.clone(), self.busy, self.permissions.len(), self.questions.len(), self.stalled);
@@ -361,6 +387,27 @@ mod tests {
     }
 
     #[test]
+    fn live_state_compares_without_the_time() {
+        let a = Live { status: "ready".into(), busy: true, permissions: ["p1".to_string()].into(), last: 5, ..Live::default() };
+        let mut b = a.clone();
+        b.last = 99;
+        assert!(a.same_as_shown(&b));
+        b.permissions.clear();
+        assert!(!a.same_as_shown(&b));
+    }
+
+    #[test]
+    fn gap_is_skipped_numbers_or_a_stream_that_starts_late() {
+        let p = |s: &str, n: u64| Point { s: s.into(), n };
+        assert!(!is_gap(&p("a", 4), &p("a", 5)));
+        assert!(!is_gap(&p("a", 4), &p("a", 4)), "a repeat is not a gap");
+        assert!(!is_gap(&p("a", 4), &p("a", 2)), "an old one is not a gap");
+        assert!(is_gap(&p("a", 4), &p("a", 6)));
+        assert!(!is_gap(&p("a", 4), &p("b", 1)), "a new stream from its first event");
+        assert!(is_gap(&p("a", 4), &p("b", 3)), "the new stream's start went missing");
+    }
+
+    #[test]
     fn ring_resumes_or_asks_for_a_snapshot() {
         let mut r = Ring::default();
         let s = "a".to_string();
@@ -404,7 +451,9 @@ mod tests {
         r.mark_stale();
         let (tail, covered) = r.tail(|_, p| p["event"]["type"] == "promptDone");
         assert!(tail.is_empty() && !covered);
-        // Resuming from a point still works: those events did happen.
+        // Resuming from a point still works: those events did happen. `is_stale` tells the caller
+        // that events after the last one may be missing.
+        assert!(r.is_stale());
         assert_eq!(r.since(&Point { s: "a".into(), n: 1 }).unwrap().len(), 1);
         // The stream went on meanwhile: the gap drops the old part and the tail is the new one.
         r.push(&Point { s: "a".into(), n: 7 }, EV_CODE, &chunk("next").1);
@@ -417,6 +466,7 @@ mod tests {
         }
         r.mark_stale();
         r.push(&Point { s: "a".into(), n: 3 }, EV_CODE, &chunk("on").1);
+        assert!(!r.is_stale(), "the stream continued: nothing was missed");
         assert_eq!(r.tail(|_, p| p["event"]["type"] == "promptDone").0.len(), 3);
     }
 

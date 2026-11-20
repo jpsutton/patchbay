@@ -539,9 +539,7 @@ export interface MeshChatEvent {
   conversationId: string;
   streamer: string;
   streamerName: string;
-  event:
-    | ChatEvent
-    | { type: "snapshot"; userMessageId: string | null; assistantMessageId: string | null; text: string; reasoning: string };
+  event: ChatEvent;
 }
 
 /** A session the relaunch picker offers: its active-turn flag was still set at launch. */
@@ -684,6 +682,8 @@ export type AcpConfigChoice =
 
 export type ChatEvent =
   | { type: "started"; userMessageId: string; assistantMessageId: string }
+  /** The reply so far, from the gateway: the phone lost events and starts the reply over from it. */
+  | { type: "snapshot"; userMessageId: string | null; assistantMessageId: string | null; text: string; reasoning: string }
   | { type: "text"; text: string }
   | { type: "reasoning"; text: string }
   | { type: "status"; message: string }
@@ -894,6 +894,22 @@ export interface Subagent {
   startedAt?: number;
   /** Client clock when the row was first seen failed; the panel drops it a minute later. */
   failedAt?: number;
+}
+
+/** A `/goal` of Patchbay's own agent, as `goal_update` reports it. */
+export interface GoalView {
+  objective: string;
+  status: "active" | "paused" | "blocked" | "complete";
+  /** Why it is paused or blocked, or the evidence that it is complete. */
+  reason: string;
+  rounds: number;
+  /** Checks since it started or was last resumed; `maxRounds` caps these. */
+  stretchRounds: number;
+  maxRounds: number;
+  tokensUsed: number;
+  /** Token cap for one start or resume; null when there is none. */
+  budget: number | null;
+  lastGaps: string;
 }
 
 export type AcpUpdate =

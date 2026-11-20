@@ -4142,6 +4142,8 @@ impl mesh::RpcHandler for MeshRpc {
             // Starting a session here for a phone, through its gateway.
             "code.new_options" => gateway::new_session_options_local(state).await,
             "host.info" => Ok(gateway::host_info_local()),
+            // A gateway whose link to this node was down: what the list shows for our sessions.
+            "code.live" => gateway::live_hosted_here(state),
             "code.create" => gateway::create_local(state, &p).map(|s| json!(s)),
             "fs.dirs" => gateway::list_dirs_local(p["path"].as_str()),
             // Phase 2: a gateway relays a share fetch HERE (the owning node). Only the opaque

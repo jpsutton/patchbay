@@ -25,6 +25,7 @@ import {
   type Conversation,
   type Model,
   type Provider,
+  type GoalView,
   type Subagent,
   type UsageView,
   type PlanAccount,
@@ -186,6 +187,8 @@ export interface CodeState {
   subagents: Subagent[];
   /** When the last harness `subagents_update` arrived, to count idle time on from it. */
   subagentsAt: number | null;
+  /** The session's `/goal` (Patchbay's own agent), or null when none is set. */
+  goal: GoalView | null;
 }
 
 export interface ChatStream {
@@ -239,6 +242,7 @@ export const emptyCode = (): CodeState => ({
   turnChars: 0,
   subagents: [],
   subagentsAt: null,
+  goal: null,
 });
 
 /** `next` with the turn clock started or cleared when `busy` flipped between `prev` and it. */
@@ -739,6 +743,10 @@ function reduceUpdate(s: CodeState, u: AcpUpdate, agent: AgentId | undefined): C
     case "subagents_update": {
       const agents = (u as { agents?: Subagent[] }).agents;
       return Array.isArray(agents) ? { ...s, subagents: stampFailed(s.subagents, agents), subagentsAt: Date.now() } : s;
+    }
+    case "goal_update": {
+      const goal = (u as { goal?: GoalView | null }).goal;
+      return { ...s, goal: goal && typeof goal.objective === "string" ? goal : null };
     }
     case "subagent_spawned": {
       const next = applySpawned(s.subagents, u as unknown as Record<string, unknown>);
