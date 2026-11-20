@@ -167,7 +167,10 @@ fn retry_hint(headers: &reqwest::header::HeaderMap, body: &str, message: &str) -
                 if k.contains("retry_after_ms") {
                     found = n;
                 } else if k.contains("retry_after") || k.contains("retrydelay") || k.contains("reset_after") {
-                    found = n.map(|s| s.saturating_mul(1000));
+                    // A number is seconds. Gemini writes a protobuf duration, `"12s"`.
+                    found = n
+                        .map(|s| s.saturating_mul(1000))
+                        .or_else(|| v.as_str().and_then(duration_string_ms));
                 } else if k.contains("reset") && (k.contains("at") || k.contains("in")) {
                     // Epoch seconds, epoch ms or a plain duration: only a timestamp is that large.
                     let now = unix_now_secs();
@@ -198,6 +201,23 @@ fn retry_hint(headers: &reqwest::header::HeaderMap, body: &str, message: &str) -
         .filter_map(|w| w.parse::<f64>().ok())
         .next();
     secs.filter(|s| *s > 0.0).map(|s| (s * 1000.0) as u64)
+}
+
+/// `"12s"`, `"12.5s"`, `"500ms"`. Anything else is not a duration.
+fn duration_string_ms(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (num, millis) = if let Some(n) = s.strip_suffix("ms") {
+        (n, true)
+    } else if let Some(n) = s.strip_suffix('s') {
+        (n, false)
+    } else {
+        return None;
+    };
+    let n: f64 = num.trim().parse().ok()?;
+    if n <= 0.0 {
+        return None;
+    }
+    Some(if millis { n as u64 } else { (n * 1000.0) as u64 })
 }
 
 fn unix_now_secs() -> u64 {
