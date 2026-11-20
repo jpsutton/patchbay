@@ -3,6 +3,7 @@ mod attachments;
 mod chat;
 mod claude_auth;
 mod grok_auth;
+mod antigravity_auth;
 mod code;
 mod db;
 #[cfg(feature = "desktop")]
@@ -234,6 +235,9 @@ struct ProviderInput {
     /// For Grok login: another Grok home directory (`GROK_HOME`) to sign in with.
     #[serde(default)]
     grok_home: Option<String>,
+    /// For Antigravity login: another Gemini home (`GEMINI_HOME`) to sign in with.
+    #[serde(default)]
+    gemini_home: Option<String>,
 }
 
 async fn list_providers(state: &AppState) -> CmdResult<Vec<Provider>> {
@@ -245,6 +249,7 @@ async fn save_provider(state: &AppState, input: ProviderInput) -> CmdResult<Prov
         (db::ProviderKind::Anthropic, db::AuthMode::ClaudeLogin) => db::AuthMode::ClaudeLogin,
         // Grok's proxy speaks the Responses API.
         (db::ProviderKind::OpenaiResponses, db::AuthMode::GrokLogin) => db::AuthMode::GrokLogin,
+        (db::ProviderKind::Gemini, db::AuthMode::AntigravityLogin) => db::AuthMode::AntigravityLogin,
         _ => db::AuthMode::ApiKey,
     };
     let p = Provider {
@@ -261,6 +266,10 @@ async fn save_provider(state: &AppState, input: ProviderInput) -> CmdResult<Prov
             .grok_home
             .map(|d| d.trim().to_owned())
             .filter(|d| !d.is_empty() && auth_mode == db::AuthMode::GrokLogin),
+        gemini_home: input
+            .gemini_home
+            .map(|d| d.trim().to_owned())
+            .filter(|d| !d.is_empty() && auth_mode == db::AuthMode::AntigravityLogin),
         auth_mode,
     };
     if p.name.is_empty() || p.base_url.is_empty() {
@@ -275,8 +284,11 @@ async fn save_provider(state: &AppState, input: ProviderInput) -> CmdResult<Prov
         // The error says where it looked and to run `grok login`.
         grok_auth::check(p.grok_home.as_deref())?;
     }
+    if p.auth_mode == db::AuthMode::AntigravityLogin {
+        antigravity_auth::check(p.gemini_home.as_deref()).await?;
+    }
     state.db.upsert_provider(&p, None)?;
-    if matches!(p.auth_mode, db::AuthMode::ClaudeLogin | db::AuthMode::GrokLogin) {
+    if matches!(p.auth_mode, db::AuthMode::ClaudeLogin | db::AuthMode::GrokLogin | db::AuthMode::AntigravityLogin) {
         providers::delete_key(&p.id);
         state.db.clear_inline_key(&p.id)?;
     } else {
@@ -334,6 +346,7 @@ async fn discover_models(
     let auth = match p.auth_mode {
         db::AuthMode::ClaudeLogin => providers::Auth::ClaudeLogin,
         db::AuthMode::GrokLogin => providers::Auth::GrokLogin,
+        db::AuthMode::AntigravityLogin => providers::Auth::AntigravityLogin,
         db::AuthMode::ApiKey => providers::Auth::Key,
     };
     let mut grok_user = None;
@@ -344,9 +357,13 @@ async fn discover_models(
             grok_user = Some(c.user_id);
             Some(c.token)
         }
+        providers::Auth::AntigravityLogin => None,
         providers::Auth::Key => providers::load_key(&p.id, inline.as_deref()),
     };
     let extras = providers::required_extras(&state.db, &providers::Keyring, &p.id)?;
+    if auth == providers::Auth::AntigravityLogin {
+        return Ok(providers::discover_antigravity_models(&p.base_url, p.gemini_home.as_deref(), &extras).await?);
+    }
     Ok(providers::discover_models_for(&p.kind, &p.base_url, key.as_deref(), auth, grok_user.as_deref(), &extras).await?)
 }
 
@@ -1725,7 +1742,7 @@ pub(crate) fn session_plan_usage_local(state: &AppState, id: &str) -> Option<Ses
     if on_cursor_session(state, id) {
         return Some(SessionPlanUsageView::Cursor { limits: state.code.cursor_plan.latest() });
     }
-    if on_antigravity_session(state, id) {
+    if on_antigravity_session(state, id) || antigravity_provider_for_session(state, id).is_some() {
         return Some(SessionPlanUsageView::Antigravity {
             limits: state.code.antigravity_plan.latest(),
         });
@@ -1791,6 +1808,15 @@ fn on_antigravity_session(state: &AppState, id: &str) -> bool {
         .is_some_and(|s| code::agents::AgentKind::parse(&s.agent) == Some(code::agents::AgentKind::Antigravity))
 }
 
+fn antigravity_provider_for_session(state: &AppState, id: &str) -> Option<Provider> {
+    let session = state.db.get_code_session(id).ok().flatten()?;
+    if !matches!(session.agent.as_str(), "patchbay" | "grok") { return None; }
+    let model_ref = session.model_ref?;
+    let model = state.db.get_model(&model_ref).ok().flatten()?;
+    let (provider, _) = state.db.get_provider(&model.provider_id).ok().flatten()?;
+    (provider.kind == db::ProviderKind::Gemini && provider.auth_mode == db::AuthMode::AntigravityLogin).then_some(provider)
+}
+
 fn any_running_cursor(state: &AppState) -> bool {
     state
         .db
@@ -1808,7 +1834,14 @@ fn any_running_antigravity(state: &AppState) -> bool {
         .ok()
         .into_iter()
         .flatten()
-        .any(|s| s.agent == code::agents::AgentKind::Antigravity.id() && state.code.is_running(&s.id))
+        .any(|s| state.code.is_running(&s.id) && (s.agent == code::agents::AgentKind::Antigravity.id() || antigravity_provider_for_session(state, &s.id).is_some()))
+}
+
+fn running_antigravity_home(state: &AppState) -> Option<String> {
+    state.db.list_code_sessions().ok()?.into_iter()
+        .filter(|s| state.code.is_running(&s.id))
+        .find_map(|s| antigravity_provider_for_session(state, &s.id))
+        .and_then(|p| p.gemini_home)
 }
 
 /// Take an Antigravity plan report seen here, or a newer one from another member for the same account.
@@ -1846,7 +1879,8 @@ async fn poll_antigravity_plan(state: &AppState) {
     if state.code.antigravity_plan.latest().is_some_and(|l| l.is_fresh(now)) {
         return;
     }
-    match code::antigravity_plan::auth_kind() {
+    let gemini_home = running_antigravity_home(state);
+    if gemini_home.is_none() { match code::antigravity_plan::auth_kind().await {
         code::antigravity_plan::AntigravityAuthKind::ApiKey => {
             let email = None;
             let limits = code::antigravity_plan::AntigravityPlanLimits::unavailable(
@@ -1863,8 +1897,8 @@ async fn poll_antigravity_plan(state: &AppState) {
             return;
         }
         code::antigravity_plan::AntigravityAuthKind::Oauth => {}
-    }
-    let Some(auth) = code::antigravity_plan::load_auth(&state.code.antigravity_plan).await else {
+    }}
+    let Some(auth) = code::antigravity_plan::load_auth_for(gemini_home.as_deref()).await else {
         tracing::debug!("antigravity plan: no readable local Google OAuth login");
         // No usable login (disk sources missing/invalid and the keychain fallback denied or
         // deferred): record the `unavailable` report instead of retrying — and therefore
@@ -2060,7 +2094,7 @@ fn provider_plan_account(p: &Provider) -> Option<String> {
     match p.auth_mode {
         db::AuthMode::ClaudeLogin => claude_auth::account_for(p.claude_config_dir.as_deref()).ok().map(|a| a.0),
         db::AuthMode::GrokLogin => grok_auth::resolve_dir(p.grok_home.as_deref()).ok().map(|d| grok_auth::account(&d).0),
-        db::AuthMode::ApiKey => None,
+        db::AuthMode::ApiKey | db::AuthMode::AntigravityLogin => None,
     }
 }
 
@@ -2122,7 +2156,7 @@ fn plan_account(state: &AppState, prefs: &prefs::Preferences, id: &str) -> Optio
             .and_then(|(p, _)| match p.auth_mode {
                 db::AuthMode::ClaudeLogin => claude_auth::account_for(p.claude_config_dir.as_deref()).ok(),
                 db::AuthMode::GrokLogin => grok_auth::resolve_dir(p.grok_home.as_deref()).ok().map(|d| grok_auth::account(&d)),
-                db::AuthMode::ApiKey => None,
+                db::AuthMode::ApiKey | db::AuthMode::AntigravityLogin => None,
             }),
         _ => None,
     }

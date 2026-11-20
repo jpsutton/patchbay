@@ -2675,7 +2675,7 @@ time.sleep(60)
             has_key: true,
             auth_mode: Default::default(),
             claude_config_dir: None,
-            grok_home: None,
+            grok_home: None, gemini_home: None,
         };
         db.upsert_provider(&p, Some("secret")).unwrap();
         let m = crate::db::Model {

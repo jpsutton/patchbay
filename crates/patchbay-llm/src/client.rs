@@ -1,6 +1,8 @@
 //! The HTTP client: request, retry, idle timeout, cancellation.
 
 use std::time::Duration;
+use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
 
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -26,6 +28,12 @@ pub struct Config {
     pub session_headers: Vec<String>,
     /// A header that carries a fresh id on every attempt (Grok's `x-grok-req-id`).
     pub request_id_header: Option<String>,
+    /// Use Google's internal Cloud Code `v1internal` envelope for Gemini requests.
+    pub cloud_code: bool,
+    /// Optional Workspace project required by Cloud Code, cached per Antigravity login.
+    pub cloud_code_project: Option<String>,
+    /// Stable local login identity used only as the in-memory project-cache key.
+    pub cloud_code_login_id: Option<String>,
     pub max_output_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
@@ -82,6 +90,9 @@ impl Config {
             extra_query: Vec::new(),
             session_headers: Vec::new(),
             request_id_header: None,
+            cloud_code: false,
+            cloud_code_project: None,
+            cloud_code_login_id: None,
             max_output_tokens: None,
             temperature: None,
             top_p: None,
@@ -98,6 +109,22 @@ impl Config {
     /// client know it (Anthropic). `None`: the endpoint decides, so there is nothing to count down.
     pub fn cache_ttl_secs(&self) -> Option<u64> {
         (self.format == WireFormat::Anthropic).then(|| self.cache_ttl.secs())
+    }
+}
+
+/// The Google token goes only to `https://*.googleapis.com`: `base_url` syncs over the mesh and a
+/// peer or a typo could otherwise send every node's login token anywhere, over http too. The one
+/// check every place that attaches that token passes through (pb-20261117-10).
+pub fn require_google_https(base_url: &str) -> Result<()> {
+    // `Url` takes the host after any `user@`, so `https://x.googleapis.com@evil.example` is evil.example.
+    let ok = reqwest::Url::parse(base_url.trim())
+        .is_ok_and(|u| u.scheme() == "https" && u.host_str().is_some_and(|h| h.ends_with(".googleapis.com")));
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::new(
+            "Antigravity login refused: its base URL must be https on a *.googleapis.com host, so the Google token is never sent anywhere else. Fix the provider's base URL.",
+        ))
     }
 }
 
@@ -118,7 +145,7 @@ fn request_headers(cfg: &Config, session: Option<&str>) -> Vec<(String, String)>
 
 /// A random id in UUID layout. It needs no uniqueness guarantee beyond "different each time", so
 /// it draws on the standard library's per-process random hasher keys instead of a new dependency.
-fn request_id() -> String {
+pub(crate) fn request_id() -> String {
     use std::hash::{BuildHasher, Hasher};
     let word = || std::collections::hash_map::RandomState::new().build_hasher().finish();
     let (a, b) = (word(), word());
@@ -305,11 +332,25 @@ impl Client {
         let mut body = wire::body(cfg, req);
         let url = wire::url(cfg);
         let mut attempt = 0u32;
+        let mut project_fallback_attempted = false;
         loop {
             let mut emitted = false;
             match self.attempt(&url, &body, req.cache_key.as_deref(), cancel, &mut emitted, &mut on_event).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) if e.cancelled => return Err(e),
+                Err(e)
+                    if cfg.cloud_code
+                        && cfg.cloud_code_project.as_deref().is_none_or(str::is_empty)
+                        && !project_fallback_attempted
+                        && project_required(&e) =>
+                {
+                    project_fallback_attempted = true;
+                    let Some(project) = self.load_code_assist_project().await? else {
+                        return Err(e);
+                    };
+                    body["project"] = serde_json::Value::String(project);
+                    continue;
+                }
                 // Some Anthropic models refuse adaptive thinking; ask again with a token budget.
                 Err(e)
                     if cfg.format == WireFormat::Anthropic
@@ -351,6 +392,9 @@ impl Client {
         on_event: &mut (impl FnMut(Event) + Send),
     ) -> Result<Response> {
         let cfg = &self.config;
+        if cfg.cloud_code && cfg.key.as_deref().is_some_and(|k| !k.is_empty()) {
+            require_google_https(&cfg.base_url)?;
+        }
         let mut rb = self
             .http
             .post(url)
@@ -481,6 +525,70 @@ impl Client {
         }
         Ok(response)
     }
+
+    async fn load_code_assist_project(&self) -> Result<Option<String>> {
+        let cfg = &self.config;
+        if let Some(login) = cfg.cloud_code_login_id.as_deref()
+            && let Some(project) = cloud_code_project_cache().lock().unwrap_or_else(|e| e.into_inner()).get(login).cloned()
+        {
+            return Ok(Some(project));
+        }
+        require_google_https(&cfg.base_url)?;
+        let url = format!("{}/v1internal:loadCodeAssist", cfg.base_url.trim_end_matches('/'));
+        let metadata = serde_json::json!({
+            "ideType": "ANTIGRAVITY",
+            "platform": "PLATFORM_UNSPECIFIED",
+            "pluginType": "GEMINI"
+        });
+        let mut request = self
+            .http
+            .post(&url)
+            .header("content-type", "application/json")
+            .json(&serde_json::json!({"metadata": metadata}));
+        if let Some(token) = cfg.key.as_deref().filter(|s| !s.is_empty()) {
+            request = request.bearer_auth(token);
+        }
+        for (name, value) in &cfg.extra_headers {
+            request = request.header(name, value);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| Error::new(format!("loadCodeAssist request failed: {}", e.without_url())))?;
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+        let value: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| Error::new(format!("parse loadCodeAssist response: {}", e.without_url())))?;
+        let project = value
+            .pointer("/cloudaicompanionProject/id")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| value.get("cloudaicompanionProject").and_then(serde_json::Value::as_str))
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        if let (Some(login), Some(project)) = (cfg.cloud_code_login_id.as_deref(), project.as_ref()) {
+            cloud_code_project_cache()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(login.to_owned(), project.clone());
+        }
+        Ok(project)
+    }
+}
+
+fn cloud_code_project_cache() -> &'static Mutex<BTreeMap<String, String>> {
+    static PROJECTS: OnceLock<Mutex<BTreeMap<String, String>>> = OnceLock::new();
+    PROJECTS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn project_required(error: &Error) -> bool {
+    if !matches!(error.status, Some(400 | 403)) {
+        return false;
+    }
+    let message = error.message.to_ascii_lowercase();
+    message.contains("project") && (message.contains("required") || message.contains("missing") || message.contains("provide"))
 }
 
 #[cfg(test)]
@@ -593,6 +701,39 @@ mod tests {
 
     /// Azure OpenAI through a query string on the base URL (the row's UNKNOWN, now measured): the path
     /// is appended after the query, so the URL is wrong. Use `extra_query` instead.
+    #[test]
+    fn the_google_token_goes_only_to_https_googleapis() {
+        for ok in ["https://daily-cloudcode-pa.googleapis.com", "https://cloudcode-pa.googleapis.com/", "HTTPS://Daily-CloudCode-PA.GoogleAPIs.com"] {
+            assert!(require_google_https(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://daily-cloudcode-pa.googleapis.com",
+            "https://evil.example",
+            "https://evil.googleapis.com.example.com",
+            "https://googleapis.com.evil.example",
+            "https://daily-cloudcode-pa.googleapis.com@evil.example",
+            "https://googleapis.com",
+            "http://127.0.0.1:9",
+            "not a url",
+            "",
+        ] {
+            assert!(require_google_https(bad).unwrap_err().message.contains("Antigravity login refused"), "{bad}");
+        }
+    }
+
+    /// The request path refuses before anything is sent: the error is the refusal, not a connect
+    /// failure, so the token never left the process.
+    #[tokio::test]
+    async fn a_cloud_code_request_to_another_host_is_refused_before_the_token_is_sent() {
+        let mut cfg = Config::new(WireFormat::Gemini, "http://127.0.0.1:9", "m");
+        cfg.cloud_code = true;
+        cfg.key = Some("TOKEN".into());
+        cfg.max_retries = 0;
+        let req = Request { messages: vec![Message::user("hi")], ..Default::default() };
+        let err = Client::new(cfg).complete(&req, &CancellationToken::new(), |_| {}).await.unwrap_err();
+        assert!(err.message.contains("Antigravity login refused") && !err.message.contains("TOKEN"), "{}", err.message);
+    }
+
     #[test]
     fn a_query_string_on_the_base_url_ends_up_before_the_path() {
         let cfg = Config::new(WireFormat::ChatCompletions, "https://x.openai.azure.com/openai/deployments/d?api-version=2024-10-21", "m");

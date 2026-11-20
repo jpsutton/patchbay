@@ -277,6 +277,7 @@ pub enum Auth {
     Key,
     ClaudeLogin,
     GrokLogin,
+    AntigravityLogin,
 }
 
 /// A provider's extra request headers and query parameters, with their values. The values are
@@ -467,6 +468,7 @@ pub struct Resolved {
     /// For `Auth::GrokLogin`: the signed-in user, whom Grok's proxy wants named on every request.
     /// Filled by `ensure_token`.
     pub grok_user: Option<String>,
+    pub antigravity: Option<crate::antigravity_auth::AntigravityAuth>,
 }
 
 pub fn resolve(db: &Db, model_ref: &str) -> Result<Resolved> {
@@ -479,10 +481,11 @@ pub fn resolve(db: &Db, model_ref: &str) -> Result<Resolved> {
     let auth = match provider.auth_mode {
         AuthMode::ClaudeLogin => Auth::ClaudeLogin,
         AuthMode::GrokLogin => Auth::GrokLogin,
+        AuthMode::AntigravityLogin => Auth::AntigravityLogin,
         AuthMode::ApiKey => Auth::Key,
     };
     let key = match auth {
-        Auth::ClaudeLogin | Auth::GrokLogin => None,
+        Auth::ClaudeLogin | Auth::GrokLogin | Auth::AntigravityLogin => None,
         Auth::Key => load_key(&provider.id, inline.as_deref()),
     };
     // Only a provider that has extras touches the keyring for them.
@@ -494,6 +497,7 @@ pub fn resolve(db: &Db, model_ref: &str) -> Result<Resolved> {
         extras,
         auth,
         grok_user: None,
+        antigravity: None,
     })
 }
 
@@ -507,6 +511,13 @@ pub async fn ensure_token(resolved: &mut Resolved) -> Result<()> {
             let c = crate::grok_auth::credentials(resolved.provider.grok_home.as_deref()).await?;
             resolved.key = Some(c.token);
             resolved.grok_user = Some(c.user_id);
+        }
+        Auth::AntigravityLogin => {
+            // Before the token is even read: it may only go to https *.googleapis.com.
+            patchbay_llm::require_google_https(&normalize_base_url(&resolved.provider.base_url)).map_err(|e| anyhow!(e.message))?;
+            let auth = crate::antigravity_auth::credentials(resolved.provider.gemini_home.as_deref()).await?;
+            resolved.key = Some(auth.access_token.clone());
+            resolved.antigravity = Some(auth);
         }
         Auth::Key => {}
     }
@@ -616,6 +627,7 @@ pub fn llm_config(r: &Resolved) -> patchbay_llm::Config {
             Auth::Key => cfg.auth = AuthScheme::XApiKey,
             // A Claude login on an Anthropic provider only; a Grok login never reaches here.
             Auth::GrokLogin => {}
+            Auth::AntigravityLogin => {}
         }
     }
     if r.auth == Auth::GrokLogin {
@@ -625,6 +637,16 @@ pub fn llm_config(r: &Resolved) -> patchbay_llm::Config {
         cfg.extra_headers.push(("x-grok-model-override".into(), r.model.model_id.clone()));
         cfg.session_headers = vec!["x-grok-conv-id".into(), "x-grok-session-id".into()];
         cfg.request_id_header = Some("x-grok-req-id".into());
+    }
+    if r.auth == Auth::AntigravityLogin {
+        cfg.auth = AuthScheme::Bearer;
+        cfg.cloud_code = true;
+        cfg.cloud_code_login_id = r.antigravity.as_ref().map(|a| a.account_id.clone());
+        cfg.extra_headers.extend([
+            ("User-Agent".into(), r.antigravity.as_ref().map(|a| a.user_agent()).unwrap_or_else(|| "antigravity/cli/1.4.12".into())),
+            ("x-goog-api-client".into(), "google-cloud-sdk vscode_cloudshelleditor/0.1".into()),
+            ("client-metadata".into(), r#"{"ideType":"ANTIGRAVITY","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}"#.into()),
+        ]);
     }
     // The user's own headers come after Patchbay's, so an `api-key` for Azure sits beside the bearer.
     cfg.extra_headers.extend(r.extras.headers.iter().cloned());
@@ -801,6 +823,42 @@ pub async fn discover_models_for(
     Ok(out)
 }
 
+pub async fn discover_antigravity_models(base_url: &str, gemini_home: Option<&str>, extras: &Extras) -> Result<Vec<DiscoveredModel>> {
+    let auth = crate::antigravity_auth::credentials(gemini_home).await?;
+    discover_antigravity_models_with_auth(base_url, &auth, extras).await
+}
+
+pub async fn discover_antigravity_models_with_auth(base_url: &str, auth: &crate::antigravity_auth::AntigravityAuth, extras: &Extras) -> Result<Vec<DiscoveredModel>> {
+    patchbay_llm::require_google_https(&normalize_base_url(base_url)).map_err(|e| anyhow!(e.message))?;
+    fetch_antigravity_models(base_url, auth, extras).await
+}
+
+/// The POST itself, past the host check (a test points it at a loopback server).
+async fn fetch_antigravity_models(base_url: &str, auth: &crate::antigravity_auth::AntigravityAuth, extras: &Extras) -> Result<Vec<DiscoveredModel>> {
+    let url = format!("{}/v1internal:fetchAvailableModels", normalize_base_url(base_url));
+    let mut req = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build()?.post(&url)
+        .bearer_auth(&auth.access_token)
+        .header("User-Agent", auth.user_agent())
+        .header("x-goog-api-client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
+        .header("client-metadata", r#"{"ideType":"ANTIGRAVITY","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}"#)
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({}));
+    for (name, value) in &extras.headers { req = req.header(name, value); }
+    let resp = req.send().await.map_err(reqwest::Error::without_url).with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.context("parse Antigravity model list")?;
+    if !status.is_success() { return Err(anyhow!("POST {url} returned {status}")); }
+    let mut out: Vec<_> = body.get("models").and_then(|v| v.as_object()).into_iter().flat_map(|models| models.iter())
+        .filter(|(_, model)| model.get("disabled").and_then(|v| v.as_bool()) != Some(true))
+        .map(|(id, model)| DiscoveredModel {
+            id: id.strip_prefix("models/").unwrap_or(id).to_owned(),
+            display_name: model.get("displayName").and_then(|v| v.as_str()).unwrap_or(id).to_owned(),
+            context_window: model.get("maxTokens").and_then(|v| v.as_u64()),
+        }).collect();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(out)
+}
+
 fn truncate(s: &str, n: usize) -> &str {
     match s.char_indices().nth(n) {
         Some((i, _)) => &s[..i],
@@ -823,6 +881,58 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_login_sets_cloud_code_mode_and_headers() {
+        use super::*;
+        let r = Resolved {
+            provider: Provider {
+                id: "p".into(), name: "Antigravity".into(), kind: ProviderKind::Gemini,
+                base_url: "https://daily-cloudcode-pa.googleapis.com".into(), has_key: false,
+                auth_mode: AuthMode::AntigravityLogin, claude_config_dir: None, grok_home: None, gemini_home: None,
+            },
+            model: Model { id: "m".into(), provider_id: "p".into(), model_id: "models/gemini-3".into(), display_name: "Gemini 3".into(), vision: false, context_window: None, params: Default::default() },
+            key: Some("fixture-access-token".into()), extras: Extras::default(), auth: Auth::AntigravityLogin,
+            grok_user: None,
+            antigravity: Some(crate::antigravity_auth::AntigravityAuth {
+                access_token: "fixture-access-token".into(), refresh_token: None, access_expires_at: None,
+                account_id: "account@example.test".into(), email: None, client_version: "9.8.7".into(),
+            }),
+        };
+        let cfg = llm_config(&r);
+        let get = |name: &str| cfg.extra_headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str());
+        assert!(cfg.cloud_code);
+        assert!(matches!(cfg.auth, AuthScheme::Bearer));
+        assert_eq!(cfg.key.as_deref(), Some("fixture-access-token"));
+        assert_eq!(get("user-agent"), Some("antigravity/cli/9.8.7"));
+        assert_eq!(get("x-goog-api-client"), Some("google-cloud-sdk vscode_cloudshelleditor/0.1"));
+        assert_eq!(get("client-metadata"), Some(r#"{"ideType":"ANTIGRAVITY","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}"#));
+    }
+
+    /// A base URL that is not https on *.googleapis.com never gets the Google token: the token is
+    /// not read (`ensure_token`) and not sent (model discovery), and the error says why.
+    #[tokio::test]
+    async fn an_antigravity_token_is_refused_for_a_base_url_outside_googleapis() {
+        use super::*;
+        for base in ["http://daily-cloudcode-pa.googleapis.com", "https://evil.example", "https://evil.googleapis.com.example.com"] {
+            let mut r = Resolved {
+                provider: Provider {
+                    id: "p".into(), name: "Antigravity".into(), kind: ProviderKind::Gemini, base_url: base.into(), has_key: false,
+                    auth_mode: AuthMode::AntigravityLogin, claude_config_dir: None, grok_home: None, gemini_home: None,
+                },
+                model: Model { id: "m".into(), provider_id: "p".into(), model_id: "models/gemini-3".into(), display_name: "Gemini 3".into(), vision: false, context_window: None, params: Default::default() },
+                key: None, extras: Extras::default(), auth: Auth::AntigravityLogin, grok_user: None, antigravity: None,
+            };
+            let e = ensure_token(&mut r).await.unwrap_err().to_string();
+            assert!(e.contains("Antigravity login refused") && r.key.is_none(), "{base}: {e}");
+            let auth = crate::antigravity_auth::AntigravityAuth {
+                access_token: "TOKEN".into(), refresh_token: None, access_expires_at: None,
+                account_id: "account@example.test".into(), email: None, client_version: "9.8.7".into(),
+            };
+            let e = discover_antigravity_models_with_auth(base, &auth, &Extras::default()).await.unwrap_err().to_string();
+            assert!(e.contains("Antigravity login refused") && !e.contains("TOKEN"), "{base}: {e}");
+        }
+    }
+
+    #[test]
     fn a_grok_login_sends_groks_headers_and_session_ids() {
         use super::*;
         let r = Resolved {
@@ -834,7 +944,7 @@ mod tests {
                 has_key: false,
                 auth_mode: AuthMode::GrokLogin,
                 claude_config_dir: None,
-                grok_home: None,
+                grok_home: None, gemini_home: None,
             },
             model: Model {
                 id: "m".into(),
@@ -849,6 +959,7 @@ mod tests {
             extras: Extras::default(),
             auth: Auth::GrokLogin,
             grok_user: Some("user-1".into()),
+            antigravity: None,
         };
         let cfg = llm_config(&r);
         let get = |k: &str| cfg.extra_headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.as_str());
@@ -907,7 +1018,7 @@ mod tests {
                 base_url: "https://api.anthropic.com/v1".into(),
                 has_key: false,
                 auth_mode: AuthMode::ClaudeLogin,
-                claude_config_dir: None, grok_home: None,
+                claude_config_dir: None, grok_home: None, gemini_home: None,
             },
             model: Model {
                 id: "m".into(),
@@ -921,6 +1032,7 @@ mod tests {
             key: None,
             auth,
             grok_user: None,
+            antigravity: None,
         };
         let request = || patchbay_llm::Request {
             system: vec![SystemBlock::new("be terse")],
@@ -946,7 +1058,7 @@ mod tests {
         use super::*;
         let on = |kind, url: &str, auth| Resolved {
             extras: Extras::default(),
-            provider: Provider { id: "p".into(), name: "n".into(), kind, base_url: url.into(), has_key: false, auth_mode: Default::default(), claude_config_dir: None, grok_home: None },
+            provider: Provider { id: "p".into(), name: "n".into(), kind, base_url: url.into(), has_key: false, auth_mode: Default::default(), claude_config_dir: None, grok_home: None, gemini_home: None },
             model: Model {
                 id: "m".into(),
                 provider_id: "p".into(),
@@ -959,6 +1071,7 @@ mod tests {
             key: None,
             auth,
             grok_user: None,
+            antigravity: None,
         };
         assert!(native_web_search(&on(ProviderKind::Anthropic, "https://api.anthropic.com/v1", Auth::Key)));
         assert!(native_web_search(&on(ProviderKind::Anthropic, "https://api.anthropic.com/v1", Auth::ClaudeLogin)));
@@ -989,7 +1102,7 @@ mod tests {
             has_key: false,
             auth_mode: AuthMode::ApiKey,
             claude_config_dir: None,
-            grok_home: None,
+            grok_home: None, gemini_home: None,
         };
         db.upsert_provider(&p, None).unwrap();
         (db, dir)
@@ -1136,7 +1249,7 @@ mod tests {
                 has_key: true,
                 auth_mode: AuthMode::ApiKey,
                 claude_config_dir: None,
-                grok_home: None,
+                grok_home: None, gemini_home: None,
             },
             model: Model {
                 id: "m".into(),
@@ -1151,6 +1264,7 @@ mod tests {
             extras: Extras { headers: vec![("api-key".into(), HEADER_SECRET.into())], query: vec![("api-version".into(), "2024-10-21".into())] },
             auth: Auth::Key,
             grok_user: None,
+            antigravity: None,
         };
         let cfg = llm_config(&r);
         assert_eq!(cfg.extra_headers, vec![("api-key".to_owned(), HEADER_SECRET.to_owned())]);
@@ -1172,6 +1286,37 @@ mod tests {
         assert_eq!(keys.get(&extras_account("azure")), None, "the keyring entry is gone with the provider");
         assert!(db.get_provider("azure").unwrap().is_none());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn antigravity_discovery_posts_v1internal_headers_and_maps_models() {
+        use super::*;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 16384];
+            let n = sock.read(&mut buf).await.unwrap();
+            let body = r#"{"models":{"gemini-3":{"displayName":"Gemini 3","maxTokens":12345},"disabled-model":{"disabled":true,"maxTokens":99},"claude-sonnet":{"displayName":"Claude Sonnet","maxTokens":200000}}}"#;
+            let _ = sock.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        });
+        let auth = crate::antigravity_auth::AntigravityAuth {
+            access_token: "fixture-token".into(), refresh_token: None, access_expires_at: None,
+            account_id: "account@example.test".into(), email: None, client_version: "9.8.7".into(),
+        };
+        let found = fetch_antigravity_models(&format!("http://127.0.0.1:{port}"), &auth, &Extras::default()).await.unwrap();
+        assert_eq!(found.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["claude-sonnet", "gemini-3"]);
+        assert_eq!(found[1].context_window, Some(12345));
+        let seen = server.await.unwrap();
+        assert!(seen.starts_with("POST /v1internal:fetchAvailableModels "), "{seen}");
+        let lower = seen.to_ascii_lowercase();
+        assert!(lower.contains("authorization: bearer fixture-token"), "{seen}");
+        assert!(lower.contains("user-agent: antigravity/cli/9.8.7"), "{seen}");
+        assert!(lower.contains("x-goog-api-client: google-cloud-sdk vscode_cloudshelleditor/0.1"), "{seen}");
+        assert!(lower.contains("client-metadata: {\"idetype\":\"antigravity\",\"platform\":\"platform_unspecified\",\"plugintype\":\"gemini\"}"), "{seen}");
+        assert!(seen.ends_with("{}"), "{seen}");
     }
 
     #[tokio::test]
@@ -1233,7 +1378,7 @@ mod tests {
                 has_key: false,
                 auth_mode: AuthMode::ApiKey,
                 claude_config_dir: None,
-                grok_home: None,
+                grok_home: None, gemini_home: None,
             };
             db.upsert_provider(&p, None).unwrap();
         }
@@ -1304,7 +1449,7 @@ mod tests {
                 has_key: true,
                 auth_mode: AuthMode::ApiKey,
                 claude_config_dir: None,
-                grok_home: None,
+                grok_home: None, gemini_home: None,
             },
             model: Model {
                 id: "m".into(),
@@ -1319,6 +1464,7 @@ mod tests {
             extras,
             auth: Auth::Key,
             grok_user: None,
+            antigravity: None,
         }
     }
 
@@ -1489,7 +1635,7 @@ mod tests {
             has_key: false,
             auth_mode: Default::default(),
             claude_config_dir: None,
-            grok_home: None,
+            grok_home: None, gemini_home: None,
         };
         db.upsert_provider(&p, None).unwrap();
         (db, dir)

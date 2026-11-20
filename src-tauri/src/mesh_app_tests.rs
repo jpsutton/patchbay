@@ -918,7 +918,7 @@ async fn phone_chat_runs_on_the_picked_computer() {
         base_url: "http://127.0.0.1:9/v1".into(),
         has_key: true,
             auth_mode: Default::default(),
-            claude_config_dir: None, grok_home: None,
+            claude_config_dir: None, grok_home: None, gemini_home: None,
         };
     db.upsert_provider(&prov, Some("k")).unwrap();
     let model = db::Model {
@@ -992,7 +992,7 @@ async fn manual_phone_gateway() {
         base_url: std::env::var("PATCHBAY_MOCK_URL").unwrap_or_else(|_| "http://127.0.0.1:8765/v1".into()),
         has_key: true,
             auth_mode: Default::default(),
-            claude_config_dir: None, grok_home: None,
+            claude_config_dir: None, grok_home: None, gemini_home: None,
         };
     db.upsert_provider(&p, Some("mock-key")).unwrap();
     for (id, model) in [("m-echo", "mock-echo"), ("m-agent", "mock-agent")] {
@@ -1381,7 +1381,7 @@ async fn usage_limit_stops_claude_turns() {
         has_key: false,
         auth_mode: db::AuthMode::ClaudeLogin,
         claude_config_dir: Some("/tmp/pb-other-claude".into()),
-        grok_home: None,
+        grok_home: None, gemini_home: None,
     };
     a.state.db.upsert_provider(&teams, None).unwrap();
     let model = db::Model {
@@ -1497,7 +1497,7 @@ async fn a_session_is_gated_only_by_its_own_accounts_report() {
                     has_key: false,
                     auth_mode: db::AuthMode::ClaudeLogin,
                     claude_config_dir: Some(dir.to_string_lossy().into_owned()),
-                    grok_home: None,
+                    grok_home: None, gemini_home: None,
                 },
                 None,
             )
@@ -1585,6 +1585,7 @@ async fn a_grok_seat_gates_its_own_sessions() {
                     auth_mode: mode,
                     claude_config_dir: None,
                     grok_home,
+                    gemini_home: None,
                 },
                 None,
             )
@@ -3171,7 +3172,7 @@ async fn resume_apply_unchecked_clears_the_flag_without_any_prompt() {
         has_key: true,
         auth_mode: Default::default(),
         claude_config_dir: None,
-        grok_home: None,
+        grok_home: None, gemini_home: None,
     };
     a.state.db.upsert_provider(&prov, Some("mock-key")).unwrap();
     a.state
@@ -3230,7 +3231,7 @@ async fn resume_guards_skip_live_sessions_and_send_each_checked_once() {
         has_key: true,
         auth_mode: Default::default(),
         claude_config_dir: None,
-        grok_home: None,
+        grok_home: None, gemini_home: None,
     };
     a.state.db.upsert_provider(&prov, Some("mock-key")).unwrap();
     a.state
@@ -3330,7 +3331,7 @@ async fn resume_apply_checked_sends_exactly_one_fixed_continue_prompt() {
         has_key: true,
         auth_mode: Default::default(),
         claude_config_dir: None,
-        grok_home: None,
+        grok_home: None, gemini_home: None,
     };
     a.state.db.upsert_provider(&prov, Some("mock-key")).unwrap();
     a.state
@@ -3391,7 +3392,7 @@ async fn dropped_peer_messages_notify_each_sender_with_id_and_reason() {
         has_key: true,
         auth_mode: Default::default(),
         claude_config_dir: None,
-        grok_home: None,
+        grok_home: None, gemini_home: None,
     };
     n.state.db.upsert_provider(&prov, Some("mock-key")).unwrap();
     n.state
@@ -3468,7 +3469,7 @@ fn seed_mock_model(n: &Node) {
         has_key: true,
         auth_mode: Default::default(),
         claude_config_dir: None,
-        grok_home: None,
+        grok_home: None, gemini_home: None,
     };
     n.state.db.upsert_provider(&prov, Some("mock-key")).unwrap();
     n.state
