@@ -100,6 +100,7 @@ pub(crate) fn stream_error(v: &Value) -> Option<Error> {
         status: None,
         retryable: matches!(kind, "overloaded_error" | "api_error" | "server_error"),
         cancelled: false,
+        retry_after: None,
     })
 }
 

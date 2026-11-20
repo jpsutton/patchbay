@@ -197,7 +197,7 @@ impl Parser for ResponsesParser {
                     .pointer("/response/error/message")
                     .and_then(Value::as_str)
                     .unwrap_or("the response failed");
-                return Err(Error { message: msg.to_owned(), status: None, retryable: false, cancelled: false });
+                return Err(Error { message: msg.to_owned(), status: None, retryable: false, cancelled: false, retry_after: None });
             }
             "error" => {
                 return Err(stream_error(&json!({"error": v.clone()}))
@@ -215,6 +215,7 @@ impl Parser for ResponsesParser {
                 status: None,
                 retryable: true,
                 cancelled: false,
+                retry_after: None,
             });
         }
         let has_calls = self.parts.iter().any(|p| matches!(p, Part::ToolCall(_)));

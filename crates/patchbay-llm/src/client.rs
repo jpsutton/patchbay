@@ -132,6 +132,16 @@ fn request_id() -> String {
     )
 }
 
+/// How long to wait before retry `attempt` (1-based). A `Retry-After` from the server wins over the
+/// guess: on a 429 the window it asks for is the real one, while 1s, 2s, 4s... may land inside it and
+/// burn a retry. Both are capped, so a bad header cannot stall the turn for long.
+fn backoff(attempt: u32, retry_after: Option<u64>) -> Duration {
+    match retry_after {
+        Some(s) => Duration::from_secs(s.min(60)),
+        None => Duration::from_millis((1000u64 << (attempt - 1)).min(20_000)),
+    }
+}
+
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
@@ -179,7 +189,7 @@ impl Client {
                         max: cfg.max_retries,
                         reason: e.to_string(),
                     });
-                    let wait = Duration::from_millis((1000u64 << (attempt - 1)).min(20_000));
+                    let wait = backoff(attempt, e.retry_after);
                     tokio::select! {
                         _ = cancel.cancelled() => return Err(Error::cancelled()),
                         _ = tokio::time::sleep(wait) => {}
@@ -262,13 +272,9 @@ impl Client {
                 .and_then(|v| v.parse::<u64>().ok());
             let text = resp.text().await.unwrap_or_default();
             let mut e = Error::http(status.as_u16(), wire::error_message(&text));
-            if let Some(s) = retry_after
-                && s > 0
-                && s <= 20
-                && e.retryable
-            {
-                tokio::time::sleep(Duration::from_secs(s)).await;
-            }
+            // Carried on the error instead of slept here: only `complete` knows whether the call is
+            // retried at all, and it can be cancelled while it waits.
+            e.retry_after = retry_after.filter(|s| *s > 0).filter(|_| e.retryable);
             e.message = e.message.trim().to_owned();
             return Err(e);
         }
@@ -466,6 +472,16 @@ mod tests {
         assert_eq!(h, vec![("x-conv-id".to_owned(), "s1".to_owned()), ("x-session-id".to_owned(), "s1".to_owned())]);
         assert!(request_headers(&cfg, None).is_empty(), "a request with no session sends none");
         assert!(request_headers(&cfg, Some("")).is_empty());
+    }
+
+    /// A 429 window is longer than a 1s/2s guess, so `Retry-After` wins when the server sends it.
+    #[test]
+    fn retry_after_wins_over_the_exponential_guess() {
+        assert_eq!(backoff(1, Some(12)), Duration::from_secs(12));
+        assert_eq!(backoff(1, None), Duration::from_secs(1));
+        assert_eq!(backoff(3, None), Duration::from_secs(4));
+        assert_eq!(backoff(9, None), Duration::from_secs(20), "the guess is capped");
+        assert_eq!(backoff(1, Some(3600)), Duration::from_secs(60), "and so is a wild header");
     }
 
     #[test]
