@@ -711,7 +711,7 @@ mod tests {
         sh(&src, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "a"]);
         // A normal staged file, and a synthetic "large" one: 64 KB is plenty over a 4 KB limit,
         // and no fixture here is anywhere near a real multi-GB file.
-        std::fs::write(src.join("staged.txt"), "staged, small\n").unwrap();
+        std::fs::write(src.join("staged.txt"), "staged, small").unwrap();
         sh(&src, &["add", "staged.txt"]);
         const BIG: usize = 64 * 1024;
         std::fs::write(src.join("large.txt"), vec![b'x'; BIG]).unwrap();
@@ -755,7 +755,7 @@ mod tests {
         let (dir, meta) = package_with_max(&data, &data, &session(&src), "handoff", &[], CAP).unwrap();
         assert!(meta.git.as_ref().unwrap().bundle, "the workspace should travel");
         unpack(&dir, &meta, &data.join("home3"), &dst, "alpha").unwrap();
-        assert_eq!(std::fs::read_to_string(dst.join("staged.txt")).unwrap(), "staged, small\n");
+        assert_eq!(std::fs::read_to_string(dst.join("staged.txt")).unwrap(), "staged, small");
         assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "committed");
     }
 
