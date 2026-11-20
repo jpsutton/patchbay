@@ -216,7 +216,29 @@ function MoreOptions({
   }, [open]);
   if (options.length === 0) return null;
   // The phone's options sheet and the composer's overflow menu already list every option on its own labeled row.
-  if (rows || overflow) return options.map((o) => <ConfigChip key={o.id} option={o} disabled={disabled} onSet={onSet} />);
+  if (rows || overflow) {
+    return options.map((o) =>
+      // The overflow menu shows an on/off option as a labelled row with a switch, as the options popup does.
+      overflow && !rows && isOnOff(o) ? (
+        <div key={o.id} className="flex items-center justify-between gap-3 rounded-md px-2.5 py-2">
+          <div className="min-w-0">
+            <div className="text-[13px] text-fg">{optionName(o)}</div>
+            {o.description && <div className="text-[12px] leading-4 text-muted">{o.description}</div>}
+          </div>
+          <div className="shrink-0">
+            <Toggle
+              label={optionName(o)}
+              checked={o.currentValue === "on"}
+              disabled={disabled}
+              onChange={(on) => onSet(o, on ? "on" : "off")}
+            />
+          </div>
+        </div>
+      ) : (
+        <ConfigChip key={o.id} option={o} disabled={disabled} onSet={onSet} />
+      ),
+    );
+  }
   const names = options.map(optionName).join(", ");
   return (
     <div ref={ref} className="relative shrink-0">
