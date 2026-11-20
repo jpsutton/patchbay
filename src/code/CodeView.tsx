@@ -1119,7 +1119,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     }
     api.codeIsRunning(activeId).then((running) => {
       if (!running) {
-        start(activeId);
+        attach(activeId);
         return;
       }
       // A running agent this window has no real state for: a reload, or the app reopened on a
@@ -1449,6 +1449,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   // What the session is waiting on, said plainly. A phone reaches it through a gateway, so it
   // can be reconnecting, or catching up on a session whose agent already runs.
   const reconnecting = remote && !!mesh?.phase && mesh.phase !== "online";
+  const canSend = (ready || status === "idle" || status === "exited") && !hostOffline && !reconnecting;
   const waiting = reconnecting
     ? "Reconnecting…"
     : remote && status === "idle"
@@ -2143,7 +2144,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     </span>
                   </div>
                 )}
-                {status === "exited" && !hostOffline && (
+                {(status === "exited" || status === "idle") && !hostOffline && (
                   <div className="flex items-center justify-center gap-2 text-xs text-muted">
                     Agent stopped.
                     <button className="text-accent-ink underline underline-offset-2" onClick={() => start(session.id)}>
@@ -2231,7 +2232,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
               }
               restore={s?.restore}
               onRestored={() => clearCodeRestore(session.id)}
-              disabled={!ready}
+              disabled={!canSend}
               commands={s?.commands}
               // A phone never sees the agent's events, so `commands` stays empty there: ask the host.
               slashCommands={isRemoteApp() ? () => api.listSessionCommands(session.id) : undefined}
@@ -2254,7 +2255,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
                     ? s?.extensions.steering
                       ? "Add to what the agent is doing…"
                       : "Queue a message for when the agent finishes…"
-                    : ready
+                    : canSend
                     ? `Ask the agent…${s?.commands?.length ? "  / for commands, @ for files" : "  @ for files"}`
                     : (waiting ?? (s?.auth ? "Sign in to start the agent" : "Agent not running"))
               }

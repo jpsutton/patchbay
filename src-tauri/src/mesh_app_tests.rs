@@ -5442,3 +5442,70 @@ async fn worker_in_own_worktree_attaches_beside_a_live_coordinator() {
     let worker = a.state.db.create_code_session(&tree.to_string_lossy(), None, "patchbay", "default").unwrap();
     teams::team_attach(&a.state, team, worker.id, "workers".into()).await.unwrap();
 }
+
+// pb-20261117-08: Opening/attaching to a stopped session must NOT start the agent process.
+// A prompt sent to a stopped session starts the agent process on demand.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stopped_session_does_not_spawn_on_attach_but_spawns_on_prompt() {
+    let a = node("no-autostart");
+    let proj = a.dir.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None, "patchbay", "default").unwrap();
+
+    let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
+    *a.state.code.test_started.lock().unwrap() = Some(started_tx);
+
+    // 1. Session is initially stopped.
+    assert!(!a.state.code.is_running(&s.id), "session agent is initially not running");
+
+    // 2. Open / attach: code_attach_local does not start the agent.
+    let attach = code_attach_local(&a.state, &s.id);
+    assert_eq!(attach["running"], false);
+    assert!(!a.state.code.is_running(&s.id), "attaching does not start the agent");
+    assert!(started.try_recv().is_err(), "no process was spawned on attach");
+
+    // 3. Prompting a stopped session:
+    // With on-demand spawn in code_prompt_local: starts the agent and delivers the prompt.
+    // Planted red: without on-demand spawn, code_prompt_local returns Err("agent is not running").
+    let session_id = s.id.clone();
+    let agent_task = tokio::spawn(async move {
+        let (id, mut rx) = tokio::time::timeout(std::time::Duration::from_secs(5), started.recv())
+            .await
+            .expect("timeout waiting for agent to start")
+            .expect("started channel open");
+        assert_eq!(id, session_id);
+        let cmd = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timeout waiting for prompt command")
+            .expect("prompt command received");
+        match cmd {
+            AgentCmd::Prompt { msg, reply, .. } => {
+                assert_eq!(msg.text, "start on prompt");
+                if let Some(reply) = reply {
+                    let _ = reply.send(Ok(code::acp::Delivery::Sent));
+                }
+            }
+            other => panic!("expected AgentCmd::Prompt"),
+        }
+        rx
+    });
+
+    let delivery = code_prompt_local(
+        &a.state,
+        s.id.clone(),
+        "start on prompt".into(),
+        Vec::new(),
+        Vec::new(),
+        "user".into(),
+        None,
+        false,
+    )
+    .await;
+    let _rx = agent_task.await.unwrap();
+    assert!(delivery.is_ok(), "prompt succeeds after on-demand start: {:?}", delivery.err());
+    assert!(a.state.code.is_running(&s.id), "agent is now running");
+}
+
+
+
+

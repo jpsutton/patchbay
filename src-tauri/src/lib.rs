@@ -2708,6 +2708,10 @@ async fn code_prompt_local(
         }
         anyhow::bail!("Not sent. {}", hit.message(now));
     }
+    // An idle session may have no live agent process; start it so the message can run.
+    if !state.code.is_running(&id) {
+        code_start_local(state, id.clone()).await?;
+    }
     // Stage 6d: one prompt boundary for team seats (dispatch brief, team_send → send_agent_message,
     // create brief, seat swap handoff, mesh agent message, human prompts). Agent-origin text is
     // neutralized so ACP `parseCommand` cannot see a leading `/`; any `/mcp` that still reaches

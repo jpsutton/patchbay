@@ -1681,7 +1681,7 @@ export const useStore = create<Store>((set, get) => ({
         set((st) => ({ code: { ...st.code, [id]: { ...emptyCode(), history, earlier, status: "exited" } } }));
         return;
       }
-      await get().startAgent(id);
+      set((st) => ({ code: { ...st.code, [id]: { ...emptyCode(), history, earlier, status: "idle" } } }));
       return;
     }
     const rev = get().agentConfigRev;
