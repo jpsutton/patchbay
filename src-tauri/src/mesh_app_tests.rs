@@ -13,6 +13,12 @@ use crate::mesh::members;
 
 const PASS: &str = "correct horse battery";
 
+/// How long the phone is given to report B as its gateway before the test calls it a
+/// failure. Not a deadline the wait races — the wait above returns the moment the phone
+/// reports B — only the outer net for a switch that never happens, generous enough that a
+/// loaded machine is never the reason it fires.
+const PHONE_GATEWAY_SWITCH_SAFETY_NET: u64 = 120;
+
 struct Node {
     state: AppState,
     events: Arc<Mutex<Vec<(String, Value)>>>,
@@ -86,6 +92,13 @@ async fn link(a: &Node, b: &Node) {
     a.state.mesh.create(PASS, "a").unwrap();
     until("listener", 5, || a.state.mesh.bound_port().is_some()).await;
     let url = format!("127.0.0.1:{}", a.state.mesh.bound_port().unwrap());
+    // A member's Hello carries the port everyone else learns it by, and `join` starts B's
+    // listener and its first dial together. Joining before the listener is up sends a Hello
+    // with no port, so A never learns where B is — and once A is gone the phone has no
+    // address left to race for, which is what made this test fail under load instead of
+    // waiting. Start B and wait for its listener the way A is waited for above.
+    b.state.mesh.start();
+    until("B's listener", 5, || b.state.mesh.bound_port().is_some()).await;
     b.state.mesh.join(&url, PASS, "b").unwrap();
     until("join request", 10, || !a.state.mesh.status()["pending"].as_array().unwrap().is_empty()).await;
     a.state.mesh.approve(b.state.mesh.node_id()).await.unwrap();
@@ -685,7 +698,28 @@ async fn phone_joins_follows_resumes_and_switches_gateway() {
     .await;
     a.state.mesh.stop();
     let bn = b.state.mesh.node_id().to_owned();
-    until("phone on B", 30, || p.client.status()["gateway"] == bn.as_str()).await;
+    // A's death is what the phone reacts to, and it reports the switch as soon as it happens,
+    // so this waits on the phone's own gateway rather than on a clock: it returns the moment
+    // the condition holds, however long the machine takes to get there. The cap is only a
+    // safety net for a switch that never comes, and it fails with the phone's own account of
+    // what never arrived instead of a bare timeout.
+    let t0 = std::time::Instant::now();
+    loop {
+        let st = p.client.status();
+        if st["gateway"] == bn.as_str() {
+            break;
+        }
+        if t0.elapsed() > Duration::from_secs(PHONE_GATEWAY_SWITCH_SAFETY_NET) {
+            panic!(
+                "the phone never took B as its gateway: waited {}s and it still reports gateway={:?} phase={:?} error={:?}",
+                t0.elapsed().as_secs(),
+                st["gateway"].as_str().unwrap_or("<none>"),
+                st["phase"].as_str().unwrap_or("<none>"),
+                st["error"].as_str().unwrap_or("<none>"),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     let idx = p.client.rpc("remote.index", Value::Null).await.unwrap();
     assert!(idx["codeSessions"].as_array().unwrap().iter().any(|c| c["id"] == s.id));
     tokio::time::sleep(Duration::from_millis(500)).await;

@@ -74,13 +74,14 @@ const RELOCK_MS = 5 * 60_000;
  */
 const RESYNC_AFTER_HIDDEN_MS = 5_000;
 
-/** Sessions being started over from a snapshot: a second trigger meanwhile would race the first. */
-const reattaching = new Set<string>();
+/**
+ * Start a session over from the gateway's snapshot. `attachAgent` drops a call made while one
+ * runs (it holds the session's live events meanwhile), so a second trigger needs no guard here.
+ */
 function reattach(id: string) {
   const st = useStore.getState();
-  if (reattaching.has(id) || !st.code[id]) return;
-  reattaching.add(id);
-  void st.attachAgent(id).finally(() => reattaching.delete(id));
+  if (!st.code[id]) return;
+  void st.attachAgent(id);
 }
 
 function flag(key: string, dflt: boolean): boolean {

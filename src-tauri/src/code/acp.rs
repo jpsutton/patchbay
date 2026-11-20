@@ -534,7 +534,21 @@ fn failure_kind(e: &acp::Error) -> (String, Option<u64>) {
         .unwrap_or_else(|| format!("rpc_{}", i32::from(e.code)));
     let resets_at = ["resetsAt", "resets_at", "reset_at"]
         .iter()
-        .find_map(|k| data.and_then(|d| d[*k].as_u64()));
+        .find_map(|k| data.and_then(|d| d[*k].as_u64()))
+        // Codex says only "try again at 2:37 PM." (local clock, no date or zone): read it as the next
+        // such time, and only for a limit (pb-20261111-28). Unparseable stays None: notify, never retry.
+        .or_else(|| {
+            use chrono::{Local, Offset, Utc};
+            if !crate::turn_failure::is_limit_kind(&kind) {
+                return None;
+            }
+            let now = Utc::now();
+            let offset = Local::now().offset().fix().local_minus_utc();
+            [Some(e.message.as_str()), data.and_then(|d| d["message"].as_str())]
+                .into_iter()
+                .flatten()
+                .find_map(|t| crate::turn_failure::parse_local_reset(t, now.timestamp(), offset))
+        });
     (kind, resets_at)
 }
 
@@ -5750,6 +5764,17 @@ for line in sys.stdin:
         assert_eq!(failure_kind(&e(json!({ "errorKind": "You hit your limit, try 9:52 PM" }))).0, "rpc_-32603");
         assert_eq!(failure_kind(&super::acp::Error::new(-32000, "x")), ("rpc_-32000".to_owned(), None));
         assert!(!is_code_token("Has Spaces") && !is_code_token("") && !is_code_token(&"a".repeat(49)) && is_code_token("usage_limit_exceeded"));
+    }
+
+    /// The real Codex limit carries only clock text; it becomes a future reset, and only for a limit.
+    #[test]
+    fn failure_kind_reads_the_codex_clock_text_for_limits_only() {
+        let e = |msg: &str, data: Value| super::acp::Error::new(-32603, msg).data(data);
+        let (kind, at) = failure_kind(&e("You've hit your usage limit. Try again at 2:37 PM.", json!({ "codex_error_info": "usage_limit_exceeded" })));
+        assert_eq!(kind, "usage_limit_exceeded");
+        assert!(at.is_some_and(|t| t > chrono::Utc::now().timestamp() as u64 && t <= chrono::Utc::now().timestamp() as u64 + 86_400));
+        assert_eq!(failure_kind(&e("try again at 2:37 PM", json!({ "errorKind": "authentication_failed" }))).1, None);
+        assert_eq!(failure_kind(&e("try again later", json!({ "codex_error_info": "usage_limit_exceeded" }))).1, None);
     }
 
 }
