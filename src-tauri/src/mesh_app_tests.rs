@@ -43,7 +43,11 @@ fn node(name: &str) -> Node {
     mesh.set_config(Some(name), Some("127.0.0.1:0"), None).unwrap();
     let events = Arc::new(Mutex::new(Vec::new()));
     let ev = events.clone();
-    let emit: mesh::node::UiSink = Arc::new(move |n: &str, p: Value| ev.lock().unwrap().push((n.to_owned(), p)));
+    // Poison-proof: a test that fails while it holds `events` (an assert message printing them) poisons
+// the lock, and a sink that then panics inside `Node::drop` turns that failure into an abort ("panic
+// in a destructor during cleanup") with the real assertion lost.
+    let emit: mesh::node::UiSink =
+        Arc::new(move |n: &str, p: Value| ev.lock().unwrap_or_else(|e| e.into_inner()).push((n.to_owned(), p)));
     Node { state: AppState::new(db, dir.to_path_buf(), mesh, emit), events, dir }
 }
 
@@ -3613,11 +3617,9 @@ async fn a_dropped_queue_tells_its_senders() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert!(
-        woke,
-        "the sender was told its queued message was dropped: {:?}",
-        n.events.lock().unwrap()
-    );
+    // Cloned first: the guard must not be held (and poisoned) while the assertion panics.
+    let seen = n.events.lock().unwrap().clone();
+    assert!(woke, "the sender was told its queued message was dropped: {seen:?}");
 }
 
 /// pb-20261107-30 (advisor condition 2, NO LOOP): once the quit guard is set, deliveries to
