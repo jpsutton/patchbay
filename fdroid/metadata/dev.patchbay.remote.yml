@@ -1,0 +1,23 @@
+Categories:
+  - Development
+  - Internet
+License: Apache-2.0
+WebSite: https://github.com/jpsutton/patchbay
+SourceCode: https://github.com/jpsutton/patchbay
+IssueTracker: https://github.com/jpsutton/patchbay/issues
+Changelog: https://github.com/jpsutton/patchbay/releases
+
+AutoName: Patchbay Remote
+Name: Patchbay Remote
+Summary: Drive your Patchbay computers' chats and coding agents from your phone
+Description: |-
+  Patchbay Remote joins your Patchbay mesh as a phone. It shows the chats and Code
+  sessions of your computers, live, and lets you send messages, answer an agent's
+  permission requests and stop a turn.
+
+  The phone does no work of its own and keeps no copy of your data or API keys. It
+  connects to whichever of your computers it can reach: on your home network, or
+  through ZeroTier, Tailscale or a VPN. No cloud service sits in between.
+
+  You need Patchbay on at least one computer, and the mesh passphrase. A computer
+  approves the phone before it can connect.
