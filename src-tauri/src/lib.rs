@@ -29,6 +29,7 @@ mod usage;
 mod win_path;
 pub mod web_token;
 pub mod agent_messaging;
+mod turn_failure;
 #[cfg(feature = "web")]
 pub mod web;
 #[cfg(test)]
@@ -69,6 +70,8 @@ pub struct AppState {
     mesh: Mesh,
     /// Local authenticated bridge used by the Patchbay-owned agent messaging MCP server.
     agent_message_bridge: Arc<std::sync::OnceLock<agent_messaging::AgentMessagingBridge>>,
+    /// pb-20261111-28: which peer messages already got a turn-failure notice or a re-wake.
+    turn_notices: Arc<turn_failure::NoticeBook>,
     /// Sends an event to this node's window.
     emit: mesh::node::UiSink,
     /// Per running session: the events a newly attached viewer needs to catch up.
@@ -119,6 +122,7 @@ impl AppState {
             terminals: Arc::default(),
             mesh: mesh.clone(),
             agent_message_bridge: Arc::default(),
+            turn_notices: Arc::default(),
             emit: emit.clone(),
             live: Arc::default(),
             remote_terms: Arc::default(),
@@ -1164,8 +1168,23 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
         return;
     }
     // The delivery log (pb-20261111-46): a peer message's turn starting or failing.
-    if let Some(bridge) = state.agent_message_bridge.get() {
-        bridge.log_code_event(&env.code_session_id, &env.event);
+    // The same hook says how the turn ended; a failed one tells its origin senders (pb-20261111-28).
+    // A thread of its own, like the dropped-queue notice above: the agent's runtime can end with it.
+    if let Some(bridge) = state.agent_message_bridge.get()
+        && let Some(ended) = bridge.log_code_event(&env.code_session_id, &env.event)
+        && ended.failure.is_some()
+    {
+        let state = state.clone();
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::error!("no runtime to tell senders of a failed turn: {e}");
+                    return;
+                }
+            };
+            rt.block_on(notify_turn_failure(&state, ended));
+        });
     }
     if matches!(env.event, CodeEvent::TurnFailed { .. }) {
         return; // log only: it is not a transcript event
@@ -3280,6 +3299,58 @@ async fn tell_senders_of_dropped(
         // from_node is THIS node (the queue's host runs the notice); the target may be remote.
         let _ = send_agent_message(state, state.mesh.node_id(), target_id, session, &text).await;
     }
+}
+
+/// One more notice kind on the same channel as the drop notice (pb-20261107-30): the recipient's
+/// turn ended in a failure (a quota, a login, a crash) without an answer, so every origin sender of
+/// a message in that turn is told once, with structured fields and no error text. The detector is
+/// the turn lifecycle (`turn_failure`); this only maps the turn to its senders. A notice never
+/// bounces another (loop guard), and a limit failure whose turn made no tool call gets ONE re-wake.
+async fn notify_turn_failure(state: &AppState, ended: turn_failure::TurnEnded) {
+    let Some(failure) = ended.failure.clone() else { return };
+    let target_id = ended.session_id.as_str();
+    let title = state.db.get_code_session(target_id).ok().flatten().map(|c| c.title).unwrap_or_else(|| target_id.to_owned());
+    let may_rewake = turn_failure::may_rewake(&failure, ended.tool_calls);
+    for m in ended.messages {
+        let Some(sender) = m.origin.strip_prefix("agent:") else { continue };
+        let Some((sender_node, sender_session)) = sender.split_once(':') else { continue };
+        if sender_session.is_empty() || sender_session == target_id || turn_failure::is_notice_text(&m.text) {
+            continue;
+        }
+        if !state.turn_notices.first_notice(&m.id) {
+            continue;
+        }
+        let rewake_at = match failure.resets_at.map(turn_failure::reset_seconds) {
+            Some(at) if may_rewake && !m.text.is_empty() && state.turn_notices.first_rewake(&m.id, target_id, &m.text) => {
+                let at = at.max(now_secs()) + u64::from(rand::random::<u8>() % 61);
+                schedule_rewake(state, sender_node, sender_session, target_id, m.text.clone(), at);
+                Some(at)
+            }
+            _ => None,
+        };
+        let notice = turn_failure::notice_json(&m.id, target_id, &title, &failure, rewake_at);
+        let text = format!("{} {notice}", turn_failure::NOTICE_TAG);
+        let _ = send_agent_message(state, state.mesh.node_id(), target_id, sender_session, &text).await;
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// The one bounded re-wake: send `text` again from its original sender at `at` (epoch seconds), if the
+/// target still exists. A thread that sleeps, so it needs no runtime that outlives the agent's. It is
+/// in memory only: a restart before `at` loses it, and the notice says so.
+fn schedule_rewake(state: &AppState, sender_node: &str, sender_session: &str, target_id: &str, text: String, at: u64) {
+    let (state, node, from, to) = (state.clone(), sender_node.to_owned(), sender_session.to_owned(), target_id.to_owned());
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(at.saturating_sub(now_secs())));
+        if state.shutting_down.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
+        let _ = rt.block_on(send_agent_message(&state, &node, &from, &to, &text));
+    });
 }
 
 /// Stop a locally-hosted session's agent, telling the senders of its queued peer messages

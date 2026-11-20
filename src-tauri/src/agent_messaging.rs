@@ -291,6 +291,8 @@ pub struct AgentMessagingBridge {
     /// Set when the app begins to quit: lines logged after it carry `phase=shutdown`, so a child
     /// that dies because the app is going down is not mistaken for a mid-session death.
     shutting_down: Arc<AtomicBool>,
+    /// pb-20261111-28: the turn-lifecycle detector, fed every code event of every session.
+    turns: Arc<crate::turn_failure::TurnTracker>,
 }
 
 impl AgentMessagingBridge {
@@ -308,6 +310,7 @@ impl AgentMessagingBridge {
                 tokens: Arc::default(),
                 mcp_log_path,
                 shutting_down: Arc::default(),
+                turns: Arc::default(),
             },
             listener,
         ))
@@ -391,8 +394,10 @@ impl AgentMessagingBridge {
     }
 
     /// Log the delivery-relevant code events of session `session`: a peer message's turn starting,
-    /// and a peer message's turn ending in an error.
-    pub(crate) fn log_code_event(&self, session: &str, event: &CodeEvent) {
+    /// joined by a steered message, and ending (`msg_turn_ended`, whatever the outcome), and a peer
+    /// message's turn ending in an error. Returns the turn that ended, for the router.
+    pub(crate) fn log_code_event(&self, session: &str, event: &CodeEvent) -> Option<crate::turn_failure::TurnEnded> {
+        let observed = self.turns.observe(session, event);
         match event {
             CodeEvent::UserPrompt { prompt_id, origin, delivery: Delivery::Sent, .. }
                 if is_agent_message_origin(origin) =>
@@ -420,6 +425,32 @@ impl AgentMessagingBridge {
             }
             _ => {}
         }
+        if let Some(s) = &observed.steered {
+            self.log_delivery_line(
+                "msg_steered",
+                &[
+                    ("message_id", s.message_id.clone()),
+                    ("source", origin_source(&s.origin)),
+                    ("target", session.to_owned()),
+                    ("turn_id", s.turn_id.clone()),
+                ],
+            );
+        }
+        let ended = observed.ended?;
+        for m in &ended.messages {
+            let mut fields = vec![
+                ("message_id", m.id.clone()),
+                ("source", origin_source(&m.origin)),
+                ("target", session.to_owned()),
+                ("turn_id", ended.turn_id.clone()),
+                ("outcome", ended.outcome.to_owned()),
+            ];
+            if let Some(f) = &ended.failure {
+                fields.push(("error_kind", f.kind.clone()));
+            }
+            self.log_delivery_line("msg_turn_ended", &fields);
+        }
+        Some(ended)
     }
 
     /// Drop a session's token: its MCP server can't call the bridge again until the agent restarts.
