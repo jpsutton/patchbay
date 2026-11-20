@@ -266,15 +266,16 @@ fn http_date_epoch(s: &str) -> Option<u64> {
 /// (`retry_after_ms`, `retryDelay`, `reset_at`...). On a 429 the window it names is the real one,
 /// while a guess may land inside it and burn a retry.
 ///
-/// Without a hint: exponential from a floor, 4s, 8s, 16s... A rate limit is a per-minute window, so
-/// a 1s first try is nearly always wasted; the floor is 4s for a 429 and 1s for anything else.
+/// Without a hint: exponential from a floor. A rate limit is a per-minute window, so a 1s first try
+/// is always wasted: a 429 starts at 30s and doubles to a 60s cap (30s, 60s), which outlasts one
+/// window even with two retries. Other errors start at 1s and cap at 20s.
 /// Every wait is capped, so a bad header cannot stall the turn for long.
 fn backoff(attempt: u32, status: Option<u16>, hint: Option<u64>) -> Duration {
     if let Some(ms) = hint {
         return Duration::from_millis(ms.min(60_000));
     }
-    let floor = if status == Some(429) { 4_000 } else { 1_000 };
-    Duration::from_millis((floor << (attempt - 1)).min(20_000))
+    let (floor, cap) = if status == Some(429) { (30_000u64, 60_000u64) } else { (1_000, 20_000) };
+    Duration::from_millis((floor << (attempt - 1)).min(cap))
 }
 
 #[derive(Clone)]
@@ -615,9 +616,9 @@ mod tests {
     fn a_hint_wins_and_a_429_waits_longer_than_other_errors() {
         assert_eq!(backoff(1, Some(429), Some(12_000)), Duration::from_secs(12));
         assert_eq!(backoff(3, Some(429), Some(500)), Duration::from_millis(500));
-        assert_eq!(backoff(1, Some(429), None), Duration::from_secs(4), "a 429 has a 4s floor");
-        assert_eq!(backoff(2, Some(429), None), Duration::from_secs(8));
-        assert_eq!(backoff(4, Some(429), None), Duration::from_secs(20), "the guess is capped");
+        assert_eq!(backoff(1, Some(429), None), Duration::from_secs(30), "a 429 starts at 30s");
+        assert_eq!(backoff(2, Some(429), None), Duration::from_secs(60));
+        assert_eq!(backoff(4, Some(429), None), Duration::from_secs(60), "capped at one window");
         assert_eq!(backoff(1, Some(503), None), Duration::from_secs(1), "other errors keep a 1s floor");
         assert_eq!(backoff(3, Some(503), None), Duration::from_secs(4));
         assert_eq!(backoff(1, Some(429), Some(3_600_000)), Duration::from_secs(60), "and a wild hint is capped");
