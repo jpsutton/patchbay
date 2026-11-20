@@ -226,7 +226,8 @@ fn http_date_epoch(s: &str) -> Option<u64> {
         let yoe = y - era * 400;
         let mp = (m + 9) % 12;
         let doy = (153 * mp + 2) / 5 + d - 1;
-        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        // `doy` is a day count (`u32`). The year terms are `i64`.
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + i64::from(doy);
         era * 146_097 + doe - 719_468
     }
     let s = s.trim();
@@ -654,6 +655,18 @@ mod tests {
             Some(12_500),
             "a phrase with a time is used"
         );
+    }
+
+    /// RFC 9110's example IMF-fixdate. A date in the past is not a wait, so this checks the parser
+    /// itself: the header path only returns a wait when the instant is still ahead.
+    #[test]
+    fn an_http_date_is_seconds_since_the_epoch() {
+        assert_eq!(
+            http_date_epoch("Sun, 06 Nov 1994 08:49:37 GMT"),
+            Some(784_111_777)
+        );
+        assert_eq!(http_date_epoch("06 Nov 1994 08:49:37 GMT"), Some(784_111_777));
+        assert_eq!(http_date_epoch("not a date"), None);
     }
 
     #[test]
