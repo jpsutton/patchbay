@@ -389,6 +389,7 @@ pub enum Event {
 pub struct Error {
     pub message: String,
     pub status: Option<u16>,
+    pub code: Option<String>,
     pub retryable: bool,
     pub cancelled: bool,
     /// The server's `Retry-After`, in seconds: it knows when the limit resets, a backoff only guesses.
@@ -397,11 +398,11 @@ pub struct Error {
 
 impl Error {
     pub fn new(message: impl Into<String>) -> Self {
-        Error { message: message.into(), status: None, retryable: false, cancelled: false, retry_after: None }
+        Error { message: message.into(), status: None, code: None, retryable: false, cancelled: false, retry_after: None }
     }
 
     pub fn cancelled() -> Self {
-        Error { message: "cancelled".into(), status: None, retryable: false, cancelled: true, retry_after: None }
+        Error { message: "cancelled".into(), status: None, code: None, retryable: false, cancelled: true, retry_after: None }
     }
 
     pub fn http(status: u16, message: impl Into<String>) -> Self {
@@ -413,10 +414,34 @@ impl Error {
         Error {
             message,
             status: Some(status),
+            code: None,
             retryable: matches!(status, 408 | 409 | 425 | 429) || status >= 500,
             cancelled: false,
             retry_after: None,
         }
+    }
+
+    /// Whether an API error indicates provider context overflow / prompt-too-long.
+    /// Strictly gates on HTTP 400 or 413 and specific provider phrases / error code.
+    pub fn is_context_overflow(&self) -> bool {
+        let Some(status) = self.status else { return false };
+        if status != 400 && status != 413 {
+            return false;
+        }
+        if self.code.as_deref() == Some("context_length_exceeded") {
+            return true;
+        }
+        let lower = self.message.to_ascii_lowercase();
+        const PHRASES: &[&str] = &[
+            "context_length_exceeded",
+            "prompt is too long",
+            "maximum context length",
+            "context length exceeded",
+            "context window exceeded",
+            "input is too long",
+            "exceeds context length",
+        ];
+        PHRASES.iter().any(|p| lower.contains(p))
     }
 }
 
@@ -432,6 +457,47 @@ mod tests {
         assert!(e.message.contains("usage is used up"), "{}", e.message);
         assert!(!e.retryable);
         assert_eq!(Error::http(403, "forbidden").message, "forbidden");
+    }
+
+    #[test]
+    fn context_overflow_error_classification() {
+        // Positives: HTTP 400 or 413 + code context_length_exceeded or specific phrases.
+        let mut e = Error::http(400, "invalid request");
+        e.code = Some("context_length_exceeded".into());
+        assert!(e.is_context_overflow());
+
+        for phrase in [
+            "context_length_exceeded",
+            "This model's maximum context length is 128000 tokens",
+            "prompt is too long: 205000 tokens > 200000 maximum",
+            "Context length exceeded",
+            "context window exceeded",
+            "Input is too long for this model",
+            "message exceeds context length",
+        ] {
+            assert!(Error::http(400, phrase).is_context_overflow(), "{phrase}");
+            assert!(Error::http(413, phrase).is_context_overflow(), "{phrase} (413)");
+        }
+
+        // Negatives:
+        // 1. HTTP 429 quota / rate limit (must never trigger compaction)
+        assert!(!Error::http(429, "quota exceeds the limit").is_context_overflow());
+        assert!(!Error::http(429, "prompt is too long").is_context_overflow());
+        // 2. HTTP 400 unrelated invalid_request
+        assert!(!Error::http(400, "invalid_request_error: unrecognized field 'foo'").is_context_overflow());
+        assert!(!Error::http(400, "parameter 'messages' is required").is_context_overflow());
+        // 3. Gemini "Request payload size exceeds the limit" is a byte-payload size limit (e.g. giant image/upload),
+        // not a context token overflow, and does not match the prompt/context length phrases.
+        assert!(!Error::http(400, "Request payload size exceeds the limit: 10485760 bytes").is_context_overflow());
+        // 4. Generic dropped phrases: "exceeds the limit" and "too many tokens"
+        assert!(!Error::http(400, "exceeds the limit").is_context_overflow());
+        assert!(!Error::http(400, "too many tokens").is_context_overflow());
+        // 5. Non-400/413 status codes even with matching phrases
+        assert!(!Error::http(401, "prompt is too long").is_context_overflow());
+        assert!(!Error::http(403, "maximum context length").is_context_overflow());
+        assert!(!Error::http(404, "context_length_exceeded").is_context_overflow());
+        assert!(!Error::http(500, "context window exceeded").is_context_overflow());
+        assert!(!Error::new("prompt is too long").is_context_overflow()); // status: None
     }
 
     #[test]

@@ -403,6 +403,7 @@ impl Client {
                 Err(_) => return Err(Error {
                     message: format!("no response for {}s", cfg.idle_timeout.as_secs()),
                     status: None,
+                    code: None,
                     retryable: true,
                     cancelled: false,
                     retry_after: None,
@@ -415,6 +416,7 @@ impl Client {
                     Error {
                         message: format!("request failed: {} (POST {target})", diag::chain(&e.without_url())),
                         status: None,
+                        code: None,
                         retryable,
                         cancelled: false,
                         retry_after: None,
@@ -426,7 +428,9 @@ impl Client {
         if !status.is_success() {
             let headers = resp.headers().clone();
             let text = resp.text().await.unwrap_or_default();
-            let mut e = Error::http(status.as_u16(), wire::error_message(&text));
+            let (code, msg) = wire::error_details(&text);
+            let mut e = Error::http(status.as_u16(), msg);
+            e.code = code;
             // Carried on the error instead of slept here: only `complete` knows whether the call is
             // retried at all, and it can be cancelled while it waits.
             e.retry_after = retry_hint(&headers, &text, &e.message).filter(|_| e.retryable);
@@ -447,6 +451,7 @@ impl Client {
                     Err(_) => return Err(Error {
                         message: watch.failure(&format!("no data for {}s", cfg.idle_timeout.as_secs()), &sse.pending()),
                         status: None,
+                        code: None,
                         retryable: true,
                         cancelled: false,
                         retry_after: None,
@@ -463,6 +468,7 @@ impl Client {
                     return Err(Error {
                         message: watch.failure(&format!("stream error: {}", diag::chain(&e.without_url())), &sse.pending()),
                         status: None,
+                        code: None,
                         retryable: true,
                         cancelled: false,
                         retry_after: None,

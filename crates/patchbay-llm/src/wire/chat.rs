@@ -233,6 +233,7 @@ impl Parser for ChatParser {
             return Err(Error {
                 message: "the stream ended without a reply".into(),
                 status: None,
+                code: None,
                 retryable: true,
                 cancelled: false,
                 retry_after: None,

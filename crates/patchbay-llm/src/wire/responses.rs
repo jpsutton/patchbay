@@ -197,7 +197,8 @@ impl Parser for ResponsesParser {
                     .pointer("/response/error/message")
                     .and_then(Value::as_str)
                     .unwrap_or("the response failed");
-                return Err(Error { message: msg.to_owned(), status: None, retryable: false, cancelled: false, retry_after: None });
+                let code = v.pointer("/response/error/code").and_then(Value::as_str).map(ToOwned::to_owned);
+                return Err(Error { message: msg.to_owned(), status: None, code, retryable: false, cancelled: false, retry_after: None });
             }
             "error" => {
                 return Err(stream_error(&json!({"error": v.clone()}))
@@ -213,6 +214,7 @@ impl Parser for ResponsesParser {
             return Err(Error {
                 message: "the stream ended without a reply".into(),
                 status: None,
+                code: None,
                 retryable: true,
                 cancelled: false,
                 retry_after: None,
