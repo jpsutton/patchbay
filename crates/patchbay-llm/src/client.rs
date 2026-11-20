@@ -112,6 +112,22 @@ impl Config {
     }
 }
 
+/// The Google token goes only to `https://*.googleapis.com`: `base_url` syncs over the mesh and a
+/// peer or a typo could otherwise send every node's login token anywhere, over http too. The one
+/// check every place that attaches that token passes through (pb-20261117-10).
+pub fn require_google_https(base_url: &str) -> Result<()> {
+    // `Url` takes the host after any `user@`, so `https://x.googleapis.com@evil.example` is evil.example.
+    let ok = reqwest::Url::parse(base_url.trim())
+        .is_ok_and(|u| u.scheme() == "https" && u.host_str().is_some_and(|h| h.ends_with(".googleapis.com")));
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::new(
+            "Antigravity login refused: its base URL must be https on a *.googleapis.com host, so the Google token is never sent anywhere else. Fix the provider's base URL.",
+        ))
+    }
+}
+
 /// The headers that differ per request: the session id under each of `cfg.session_headers`
 /// (when the request has one), and a fresh id under `cfg.request_id_header`.
 fn request_headers(cfg: &Config, session: Option<&str>) -> Vec<(String, String)> {
@@ -240,6 +256,9 @@ impl Client {
         on_event: &mut (impl FnMut(Event) + Send),
     ) -> Result<Response> {
         let cfg = &self.config;
+        if cfg.cloud_code && cfg.key.as_deref().is_some_and(|k| !k.is_empty()) {
+            require_google_https(&cfg.base_url)?;
+        }
         let mut rb = self
             .http
             .post(url)
@@ -382,6 +401,7 @@ impl Client {
         {
             return Ok(Some(project));
         }
+        require_google_https(&cfg.base_url)?;
         let url = format!("{}/v1internal:loadCodeAssist", cfg.base_url.trim_end_matches('/'));
         let metadata = serde_json::json!({
             "ideType": "ANTIGRAVITY",
@@ -549,6 +569,39 @@ mod tests {
 
     /// Azure OpenAI through a query string on the base URL (the row's UNKNOWN, now measured): the path
     /// is appended after the query, so the URL is wrong. Use `extra_query` instead.
+    #[test]
+    fn the_google_token_goes_only_to_https_googleapis() {
+        for ok in ["https://daily-cloudcode-pa.googleapis.com", "https://cloudcode-pa.googleapis.com/", "HTTPS://Daily-CloudCode-PA.GoogleAPIs.com"] {
+            assert!(require_google_https(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://daily-cloudcode-pa.googleapis.com",
+            "https://evil.example",
+            "https://evil.googleapis.com.example.com",
+            "https://googleapis.com.evil.example",
+            "https://daily-cloudcode-pa.googleapis.com@evil.example",
+            "https://googleapis.com",
+            "http://127.0.0.1:9",
+            "not a url",
+            "",
+        ] {
+            assert!(require_google_https(bad).unwrap_err().message.contains("Antigravity login refused"), "{bad}");
+        }
+    }
+
+    /// The request path refuses before anything is sent: the error is the refusal, not a connect
+    /// failure, so the token never left the process.
+    #[tokio::test]
+    async fn a_cloud_code_request_to_another_host_is_refused_before_the_token_is_sent() {
+        let mut cfg = Config::new(WireFormat::Gemini, "http://127.0.0.1:9", "m");
+        cfg.cloud_code = true;
+        cfg.key = Some("TOKEN".into());
+        cfg.max_retries = 0;
+        let req = Request { messages: vec![Message::user("hi")], ..Default::default() };
+        let err = Client::new(cfg).complete(&req, &CancellationToken::new(), |_| {}).await.unwrap_err();
+        assert!(err.message.contains("Antigravity login refused") && !err.message.contains("TOKEN"), "{}", err.message);
+    }
+
     #[test]
     fn a_query_string_on_the_base_url_ends_up_before_the_path() {
         let cfg = Config::new(WireFormat::ChatCompletions, "https://x.openai.azure.com/openai/deployments/d?api-version=2024-10-21", "m");

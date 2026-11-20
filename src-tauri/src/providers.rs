@@ -513,6 +513,8 @@ pub async fn ensure_token(resolved: &mut Resolved) -> Result<()> {
             resolved.grok_user = Some(c.user_id);
         }
         Auth::AntigravityLogin => {
+            // Before the token is even read: it may only go to https *.googleapis.com.
+            patchbay_llm::require_google_https(&normalize_base_url(&resolved.provider.base_url)).map_err(|e| anyhow!(e.message))?;
             let auth = crate::antigravity_auth::credentials(resolved.provider.gemini_home.as_deref()).await?;
             resolved.key = Some(auth.access_token.clone());
             resolved.antigravity = Some(auth);
@@ -827,6 +829,12 @@ pub async fn discover_antigravity_models(base_url: &str, gemini_home: Option<&st
 }
 
 pub async fn discover_antigravity_models_with_auth(base_url: &str, auth: &crate::antigravity_auth::AntigravityAuth, extras: &Extras) -> Result<Vec<DiscoveredModel>> {
+    patchbay_llm::require_google_https(&normalize_base_url(base_url)).map_err(|e| anyhow!(e.message))?;
+    fetch_antigravity_models(base_url, auth, extras).await
+}
+
+/// The POST itself, past the host check (a test points it at a loopback server).
+async fn fetch_antigravity_models(base_url: &str, auth: &crate::antigravity_auth::AntigravityAuth, extras: &Extras) -> Result<Vec<DiscoveredModel>> {
     let url = format!("{}/v1internal:fetchAvailableModels", normalize_base_url(base_url));
     let mut req = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build()?.post(&url)
         .bearer_auth(&auth.access_token)
@@ -897,6 +905,31 @@ mod tests {
         assert_eq!(get("user-agent"), Some("antigravity/cli/9.8.7"));
         assert_eq!(get("x-goog-api-client"), Some("google-cloud-sdk vscode_cloudshelleditor/0.1"));
         assert_eq!(get("client-metadata"), Some(r#"{"ideType":"ANTIGRAVITY","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}"#));
+    }
+
+    /// A base URL that is not https on *.googleapis.com never gets the Google token: the token is
+    /// not read (`ensure_token`) and not sent (model discovery), and the error says why.
+    #[tokio::test]
+    async fn an_antigravity_token_is_refused_for_a_base_url_outside_googleapis() {
+        use super::*;
+        for base in ["http://daily-cloudcode-pa.googleapis.com", "https://evil.example", "https://evil.googleapis.com.example.com"] {
+            let mut r = Resolved {
+                provider: Provider {
+                    id: "p".into(), name: "Antigravity".into(), kind: ProviderKind::Gemini, base_url: base.into(), has_key: false,
+                    auth_mode: AuthMode::AntigravityLogin, claude_config_dir: None, grok_home: None, gemini_home: None,
+                },
+                model: Model { id: "m".into(), provider_id: "p".into(), model_id: "models/gemini-3".into(), display_name: "Gemini 3".into(), vision: false, context_window: None, params: Default::default() },
+                key: None, extras: Extras::default(), auth: Auth::AntigravityLogin, grok_user: None, antigravity: None,
+            };
+            let e = ensure_token(&mut r).await.unwrap_err().to_string();
+            assert!(e.contains("Antigravity login refused") && r.key.is_none(), "{base}: {e}");
+            let auth = crate::antigravity_auth::AntigravityAuth {
+                access_token: "TOKEN".into(), refresh_token: None, access_expires_at: None,
+                account_id: "account@example.test".into(), email: None, client_version: "9.8.7".into(),
+            };
+            let e = discover_antigravity_models_with_auth(base, &auth, &Extras::default()).await.unwrap_err().to_string();
+            assert!(e.contains("Antigravity login refused") && !e.contains("TOKEN"), "{base}: {e}");
+        }
     }
 
     #[test]
@@ -1273,7 +1306,7 @@ mod tests {
             access_token: "fixture-token".into(), refresh_token: None, access_expires_at: None,
             account_id: "account@example.test".into(), email: None, client_version: "9.8.7".into(),
         };
-        let found = discover_antigravity_models_with_auth(&format!("http://127.0.0.1:{port}"), &auth, &Extras::default()).await.unwrap();
+        let found = fetch_antigravity_models(&format!("http://127.0.0.1:{port}"), &auth, &Extras::default()).await.unwrap();
         assert_eq!(found.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["claude-sonnet", "gemini-3"]);
         assert_eq!(found[1].context_window, Some(12345));
         let seen = server.await.unwrap();

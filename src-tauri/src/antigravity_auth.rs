@@ -320,7 +320,7 @@ fn read_oauth_creds(home: &Path) -> Option<AntigravityAuth> {
     let refresh = value.get("refresh_token").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
     let expiry = expiry_from_number(value.get("expiry_date"));
     let email = email_from_id_token(value.get("id_token").and_then(Value::as_str)).or_else(|| active_google_email(home));
-    let account_id = email.clone().unwrap_or_else(|| format!("token:{}", &access[..access.len().min(16)]));
+    let account_id = email.clone().unwrap_or_else(|| token_id(access));
     Some(AntigravityAuth {
         access_token: access.to_owned(),
         refresh_token: refresh,
@@ -329,6 +329,13 @@ fn read_oauth_creds(home: &Path) -> Option<AntigravityAuth> {
         email,
         client_version: read_agy_version(home).unwrap_or_else(|| AGY_VERSION_FALLBACK.to_owned()),
     })
+}
+
+/// A login's stand-in identity when no email is known: a short hash of the token, never any of its
+/// text (an id reaches plan reports and the mesh, and slicing token bytes can panic mid-character).
+fn token_id(access: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("token:{}", &hex::encode(Sha256::digest(access.as_bytes()))[..12])
 }
 
 fn auth_from_wrapped_token(value: &Value, email_hint: Option<String>, home: Option<&Path>) -> Option<AntigravityAuth> {
@@ -343,7 +350,7 @@ fn auth_from_wrapped_token(value: &Value, email_hint: Option<String>, home: Opti
     let email = email_hint
         .or_else(|| email_from_id_token(value.get("id_token").and_then(Value::as_str)))
         .or_else(|| home.and_then(active_google_email));
-    let account_id = email.clone().unwrap_or_else(|| format!("token:{}", &access[..access.len().min(16)]));
+    let account_id = email.clone().unwrap_or_else(|| token_id(&access));
     Some(AntigravityAuth {
         access_token: access,
         refresh_token: refresh,
@@ -540,6 +547,19 @@ mod tests {
         }
     }
 
+    /// No email: the account id is a hash, never token text, and a non-ASCII token (a byte-16 slice
+    /// would split a character and panic) is fine.
+    #[test]
+    fn the_fallback_account_id_is_a_hash_never_token_text() {
+        let token = format!("a{}SECRETTAIL", "é".repeat(10));
+        let a = auth_from_wrapped_token(&serde_json::json!({ "access_token": token }), None, None).unwrap();
+        assert!(a.account_id.starts_with("token:") && a.account_id.len() == "token:".len() + 12, "{}", a.account_id);
+        assert!(a.account_id["token:".len()..].bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(!a.account_id.contains('é') && !a.account_id.contains("SECRET"));
+        assert_eq!(a.account_id, token_id(&token), "stable per token");
+        assert_ne!(a.account_id, token_id("another-token"));
+    }
+
     #[test]
     fn credential_sources_are_disk_first_and_alternate_homes_never_use_keychain() {
         assert_eq!(AUTH_SOURCE_ORDER, [AuthSource::CliTokenFile, AuthSource::OauthCreds, AuthSource::Keychain]);
@@ -605,7 +625,7 @@ mod tests {
         ).unwrap();
         assert_eq!(with_email.account_id, "me@example.test");
         let fingerprint = auth_from_wrapped_token(&serde_json::json!({"access_token":"fixture-access-token-long-enough"}), None, None).unwrap();
-        assert!(fingerprint.account_id.starts_with("token:fixture-access-t"));
+        assert!(fingerprint.account_id.starts_with("token:") && !fingerprint.account_id.contains("fixture"), "a hash, not token text");
         let shown = format!("{fingerprint:?}");
         assert!(shown.contains("[REDACTED]"));
         assert!(!shown.contains("fixture-access-token-long-enough"));
