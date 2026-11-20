@@ -248,6 +248,7 @@ impl Client {
                     status: None,
                     retryable: true,
                     cancelled: false,
+                    retry_after: None,
                 }),
                 // `without_url`: reqwest prints the full URL, and the query may hold a secret. The
                 // host and path (no query) are put back, so the message still says where it failed.
@@ -259,6 +260,7 @@ impl Client {
                         status: None,
                         retryable,
                         cancelled: false,
+                        retry_after: None,
                     }
                 })?,
             },
@@ -294,6 +296,7 @@ impl Client {
                         status: None,
                         retryable: true,
                         cancelled: false,
+                        retry_after: None,
                     }),
                     Ok(c) => c,
                 },
@@ -309,6 +312,7 @@ impl Client {
                         status: None,
                         retryable: true,
                         cancelled: false,
+                        retry_after: None,
                     });
                 }
                 None => (sse.flush().into_iter().collect::<Vec<_>>(), true),
