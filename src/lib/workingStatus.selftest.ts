@@ -7,6 +7,7 @@ import {
   FLOWING_MS,
   QUIET_MS,
   STALL_MS,
+  TOOL_STALL_MS,
   chunkChars,
   fmtElapsed,
   phaseOf,
@@ -57,9 +58,17 @@ assert(w.kind === "waiting" && w.quiet && w.idleMs === QUIET_MS, "quiet shows th
 w = workingStatus({ ...base, lastForegroundAt: now - STALL_MS, lastPhase: "writing", turnStartedAt: now - 60_000 }, now);
 assert(w.kind === "stalled" && w.quiet, "STALL_MS of silence is stalled");
 
-// A running tool explains silence: never quiet or stalled.
+// A running tool with recent activity is not stalled.
 w = workingStatus({ ...base, toolCalls: { t1: running }, lastForegroundAt: now - 120_000, turnStartedAt: now - 130_000 }, now);
-assert(w.kind === "tool" && w.tool === running && !w.quiet, "running tool is not stalled");
+assert(w.kind === "tool" && w.tool === running && !w.quiet, "running tool with recent activity is not stalled");
+
+// A running tool quiet past the stall limit becomes stalled.
+w = workingStatus({ ...base, toolCalls: { t1: running }, lastForegroundAt: now - TOOL_STALL_MS, turnStartedAt: now - TOOL_STALL_MS - 10_000 }, now);
+assert(w.kind === "stalled" && w.quiet && w.tool === running, "tool quiet past TOOL_STALL_MS is stalled");
+
+// Custom stall threshold is respected.
+w = workingStatus({ ...base, toolCalls: { t1: running }, lastForegroundAt: now - 60_000, turnStartedAt: now - 70_000, toolStallMs: 60_000 }, now);
+assert(w.kind === "stalled" && w.quiet && w.tool === running, "tool quiet past custom toolStallMs is stalled");
 // Background tools don't count as foreground work.
 w = workingStatus({ ...base, toolCalls: { t2: bg }, lastForegroundAt: now - 10_000, turnStartedAt: now - 20_000 }, now);
 assert(w.kind === "waiting" && w.tool === null, "background tool is not the status");
