@@ -13,7 +13,7 @@ mod goal;
 mod history;
 mod host;
 mod mcp;
-pub use mcp::{McpChildEvent, McpChildInfo, McpObserver, McpSet, set_observer};
+pub use mcp::{McpChildEvent, McpChildInfo, McpObserver, McpSet, RETRY_AFTER_META, set_observer};
 mod prompt;
 mod prompts;
 mod reqlog;

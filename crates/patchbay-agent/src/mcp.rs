@@ -16,6 +16,24 @@ const PROTOCOL: &str = "2025-06-18";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const CALL_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// A tool result's `_meta` key that says how many seconds to wait before the same call can work
+/// (Patchbay's agent-messaging server sets it on a rate limit). The harness waits that long and
+/// calls again, so the model never burns a turn guessing.
+pub const RETRY_AFTER_META: &str = "patchbay/retryAfterSecs";
+/// The longest wait the harness takes on itself. A longer one goes back to the model with the
+/// wait in the text, so it can do something else meanwhile.
+const MAX_AUTO_WAIT: Duration = Duration::from_secs(600);
+/// How many times one call may wait and retry.
+const MAX_AUTO_RETRIES: u32 = 3;
+
+/// The wait a failed tool result asks for, if it asks.
+fn retry_after(out: &ToolOutput) -> Option<Duration> {
+    if !out.is_error {
+        return None;
+    }
+    out.raw["_meta"][RETRY_AFTER_META].as_u64().map(|s| Duration::from_secs(s.max(1)))
+}
+
 /// Which session and host agent a stdio server was started for, from the server's own env entries
 /// (Patchbay's agent-messaging server carries both). Only these two names are ever read from the env.
 const ENV_SESSION: &str = "PATCHBAY_MESSAGE_SESSION";
@@ -384,6 +402,27 @@ impl Tool for McpTool {
     }
 
     async fn run(&self, input: Value, ctx: &ToolCtx) -> ToolOutput {
+        let mut retries = 0;
+        loop {
+            let out = self.call_once(&input, ctx).await;
+            let Some(wait) = retry_after(&out).filter(|w| *w <= MAX_AUTO_WAIT && retries < MAX_AUTO_RETRIES) else {
+                return out;
+            };
+            retries += 1;
+            ctx.session.text_chunk(
+                "agent_thought_chunk",
+                &format!("{} is rate limited. Waiting {}s, then calling it again.\n", self.tool, wait.as_secs()),
+            );
+            tokio::select! {
+                _ = ctx.cancel.cancelled() => return ToolOutput::error("Cancelled."),
+                _ = tokio::time::sleep(wait) => {}
+            }
+        }
+    }
+}
+
+impl McpTool {
+    async fn call_once(&self, input: &Value, ctx: &ToolCtx) -> ToolOutput {
         let call = self.server.request("tools/call", json!({"name": self.tool, "arguments": input}));
         let r = tokio::select! {
             _ = ctx.cancel.cancelled() => return ToolOutput::error("Cancelled."),
@@ -431,6 +470,21 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_failed_result_with_the_meta_key_asks_for_a_wait() {
+        let asks = |is_error: bool, meta: Value| {
+            let mut out = ToolOutput::text("x");
+            out.is_error = is_error;
+            out.raw = json!({"_meta": meta});
+            retry_after(&out)
+        };
+        assert_eq!(asks(true, json!({ (RETRY_AFTER_META): 42 })), Some(Duration::from_secs(42)));
+        assert_eq!(asks(true, json!({ (RETRY_AFTER_META): 0 })), Some(Duration::from_secs(1)));
+        assert_eq!(asks(false, json!({ (RETRY_AFTER_META): 42 })), None, "a success asks for nothing");
+        assert_eq!(asks(true, json!({})), None);
+        assert_eq!(retry_after(&ToolOutput::error("plain")), None);
+    }
 
     #[test]
     fn names_fit_provider_limits() {

@@ -1,3 +1,4 @@
+import { useStore } from "../lib/store";
 import { useEffect, useState } from "react";
 import { Dot } from "../components/Dot";
 import { fmtTokens } from "../components/UsageBar";
@@ -21,7 +22,9 @@ function label(w: WorkingStatus): string {
     case "tool":
       return `${(w.tool?.title || "Running a tool").split("\n")[0]}…`;
     case "stalled":
-      return `No activity for ${fmtElapsed(w.idleMs ?? STALL_MS)}. The model may be slow or stuck.`;
+      return w.tool
+        ? `No activity for ${fmtElapsed(w.idleMs ?? STALL_MS)}: ${(w.tool.title || "Running a tool").split("\n")[0]}. It may be slow or stuck.`
+        : `No activity for ${fmtElapsed(w.idleMs ?? STALL_MS)}. The model may be slow or stuck.`;
     default:
       return "Waiting for the model…";
   }
@@ -39,7 +42,9 @@ export function WorkingIndicator({ s, onStop }: { s: Source; onStop: () => void 
     return () => clearInterval(id);
   }, []);
 
-  const w = workingStatus(s);
+  const stallNoticeMinutes = useStore((st) => st.prefs.stallNoticeMinutes);
+  const toolStallMs = stallNoticeMinutes && stallNoticeMinutes > 0 ? stallNoticeMinutes * 60 * 1000 : undefined;
+  const w = workingStatus(toolStallMs ? { ...s, toolStallMs } : s);
   const stalled = w.kind === "stalled";
   // Under the stall threshold the label already says "Waiting"; the counter adds the how long.
   const showIdle = w.quiet && !stalled && w.idleMs != null;

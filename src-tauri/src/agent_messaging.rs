@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use patchbay_agent::{McpChildEvent, McpChildInfo, McpObserver};
+use patchbay_agent::{McpChildEvent, McpChildInfo, McpObserver, RETRY_AFTER_META};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,8 @@ const TOOL_ACCEPT_QUEUED: &str = "accept_queued_agent_message";
 const TOOL_CREATE: &str = "create_agent_session";
 /// Share an artifact the agent generated inside its session folder (pb-20261105-18).
 const TOOL_SHARE: &str = "share_artifact";
+/// Send a file to another session over the mesh; Patchbay moves it in the background.
+const TOOL_SEND_FILE: &str = "send_file";
 const MAX_LINE: usize = 64 * 1024;
 
 /// Env var carrying the child-side lifecycle log path (pb-20261109-03). Optional:
@@ -589,6 +591,16 @@ async fn handle_bridge(
                 let info = state.shares.create(&canonical.to_string_lossy(), None, None)?;
                 Ok(serde_json::to_value(info)?)
             }
+            // File transfer to another session, possibly on another node (file_transfer.rs). The
+            // file is confined to the sender's folder like a share; Patchbay then moves it.
+            "send_file" => {
+                let args = request.arguments.as_ref().ok_or_else(|| anyhow!("arguments are required"))?;
+                let path = args["path"].as_str().ok_or_else(|| anyhow!("path is required"))?;
+                let target = args["targetSessionId"].as_str().ok_or_else(|| anyhow!("targetSessionId is required"))?;
+                let canonical = confined_share_path(Path::new(&source.cwd), path)?;
+                check_send_limits(&request.source_session_id, target)?;
+                crate::file_transfer::send_file(&state, &request.source_session_id, target, canonical, args["note"].as_str()).await
+            }
             // Team tools (teams.rs): every call is checked against the caller's role there.
             "team_member" => Ok(json!(crate::teams::is_member(&state, &request.source_session_id))),
             name if crate::teams::is_tool(name) => {
@@ -612,7 +624,13 @@ async fn handle_bridge(
     .await;
     let response = match result {
         Ok(value) => json!({ "ok": value }),
-        Err(error) => json!({ "error": format!("{error:#}") }),
+        Err(error) => {
+            let mut response = json!({ "error": format!("{error:#}") });
+            if let Some(limited) = error.downcast_ref::<RateLimited>() {
+                response["retryAfterSecs"] = json!(limited.retry_after_secs);
+            }
+            response
+        }
     };
     write.write_all(response.to_string().as_bytes()).await?;
     write.write_all(b"\n").await?;
@@ -628,11 +646,48 @@ const PAIR_WINDOW: std::time::Duration = std::time::Duration::from_secs(3600);
 /// Identical body from the same source to the same target within this window is not re-prompted.
 const DEDUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
 
+const SEND_NEXT: &str = "sending another message";
+
 /// Per-session and per-pair send budgets before the bridge calls into the mesh.
 pub(crate) fn check_send_limits(source_session_id: &str, target_session_id: &str) -> Result<()> {
     check_rate(source_session_id)?;
     check_pair_rate(source_session_id, target_session_id)?;
     Ok(())
+}
+
+/// A call refused by a budget (a message send, a team dispatch). It says how long until a slot
+/// frees, so the caller waits that long instead of guessing. The bridge passes the wait on as
+/// `retryAfterSecs`, and the MCP server turns that into the `_meta` key the harness reads. The
+/// refusal always comes before the call has any effect, so calling again after the wait is safe.
+#[derive(Debug)]
+pub(crate) struct RateLimited {
+    what: String,
+    /// What the caller may do after the wait: `sending another message`.
+    next: &'static str,
+    pub(crate) retry_after_secs: u64,
+}
+
+impl RateLimited {
+    pub(crate) fn new(what: String, next: &'static str, retry_after_secs: u64) -> Self {
+        RateLimited { what, next, retry_after_secs }
+    }
+}
+
+impl std::fmt::Display for RateLimited {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "rate limit: {}. Wait {} seconds before {}.", self.what, self.retry_after_secs, self.next)
+    }
+}
+
+impl std::error::Error for RateLimited {}
+
+/// Whole seconds until the budget has a free slot. `recent` holds the sends inside `window`, oldest
+/// first, and is full (`max` or more). The send that frees a slot is the one `max` back from the
+/// newest. Rounded up, so a caller that waits this long is never refused again for the same send.
+fn wait_secs(recent: &[std::time::Instant], max: usize, window: std::time::Duration, now: std::time::Instant) -> u64 {
+    let frees = recent[recent.len() - max];
+    let left = window.saturating_sub(now.duration_since(frees));
+    (left.as_secs_f64().ceil() as u64).max(1)
 }
 
 /// At most `RATE_MAX` sends per session per 10 minutes.
@@ -645,7 +700,12 @@ fn check_rate(session_id: &str) -> Result<()> {
     let recent = sends.entry(session_id.to_owned()).or_default();
     recent.retain(|t| now.duration_since(*t) < RATE_WINDOW);
     if recent.len() >= RATE_MAX {
-        anyhow::bail!("rate limit: at most {RATE_MAX} agent messages per 10 minutes per session");
+        return Err(RateLimited::new(
+            format!("at most {RATE_MAX} agent messages per 10 minutes per session"),
+            SEND_NEXT,
+            wait_secs(recent, RATE_MAX, RATE_WINDOW, now),
+        )
+        .into());
     }
     recent.push(now);
     Ok(())
@@ -662,9 +722,12 @@ fn check_pair_rate(source_session_id: &str, target_session_id: &str) -> Result<(
     let recent = pairs.entry(key).or_default();
     recent.retain(|t| now.duration_since(*t) < PAIR_WINDOW);
     if recent.len() >= PAIR_MAX {
-        anyhow::bail!(
-            "rate limit: at most {PAIR_MAX} agent messages per hour to the same session (pause or send something new later)"
-        );
+        return Err(RateLimited::new(
+            format!("at most {PAIR_MAX} agent messages per hour to the same session"),
+            SEND_NEXT,
+            wait_secs(recent, PAIR_MAX, PAIR_WINDOW, now),
+        )
+        .into());
     }
     recent.push(now);
     Ok(())
@@ -842,9 +905,9 @@ async fn bridge_call(addr: &str, request: Value) -> Result<Value> {
 
 fn tools_list_for(can_steer: bool) -> Value {
     let send_description = if can_steer {
-        "Send a message to another Patchbay Code session in this mesh. When that session is mid-turn and can take mid-turn messages, it receives yours in the running turn; otherwise the message waits for its next turn. The recipient can reply by sending a message to your session. A result of sent, steered, queued, or duplicate all mean the message was accepted — do not resend because delivery was queued. Only send when you have new information."
+        "Send a message to another Patchbay Code session in this mesh. When that session is mid-turn and can take mid-turn messages, it receives yours in the running turn; otherwise the message waits for its next turn. The recipient can reply by sending a message to your session. A result of sent, steered, queued, or duplicate all mean the message was accepted — do not resend because delivery was queued. If a rate limit refuses the send, the error says how many seconds to wait: wait that long, then send again. Only send when you have new information."
     } else {
-        "Send a message to another Patchbay Code session in this mesh. When that session is mid-turn and cannot take mid-turn messages, the message queues until its turn ends or it calls accept_queued_agent_message. This session also queues peer messages mid-turn: use list_queued_agent_messages and accept_queued_agent_message to read them as a tool step without ending your turn. A result of sent, steered, queued, or duplicate all mean the message was accepted — do not resend because delivery was queued. Only send when you have new information."
+        "Send a message to another Patchbay Code session in this mesh. When that session is mid-turn and cannot take mid-turn messages, the message queues until its turn ends or it calls accept_queued_agent_message. This session also queues peer messages mid-turn: use list_queued_agent_messages and accept_queued_agent_message to read them as a tool step without ending your turn. A result of sent, steered, queued, or duplicate all mean the message was accepted — do not resend because delivery was queued. If a rate limit refuses the send, the error says how many seconds to wait: wait that long, then send again. Only send when you have new information."
     };
     let mut tools = vec![
         json!({
@@ -891,6 +954,20 @@ fn tools_list_for(can_steer: bool) -> Value {
                 "path": { "type": "string", "description": "Path of the file to share, absolute or relative to this session's folder." }
             },
             "required": ["path"],
+            "additionalProperties": false
+        }
+    }));
+    tools.push(json!({
+        "name": TOOL_SEND_FILE,
+        "description": "Send a file to another Patchbay Code session in this mesh, including one on another computer that has no direct network route to this one. Use it instead of scp, magic-wormhole or other tools: nothing needs to be installed. Call it ONCE per file. Patchbay moves the file in the background, in chunks, and checks its SHA-256; do not poll or repeat the call. The target agent is messaged when the file has arrived and names the path it was saved at (the target session's folder, under .patchbay/inbox/); an existing file there is never overwritten. If the transfer fails you receive a message from the target session. The file must be a regular file inside this session's folder, at most 1 GiB. Find targetSessionId with list_agent_sessions. Send only files the user asked for or the work needs.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "targetSessionId": { "type": "string", "description": "The Patchbay Code session ID from list_agent_sessions." },
+                "path": { "type": "string", "description": "Path of the file to send, absolute or relative to this session's folder." },
+                "note": { "type": "string", "description": "Optional short note delivered to the target agent with the file (at most 2 KiB), for example what the file is for." }
+            },
+            "required": ["targetSessionId", "path"],
             "additionalProperties": false
         }
     }));
@@ -1157,6 +1234,7 @@ pub(crate) async fn call_tool(
         t if crate::teams::is_tool(t) => (t, None, None, None),
         TOOL_CREATE => ("create", None, None, None),
         TOOL_SHARE => ("share", None, None, None),
+        TOOL_SEND_FILE => ("send_file", None, None, None),
         TOOL_LIST_SESSIONS => ("list", None, None, None),
         TOOL_LIST_QUEUED => ("list_queued", None, None, None),
         TOOL_ACCEPT_QUEUED => (
@@ -1182,7 +1260,7 @@ pub(crate) async fn call_tool(
         "targetSessionId": target_session_id,
         "message": message,
         "messageId": message_id,
-        "arguments": (matches!(name, TOOL_CREATE | TOOL_SHARE) || crate::teams::is_tool(name)).then(|| params["arguments"].clone()),
+        "arguments": (matches!(name, TOOL_CREATE | TOOL_SHARE | TOOL_SEND_FILE) || crate::teams::is_tool(name)).then(|| params["arguments"].clone()),
     });
     write.write_all(request.to_string().as_bytes()).await?;
     write.write_all(b"\n").await?;
@@ -1194,7 +1272,11 @@ pub(crate) async fn call_tool(
         .await?;
     let response: Value = serde_json::from_str(&line)?;
     if let Some(error) = response["error"].as_str() {
-        return Ok(json!({ "content": [{ "type": "text", "text": error }], "isError": true }));
+        let mut result = json!({ "content": [{ "type": "text", "text": error }], "isError": true });
+        if let Some(secs) = response["retryAfterSecs"].as_u64() {
+            result["_meta"] = json!({ (RETRY_AFTER_META): secs });
+        }
+        return Ok(result);
     }
     let text = match name {
         TOOL_ACCEPT_QUEUED => response["ok"]["text"].as_str().unwrap_or_default().to_owned(),
@@ -1730,12 +1812,65 @@ time.sleep(3600)
     }
 
     #[test]
+    fn tools_list_offers_send_file_in_both_modes() {
+        for can_steer in [true, false] {
+            let list = tools_list_for(can_steer);
+            let tool = list["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == TOOL_SEND_FILE)
+                .expect("send_file listed");
+            assert_eq!(tool["inputSchema"]["required"], json!(["targetSessionId", "path"]));
+            for k in ["targetSessionId", "path", "note"] {
+                assert!(tool["inputSchema"]["properties"][k].is_object(), "{k}");
+            }
+        }
+    }
+
+    #[test]
     fn rate_limit_trips_after_max_sends() {
         for _ in 0..RATE_MAX {
             check_rate("rate-test-session").unwrap();
         }
         assert!(check_rate("rate-test-session").is_err());
         assert!(check_rate("other-session").is_ok());
+    }
+
+    #[test]
+    fn rate_limit_error_says_how_long_to_wait() {
+        for _ in 0..RATE_MAX {
+            check_rate("rate-wait-session").unwrap();
+        }
+        let err = check_rate("rate-wait-session").unwrap_err();
+        let limited = err.downcast_ref::<RateLimited>().expect("a RateLimited error");
+        assert!((1..=RATE_WINDOW.as_secs()).contains(&limited.retry_after_secs), "{}", limited.retry_after_secs);
+        let text = format!("{err:#}");
+        assert!(text.starts_with("rate limit:"), "{text}");
+        assert!(text.contains(&format!("Wait {} seconds", limited.retry_after_secs)), "{text}");
+
+        for _ in 0..PAIR_MAX {
+            check_pair_rate("wait-src", "wait-dst").unwrap();
+        }
+        let err = check_pair_rate("wait-src", "wait-dst").unwrap_err();
+        let limited = err.downcast_ref::<RateLimited>().expect("a RateLimited error");
+        assert!(limited.retry_after_secs > RATE_WINDOW.as_secs() && limited.retry_after_secs <= PAIR_WINDOW.as_secs());
+    }
+
+    #[test]
+    fn wait_is_until_the_slot_that_frees_first_and_rounds_up() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let window = Duration::from_secs(600);
+        // Sends 500s, 300s and 100s ago, budget of 2: the 300s-old one frees the slot (300s left).
+        let at = |ago: u64| now - Duration::from_secs(ago);
+        let recent = [at(500), at(300), at(100)];
+        assert_eq!(wait_secs(&recent, 2, window, now), 300);
+        // Budget of 3 and exactly full: the oldest frees it.
+        assert_eq!(wait_secs(&recent, 3, window, now), 100);
+        // A fraction of a second left rounds up to a whole second.
+        let almost = [now - Duration::from_millis(599_500)];
+        assert_eq!(wait_secs(&almost, 1, window, now), 1);
     }
 
     #[test]
