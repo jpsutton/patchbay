@@ -373,6 +373,14 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
               patchChatStream(convId, { assistantId: e.assistantMessageId });
               if (useStore.getState().activeConversationId === convId) load(convId);
               break;
+            case "snapshot":
+              patchChatStream(convId, (s) => ({
+                assistantId: e.assistantMessageId ?? s.assistantId,
+                text: e.text,
+                reasoning: e.reasoning,
+                status: null,
+              }));
+              break;
             case "text":
               patchChatStream(convId, (s) => ({ text: s.text + e.text, status: null }));
               break;
@@ -392,7 +400,7 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
               break;
             case "done":
               patchChatStream(convId, { running: false });
-              if (e.stopReason !== "cancelled") {
+              if (e.stopReason !== "cancelled" && e.stopReason !== "resynced") {
                 const title = useStore.getState().conversations.find((c) => c.id === convId)?.title ?? "Chat";
                 notifyInBackground("Reply ready", title, { kind: "chat", id: convId });
               }

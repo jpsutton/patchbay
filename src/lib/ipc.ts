@@ -539,9 +539,7 @@ export interface MeshChatEvent {
   conversationId: string;
   streamer: string;
   streamerName: string;
-  event:
-    | ChatEvent
-    | { type: "snapshot"; userMessageId: string | null; assistantMessageId: string | null; text: string; reasoning: string };
+  event: ChatEvent;
 }
 
 /** A session the relaunch picker offers: its active-turn flag was still set at launch. */
@@ -684,6 +682,8 @@ export type AcpConfigChoice =
 
 export type ChatEvent =
   | { type: "started"; userMessageId: string; assistantMessageId: string }
+  /** The reply so far, from the gateway: the phone lost events and starts the reply over from it. */
+  | { type: "snapshot"; userMessageId: string | null; assistantMessageId: string | null; text: string; reasoning: string }
   | { type: "text"; text: string }
   | { type: "reasoning"; text: string }
   | { type: "status"; message: string }

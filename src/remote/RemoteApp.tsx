@@ -67,6 +67,21 @@ const GROUP_KEY = "patchbay.remote.groupCodeByProject";
 const ONLINE_ONLY_KEY = "patchbay.remote.codeOnlineHostsOnly";
 /** Lock again after the app has been out of sight this long. */
 const RELOCK_MS = 5 * 60_000;
+/**
+ * Out of sight this long, the page may have missed events: a hidden WebView runs late or not at
+ * all, and events the backend emits meanwhile are not queued for it. The open sessions start over
+ * from the gateway's snapshot when the app comes back.
+ */
+const RESYNC_AFTER_HIDDEN_MS = 5_000;
+
+/** Sessions being started over from a snapshot: a second trigger meanwhile would race the first. */
+const reattaching = new Set<string>();
+function reattach(id: string) {
+  const st = useStore.getState();
+  if (reattaching.has(id) || !st.code[id]) return;
+  reattaching.add(id);
+  void st.attachAgent(id).finally(() => reattaching.delete(id));
+}
 
 function flag(key: string, dflt: boolean): boolean {
   try {
@@ -337,14 +352,15 @@ function Main({
       }),
       listen("remote://status", () => useStore.getState().refreshMesh()),
       listen<{ id: string; live: Live }>("remote://live", (ev) => setLive((m) => ({ ...m, [ev.payload.id]: ev.payload.live }))),
-      // After a reconnect the gateway no longer had what this phone missed: start that view over.
+      // The gateway no longer had what this phone missed (after a reconnect), or numbers went
+      // missing between the host and this phone: start that view over.
       listen<{ topic: string; snapshot?: { stream?: MeshChatEvent["event"] & Record<string, unknown> } }>("remote://resync", (ev) => {
         const { topic } = ev.payload;
         const s = useStore.getState();
         if (topic === "index") refresh();
         else if (topic.startsWith("session:")) {
           const id = topic.slice("session:".length);
-          if (s.code[id]) s.attachAgent(id);
+          if (s.code[id]) reattach(id);
         } else if (topic.startsWith("chat:")) s.onSynced(["messages"]);
       }),
     ];
@@ -370,7 +386,13 @@ function Main({
       }
       remote.keepAlive(false).catch(() => {});
       remote.kick().catch(() => {});
-      if (flag(LOCK_KEY, false) && hiddenAt.current && Date.now() - hiddenAt.current > RELOCK_MS) onLock();
+      const away = hiddenAt.current ? Date.now() - hiddenAt.current : 0;
+      if (flag(LOCK_KEY, false) && away > RELOCK_MS) onLock();
+      if (away > RESYNC_AFTER_HIDDEN_MS) {
+        const st = useStore.getState();
+        // Only sessions with a live agent: a resync of an exited one would start it again.
+        for (const id of watchedRef.current) if (st.code[id]?.status === "ready") reattach(id);
+      }
       hiddenAt.current = null;
     };
     document.addEventListener("visibilitychange", onVis);

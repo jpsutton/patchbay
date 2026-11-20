@@ -1049,6 +1049,16 @@ impl Inner {
             }
             return;
         }
+        if name == remote::EV_STALE {
+            // The gateway lost its feed for a topic this phone follows: events may be missing.
+            // Looked up first: the lock must not be held while the sink runs.
+            let followed = payload["topic"].as_str().filter(|t| self.st.lock().unwrap().subs.contains_key(*t));
+            if let Some(topic) = followed {
+                self.emit(EV_RESYNC, json!({ "topic": topic, "mode": "stale" }));
+            }
+            return;
+        }
+        let mut gap: Option<String> = None;
         if let Some(topic) = remote::topic_of(name, &payload) {
             let mut st = self.st.lock().unwrap();
             if let Some(buf) = st.pending.get_mut(&topic) {
@@ -1056,10 +1066,21 @@ impl Inner {
                 return;
             }
             if let (Some(sub), Some(p)) = (st.subs.get_mut(&topic), remote::point_of(&payload)) {
+                // Numbers skipped: events went missing between the host and this phone (the
+                // gateway's link to the host dropped, say). Nothing later says so, so start the
+                // view over from a snapshot instead of showing a transcript with a hole in it.
+                // A chat reply's text has the same problem.
+                if sub.as_ref().is_some_and(|last| remote::is_gap(last, &p)) {
+                    gap = Some(topic.clone());
+                }
                 *sub = Some(p);
             }
         }
         self.emit(name, payload);
+        if let Some(topic) = gap {
+            tracing::debug!("remote: gap in {topic}; resyncing");
+            self.emit(EV_RESYNC, json!({ "topic": topic, "mode": "gap" }));
+        }
     }
 
     /// Resubscribe from the last points, then refresh the member list.

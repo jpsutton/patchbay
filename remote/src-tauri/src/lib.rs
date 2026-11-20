@@ -327,6 +327,52 @@ impl Remote {
         }
     }
 
+    /// A reply this phone follows may have lost events (numbers skipped, or the connection to the
+    /// gateway dropped and came back with a snapshot). The gateway's record of the reply so far
+    /// replaces what the view has. A reply the gateway no longer has ended while the phone was
+    /// not listening, and a reply that came from another computer is then marked done.
+    async fn resync_chat(&self, conv: &str) {
+        let all = match self.client.rpc("remote.streams", Value::Null).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!("resyncing {conv}: {e:#}");
+                return;
+            }
+        };
+        let stream = all.as_array().into_iter().flatten().find(|s| s["conversationId"] == conv);
+        let channel = self.channels.lock().unwrap().get(conv).cloned();
+        match (stream, channel) {
+            (Some(s), Some(ch)) => {
+                let _ = ch.send(json!({
+                    "type": "snapshot",
+                    "userMessageId": s["userMessageId"],
+                    "assistantMessageId": s["assistantMessageId"],
+                    "text": s["text"],
+                    "reasoning": s["reasoning"],
+                }));
+            }
+            // A reply this phone started and the gateway doesn't track: nothing to compare with.
+            (None, Some(_)) => {}
+            (stream, None) => {
+                let event = match stream {
+                    Some(s) => json!({
+                        "type": "snapshot",
+                        "userMessageId": s["userMessageId"],
+                        "assistantMessageId": s["assistantMessageId"],
+                        "text": s["text"],
+                        "reasoning": s["reasoning"],
+                    }),
+                    None => json!({ "type": "done", "stopReason": "resynced", "usage": null }),
+                };
+                let who = |k: &str| stream.map(|s| s[k].clone()).unwrap_or(Value::Null);
+                self.emit(
+                    "mesh://chat",
+                    json!({ "conversationId": conv, "streamer": who("streamer"), "streamerName": who("streamerName"), "event": event }),
+                );
+            }
+        }
+    }
+
     async fn code(&self, method: &str, params: Value) -> CmdResult<Value> {
         Ok(self.client.rpc("remote.code", json!({ "method": method, "params": params })).await?)
     }
@@ -1030,6 +1076,13 @@ pub fn run() {
             let handle = app.handle().clone();
             let sink: client::Sink = Arc::new(move |name: &str, payload: Value| {
                 if let Some(r) = handle.try_state::<Arc<Remote>>() {
+                    // A chat reply that may have lost events: fetch the gateway's record of it.
+                    if name == client::EV_RESYNC
+                        && let Some(conv) = payload["topic"].as_str().and_then(|t| t.strip_prefix("chat:"))
+                    {
+                        let (r, conv) = (r.inner().clone(), conv.to_owned());
+                        tauri::async_runtime::spawn(async move { r.resync_chat(&conv).await });
+                    }
                     r.on_event(name, payload);
                 }
             });
