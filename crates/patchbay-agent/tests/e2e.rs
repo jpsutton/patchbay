@@ -861,3 +861,92 @@ async fn a_search_rooted_at_a_link_to_a_share_is_refused_without_asking() {
         }
     }
 }
+
+/// The `goal_update`s seen so far, as (status, rounds).
+fn goal_states(acp: &Acp) -> Vec<(String, u64)> {
+    acp.updates
+        .iter()
+        .filter(|u| u["sessionUpdate"] == "goal_update" && u["goal"].is_object())
+        .map(|u| (u["goal"]["status"].as_str().unwrap().to_owned(), u["goal"]["rounds"].as_u64().unwrap()))
+        .collect()
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_goal_runs_rounds_until_the_check_says_it_is_done() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));
+    let sid = open(&mut acp, &cwd).await;
+    let r = prompt(&mut acp, &sid, "/goal ship it").await;
+    assert_eq!(r["stopReason"], "end_turn");
+    // Two rounds sent the agent back to work; the third check found it done.
+    let states = goal_states(&acp);
+    assert_eq!(states.last(), Some(&("complete".to_owned(), 3)), "{states:?}");
+    assert!(states.contains(&("active".to_owned(), 2)), "{states:?}");
+    assert!(acp.text_of("agent_message_chunk").contains("Goal complete after 3 round(s): cargo test passed"));
+    assert!(acp.text_of("agent_thought_chunk").contains("Goal check, round 1: not complete yet: gap 1"));
+    // The status command answers without a model call.
+    acp.updates.clear();
+    let r = prompt(&mut acp, &sid, "/goal").await;
+    assert_eq!(r["stopReason"], "end_turn");
+    assert!(acp.text_of("agent_message_chunk").contains("Status: complete"));
+    // The goal is on disk: a reload has it.
+    let mut again = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));
+    again.call("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await;
+    again.call("session/load", json!({"sessionId": sid, "cwd": cwd, "mcpServers": []})).await;
+    assert_eq!(goal_states(&again).last(), Some(&("complete".to_owned(), 3)));
+    // Clearing it removes it.
+    prompt(&mut again, &sid, "/goal clear").await;
+    assert!(again.updates.iter().any(|u| u["sessionUpdate"] == "goal_update" && u["goal"].is_null()));
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_goal_that_makes_no_progress_pauses_and_resumes() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));
+    let sid = open(&mut acp, &cwd).await;
+    let r = prompt(&mut acp, &sid, "/goal fix it !gstuck").await;
+    assert_eq!(r["stopReason"], "end_turn");
+    let states = goal_states(&acp);
+    assert_eq!(states.last(), Some(&("paused".to_owned(), 3)), "{states:?}");
+    let last = acp.updates.iter().rev().find(|u| u["sessionUpdate"] == "goal_update").unwrap();
+    assert!(last["goal"]["reason"].as_str().unwrap().contains("same gaps"), "{last}");
+    // A paused goal survives a reload as paused; resuming it starts another stretch.
+    let mut again = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));
+    again.call("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}})).await;
+    again.call("session/load", json!({"sessionId": sid, "cwd": cwd, "mcpServers": []})).await;
+    assert_eq!(goal_states(&again).last(), Some(&("paused".to_owned(), 3)));
+    prompt(&mut again, &sid, "/goal resume").await;
+    assert!(goal_states(&again).contains(&("active".to_owned(), 3)));
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_check_that_does_not_answer_with_a_verdict_never_completes_the_goal() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));
+    let sid = open(&mut acp, &cwd).await;
+    let r = prompt(&mut acp, &sid, "/goal anything !gbad").await;
+    assert_eq!(r["stopReason"], "end_turn");
+    let states = goal_states(&acp);
+    assert_eq!(states.last().map(|s| s.0.as_str()), Some("paused"), "{states:?}");
+    assert!(acp.text_of("agent_message_chunk").contains("the completion check failed"));
+    assert!(!states.iter().any(|s| s.0 == "complete"));
+    let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_goal_is_refused_in_plan_mode() {
+    let cwd = workdir();
+    let mut acp = Acp::start(WireFormat::ChatCompletions, cwd.join("data"));
+    let sid = open(&mut acp, &cwd).await;
+    acp.call("session/set_mode", json!({"sessionId": sid, "modeId": "plan"})).await;
+    prompt(&mut acp, &sid, "/goal ship it").await;
+    assert!(acp.text_of("agent_message_chunk").contains("Leave plan mode first"));
+    assert!(goal_states(&acp).is_empty());
+    let _ = std::fs::remove_dir_all(cwd);
+}
