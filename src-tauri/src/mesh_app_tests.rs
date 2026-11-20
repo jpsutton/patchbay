@@ -1168,6 +1168,42 @@ async fn a_quiet_turn_is_reported_stalled_once_and_cleared_by_activity() {
     assert_eq!(stalls(), 1, "off");
 }
 
+#[tokio::test]
+async fn a_quiet_turn_with_a_pending_tool_and_no_permission_is_stalled() {
+    use code::acp::CodeEvent;
+    let a = node("alpha-stall-tool");
+    let s = a.state.db.create_code_session(&a.dir.to_string_lossy(), None, "opencode", "default").unwrap();
+    let _rx = a.state.code.attach_test_agent(&s.id);
+    let stalls = || {
+        a.events.lock().unwrap().iter().filter(|(n, p)| n == code::acp::EVENT && p["event"]["type"] == "stalled").count()
+    };
+    let activity = || {
+        let listed = list_agent_sessions(&a.state, &s.id).unwrap();
+        let me = listed.as_array().unwrap().iter().find(|x| x["sessionId"] == s.id.as_str()).cloned().unwrap();
+        me["activity"].as_str().unwrap_or_default().to_owned()
+    };
+
+    // Mid-turn with a tool call in progress/pending, and no pending permission
+    a.state.code.set_busy(&s.id, true);
+    emit(&a, &s.id, CodeEvent::Update {
+        update: json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call_1",
+            "title": "git fetch origin",
+            "status": "pending",
+        }),
+    });
+    assert_eq!(activity(), "running");
+
+    // Eleven minutes of quiet
+    let ago = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(11 * 60)).unwrap();
+    a.state.code.stall.touch_at(&s.id, ago, 1);
+    check_stalls(&a.state);
+
+    assert_eq!(stalls(), 1, "check_stalls must fire for quiet turn with pending tool");
+    assert_eq!(activity(), "stalled", "activity must be stalled");
+}
+
 static TRACING_LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 struct TestLogWriter;

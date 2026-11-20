@@ -44,6 +44,7 @@ import { PermissionCard, PlanDocCard, planDocOf, StopButton, ToolCallCard, ToolG
 import { toolDescription } from "./toolLabel";
 import { SignInCard } from "./SignInCard";
 import { WorkingIndicator } from "./WorkingIndicator";
+import { workingStatus } from "../lib/workingStatus";
 import { SubagentsPanel } from "./SubagentsPanel";
 import { TranscriptRows, type TranscriptRow } from "./TranscriptRows";
 import { DiffView, diffStats } from "./DiffView";
@@ -1250,6 +1251,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     el.focus();
   }, [remote, viewActive, activeId, focusStatus]);
   const listenOn = useStore((s) => s.prefs.readAloudListen);
+  const stallNoticeMinutes = useStore((s) => s.prefs.stallNoticeMinutes);
   const skipListen = useRef(false);
   useStopSpeechWhenHidden();
   // Live reading: each agent message is spoken as it finishes, in order, for the length of a
@@ -1702,19 +1704,23 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   }
 
   const needsYou = (s?.permissions.length ?? 0) > 0 || (s?.questions.length ?? 0) > 0 || !!s?.auth;
-  // The status light: amber = needs you, blue = working, green = ready, red = stopped.
+  const toolStallMs = stallNoticeMinutes && stallNoticeMinutes > 0 ? stallNoticeMinutes * 60 * 1000 : undefined;
+  const stalled = working && (s?.stalled != null || (s && workingStatus(toolStallMs ? { ...s, toolStallMs } : s).kind === "stalled"));
+  // The status light: amber = needs you, warn = stalled, blue = working, green = ready, red = stopped.
   const dot = needsYou
     ? { className: "text-accent signal-pulse", halo: 3 }
-    : working
-      ? { className: "text-live", halo: 3 }
-      : status === "ready"
-        ? { className: "text-ok", halo: 3 }
-        : status === "starting"
-          ? { className: "text-accent signal-pulse" }
-          : status === "exited"
-            ? { className: "text-danger" }
-            : { className: "text-faint" };
-  const dotLabel = needsYou ? "needs you" : working ? "working" : status;
+    : stalled
+      ? { className: "text-warn", halo: 3 }
+      : working
+        ? { className: "text-live", halo: 3 }
+        : status === "ready"
+          ? { className: "text-ok", halo: 3 }
+          : status === "starting"
+            ? { className: "text-accent signal-pulse" }
+            : status === "exited"
+              ? { className: "text-danger" }
+              : { className: "text-faint" };
+  const dotLabel = needsYou ? "needs you" : stalled ? "stalled" : working ? "working" : status;
 
   const stopTurn = () => {
     if (s?.busy) skipListen.current = true;
