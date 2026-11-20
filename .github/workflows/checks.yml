@@ -1,10 +1,15 @@
-# Checks on every pull request (into staging and into release): static checks,
-# the frontend's typecheck, build, selftests and notices, the phone app's build,
-# and the Rust unit tests on Linux (and, not yet required, on Windows).
+# Checks on every pull request into release: static checks, the frontend's
+# typecheck, build, selftests and notices, the phone app's build, and the Rust
+# unit tests on Linux (and, not yet required, on Windows).
 # No packages; build.yml does those for release PRs.
 #
-# A pull request that only touches docs skips the heavy jobs. They still report
-# (as skipped), which satisfies the required checks, so the PR can merge.
+# Pull requests into staging run no heavy jobs. staging collects many changes
+# and merges them into one release PR, where these checks run once; rerunning
+# them per staging PR is slow and flaky, and catches nothing the release PR
+# would not. The jobs still report (as skipped), which satisfies the required
+# checks, so the PR can merge.
+#
+# A pull request that only touches docs skips the heavy jobs too, the same way.
 name: checks
 
 on:
@@ -27,16 +32,22 @@ jobs:
   # Whether the pull request changes anything besides docs. Docs are Markdown
   # (except THIRD_PARTY_NOTICES.md, which frontend checks), docs/, LICENSE and
   # NOTICE. Anything else, a manual run, or a PR too big to list counts as source.
+  #
+  # `heavy` is `source` and a release PR (or a manual run): staging PRs run no
+  # heavy jobs, but every job must still report so its required check resolves.
   changes:
     runs-on: ubuntu-latest
     outputs:
       source: ${{ steps.files.outputs.source }}
+      heavy: ${{ steps.files.outputs.heavy }}
     steps:
       - id: files
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
           CHANGED: ${{ github.event.pull_request.changed_files }}
+          BASE_REF: ${{ github.base_ref }}
+          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
           source=false
@@ -61,7 +72,16 @@ jobs:
             done <<< "$files"
           fi
           echo "source=$source" >> "$GITHUB_OUTPUT"
-          [ "$source" = true ] || echo "Docs only: skipping the build and test jobs" >> "$GITHUB_STEP_SUMMARY"
+          heavy=$source
+          if [ "$EVENT" = pull_request ] && [ "$BASE_REF" != release ]; then
+            heavy=false
+          fi
+          echo "heavy=$heavy" >> "$GITHUB_OUTPUT"
+          if [ "$source" = false ]; then
+            echo "Docs only: skipping the build and test jobs" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$heavy" = false ]; then
+            echo "Into staging: skipping the build and test jobs (they run on the release PR)" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   # release only takes what staging has: changes go feature branch -> staging
   # -> release.
@@ -100,7 +120,7 @@ jobs:
   static:
     needs: changes
     # Runs unless changes found docs only; if changes itself failed, this still runs.
-    if: ${{ !cancelled() && needs.changes.outputs.source != 'false' }}
+    if: ${{ !cancelled() && needs.changes.outputs.heavy != 'false' }}
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     steps:
@@ -124,7 +144,7 @@ jobs:
   frontend:
     needs: changes
     # Runs unless changes found docs only; if changes itself failed, this still runs.
-    if: ${{ !cancelled() && needs.changes.outputs.source != 'false' }}
+    if: ${{ !cancelled() && needs.changes.outputs.heavy != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -145,7 +165,7 @@ jobs:
   linux:
     needs: changes
     # Runs unless changes found docs only; if changes itself failed, this still runs.
-    if: ${{ !cancelled() && needs.changes.outputs.source != 'false' }}
+    if: ${{ !cancelled() && needs.changes.outputs.heavy != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -223,7 +243,7 @@ jobs:
   windows:
     needs: changes
     # Runs unless changes found docs only; if changes itself failed, this still runs.
-    if: ${{ !cancelled() && needs.changes.outputs.source != 'false' }}
+    if: ${{ !cancelled() && needs.changes.outputs.heavy != 'false' }}
     runs-on: windows-latest
     continue-on-error: true
     # A cold build compiles Tauri, its plugins and every crate for Windows.
@@ -261,7 +281,7 @@ jobs:
   remote:
     needs: changes
     # Runs unless changes found docs only; if changes itself failed, this still runs.
-    if: ${{ !cancelled() && needs.changes.outputs.source != 'false' }}
+    if: ${{ !cancelled() && needs.changes.outputs.heavy != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -288,7 +308,7 @@ jobs:
   # compile Kotlin or run its simulated API 26–37 lifecycle and speech tests.
   android-speech:
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.source != 'false' }}
+    if: ${{ !cancelled() && needs.changes.outputs.heavy != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
