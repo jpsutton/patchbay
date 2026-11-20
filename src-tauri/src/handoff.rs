@@ -7,8 +7,9 @@
 //! untouched on the source. This only happens when the user moves a session and the source is
 //! online: the working folder is never replicated to other computers on its own.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,10 @@ use crate::db::CodeSession;
 
 /// Largest non-git folder we'll tar up.
 const MAX_TARBALL: u64 = 512 * 1024 * 1024;
+/// Largest workspace bundle we'll build: HEAD plus every uncommitted and untracked (not ignored)
+/// file the receiver doesn't have yet, sized like [`MAX_TARBALL`]. A multi-GB untracked file is
+/// refused before it is bundled or sent (pb-20261108-35), with the reason logged and returned.
+const MAX_BUNDLE: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -116,6 +121,107 @@ fn snapshot(cwd: &Path, reference: &str, scratch: &Path) -> Result<Option<(PathB
     Ok(Some((top, GitMeta { branch, head, commit, reference: reference.to_owned(), remote, subpath, bundle: false })))
 }
 
+/// Every object a bundle for `commit` would carry, leaving out what `known` already has: one
+/// `(sha, path, size)` per object, `path` empty for the ones without one (commits, some trees).
+/// Sizes are the objects' uncompressed sizes, so the sum errs toward refusing — and it is the
+/// same set `git bundle create … ^<known>` ships, so a repeat transfer counts only its delta.
+fn shipped_objects(top: &Path, commit: &str, known: &[String]) -> Result<Vec<(String, String, u64)>> {
+    let mut args: Vec<&str> = vec!["rev-list", "--objects", commit];
+    let have: Vec<&str> = known.iter().map(String::as_str).collect();
+    if !have.is_empty() {
+        args.push("--not");
+        args.extend(have);
+    }
+    let listing = git(top, &args)?;
+    let mut shas = Vec::new();
+    let mut paths = Vec::new();
+    let mut odd = 0;
+    for line in listing.lines() {
+        let mut it = line.splitn(2, ' ');
+        let sha = it.next().unwrap_or_default();
+        // An unrecognised line is refused, not dropped: silently dropping objects here would
+        // under-count the bundle and let an oversized one through.
+        if sha.len() < 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            odd += 1;
+            continue;
+        }
+        shas.push(sha.to_owned());
+        paths.push(it.next().unwrap_or_default().to_owned());
+    }
+    if odd > 0 {
+        bail!("git rev-list --objects printed {odd} object names in an unexpected shape");
+    }
+    if shas.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(top)
+        .args(["cat-file", "--batch-check=%(objectname) %(objectsize)"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    patchbay_agent::proc::NoWindow::no_window(&mut cmd);
+    let mut child = cmd.spawn().context("running git cat-file --batch-check")?;
+    {
+        let mut stdin = child.stdin.take().context("git cat-file --batch-check stdin")?;
+        let mut names = shas.join("\n");
+        names.push('\n');
+        stdin.write_all(names.as_bytes()).context("writing object names to git cat-file")?;
+    }
+    let out = child.wait_with_output().context("running git cat-file --batch-check")?;
+    if !out.status.success() {
+        bail!("git cat-file --batch-check: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let mut sizes = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut it = line.split_whitespace();
+        let name = it.next().unwrap_or_default();
+        let size = it
+            .next()
+            .and_then(|s| s.parse::<u64>().ok())
+            .with_context(|| format!("git cat-file didn't size {name}"))?;
+        sizes.push(size);
+    }
+    if sizes.len() != shas.len() {
+        bail!("git cat-file sized {} of {} objects", sizes.len(), shas.len());
+    }
+    Ok(shas.into_iter().zip(paths).zip(sizes).map(|((sha, path), size)| (sha, path, size)).collect())
+}
+
+/// `bytes` as a person reads it.
+fn fmt_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    match bytes {
+        b if b >= GB => format!("{:.1} GB", b as f64 / GB as f64),
+        b if b >= MB => format!("{:.1} MB", b as f64 / MB as f64),
+        b if b >= KB => format!("{:.1} KB", b as f64 / KB as f64),
+        b => format!("{b} B"),
+    }
+}
+
+/// Why a bundle must not be built, or `None` when it fits: the total the receiver doesn't have
+/// yet (a single file is over the limit when the total is), named with the largest file in it.
+fn oversize_reason(shipped: &[(String, String, u64)], max: u64) -> Option<String> {
+    let total: u64 = shipped.iter().map(|r| r.2).sum();
+    if total <= max {
+        return None;
+    }
+    let largest = match shipped.iter().filter(|r| !r.1.is_empty()).max_by_key(|r| r.2) {
+        Some((_, path, size)) => format!("the largest is `{path}` at {}", fmt_size(*size)),
+        None => "no single file is to blame".to_owned(),
+    };
+    Some(format!(
+        "the copy was skipped: {} of files would travel to the other computer ({} limit); {largest}. \
+         Move it out of the project or add it to .gitignore, then try again.",
+        fmt_size(total),
+        fmt_size(max),
+    ))
+}
+
 /// Package session state into a fresh outbox directory. `have`: commits the receiver already
 /// has, left out of the bundle.
 pub fn package(
@@ -124,6 +230,19 @@ pub fn package(
     s: &CodeSession,
     kind: &str,
     have: &[String],
+) -> Result<(PathBuf, Meta)> {
+    package_with_max(data_dir, agent_home, s, kind, have, MAX_BUNDLE)
+}
+
+/// [`package`] with an explicit bundle limit; tests lower it (a real multi-GB fixture is the
+/// thing this exists to avoid).
+fn package_with_max(
+    data_dir: &Path,
+    agent_home: &Path,
+    s: &CodeSession,
+    kind: &str,
+    have: &[String],
+    max_bundle: u64,
 ) -> Result<(PathBuf, Meta)> {
     let dir = outbox(data_dir).join(format!("{kind}-{}-{}", s.id, crate::db::new_id()));
     std::fs::create_dir_all(&dir)?;
@@ -141,6 +260,15 @@ pub fn package(
             }
             let has_snapshot = known.iter().any(|h| git(&top, &["merge-base", "--is-ancestor", &g.commit, h]).is_ok());
             if !has_snapshot {
+                // Sized before bundling: what the receiver doesn't already have. An oversized
+                // snapshot is refused here, loud in the log and to the caller, instead of being
+                // fanned out (pb-20261108-35).
+                let shipped = shipped_objects(&top, &g.commit, &known)?;
+                if let Some(reason) = oversize_reason(&shipped, max_bundle) {
+                    tracing::warn!(session = %s.id, "{reason}");
+                    let _ = std::fs::remove_dir_all(&dir);
+                    bail!("{reason}");
+                }
                 args.extend(known.iter().map(|h| format!("^{h}")));
                 let refs: Vec<&str> = args.iter().map(String::as_str).collect();
                 git(&top, &refs)?;
@@ -547,5 +675,127 @@ mod tests {
         let t = r#"{"v":1,"entries":[{"kind":"user","text":"fix the bug"},{"kind":"tool","id":"x"},{"kind":"agent","text":"done"}]}"#;
         let p = handoff_prompt(Some(t), "alpha");
         assert!(p.contains("User: fix the bug") && p.contains("Assistant: done") && p.contains("from alpha"));
+    }
+
+    /// A tracing log a test can read, so "loud" is something other than a claim.
+    #[derive(Clone, Default)]
+    struct LogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for LogBuf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+        type Writer = LogBuf;
+        fn make_writer(&'a self) -> LogBuf {
+            self.clone()
+        }
+    }
+
+    /// A move over a low limit: the big untracked file never packages, the skip names it (in the
+    /// log and in the error) with the limit and its size, nothing is left behind to send, and a
+    /// normal staged file still packages at the same limit. pb-20261108-35.
+    #[test]
+    fn an_oversized_untracked_file_is_never_packaged() {
+        let base = std::env::temp_dir().join(format!("pb-handoff-oversize-{}", crate::db::new_id()));
+        let (src, dst, data) = (base.join("src"), base.join("dst"), base.join("data"));
+        std::fs::create_dir_all(&src).unwrap();
+        sh(&src, &["init", "-q", "-b", "main"]);
+        sh(&src, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "root"]);
+        std::fs::write(src.join("a.txt"), "committed").unwrap();
+        sh(&src, &["add", "a.txt"]);
+        sh(&src, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "a"]);
+        // A normal staged file, and a synthetic "large" one: 64 KB is plenty over a 4 KB limit,
+        // and no fixture here is anywhere near a real multi-GB file.
+        std::fs::write(src.join("staged.txt"), "staged, small").unwrap();
+        sh(&src, &["add", "staged.txt"]);
+        const BIG: usize = 64 * 1024;
+        std::fs::write(src.join("large.txt"), vec![b'x'; BIG]).unwrap();
+        const CAP: u64 = 4 * 1024;
+
+        let logs = LogBuf::default();
+        let subscriber =
+            tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).with_max_level(tracing::Level::INFO).finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        let res = package_with_max(&data, &data, &session(&src), "handoff", &[], CAP);
+        drop(guard);
+        let log = String::from_utf8_lossy(&logs.0.lock().unwrap()).into_owned();
+
+        let err = match res {
+            Ok((dir, meta)) => {
+                // The cap did not hold: show what would have shipped, then fail here.
+                unpack(&dir, &meta, &data.join("home2"), &dst, "alpha").unwrap();
+                let shipped = std::fs::metadata(dst.join("large.txt")).map(|m| m.len()).unwrap_or(0);
+                panic!("the cap did not hold: large.txt shipped to the target ({shipped} bytes)");
+            }
+            Err(e) => e.to_string(),
+        };
+        // Raw, so `--nocapture` shows the line a person would see in the logs.
+        println!("logged: {}", log.trim());
+        println!("returned: {err}");
+        // Loud where a person looks: the log line and the error both name the file, the limit
+        // and the file's size.
+        assert!(log.contains("large.txt"), "the skip was not logged: {log}");
+        assert!(log.contains(&fmt_size(CAP)), "the log does not name the limit: {log}");
+        assert!(err.contains("large.txt"), "the error does not name the file: {err}");
+        assert!(err.contains(&fmt_size(CAP)), "the error does not name the limit: {err}");
+        assert!(err.contains(&fmt_size(BIG as u64)), "the error does not name the file's size: {err}");
+        // Nothing a peer could be sent was left behind.
+        let left: Vec<String> = std::fs::read_dir(outbox(&data))
+            .map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+            .unwrap_or_default();
+        assert!(left.is_empty(), "a refused package left something behind: {left:?}");
+
+        // The same limit, without the big file: a normal staged file still packages.
+        std::fs::remove_file(src.join("large.txt")).unwrap();
+        let (dir, meta) = package_with_max(&data, &data, &session(&src), "handoff", &[], CAP).unwrap();
+        assert!(meta.git.as_ref().unwrap().bundle, "the workspace should travel");
+        unpack(&dir, &meta, &data.join("home3"), &dst, "alpha").unwrap();
+        assert_eq!(std::fs::read_to_string(dst.join("staged.txt")).unwrap(), "staged, small");
+        assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "committed");
+    }
+
+    /// The receiver's commits stay out of the next bundle even at a low limit: a repeat transfer
+    /// carries only what changed, and still packages. pb-20261108-35.
+    #[test]
+    fn repeat_transfers_stay_incremental_under_a_low_cap() {
+        let base = std::env::temp_dir().join(format!("pb-handoff-incremental-{}", crate::db::new_id()));
+        let (src, dst, data) = (base.join("src"), base.join("dst"), base.join("data"));
+        std::fs::create_dir_all(&src).unwrap();
+        sh(&src, &["init", "-q", "-b", "main"]);
+        sh(&src, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "root"]);
+        std::fs::write(src.join("a.txt"), "committed").unwrap();
+        sh(&src, &["add", "a.txt"]);
+        sh(&src, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "a"]);
+        std::fs::write(src.join("a.txt"), "edited, not committed").unwrap();
+        std::fs::write(src.join("new.txt"), "untracked").unwrap();
+        const CAP: u64 = 4 * 1024;
+
+        let (d1, m1) = package_with_max(&data, &data, &session(&src), "handoff", &[], CAP).unwrap();
+        assert!(m1.git.as_ref().unwrap().bundle, "the first transfer carries the workspace");
+        unpack(&d1, &m1, &data.join("home2"), &dst, "alpha").unwrap();
+
+        // What a repeat transfer sends: the target's local commits (`local_commits`).
+        let have = vec![git(&dst, &["rev-parse", "HEAD"]).unwrap()];
+        let (d2, m2) = package_with_max(&data, &data, &session(&src), "handoff", &have, CAP).unwrap();
+        let g2 = m2.git.clone().unwrap();
+        assert!(g2.bundle, "the snapshot is not on the target yet, so it travels");
+
+        let top = PathBuf::from(git(&src, &["rev-parse", "--show-toplevel"]).unwrap());
+        let shipped = shipped_objects(&top, &g2.commit, &have).unwrap();
+        let committed = git(&top, &["rev-parse", &format!("{}:a.txt", g2.head)]).unwrap();
+        let edited = git(&top, &["rev-parse", &format!("{}:a.txt", g2.commit)]).unwrap();
+        assert_ne!(committed, edited, "the fixture needs an edit to travel");
+        assert!(!shipped.iter().any(|r| r.0 == committed), "the target already has it: {shipped:?}");
+        assert!(shipped.iter().any(|r| r.0 == edited), "the edit must travel: {shipped:?}");
+
+        // And the bundle the target is actually sent is smaller than the first one.
+        let b1 = std::fs::metadata(d1.join("workspace.bundle")).unwrap().len();
+        let b2 = std::fs::metadata(d2.join("workspace.bundle")).unwrap().len();
+        assert!(b2 < b1, "the repeat bundle ({b2} B) should be smaller than the first ({b1} B)");
     }
 }
