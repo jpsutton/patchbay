@@ -266,14 +266,21 @@ pub async fn load_auth_for(gemini_home: Option<&str>) -> Option<AntigravityAuth>
 
 /// Fetch the quota summary for the local Antigravity OAuth login.
 pub async fn fetch(auth: &AntigravityAuth) -> Result<AntigravityPlanLimits> {
+    fetch_from(QUOTA_URL, auth).await
+}
+
+/// `fetch` against `url` (a test points it at a loopback server).
+async fn fetch_from(url: &str, auth: &AntigravityAuth) -> Result<AntigravityPlanLimits> {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
+        // No redirects: a 3xx would send the bearer token wherever the server points.
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent(auth.user_agent())
         .build()?;
     // Consumer Antigravity accounts use an empty project; `SetProjectID("")` is what the CLI logs.
     // Do not invent a hard-coded GCP project id.
     let resp = http
-        .post(QUOTA_URL)
+        .post(url)
         .header("Authorization", format!("Bearer {}", auth.access_token))
         .header("Content-Type", "application/json")
         .header("x-goog-api-client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
@@ -282,6 +289,9 @@ pub async fn fetch(auth: &AntigravityAuth) -> Result<AntigravityPlanLimits> {
         .send()
         .await?;
     let status = resp.status();
+    if status.is_redirection() {
+        return Err(anyhow!("Antigravity quota answered a redirect (HTTP {status}); Patchbay does not follow redirects with a login token"));
+    }
     let body: Value = resp.json().await?;
     if !status.is_success() {
         return Err(anyhow!("Antigravity quota HTTP {status}"));
@@ -373,6 +383,22 @@ mod tests {
         assert_eq!(l.buckets[0].resets_at, Some(1_793_850_347)); // 2026-11-05T03:45:47Z
         assert!(AntigravityPlanLimits::from_response("x".into(), None, &json!({}), 1).is_none());
         assert!(AntigravityPlanLimits::from_response("x".into(), None, &json!({ "groups": [] }), 1).is_none());
+    }
+
+    /// The quota call does not follow a 302/307 (its bearer token would go with it).
+    #[tokio::test]
+    async fn the_quota_call_does_not_follow_a_redirect() {
+        use std::sync::atomic::Ordering;
+        let auth = AntigravityAuth {
+            access_token: "TOKEN".into(), refresh_token: None, access_expires_at: None,
+            account_id: "account@example.test".into(), email: None, client_version: "9.8.7".into(),
+        };
+        for status in [302u16, 307] {
+            let (base, first, second) = crate::test_support::redirect_trap(status).await;
+            let e = fetch_from(&base, &auth).await.unwrap_err().to_string();
+            assert!(e.contains("redirect") && !e.contains("TOKEN"), "{status}: {e}");
+            assert_eq!((first.load(Ordering::SeqCst), second.load(Ordering::SeqCst)), (1, 0), "{status}: followed");
+        }
     }
 
     #[test]

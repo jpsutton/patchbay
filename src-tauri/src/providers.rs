@@ -836,7 +836,9 @@ pub async fn discover_antigravity_models_with_auth(base_url: &str, auth: &crate:
 /// The POST itself, past the host check (a test points it at a loopback server).
 async fn fetch_antigravity_models(base_url: &str, auth: &crate::antigravity_auth::AntigravityAuth, extras: &Extras) -> Result<Vec<DiscoveredModel>> {
     let url = format!("{}/v1internal:fetchAvailableModels", normalize_base_url(base_url));
-    let mut req = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build()?.post(&url)
+    // No redirects: a 3xx would send the bearer token wherever the server points (pb-20261117-10).
+    let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?;
+    let mut req = http.post(&url)
         .bearer_auth(&auth.access_token)
         .header("User-Agent", auth.user_agent())
         .header("x-goog-api-client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
@@ -846,6 +848,7 @@ async fn fetch_antigravity_models(base_url: &str, auth: &crate::antigravity_auth
     for (name, value) in &extras.headers { req = req.header(name, value); }
     let resp = req.send().await.map_err(reqwest::Error::without_url).with_context(|| format!("POST {url}"))?;
     let status = resp.status();
+    if status.is_redirection() { bail!("POST {url} answered a redirect ({status}); Patchbay does not follow redirects with a login token"); }
     let body: serde_json::Value = resp.json().await.context("parse Antigravity model list")?;
     if !status.is_success() { return Err(anyhow!("POST {url} returned {status}")); }
     let mut out: Vec<_> = body.get("models").and_then(|v| v.as_object()).into_iter().flat_map(|models| models.iter())
@@ -929,6 +932,39 @@ mod tests {
             };
             let e = discover_antigravity_models_with_auth(base, &auth, &Extras::default()).await.unwrap_err().to_string();
             assert!(e.contains("Antigravity login refused") && !e.contains("TOKEN"), "{base}: {e}");
+        }
+    }
+
+    /// Model discovery does not follow a 302/307 (the bearer token would go with it): one hit on the
+    /// origin, none on the redirect target, and the error says why without the token.
+    #[tokio::test]
+    async fn antigravity_discovery_does_not_follow_a_redirect() {
+        use super::*;
+        use std::sync::atomic::Ordering;
+        let auth = crate::antigravity_auth::AntigravityAuth {
+            access_token: "TOKEN".into(), refresh_token: None, access_expires_at: None,
+            account_id: "account@example.test".into(), email: None, client_version: "9.8.7".into(),
+        };
+        for status in [302u16, 307] {
+            let (base, first, second) = crate::test_support::redirect_trap(status).await;
+            let e = fetch_antigravity_models(&base, &auth, &Extras::default()).await.unwrap_err().to_string();
+            assert!(e.contains("redirect") && !e.contains("TOKEN"), "{status}: {e}");
+            assert_eq!((first.load(Ordering::SeqCst), second.load(Ordering::SeqCst)), (1, 0), "{status}: followed");
+        }
+    }
+
+    /// A query or fragment on the base URL is refused, and no error text carries it.
+    #[tokio::test]
+    async fn a_base_url_with_a_query_is_refused_and_never_printed() {
+        use super::*;
+        let auth = crate::antigravity_auth::AntigravityAuth {
+            access_token: "TOKEN".into(), refresh_token: None, access_expires_at: None,
+            account_id: "account@example.test".into(), email: None, client_version: "9.8.7".into(),
+        };
+        for base in ["https://daily-cloudcode-pa.googleapis.com?key=QSECRET", "https://daily-cloudcode-pa.googleapis.com/#FSECRET"] {
+            let e = discover_antigravity_models_with_auth(base, &auth, &Extras::default()).await.unwrap_err();
+            let shown = format!("{e} | {e:#} | {e:?}");
+            assert!(shown.contains("Antigravity login refused") && !shown.contains("SECRET") && !shown.contains("TOKEN"), "{shown}");
         }
     }
 

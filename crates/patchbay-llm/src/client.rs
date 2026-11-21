@@ -116,9 +116,20 @@ impl Config {
 /// peer or a typo could otherwise send every node's login token anywhere, over http too. The one
 /// check every place that attaches that token passes through (pb-20261117-10).
 pub fn require_google_https(base_url: &str) -> Result<()> {
+    // What is checked is what is sent, so nothing a parser would quietly normalize is let through:
+    // surrounding whitespace, a backslash (some parsers read it as a slash), userinfo, and a query
+    // or fragment (a token or key could ride in one, and it would reach logs and error text).
     // `Url` takes the host after any `user@`, so `https://x.googleapis.com@evil.example` is evil.example.
-    let ok = reqwest::Url::parse(base_url.trim())
-        .is_ok_and(|u| u.scheme() == "https" && u.host_str().is_some_and(|h| h.ends_with(".googleapis.com")));
+    let ok = base_url == base_url.trim()
+        && !base_url.contains('\\')
+        && reqwest::Url::parse(base_url).is_ok_and(|u| {
+            u.scheme() == "https"
+                && u.username().is_empty()
+                && u.password().is_none()
+                && u.query().is_none()
+                && u.fragment().is_none()
+                && u.host_str().is_some_and(|h| h.ends_with(".googleapis.com"))
+        });
     if ok {
         Ok(())
     } else {
@@ -179,6 +190,8 @@ impl Client {
     pub fn new(config: Config) -> Self {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(30))
+            // A redirect would carry the key (and any Google token) to wherever the server says.
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("patchbay/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("reqwest client");
@@ -310,6 +323,9 @@ impl Client {
             },
         };
         let status = resp.status();
+        if status.is_redirection() {
+            return Err(Error::new(format!("the server answered a redirect (HTTP {}); Patchbay does not follow redirects with credentials", status.as_u16())));
+        }
         if !status.is_success() {
             let retry_after = resp
                 .headers()
@@ -423,6 +439,9 @@ impl Client {
             .send()
             .await
             .map_err(|e| Error::new(format!("loadCodeAssist request failed: {}", e.without_url())))?;
+        if response.status().is_redirection() {
+            return Err(Error::new(format!("loadCodeAssist answered a redirect (HTTP {}); Patchbay does not follow redirects with a login token", response.status().as_u16())));
+        }
         if !response.status().is_success() {
             return Ok(None);
         }
@@ -584,8 +603,25 @@ mod tests {
             "http://127.0.0.1:9",
             "not a url",
             "",
+            // A trailing dot is a different spelling of the host: refused, not guessed at.
+            "https://daily-cloudcode-pa.googleapis.com.",
+            "https://[::1]",
+            "https://[2001:db8::1]/",
+            "https://evil.example\\@daily-cloudcode-pa.googleapis.com",
+            "https://daily-cloudcode-pa.googleapis.com\\.evil.example",
+            " https://daily-cloudcode-pa.googleapis.com",
+            "https://daily-cloudcode-pa.googleapis.com ",
+            "https://daily-cloudcode-pa.googleapis.com\n",
+            "https://daily-cloudcode-pa.googleapis.com?key=SECRET",
+            "https://daily-cloudcode-pa.googleapis.com/v1?a=b",
+            "https://daily-cloudcode-pa.googleapis.com?",
+            "https://daily-cloudcode-pa.googleapis.com/#frag",
+            "https://daily-cloudcode-pa.googleapis.com#",
+            "https://user:pw@daily-cloudcode-pa.googleapis.com",
         ] {
-            assert!(require_google_https(bad).unwrap_err().message.contains("Antigravity login refused"), "{bad}");
+            let e = require_google_https(bad).unwrap_err().message;
+            assert!(e.contains("Antigravity login refused"), "{bad}");
+            assert!(!e.contains("SECRET") && !e.contains("frag"), "the refusal never echoes the URL: {e}");
         }
     }
 
@@ -600,6 +636,44 @@ mod tests {
         let req = Request { messages: vec![Message::user("hi")], ..Default::default() };
         let err = Client::new(cfg).complete(&req, &CancellationToken::new(), |_| {}).await.unwrap_err();
         assert!(err.message.contains("Antigravity login refused") && !err.message.contains("TOKEN"), "{}", err.message);
+    }
+
+    /// A server that answers 302/307 is NOT followed: the key would go with it. One hit on the
+    /// origin, none on the place it points at, and the error says why.
+    #[tokio::test]
+    async fn a_redirect_is_never_followed_with_the_key() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for status in [302u16, 307] {
+            let (first, second) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+            let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let target_port = target.local_addr().unwrap().port();
+            let hits = second.clone();
+            tokio::spawn(async move {
+                while let Ok((mut s, _)) = target.accept().await {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    let _ = s.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+                }
+            });
+            let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin_port = origin.local_addr().unwrap().port();
+            let hits = first.clone();
+            tokio::spawn(async move {
+                while let Ok((mut s, _)) = origin.accept().await {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    let mut buf = vec![0u8; 16384];
+                    let _ = s.read(&mut buf).await;
+                    let _ = s.write_all(format!("HTTP/1.1 {status} Redirect\r\nlocation: http://127.0.0.1:{target_port}/x\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").as_bytes()).await;
+                }
+            });
+            let mut cfg = Config::new(WireFormat::Gemini, format!("http://127.0.0.1:{origin_port}"), "m");
+            cfg.key = Some("KEY".into());
+            cfg.max_retries = 0;
+            let req = Request { messages: vec![Message::user("hi")], ..Default::default() };
+            let err = Client::new(cfg).complete(&req, &CancellationToken::new(), |_| {}).await.unwrap_err();
+            assert!(err.message.contains("redirect") && !err.message.contains("KEY"), "{status}: {}", err.message);
+            assert_eq!((first.load(Ordering::SeqCst), second.load(Ordering::SeqCst)), (1, 0), "{status}: followed or retried");
+        }
     }
 
     #[test]

@@ -508,21 +508,30 @@ fn find_gocspx_secrets(data: &[u8]) -> Vec<String> {
 
 async fn refresh_access_token(home: PathBuf, refresh_token: String) -> Result<(String, i64)> {
     let clients = tokio::task::spawn_blocking(move || oauth_clients(&home)).await??;
-    let http = reqwest::Client::builder().timeout(Duration::from_secs(20)).build()?;
+    refresh_at(TOKEN_URL, &clients, &refresh_token).await
+}
+
+/// The refresh POST against `url` (a test points it at a loopback server).
+async fn refresh_at(url: &str, clients: &[OauthClient], refresh_token: &str) -> Result<(String, i64)> {
+    // No redirects: a 3xx would send the refresh token and client secret wherever the server points.
+    let http = reqwest::Client::builder().timeout(Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none()).build()?;
     let mut last_status = None;
-    for client in &clients {
+    for client in clients {
         let response = http
-            .post(TOKEN_URL)
+            .post(url)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .form(&[
                 ("client_id", client.client_id.as_str()),
                 ("client_secret", client.client_secret.as_str()),
-                ("refresh_token", refresh_token.as_str()),
+                ("refresh_token", refresh_token),
                 ("grant_type", "refresh_token"),
             ])
             .send()
             .await?;
         let status = response.status();
+        if status.is_redirection() {
+            return Err(anyhow!("Google token refresh answered a redirect (HTTP {status}); Patchbay does not follow redirects with a login token"));
+        }
         let body: Value = response.json().await?;
         if !status.is_success() { last_status = Some(status); continue; }
         let access = body.get("access_token").and_then(Value::as_str).filter(|s| !s.is_empty()).ok_or_else(|| anyhow!("token refresh response missing access_token"))?;
@@ -549,6 +558,19 @@ mod tests {
 
     /// No email: the account id is a hash, never token text, and a non-ASCII token (a byte-16 slice
     /// would split a character and panic) is fine.
+    /// The refresh call carries the refresh token and the client secret: it must not follow a 302/307.
+    #[tokio::test]
+    async fn the_refresh_call_does_not_follow_a_redirect() {
+        use std::sync::atomic::Ordering;
+        let clients = [OauthClient { client_id: "ID".into(), client_secret: "CSECRET".into() }];
+        for status in [302u16, 307] {
+            let (base, first, second) = crate::test_support::redirect_trap(status).await;
+            let e = refresh_at(&base, &clients, "RTOKEN").await.unwrap_err().to_string();
+            assert!(e.contains("redirect") && !e.contains("RTOKEN") && !e.contains("CSECRET"), "{status}: {e}");
+            assert_eq!((first.load(Ordering::SeqCst), second.load(Ordering::SeqCst)), (1, 0), "{status}: followed");
+        }
+    }
+
     #[test]
     fn the_fallback_account_id_is_a_hash_never_token_text() {
         let token = format!("a{}SECRETTAIL", "é".repeat(10));
