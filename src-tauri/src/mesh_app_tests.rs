@@ -22,6 +22,8 @@ const PHONE_GATEWAY_SWITCH_SAFETY_NET: u64 = 120;
 struct Node {
     state: AppState,
     events: Arc<Mutex<Vec<(String, Value)>>>,
+    /// When each of `events` arrived, index for index (pb-20261117-22: how late a notice came).
+    stamps: Arc<Mutex<Vec<std::time::Instant>>>,
     /// LAST, so it drops after the database and mesh above have let go of their files.
     dir: crate::test_support::TestDir,
 }
@@ -46,9 +48,14 @@ fn node(name: &str) -> Node {
     // Poison-proof: a test that fails while it holds `events` (an assert message printing them) poisons
 // the lock, and a sink that then panics inside `Node::drop` turns that failure into an abort ("panic
 // in a destructor during cleanup") with the real assertion lost.
-    let emit: mesh::node::UiSink =
-        Arc::new(move |n: &str, p: Value| ev.lock().unwrap_or_else(|e| e.into_inner()).push((n.to_owned(), p)));
-    Node { state: AppState::new(db, dir.to_path_buf(), mesh, emit), events, dir }
+    let stamps = Arc::new(Mutex::new(Vec::new()));
+    let st = stamps.clone();
+    let emit: mesh::node::UiSink = Arc::new(move |n: &str, p: Value| {
+        let mut events = ev.lock().unwrap_or_else(|e| e.into_inner());
+        events.push((n.to_owned(), p));
+        st.lock().unwrap_or_else(|e| e.into_inner()).push(std::time::Instant::now());
+    });
+    Node { state: AppState::new(db, dir.to_path_buf(), mesh, emit), events, stamps, dir }
 }
 
 /// A node's folder (database, WAL, attachment stores) is gone once the node is dropped: these
@@ -3578,7 +3585,7 @@ async fn quit_notices_leave_no_orphan_agents() {
 /// where the mesh lives (their sink is a collector with no mesh behind it).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dropped_queue_tells_its_senders() {
-    let n = node("alpha-queue-dropped");
+    let (n, log) = logging_node("alpha-queue-dropped");
     seed_mock_model(&n);
     let proj = n.dir.join("proj");
     repo(&proj);
@@ -3593,6 +3600,7 @@ async fn a_dropped_queue_tells_its_senders() {
         preview: "queued words".into(),
         origin: format!("agent:{}:{}", n.state.mesh.node_id(), sender.id),
     }];
+    let t0 = std::time::Instant::now();
     crate::on_code_event(
         &n.state,
         code::acp::Envelope {
@@ -3619,7 +3627,45 @@ async fn a_dropped_queue_tells_its_senders() {
     }
     // Cloned first: the guard must not be held (and poisoned) while the assertion panics.
     let seen = n.events.lock().unwrap().clone();
-    assert!(woke, "the sender was told its queued message was dropped: {seen:?}");
+    // How long each event took, so a failure says late or never, and a pass says how close it ran.
+    let at: Vec<u128> = n.stamps.lock().unwrap().iter().map(|t| t.saturating_duration_since(t0).as_millis()).collect();
+    let timeline: Vec<String> = seen
+        .iter()
+        .zip(&at)
+        .map(|((_, p), ms)| {
+            let who: String = p["codeSessionId"].as_str().unwrap_or("?").chars().take(8).collect();
+            format!("{ms}ms {who}:{}", p["event"]["type"].as_str().unwrap_or("?"))
+        })
+        .collect();
+    assert!(
+        woke,
+        "the sender was told its queued message was dropped. Timeline since the drop: {timeline:?}. Notices that failed to deliver: {:?}. Events: {seen:?}",
+        lines_with(&log, "msg_notice_failed")
+    );
+    eprintln!("a_dropped_queue_tells_its_senders: notice seen after {}ms", t0.elapsed().as_millis());
+}
+
+/// pb-20261117-22: a notice to a sender that cannot be delivered leaves a line in the delivery log
+/// (and a warning) instead of vanishing: the two session ids and a fixed `kind`, never the message
+/// or the error's text. A sender session that does not exist is the plainest refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_notice_that_cannot_be_delivered_is_logged_with_its_kind() {
+    let (n, log) = logging_node("alpha-notice-failed");
+    seed_mock_model(&n);
+    let proj = n.dir.join("proj");
+    repo(&proj);
+    let target = n.state.db.create_code_session(&proj.to_string_lossy(), None, "patchbay", "default").unwrap();
+    let entries = vec![code::acp::QueuedAgentMessage {
+        message_id: "m-lost-1".into(),
+        preview: "SECRET-BODY".into(),
+        origin: format!("agent:{}:no-such-session", n.state.mesh.node_id()),
+    }];
+    crate::tell_senders_of_dropped(&n.state, &target.id, entries, "the agent crashed").await;
+    let lines = lines_with(&log, "msg_notice_failed");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("kind=not_found"), "{}", lines[0]);
+    assert!(lines[0].contains("sender=no-such-session") && lines[0].contains(&format!("target={}", target.id)), "{}", lines[0]);
+    assert!(!log_text(&log).contains("SECRET-BODY") && !lines[0].contains("crashed"), "no message text in the log");
 }
 
 /// pb-20261107-30 (advisor condition 2, NO LOOP): once the quit guard is set, deliveries to
