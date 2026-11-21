@@ -75,7 +75,7 @@ David and Jared's project accepts the residual risk that Google may change or di
 
 ## Not covered
 
-- ChatGPT/Codex and Copilot subscription designs (tracked separately under `pb-20261111-33`).
+- ChatGPT/Codex subscription login: see [`codex-login.md`](codex-login.md) (`pb-20261111-33`). GitHub Copilot was dropped from scope (2026-11-20).
 - Turn cancellation, send gating, and auto-resume (`pb-20261117-11`).
 - Changes to the existing ACP `AgentKind::Antigravity` path.
 - Interactive sign-in UI or authorization-code flow implementation in this design phase.
