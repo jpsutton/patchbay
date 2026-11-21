@@ -18,17 +18,20 @@ export interface SlimResult {
 }
 
 const hasImage = (tc: AcpToolCall) => !!tc.content?.some((c) => c.type === "content" && c.content.type === "image");
-const hasPayload = (tc: AcpToolCall) => !!tc.content?.length || tc.rawInput != null || tc.rawOutput != null;
+const IMAGE_NOTE = "Image not kept: the saved transcript was too large.";
+// A call an earlier slimming already stripped (only our note left) has no payload to drop again.
+const onlyNote = (tc: AcpToolCall) => tc.content?.length === 1 && tc.content[0].type === "content" && tc.content[0].content.type === "text" && tc.content[0].content.text === IMAGE_NOTE;
+const hasPayload = (tc: AcpToolCall) => (!!tc.content?.length && !onlyNote(tc)) || tc.rawInput != null || tc.rawOutput != null;
 
 /** `tc` without its payload; a dropped image inside it leaves a visible note. */
 function stripCall(tc: AcpToolCall): AcpToolCall {
   const content: AcpToolCall["content"] = hasImage(tc)
-    ? [{ type: "content", content: { type: "text", text: "Image not kept: the saved transcript was too large." } }]
+    ? [{ type: "content", content: { type: "text", text: IMAGE_NOTE } }]
     : null;
   return { ...tc, content, rawInput: null, rawOutput: null };
 }
 
-const noImage = (): any => ({ kind: "info", text: "Image not kept: the saved transcript was too large." });
+const noImage = (): any => ({ kind: "info", text: IMAGE_NOTE });
 
 /**
  * The transcript JSON to save. Under the budget it is exactly what `JSON.stringify` gives.
@@ -46,7 +49,7 @@ export function slimTranscript(entries: any[], toolCalls: Record<string, AcpTool
   const mainEntries = entries.filter((e) => !isNote(e));
 
   const parts: Part[] = [];
-  if (earlier) parts.push({ entries: earlier.entries, toolCalls: { ...earlier.toolCalls } });
+  if (earlier) parts.push({ entries: [...earlier.entries], toolCalls: { ...earlier.toolCalls } });
   parts.push({ entries: [...mainEntries], toolCalls: { ...toolCalls } });
 
   // Reserve room for the note we add.
@@ -74,7 +77,7 @@ export function slimTranscript(entries: any[], toolCalls: Record<string, AcpTool
 
   const note = {
     kind: "info",
-    text: `${NOTE_PREFIX}: the oldest ${dropped.toolOutputs} tool outputs and ${dropped.images} images were not kept.`,
+    text: `${NOTE_PREFIX}: the oldest ${dropped.toolOutputs} tool output${dropped.toolOutputs === 1 ? "" : "s"} and ${dropped.images} image${dropped.images === 1 ? "" : "s"} were not kept.`,
   };
   const main = parts[parts.length - 1];
   const json = JSON.stringify({
@@ -83,5 +86,5 @@ export function slimTranscript(entries: any[], toolCalls: Record<string, AcpTool
     entries: [note, ...main.entries],
     toolCalls: main.toolCalls,
   });
-  return { json, dropped, tooBig: json.length > TRANSCRIPT_HARD_MAX };
+  return { json, dropped, tooBig: new TextEncoder().encode(json).length > TRANSCRIPT_HARD_MAX };
 }

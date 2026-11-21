@@ -296,11 +296,14 @@ function saveFailed(id: string, why: unknown) {
   console.error(`saving the transcript of ${id} failed:`, why);
   if (saveFailureShown.has(id)) return;
   saveFailureShown.add(id);
-  const note: Entry = { kind: "info", text: "The saved transcript could not be updated (too large), so other devices and a reload may show older history." };
-  useStore.setState((st) => {
-    const s = st.code[id];
-    return s ? { code: { ...st.code, [id]: { ...s, entries: [...s.entries, note] } } } : st;
-  });
+  const note: Entry = { kind: "info", text: "The saved transcript could not be updated, so other devices and a reload may show older history." };
+  // Deferred: a save from inside the reducer would be overwritten by the batch's own store update.
+  queueMicrotask(() =>
+    useStore.setState((st) => {
+      const s = st.code[id];
+      return s ? { code: { ...st.code, [id]: { ...s, entries: [...s.entries, note] } } } : st;
+    }),
+  );
 }
 
 /** Persist what the transcript shows, so the session renders before the agent replays it. */

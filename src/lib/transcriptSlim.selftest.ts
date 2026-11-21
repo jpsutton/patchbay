@@ -86,6 +86,26 @@ const kept = (c: any) => c.content != null || c.rawInput != null || c.rawOutput 
   assert(twice.entries.filter((e: any) => e.kind === "info").length === 1, "one note");
 }
 
+// The caller's state is never mutated, and re-slimming does not recount stripped calls.
+{
+  const e = build(3, 10_000, [0]);
+  e.entries.unshift({ kind: "image", data: blob(50_000), mimeType: "image/png" });
+  const m = build(3, 10_000);
+  const before = JSON.stringify([e, m]);
+  const r1 = slimTranscript(m.entries, m.toolCalls, e, 1_000);
+  assert(JSON.stringify([e, m]) === before, "inputs unchanged after slimming");
+  assert(r1.dropped.images === 2 && r1.dropped.toolOutputs === 6, "everything dropped and counted");
+  const o = parse(r1.json);
+  const r2 = slimTranscript(o.entries, o.toolCalls, o.earlier, 1_000);
+  assert(r2.dropped.images === 0 && r2.dropped.toolOutputs === 0, "stripped calls are not recounted");
+}
+
+// The backend cap is bytes: multibyte text over it is tooBig though its length is under.
+{
+  const r = slimTranscript([{ kind: "agent", text: "é".repeat(2_200_000) }], {}, undefined, 1000);
+  assert(r.tooBig, "bytes, not characters");
+}
+
 // Still too big after dropping everything: reported.
 {
   const entries = [{ kind: "agent", text: blob(TRANSCRIPT_HARD_MAX + 10) }];
