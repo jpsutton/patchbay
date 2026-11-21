@@ -262,6 +262,7 @@ const AGENT_PREF_KEYS: (keyof Preferences)[] = [
   "claudeConfig",
   "agentPaths",
   "agentProviders",
+  "codexQuestionForms",
 ];
 
 /** Saved preferences with defaults filled in for anything an older backend leaves out. */

@@ -1093,6 +1093,8 @@ export interface Preferences {
   autoArchiveDays: number | null;
   /** Say so, and mark the session, when a turn has had nothing from its agent this many minutes; 0 = off. */
   stallNoticeMinutes: number;
+  /** Codex asks through question cards (its `default_mode_request_user_input` feature). Off by default. */
+  codexQuestionForms: boolean;
   permissionMode: "default" | "auto" | "always-approve";
   agentInstructions: string;
   webFetch: boolean;
@@ -1146,6 +1148,7 @@ export const defaultPreferences: Preferences = {
   cursorUsageLimit: { enabled: false, percent: 95, autoResume: false },
   autoArchiveDays: null,
   stallNoticeMinutes: 10,
+  codexQuestionForms: false,
   permissionMode: "default",
   agentInstructions: "",
   webFetch: false,
