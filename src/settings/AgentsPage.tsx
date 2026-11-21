@@ -829,6 +829,18 @@ export function AgentPage({ id, list }: { id: AgentId; list: AgentList }) {
         <UsageLimit agent={a.id} />
       )}
       {a.id === "cursor" && <CursorUsageLimit />}
+      {a.id === "codex" && (
+        <Row
+          label="Ask questions in a card"
+          hint="Turns on Codex's experimental default_mode_request_user_input feature and tells Codex to ask with it, so its questions arrive as a question card. Without it Codex can ask in a way the ACP adapter drops, and you only see that it asked. Idle sessions restart to apply it; busy ones after their turn."
+        >
+          <Toggle
+            label="Ask questions in a card"
+            checked={prefs.codexQuestionForms}
+            onChange={(codexQuestionForms) => update({ codexQuestionForms })}
+          />
+        </Row>
+      )}
       {a.id === "antigravity" && !a.available && (
         <div className="mt-4 rounded-lg border border-border bg-panel-2/50 p-4">
           <div className="flex items-center justify-between gap-4">
