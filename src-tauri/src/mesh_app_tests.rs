@@ -5442,3 +5442,51 @@ async fn worker_in_own_worktree_attaches_beside_a_live_coordinator() {
     let worker = a.state.db.create_code_session(&tree.to_string_lossy(), None, "patchbay", "default").unwrap();
     teams::team_attach(&a.state, team, worker.id, "workers".into()).await.unwrap();
 }
+
+/// pb-20261121-01: a permission answer that cannot reach the node hosting the session must fail
+/// loudly and leave the card open. It must never answer `None`, which the agent reports as the
+/// user rejecting the tool call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mesh_rpc_failure_never_answers_a_card() {
+    let a = node("alpha");
+    let proj = a.dir.join("proj");
+    repo(&proj);
+    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None, "claude-code", "default").unwrap();
+    a.state.db.set_code_session_host(&s.id, "ghost-node-not-in-the-mesh", &proj.to_string_lossy(), None).unwrap();
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    a.state.code.pending.lock().unwrap().insert(
+        "card".into(),
+        code::acp::PendingPermission { session_id: s.id.clone(), target_session_id: None, local_human_only: false, offered: vec![], tx },
+    );
+    let res = code_permission_respond(&a.state, "card".into(), None, Some(s.id.clone())).await;
+    assert!(res.is_err(), "the answer did not reach the host, so it is an error");
+    assert!(rx.try_recv().is_err(), "nothing was answered: not `None`, not an option");
+    assert!(a.state.code.pending.lock().unwrap().contains_key("card"), "the card is still open");
+}
+
+/// pb-20261121-01: a turn cancelled with a card open ends with no failure, so its senders would
+/// hear nothing. The cancel's reason becomes the failure kind, once; a turn that ended any other
+/// way drops a note left for it, so a later cancel is never blamed for an older reason.
+#[test]
+fn a_cancelled_turn_tells_its_senders_the_reason_once() {
+    let a = node("alpha");
+    let ended = |outcome: &'static str| turn_failure::TurnEnded {
+        session_id: "s1".into(),
+        turn_id: "t".into(),
+        outcome,
+        messages: vec![],
+        tool_calls: 0,
+        failure: None,
+    };
+    let note = || code::cancel_note::Note::new("the 5-hour usage limit was reached (99%); it resets in 1h", "usage_limit_stop", Some(1_800_000_000));
+    a.state.code.cancel_notes.record("s1", note(), true, true);
+    let mut e = ended("cancelled");
+    assert!(cancel_reason_as_failure(&a.state, &mut e));
+    assert_eq!(e.failure, Some(turn_failure::Failure { kind: "usage_limit_stop".into(), resets_at: Some(1_800_000_000) }));
+    let mut again = ended("cancelled");
+    assert!(!cancel_reason_as_failure(&a.state, &mut again), "told once");
+    // A note left, then the turn finished normally: the note is stale and goes.
+    a.state.code.cancel_notes.record("s1", note(), true, true);
+    assert!(!cancel_reason_as_failure(&a.state, &mut ended("ok")));
+    assert!(!cancel_reason_as_failure(&a.state, &mut ended("cancelled")), "a later cancel is not blamed on the old reason");
+}

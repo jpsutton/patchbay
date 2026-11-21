@@ -142,6 +142,19 @@ impl Hit {
         )
     }
 
+    /// What the agent and the senders of its messages are told the stop was for (pb-20261121-01):
+    /// no account name, since that can be an email.
+    pub fn reason(&self, now: i64) -> String {
+        if self.what == "extra usage" {
+            format!("the plan is past its limits and using extra usage; it resets in {}", fmt_wait(self.resets_at - now))
+        } else {
+            format!(
+                "the {} usage limit was reached ({}%); it resets in {}",
+                self.what, self.percent, fmt_wait(self.resets_at - now)
+            )
+        }
+    }
+
     /// The refusal an agent's message gets when the RECIPIENT's account is over: it names the
     /// recipient and its account, and never says the sender used anything.
     pub fn recipient_message(&self, limit: u8, now: i64, target: &str) -> String {
