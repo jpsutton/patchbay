@@ -156,6 +156,28 @@ fn mcp_log_append(path: &Path, line: &str) {
     })();
 }
 
+/// Why a notice to a sender was refused, as a fixed word for the log. Matches on the refusal's
+/// leading text only, so no title, id or account detail reaches the log. `plan_limit` is the
+/// recipient's usage-limit stop (`Not sent. ...`), which a notice can hit like any prompt.
+pub(crate) fn notice_failure_kind(e: &anyhow::Error) -> &'static str {
+    let t = e.to_string();
+    if t.starts_with("Not sent.") {
+        "plan_limit"
+    } else if t.contains("agent stopped") {
+        "agent_stopped"
+    } else if t.contains("is closing") {
+        "closing"
+    } else if t.contains("not found") {
+        "not_found"
+    } else if t.contains("archived") {
+        "archived"
+    } else if t.contains("not hosted") || t.contains("no longer hosted") || t.contains("being moved") {
+        "not_hosted"
+    } else {
+        "other"
+    }
+}
+
 fn mcp_log_event(path: Option<&Path>, event: &str, fields: &[(&str, String)]) {
     let Some(path) = path else { return };
     let mut line = format!("ts={} event={event}", now_ms());
@@ -378,6 +400,16 @@ impl AgentMessagingBridge {
         let mut all = vec![("src", "delivery".to_owned())];
         all.extend(fields.iter().map(|(k, v)| (*k, safe_field(v))));
         mcp_log_event(self.mcp_log_path.as_deref(), event, &all);
+    }
+
+    /// A notice to a sender (a dropped queue, a failed turn) that could not be handed over: the
+    /// sender and target sessions and a structured `kind` (see [`notice_failure_kind`]), never the
+    /// error's text, a title or a message body.
+    pub(crate) fn log_notice_failed(&self, sender: &str, target: &str, kind: &str) {
+        self.log_delivery_line(
+            "msg_notice_failed",
+            &[("sender", sender.to_owned()), ("target", target.to_owned()), ("kind", kind.to_owned())],
+        );
     }
 
     /// The message was handed to the target: `delivery` is `sent` (a new turn) or `steered` (into
@@ -1386,6 +1418,20 @@ impl AgentMessagingBridge {
 
 #[cfg(test)]
 mod tests {
+    /// pb-20261117-22: the recipient's usage-limit stop reads as its own kind in the delivery log,
+    /// apart from a vanished sender or a stopped agent.
+    #[test]
+    fn a_notice_refusal_is_told_apart_by_its_kind() {
+        let kind = |m: &str| notice_failure_kind(&anyhow::anyhow!("{m}"));
+        assert_eq!(kind("Not sent. Alice's plan is at 99%"), "plan_limit");
+        assert_eq!(kind("agent stopped"), "agent_stopped");
+        assert_eq!(kind("the target session is closing; send again after Patchbay reopens it"), "closing");
+        assert_eq!(kind("source Code session was not found"), "not_found");
+        assert_eq!(kind("target Code session is archived"), "archived");
+        assert_eq!(kind("target session is no longer hosted here"), "not_hosted");
+        assert_eq!(kind("something new"), "other");
+    }
+
     use super::*;
 
     // ---- supervisor-side log of the MCP children Patchbay hosts itself (pb-20261110-12) ----

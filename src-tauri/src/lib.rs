@@ -3332,7 +3332,20 @@ async fn tell_senders_of_dropped(
             m.message_id, target_title, target_id, reason
         );
         // from_node is THIS node (the queue's host runs the notice); the target may be remote.
-        let _ = send_agent_message(state, state.mesh.node_id(), target_id, session, &text).await;
+        let sent = send_agent_message(state, state.mesh.node_id(), target_id, session, &text).await;
+        note_notice_failure(state, session, target_id, sent);
+    }
+}
+
+/// A notice to a sender that could not be delivered leaves a trace (pb-20261117-22): a warning and a
+/// `msg_notice_failed` line in the delivery log, with the two session ids and a fixed `kind`
+/// (`plan_limit` is the recipient's usage-limit stop). Never the error's text or a message body.
+fn note_notice_failure(state: &AppState, sender_session: &str, target_id: &str, sent: anyhow::Result<serde_json::Value>) {
+    let Err(e) = sent else { return };
+    let kind = agent_messaging::notice_failure_kind(&e);
+    tracing::warn!(sender = sender_session, target = target_id, kind, "a notice to a sender was not delivered");
+    if let Some(bridge) = state.agent_message_bridge.get() {
+        bridge.log_notice_failed(sender_session, target_id, kind);
     }
 }
 
@@ -3365,7 +3378,8 @@ async fn notify_turn_failure(state: &AppState, ended: turn_failure::TurnEnded) {
         };
         let notice = turn_failure::notice_json(&m.id, target_id, &title, &failure, rewake_at);
         let text = format!("{} {notice}", turn_failure::NOTICE_TAG);
-        let _ = send_agent_message(state, state.mesh.node_id(), target_id, sender_session, &text).await;
+        let sent = send_agent_message(state, state.mesh.node_id(), target_id, sender_session, &text).await;
+        note_notice_failure(state, sender_session, target_id, sent);
     }
 }
 
