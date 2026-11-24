@@ -1540,11 +1540,11 @@ mod tests {
         std::fs::write(cwd.join("a.bin"), "x").unwrap();
         // Setup runs without the user's global config (it may hold a real lfs filter) and without our overrides.
         for args in [&["add", "-A", "--"][..], &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base"][..]] {
-            assert!(std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").arg("-C").arg(&cwd).args(args).status().unwrap().success());
+            assert!(std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(&cwd).args(args).status().unwrap().success());
         }
         git(&cwd, &["config", "filter.lfs.process", &format!("touch {}", marker.display())]).unwrap();
         let control = d.join("control");
-        let out = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").arg("-C").arg(&cwd).args(["worktree", "add", "-q", "-b", "control", "--"]).arg(&control).arg("main").output().unwrap();
+        let out = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(&cwd).args(["worktree", "add", "-q", "-b", "control", "--"]).arg(&control).arg("main").output().unwrap();
         assert!(marker.exists(), "control: plain git starts the filter: {}", String::from_utf8_lossy(&out.stderr));
         std::fs::remove_file(&marker).unwrap();
         let made = make_worktree(&team, "DM-20261109-01", "HEAD", false);
@@ -1589,7 +1589,7 @@ mod tests {
         git(&cwd, &["config", "remote.p.promisor", "true"]).unwrap();
         git(&cwd, &["config", "remote.p.uploadpack", &format!("touch {}; false #", marker.display())]).unwrap();
         let control = d.join("control");
-        let out = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").arg("-C").arg(&cwd).args(["worktree", "add", "-q", "-b", "control", "--"]).arg(&control).arg("main").output().unwrap();
+        let out = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(&cwd).args(["worktree", "add", "-q", "-b", "control", "--"]).arg(&control).arg("main").output().unwrap();
         assert!(marker.exists(), "control: plain git runs the upload-pack for a missing blob: {}", String::from_utf8_lossy(&out.stderr));
         std::fs::remove_file(&marker).unwrap();
         // The wrapper itself, below the config refusal: the env switch is the second line of defence.
@@ -1667,7 +1667,7 @@ mod tests {
     fn a_fresh_spawn_neutralises_the_exact_lfs_filters_at_checkout() {
         let (d, _t, team) = setup();
         let cwd = d.join("proj");
-        let plain = |args: &[&str]| assert!(std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").arg("-C").arg(&cwd).args(args).output().unwrap().status.success(), "{args:?}");
+        let plain = |args: &[&str]| assert!(std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(&cwd).args(args).output().unwrap().status.success(), "{args:?}");
         plain(&["init", "-q", "-b", "main"]);
         std::fs::write(cwd.join(".gitattributes"), "* filter=lfs\n").unwrap();
         std::fs::write(cwd.join("a.txt"), "x").unwrap();
@@ -1679,8 +1679,11 @@ mod tests {
         plain(&["config", "filter.lfs.process", &format!("touch {}", marker.display())]);
         plain(&["config", "filter.lfs.required", "true"]);
         let control = d.join("control");
-        let _ = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").arg("-C").arg(&cwd).args(["worktree", "add", "-q", "-b", "control", "--"]).arg(&control).arg("main").output().unwrap();
-        assert!(marker.exists(), "control: plain git runs the lfs filter at checkout");
+        // Setup and control run without system config: a runner with `git lfs install --system` would turn the
+        // committed .gitattributes (`* filter=lfs` matches itself) into an LFS pointer and break the attributes.
+        let out = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(&cwd).args(["worktree", "add", "-q", "-b", "control", "--"]).arg(&control).arg("main").output().unwrap();
+        let version = String::from_utf8_lossy(&std::process::Command::new("git").arg("--version").output().unwrap().stdout).trim().to_owned();
+        assert!(marker.exists(), "control: plain git runs the lfs filter at checkout ({version}; control stderr: {})", String::from_utf8_lossy(&out.stderr));
         std::fs::remove_file(&marker).unwrap();
         let made = make_worktree(&team, "DM-20261109-01", "HEAD", false);
         assert!(!marker.exists(), "the overrides keep the lfs filter from running at checkout");
@@ -1714,7 +1717,7 @@ mod tests {
         let esc = std::ffi::OsStr::from_bytes(b"filter.a\x1b[2Jb.smudge");
         let long = format!("filter.{}.smudge", "a".repeat(300));
         for key in [esc.to_os_string(), long.clone().into()] {
-            let out = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").arg("-C").arg(&cwd).args(["config", "--local"]).arg(&key).arg("x").output().unwrap();
+            let out = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(&cwd).args(["config", "--local"]).arg(&key).arg("x").output().unwrap();
             assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         }
         for e in [

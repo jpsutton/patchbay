@@ -1098,7 +1098,7 @@ mod tests {
         let marker = d.join("clean-ran");
         run(&["config", "filter.x.clean", &format!("touch {}; cat", marker.display())]);
         std::fs::write(wt.join("f.txt"), "one").unwrap(); // same bytes, new stat data: status must hash it
-        let plain = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").arg("-C").arg(&wt).args(["status", "--porcelain"]).output().unwrap();
+        let plain = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(&wt).args(["status", "--porcelain"]).output().unwrap();
         assert!(plain.status.success() && marker.exists(), "control: plain git status runs the clean filter");
         std::fs::remove_file(&marker).unwrap();
         std::fs::write(wt.join("f.txt"), "one").unwrap();
@@ -1116,20 +1116,20 @@ mod tests {
         std::fs::write(wt.join(".gitattributes"), format!("* filter={driver}\n")).unwrap();
         std::fs::write(wt.join("f.txt"), "one").unwrap();
         for args in [&["add", "-A"][..], &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "work"][..]] {
-            assert!(std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").arg("-C").arg(&wt).args(args).output().unwrap().status.success());
+            assert!(std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(&wt).args(args).output().unwrap().status.success());
         }
         (d, t, team, i.id, wt)
     }
 
     fn wt_git(wt: &std::path::Path, args: &[&str]) {
-        let out = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").arg("-C").arg(wt).args(args).output().unwrap();
+        let out = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(wt).args(args).output().unwrap();
         assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
     }
 
     /// Plain git must run the planted code on a stat-changed file (so the test cannot pass vacuously).
     fn assert_plain_status_runs_it(wt: &std::path::Path, marker: &std::path::Path) {
         std::fs::write(wt.join("f.txt"), "one").unwrap(); // same bytes, new stat data: status must hash it
-        let _ = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").arg("-C").arg(wt).args(["status", "--porcelain"]).output().unwrap();
+        let _ = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(wt).args(["status", "--porcelain"]).output().unwrap();
         assert!(marker.exists(), "control: plain git status runs the planted code");
         std::fs::remove_file(marker).unwrap();
         std::fs::write(wt.join("f.txt"), "one").unwrap();
@@ -1146,6 +1146,27 @@ mod tests {
         assert_plain_status_runs_it(&wt, &marker);
         assert_eq!(t.set_item(&team.id, &id, Some("desk1"), &json!({ "status": "done" })).unwrap().status, "done");
         assert!(!marker.exists(), "the wrapper's overrides keep the lfs filter from running");
+    }
+
+    /// Pins the behaviour as it is. The wrapper blanks the lfs clean filter, so a stat-changed file whose blob is an
+    /// LFS pointer hashes as raw content and reads as dirty, although the user's own git (with its clean filter)
+    /// calls it clean. The done check fails closed; the worker provides a PR URL. A pointer is modelled by a clean
+    /// filter that always yields the blob text, since git-lfs may not be installed. Decision pending: ship fail-closed,
+    /// or pin the lfs filter to fixed git-lfs commands (needs its own review).
+    #[test]
+    fn done_reports_an_lfs_pointer_file_dirty_because_the_wrapper_blanks_the_clean_filter() {
+        let (_d, t, team, id, wt) = filtered_done_fixture("lfs");
+        std::fs::write(wt.join(".gitattributes"), "f.txt filter=lfs\n").unwrap(); // not the attributes file itself
+        std::fs::write(wt.join("f.txt"), "pointer\n").unwrap();
+        wt_git(&wt, &["add", "-A"]);
+        wt_git(&wt, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "pointer"]);
+        wt_git(&wt, &["config", "filter.lfs.clean", "cat >/dev/null; printf 'pointer\\n'"]);
+        // Same length as the blob: git compares sizes before it runs a filter, so only an equal-size change reaches it.
+        std::fs::write(wt.join("f.txt"), "POINTER\n").unwrap();
+        let user = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(&wt).args(["status", "--porcelain"]).output().unwrap();
+        assert!(user.status.success() && String::from_utf8_lossy(&user.stdout).trim().is_empty(), "control: the user's own git calls the file clean: {:?}", String::from_utf8_lossy(&user.stdout));
+        let err = t.set_item(&team.id, &id, Some("desk1"), &json!({ "status": "done" })).unwrap_err().to_string();
+        assert_eq!(err, DONE_REQUIRES_CLEAN_WORKTREE);
     }
 
     #[test]
@@ -1189,7 +1210,7 @@ mod tests {
         wt_git(&wt, &["add", "-A"]);
         wt_git(&wt, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "gitlink"]);
         std::fs::write(sub.join("g.txt"), "g").unwrap(); // stat-changed inside the nested repository
-        let _ = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").arg("-C").arg(&wt).args(["status", "--porcelain"]).output().unwrap();
+        let _ = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(&wt).args(["status", "--porcelain"]).output().unwrap();
         assert!(marker.exists(), "control: a plain git status enters the nested repository and runs its filter");
         std::fs::remove_file(&marker).unwrap();
         std::fs::write(sub.join("g.txt"), "g").unwrap();
