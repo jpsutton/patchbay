@@ -677,7 +677,8 @@ fn hardened_git_with(cwd: &Path, inherited: impl IntoIterator<Item = String>) ->
         .args(["-c", "filter.lfs.process=", "-c", "filter.lfs.smudge=", "-c", "filter.lfs.required=false", "-C"])
         .arg(cwd);
     for key in inherited {
-        if key.starts_with("GIT_") {
+        // GIT_EXEC_PATH is the daemon's own (a portable git needs it); the worker cannot set it.
+        if key.starts_with("GIT_") && key != "GIT_EXEC_PATH" {
             cmd.env_remove(key);
         }
     }
@@ -742,9 +743,10 @@ fn trust_relevant(path: &str) -> bool {
 }
 
 /// Refuse a checkout when the shared repository config could run code at `worktree add`. Every spawn refuses the
-/// keys git itself acts on (promisor remotes, proxies, fsmonitor, ssh command, includes), since the
-/// lazy-fetch environment switch needs git 2.44+. A refresh, which follows an untrusted worker, also refuses
-/// filters, lfs, credentials and attributes.
+/// keys git itself acts on (promisor remotes, proxies, includes), since the lazy-fetch environment switch
+/// needs git 2.44+. fsmonitor and sshCommand are not among them: the wrapper overrides fsmonitor on the command
+/// line, and ssh only runs for a fetch, which the refused keys and the environment switch rule out. A refresh,
+/// which follows an untrusted worker, also refuses filters, lfs, credentials, those two and attributes.
 fn refuse_repo_code_hooks(repo: &Path, refresh: bool) -> Result<()> {
     let keys = git(repo, &["config", "--local", "--name-only", "--list", "-z"])?;
     let bad: Vec<&str> = keys
@@ -753,9 +755,9 @@ fn refuse_repo_code_hooks(repo: &Path, refresh: bool) -> Result<()> {
             let k = k.to_ascii_lowercase();
             let spawn = k.starts_with("include.") || k.starts_with("includeif.")
                 || (k.starts_with("remote.") && [".promisor", ".uploadpack", ".receivepack", ".vcs"].iter().any(|e| k.ends_with(e)))
-                || matches!(k.as_str(), "core.fsmonitor" | "core.sshcommand" | "extensions.partialclone" | "core.gitproxy");
+                || matches!(k.as_str(), "extensions.partialclone" | "core.gitproxy");
             let more = k.starts_with("filter.") || k.starts_with("lfs.customtransfer.") || k.starts_with("lfs.extension.") || k.starts_with("credential.")
-                || matches!(k.as_str(), "submodule.recurse" | "core.hookspath" | "lfs.standalonetransferagent" | "core.attributesfile" | "extensions.worktreeconfig");
+                || matches!(k.as_str(), "submodule.recurse" | "core.hookspath" | "core.fsmonitor" | "core.sshcommand" | "lfs.standalonetransferagent" | "core.attributesfile" | "extensions.worktreeconfig");
             spawn || (refresh && more)
         })
         .collect();
@@ -1510,7 +1512,7 @@ mod tests {
 
     #[test]
     fn a_fresh_spawn_refuses_repo_config_git_acts_on() {
-        for (key, value) in [("extensions.partialClone", "p"), ("remote.p.promisor", "true"), ("remote.p.uploadpack", "x"), ("remote.p.receivepack", "x"), ("remote.p.vcs", "x"), ("core.gitProxy", "x"), ("core.fsmonitor", "true"), ("core.sshCommand", "x"), ("include.path", "/dev/null"), ("includeIf.gitdir:/.path", "/dev/null")] {
+        for (key, value) in [("extensions.partialClone", "p"), ("remote.p.promisor", "true"), ("remote.p.uploadpack", "x"), ("remote.p.receivepack", "x"), ("remote.p.vcs", "x"), ("core.gitProxy", "x"), ("include.path", "/dev/null"), ("includeIf.gitdir:/.path", "/dev/null")] {
             let (d, _t, team) = setup();
             let cwd = d.join("proj");
             git(&cwd, &["init", "-q", "-b", "main"]).unwrap();
@@ -1523,13 +1525,26 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_spawn_accepts_fsmonitor_and_ssh_command_but_a_refresh_refuses_them() {
+        let (d, _t, team) = setup();
+        let cwd = d.join("proj");
+        git(&cwd, &["init", "-q", "-b", "main"]).unwrap();
+        git(&cwd, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]).unwrap();
+        git(&cwd, &["config", "--local", "core.fsmonitor", "true"]).unwrap();
+        git(&cwd, &["config", "--local", "core.sshCommand", "x"]).unwrap();
+        assert!(make_worktree(&team, "DM-20261109-01", "HEAD", false).is_ok());
+        let e = make_worktree(&team, "DM-20261109-02", "HEAD", true).unwrap_err().to_string();
+        assert!(e.contains("worker refresh refused") && e.contains("core.fsmonitor") && e.contains("core.sshcommand"), "{e}");
+    }
+
+    #[test]
     fn hardened_git_scrubs_inherited_git_env_and_sets_its_own() {
-        let cmd = hardened_git_with(Path::new("/x"), ["GIT_DIR", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_GLOBAL", "PATH"].map(String::from));
+        let cmd = hardened_git_with(Path::new("/x"), ["GIT_DIR", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_GLOBAL", "GIT_EXEC_PATH", "PATH"].map(String::from));
         let envs: std::collections::HashMap<_, _> = cmd.get_envs().map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned()))).collect();
         for gone in ["GIT_DIR", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_GLOBAL"] {
             assert_eq!(envs.get(gone), Some(&None), "{gone} must be removed");
         }
-        assert!(!envs.contains_key("PATH"));
+        assert!(!envs.contains_key("PATH") && !envs.contains_key("GIT_EXEC_PATH"), "the daemon's own GIT_EXEC_PATH is kept");
         assert_eq!(envs.get("GIT_NO_LAZY_FETCH"), Some(&Some("1".to_owned())));
         assert_eq!(envs.get("GIT_CONFIG_NOSYSTEM"), Some(&Some("1".to_owned())));
         let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
