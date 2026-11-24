@@ -493,6 +493,8 @@ export interface MeshMember {
   authFailed?: boolean;
   /** App version it last reported; absent for older versions and phones. */
   appVersion?: string | null;
+  /** Its OS as it last reported it ("macos", "windows", "linux"); absent for older versions and phones. */
+  os?: string | null;
 }
 
 /** Something wrong with this computer's mesh that the user has to fix. */

@@ -99,6 +99,10 @@ pub struct LinkReport {
     /// App versions of the phones in `remotes`. Older nodes omit it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub remote_versions: std::collections::BTreeMap<String, String>,
+    /// The origin's OS (`std::env::consts::OS`: "macos", "windows", "linux"), so a move can
+    /// offer a folder in the target's form. Older nodes omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
 }
 
 /// One synced cell write (or a row delete when `c` is the tombstone column).
@@ -145,4 +149,55 @@ pub enum Msg {
     /// From a gateway to a remote member: reconnect with this instead of the passphrase
     /// handshake. `id` and `key` are hex; `expires` is in Unix milliseconds.
     Ticket { id: String, key: String, expires: i64 },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn links(os: Option<&str>) -> Msg {
+        Msg::Links(LinkReport {
+            origin: "a".into(),
+            ver: 1,
+            links: vec![],
+            addrs: vec![],
+            peers: vec![],
+            remotes: vec![],
+            app_version: Some("1.0.0".into()),
+            remote_versions: BTreeMap::new(),
+            os: os.map(str::to_owned),
+        })
+    }
+
+    fn os_of(m: Msg) -> Option<String> {
+        match m {
+            Msg::Links(r) => r.os,
+            _ => panic!("not a link report"),
+        }
+    }
+
+    #[test]
+    fn link_report_os_round_trips_and_is_optional() {
+        let with = serde_json::to_string(&links(Some("windows"))).unwrap();
+        assert_eq!(os_of(serde_json::from_str(&with).unwrap()).as_deref(), Some("windows"));
+        // A report without it (an older node) still parses, and a new node sends no empty key.
+        let without = serde_json::to_string(&links(None)).unwrap();
+        assert!(!without.contains("\"os\""), "{without}");
+        assert_eq!(os_of(serde_json::from_str(&without).unwrap()), None);
+    }
+
+    #[test]
+    fn link_reports_and_hellos_ignore_fields_they_do_not_know() {
+        // What lets an older node read a newer node's report (with `os`) at all: unknown keys
+        // are skipped, not refused. A `deny_unknown_fields` here would split the mesh.
+        let mut v = serde_json::to_value(links(Some("macos"))).unwrap();
+        v["someFutureField"] = serde_json::json!(42);
+        assert!(serde_json::from_value::<Msg>(v).is_ok());
+        let hello = serde_json::json!({
+            "type": "hello", "nodeId": "n", "name": "n", "noisePub": "", "signPub": "", "version": 1,
+            "meshId": null, "record": null, "joining": false, "dataKeyGen": 0, "addrs": [],
+            "listenPort": null, "someFutureField": "x"
+        });
+        assert!(serde_json::from_value::<Msg>(hello).is_ok());
+    }
 }
