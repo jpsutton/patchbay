@@ -30,7 +30,7 @@ use anyhow::{Result, anyhow};
 use tokio::sync::{mpsc, oneshot};
 
 use self::acp::{
-    AgentCmd, PendingPermission, PendingPermissions, PendingQuestions, Sink, SpawnSpec,
+    AgentCmd, PendingPermissions, PendingQuestions, Sink, SpawnSpec,
 };
 use crate::db::Db;
 
@@ -86,10 +86,6 @@ pub struct CodeManager {
     pub pending: PendingPermissions,
     /// Why a turn with a card open was cancelled, until the agent and the senders are told.
     pub cancel_notes: cancel_note::CancelNotes,
-    /// Event sinks retained so coordinator-initiated redispatch can publish a local confirmation.
-    event_sinks: Mutex<HashMap<String, Sink>>,
-    process_source: Mutex<Option<Arc<dyn crate::teams::process_sweep::ProcessSource>>>,
-    local_confirmations_resolved: Mutex<std::collections::HashSet<String>>,
     pub questions: PendingQuestions,
     /// Sessions whose agent is in the middle of a turn.
     busy: Mutex<std::collections::HashSet<String>>,
@@ -144,6 +140,13 @@ impl CodeManager {
         rx
     }
 
+    #[cfg(test)]
+    pub(crate) fn attach_test_worker(&self, id: &str) -> mpsc::UnboundedReceiver<AgentCmd> {
+        let rx = self.attach_test_agent(id);
+        self.agents.lock().unwrap().get_mut(id).unwrap().launched_as_worker = true;
+        rx
+    }
+
     /// U1: running agent was launched as a worker (immutable for that process).
     pub fn process_launched_as_worker(&self, code_session_id: &str) -> bool {
         self.agents
@@ -151,11 +154,6 @@ impl CodeManager {
             .unwrap()
             .get(code_session_id)
             .is_some_and(|a| a.launched_as_worker && !a.tx.is_closed())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_process_source_for_test(&self, source: Arc<dyn crate::teams::process_sweep::ProcessSource>) {
-        *self.process_source.lock().unwrap() = Some(source);
     }
 
     pub fn busy_sessions(&self) -> Vec<String> {
@@ -274,11 +272,6 @@ impl CodeManager {
         Ok(result)
     }
 
-    fn bind_generation_owner(&self, generation: &LaunchGeneration, owner: Option<&str>) -> Result<()> {
-        let mut states = self.lock_current_generation(generation)?;
-        states.get_mut(&generation.session_id).expect("checked current generation").owner_session_id = owner.map(str::to_owned);
-        Ok(())
-    }
 
     pub fn start(
         &self,
@@ -457,7 +450,7 @@ impl CodeManager {
         Ok(())
     }
 
-    /// Stop, sweep and confirm a reused worker worktree, then run the first spawn gate. Shared by
+    /// Claim a fresh worker launch, then run the first spawn gate. Shared by
     /// production start and route-level test starts so tests exercise the same route behavior.
     pub(crate) fn preflight_start(
         &self,
@@ -472,7 +465,7 @@ impl CodeManager {
 
     fn preflight_start_with_generation(
         &self,
-        sink: Sink,
+        _sink: Sink,
         db: &Db,
         data_dir: &Path,
         code_session_id: &str,
@@ -491,57 +484,14 @@ impl CodeManager {
             }
             anyhow::bail!("agent could not be stopped (pid {pid}); restart Patchbay before trying again");
         }
-        if known_worker && !data_dir.join("teams.db").is_file() {
-            // A missing team DB is a direct refusal for a known worker, not a confirmation that
-            // could only end in the same refusal after a human waits on it.
-            let session = db
-                .get_code_session(code_session_id)?
-                .ok_or_else(|| anyhow!("code session not found"))?;
-            crate::teams::gate_session_start(db, data_dir, self, &session)?;
-        }
         let session = db
             .get_code_session(code_session_id)?
             .ok_or_else(|| anyhow!("code session not found"))?;
-        self.event_sinks
-            .lock()
-            .unwrap()
-            .insert(code_session_id.to_owned(), sink.clone());
         self.require_current_generation(&current)?;
-        if let Some(context) =
-            crate::teams::worker_reuse_context(data_dir, db, self, code_session_id)?
-        {
-            self.bind_generation_owner(&current, context.coordinator_session.as_deref())?;
-            #[cfg(target_os = "windows")]
-            anyhow::bail!("cannot restart or redispatch this worker in place on Windows because process sweeping is unsupported; create a fresh worker worktree");
-            #[cfg(not(target_os = "windows"))]
-            {
-                let source = self.process_source.lock().unwrap().clone();
-                let run_sweep = || -> Result<crate::teams::process_sweep::SweepReport> {
-                    if let Some(source) = &source {
-                        crate::teams::process_sweep::sweep_with(Path::new(&session.cwd), std::process::id(), worker_pgid, source.as_ref())
-                    } else {
-                        crate::teams::sweep_worker_worktree(Path::new(&session.cwd), worker_pgid)
-                    }
-                };
-                let note = if context.history_unknown {
-                    "worker history could not be verified; treating this as a reused worktree"
-                } else {
-                    "same-uid process sweep completed"
-                };
-                if !self.confirm_reused_worker_with_sweep(
-                    code_session_id,
-                    &sink,
-                    context.coordinator_session.as_deref(),
-                    &current,
-                    note,
-                    run_sweep,
-                )? {
-                anyhow::bail!("worker restart cancelled by the local human");
-                }
-            }
-        }
+        crate::teams::claim_fresh_worker_start(data_dir, db, self, &session, known_worker)?;
         self.require_current_generation(&current)?;
         crate::teams::gate_session_start(db, data_dir, self, &session)?;
+        db.record_session_launched(&session.id)?;
         Ok((session, current))
     }
 
@@ -778,12 +728,6 @@ impl CodeManager {
         {
             return Err(anyhow!("option not offered for this request: {id}"));
         }
-        if entry.local_human_only {
-            self.local_confirmations_resolved
-                .lock()
-                .unwrap()
-                .insert(request_id.to_owned());
-        }
         let acp::PendingPermission { tx, .. } = map.remove(request_id).expect("pending entry");
         let _ = tx.send(option_id);
         Ok(())
@@ -795,154 +739,6 @@ impl CodeManager {
             .unwrap()
             .get(request_id)
             .is_some_and(|p| p.local_human_only)
-    }
-
-    pub(crate) fn take_local_confirmation_resolution(&self, request_id: &str) -> bool {
-        self.local_confirmations_resolved
-            .lock()
-            .unwrap()
-            .remove(request_id)
-    }
-
-    /// Ask the local UI to authorize reuse of a worktree after its process sweep. The synthetic
-    /// permission is bound to the chosen local session and rejects sessionless mesh replies.
-    pub(crate) fn confirm_reused_worker(
-        &self,
-        fallback_session: &str,
-        fallback_sink: &Sink,
-        coordinator_session: Option<&str>,
-        found: usize,
-        killed: usize,
-        remaining: usize,
-        unknown: usize,
-        complete: bool,
-        wall_ms: u128,
-        sweep_note: &str,
-    ) -> Result<bool> {
-        self.confirm_reused_worker_for_generation(
-            fallback_session, fallback_sink, coordinator_session, found, killed, remaining,
-            unknown, complete, wall_ms, sweep_note, None,
-        )
-    }
-
-    fn confirm_reused_worker_for_generation(
-        &self,
-        fallback_session: &str,
-        fallback_sink: &Sink,
-        coordinator_session: Option<&str>,
-        found: usize,
-        killed: usize,
-        remaining: usize,
-        unknown: usize,
-        complete: bool,
-        wall_ms: u128,
-        sweep_note: &str,
-        generation: Option<&LaunchGeneration>,
-    ) -> Result<bool> {
-        let display_session = coordinator_session.unwrap_or(fallback_session);
-        let sink = coordinator_session
-            .and_then(|id| self.event_sinks.lock().unwrap().get(id).cloned())
-            .unwrap_or_else(|| fallback_sink.clone());
-        let request_id = crate::db::new_id();
-        let (tx, rx) = oneshot::channel();
-        let target_session_id = fallback_session.to_owned();
-        let request = serde_json::json!({
-            "toolCall": {
-                "toolCallId": request_id,
-                "title": "Confirm worker restart",
-                "kind": "other",
-                "rawInput": {},
-                "_meta": { "patchbay": { "workerRestartConfirm": {
-                    "message": format!("a previous worker ran here; {found} processes were found and {killed} killed; {remaining} remain; {unknown} processes could not be checked; sweep {}; {wall_ms} ms; detached processes may still remain.", if complete { "complete" } else { "incomplete" }),
-                    "found": found,
-                    "killed": killed,
-                    "remaining": remaining,
-                    "unknown": unknown,
-                    "complete": complete,
-                    "wallMs": wall_ms,
-                    "sweepNote": sweep_note,
-                } } }
-            },
-            "options": [
-                { "optionId": "confirm_restart", "name": "Restart worker", "kind": "allow_once" },
-                { "optionId": "cancel_restart", "name": "Cancel", "kind": "reject_once" }
-            ]
-        });
-        let request_id = request["toolCall"]["toolCallId"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let register_and_emit = || {
-            self.pending.lock().unwrap().insert(
-                request_id.clone(),
-                PendingPermission {
-                    session_id: display_session.to_owned(),
-                    target_session_id: Some(target_session_id),
-                    local_human_only: true,
-                    offered: vec!["confirm_restart".to_owned(), "cancel_restart".to_owned()],
-                    tx,
-                },
-            );
-            sink(acp::Envelope {
-                code_session_id: display_session.to_owned(),
-                event: acp::CodeEvent::Permission {
-                    request_id: request_id.clone(),
-                    request,
-                },
-            });
-        };
-        if let Some(generation) = generation {
-            self.with_current_generation(generation, register_and_emit)?;
-        } else {
-            register_and_emit();
-        }
-        let reply = rx
-            .blocking_recv()
-            .map_err(|_| anyhow!("local human confirmation was dropped"))?;
-        self.pending.lock().unwrap().remove(&request_id);
-        sink(acp::Envelope {
-            code_session_id: display_session.to_owned(),
-            event: acp::CodeEvent::PermissionResolved { request_id },
-        });
-        Ok(reply.as_deref() == Some("confirm_restart"))
-    }
-
-    fn confirm_reused_worker_with_sweep<F>(
-        &self,
-        target_session: &str,
-        fallback_sink: &Sink,
-        coordinator_session: Option<&str>,
-        current: &LaunchGeneration,
-        sweep_note: &str,
-        mut sweep: F,
-    ) -> Result<bool>
-    where
-        F: FnMut() -> Result<crate::teams::process_sweep::SweepReport>,
-    {
-        let initial = sweep()?;
-        refuse_remaining_processes(&initial)?;
-        self.require_current_generation(current)?;
-        let (found, killed, remaining) = initial.counts();
-        if !self.confirm_reused_worker_for_generation(
-            target_session,
-            fallback_sink,
-            coordinator_session,
-            found,
-            killed,
-            remaining,
-            initial.unknown,
-            initial.complete,
-            initial.wall_ms,
-            sweep_note,
-            Some(current),
-        )? {
-            return Ok(false);
-        }
-        self.require_current_generation(current)?;
-        let after = sweep()?;
-        refuse_resweep_regression(&initial, &after)?;
-        self.require_current_generation(current)?;
-        Ok(true)
     }
 
     /// Answer a question card. A reply that isn't the card's shape is ignored, so the card stays.
@@ -957,7 +753,6 @@ impl CodeManager {
 
     pub fn stop(&self, code_session_id: &str) {
         self.invalidate_generation(code_session_id);
-        self.cancel_reuse_confirmations(code_session_id);
         self.note_cancel(code_session_id, "the session was stopped", "shutdown", None, false);
         if let Some(a) = self.agents.lock().unwrap().get_mut(code_session_id) {
             a.stopping = true;
@@ -972,12 +767,10 @@ impl CodeManager {
     }
 
     fn stop_and_wait_with_group(&self, code_session_id: &str, timeout: std::time::Duration) -> (bool, Option<u32>) {
-        self.cancel_reuse_confirmations(code_session_id);
         self.note_cancel(code_session_id, "the session was stopped", "shutdown", None, false);
         let process_group = {
             let mut agents = self.agents.lock().unwrap();
             let Some(agent) = agents.get_mut(code_session_id) else {
-                self.event_sinks.lock().unwrap().remove(code_session_id);
                 return (true, None);
             };
             agent.stopping = true;
@@ -1001,32 +794,11 @@ impl CodeManager {
         let a = agents.remove(code_session_id).expect("agent was checked under the same lock");
         drop(agents);
         let _ = a.thread.join();
-        self.event_sinks.lock().unwrap().remove(code_session_id);
         (true, (process_group > 1).then_some(process_group))
-    }
-
-    fn cancel_reuse_confirmations(&self, session_id: &str) {
-        let mut pending = self.pending.lock().unwrap();
-        let ids: Vec<_> = pending.iter()
-            .filter(|(_, entry)| entry.local_human_only && (entry.session_id == session_id || entry.target_session_id.as_deref() == Some(session_id)))
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in ids {
-            if let Some(entry) = pending.remove(&id) { let _ = entry.tx.send(None); }
-        }
-    }
-
-    fn cancel_all_reuse_confirmations(&self) {
-        let mut pending = self.pending.lock().unwrap();
-        let ids: Vec<_> = pending.iter().filter(|(_, entry)| entry.local_human_only).map(|(id, _)| id.clone()).collect();
-        for id in ids {
-            if let Some(entry) = pending.remove(&id) { let _ = entry.tx.send(None); }
-        }
     }
 
     pub fn stop_all(&self) {
         self.generations.lock().unwrap().clear();
-        self.cancel_all_reuse_confirmations();
         let agents: Vec<Agent> = self.agents.lock().unwrap().drain().map(|(_, a)| a).collect();
         for a in &agents {
             request_agent_shutdown(a);
@@ -1063,34 +835,7 @@ impl CodeManager {
         }
         for a in agents { if a.thread.is_finished() { let _ = a.thread.join(); } }
         if let Some(thread) = group_thread.filter(|thread| thread.is_finished()) { let _ = thread.join(); }
-        self.event_sinks.lock().unwrap().clear();
     }
-}
-
-fn refuse_remaining_processes(report: &crate::teams::process_sweep::SweepReport) -> Result<()> {
-    if let Some(process) = report.remaining.first() {
-        anyhow::bail!(
-            "worker worktree still has live process {} ({}); stop it and retry",
-            process.pid,
-            process.command
-        );
-    }
-    Ok(())
-}
-
-fn refuse_resweep_regression(
-    initial: &crate::teams::process_sweep::SweepReport,
-    after: &crate::teams::process_sweep::SweepReport,
-) -> Result<()> {
-    refuse_remaining_processes(after)?;
-    if after.unknown > initial.unknown {
-        anyhow::bail!(
-            "worker worktree resweep found more unchecked processes ({} versus {}); retry after resolving the scan gap",
-            after.unknown,
-            initial.unknown
-        );
-    }
-    Ok(())
 }
 
 /// Shared auto-approve closure body (G1/U1). Worker-git floor returns ask (None) before team-tool
@@ -1241,54 +986,6 @@ mod tests {
         assert!(live_groups.is_empty(), "daemon shutdown left process groups alive: {live_groups:?}");
     }
 
-    #[test]
-    fn reused_worker_confirmation_is_session_bound_and_local_human_only() {
-        let manager = Arc::new(CodeManager::default());
-        let (tx, rx) = std::sync::mpsc::channel();
-        let sink: Sink = Arc::new(move |env| {
-            if let acp::CodeEvent::Permission { request_id, request } = env.event {
-                tx.send((env.code_session_id, request_id, request)).unwrap();
-            }
-        });
-        let worker_sink = sink.clone();
-        let worker_manager = manager.clone();
-        let waiter = std::thread::spawn(move || {
-            worker_manager.confirm_reused_worker("worker-session", &worker_sink, None, 2, 1, 1, 0, true, 2, "sweep report")
-        });
-        let (display_session, request_id, request) = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
-        assert_eq!(display_session, "worker-session");
-        assert_eq!(request["toolCall"]["_meta"]["patchbay"]["workerRestartConfirm"]["found"], 2);
-        assert_eq!(request["options"].as_array().unwrap().len(), 2);
-        assert!(manager.respond_permission(&request_id, Some("confirm_restart".into()), None).is_err());
-        assert!(manager.respond_permission(&request_id, Some("confirm_restart".into()), Some("other-session")).is_err());
-        manager.respond_permission(&request_id, Some("confirm_restart".into()), Some("worker-session")).unwrap();
-        assert!(waiter.join().unwrap().unwrap());
-    }
-
-    fn sweep_report(unknown: usize, remaining: Vec<crate::teams::process_sweep::ProcessRecord>) -> crate::teams::process_sweep::SweepReport {
-        crate::teams::process_sweep::SweepReport {
-            unknown,
-            remaining,
-            complete: unknown == 0,
-            ..Default::default()
-        }
-    }
-
-    fn remaining_process(pid: u32, command: &str) -> crate::teams::process_sweep::ProcessRecord {
-        crate::teams::process_sweep::ProcessRecord {
-            pid,
-            uid: 1,
-            start_sec: 1,
-            start_subsec: 0,
-            parent: 1,
-            pgid: pid,
-            command: command.into(),
-            paths: Vec::new(),
-            paths_complete: true,
-        }
-    }
-
-    /// pb-20261121-01: a registered fake agent whose commands the test reads.
     fn fake_agent(manager: &CodeManager, id: &str) -> mpsc::UnboundedReceiver<AgentCmd> {
         let (tx, rx) = mpsc::unbounded_channel();
         manager.agents.lock().unwrap().insert(id.into(), Agent {
@@ -1419,244 +1116,6 @@ mod tests {
             acp::PendingPermission { session_id: "s".into(), target_session_id: None, local_human_only: true, offered: vec![], tx },
         );
         assert!(!m.has_open_card("s"));
-    }
-
-    #[test]
-    fn stopping_target_cancels_confirmation_and_invalidates_start() {
-        let manager = Arc::new(CodeManager::default());
-        let generation = manager.new_generation("worker-session");
-        let (tx, rx) = std::sync::mpsc::channel();
-        let sink: Sink = Arc::new(move |env| {
-            if let acp::CodeEvent::Permission { request_id, .. } = env.event {
-                tx.send(request_id).unwrap();
-            }
-        });
-        let worker_manager = manager.clone();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let waiter = std::thread::spawn(move || {
-            let result = worker_manager.confirm_reused_worker("worker-session", &sink, Some("coordinator"), 0, 0, 0, 0, true, 1, "sweep");
-            let _ = done_tx.send(result);
-        });
-        let request_id = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
-        manager.stop("worker-session");
-        let result = done_rx.recv_timeout(std::time::Duration::from_secs(2));
-        if result.is_err() {
-            manager.stop("coordinator");
-            let _ = done_rx.recv_timeout(std::time::Duration::from_secs(2));
-            panic!("stopping the target did not cancel its pending confirmation");
-        }
-        assert!(!result.unwrap().unwrap());
-        waiter.join().unwrap();
-        assert!(!manager.pending.lock().unwrap().contains_key(&request_id));
-        assert!(manager.require_current_generation(&generation).is_err());
-    }
-
-    #[test]
-    fn stop_after_confirmation_prevents_the_launch_generation() {
-        let manager = Arc::new(CodeManager::default());
-        let generation = manager.new_generation("worker-session");
-        let (tx, rx) = std::sync::mpsc::channel();
-        let sink: Sink = Arc::new(move |env| {
-            if let acp::CodeEvent::Permission { request_id, .. } = env.event {
-                tx.send(request_id).unwrap();
-            }
-        });
-        let reports = Arc::new(Mutex::new(vec![sweep_report(0, vec![]), sweep_report(0, vec![])]));
-        let worker_manager = manager.clone();
-        let worker_sink = sink.clone();
-        let worker_generation = generation.clone();
-        let waiter = std::thread::spawn(move || {
-            worker_manager.confirm_reused_worker_with_sweep(
-                "worker-session", &worker_sink, Some("coordinator"), &worker_generation, "sweep",
-                || Ok(reports.lock().unwrap().remove(0)),
-            )
-        });
-        let request_id = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
-        manager.respond_permission(&request_id, Some("confirm_restart".into()), Some("coordinator")).unwrap();
-        assert!(waiter.join().unwrap().unwrap());
-        // Stop after confirmation/preflight but before the guarded ACP spawn.
-        manager.stop("worker-session");
-        let mut spawned = false;
-        let result = manager.with_spawn_generation(&generation, || spawned = true);
-        assert!(result.is_err());
-        assert!(!spawned, "cancelled generation must not call the spawn closure");
-    }
-
-    #[test]
-    fn stopping_confirmation_owner_after_answer_prevents_worker_launch() {
-        let manager = Arc::new(CodeManager::default());
-        let generation = manager.new_generation("worker-session");
-        manager.bind_generation_owner(&generation, Some("coordinator")).unwrap();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let sink: Sink = Arc::new(move |env| {
-            if let acp::CodeEvent::Permission { request_id, .. } = env.event { tx.send(request_id).unwrap(); }
-        });
-        let reports = Arc::new(Mutex::new(vec![sweep_report(0, vec![]), sweep_report(0, vec![])]));
-        let worker_manager = manager.clone();
-        let worker_sink = sink.clone();
-        let worker_generation = generation.clone();
-        let waiter = std::thread::spawn(move || worker_manager.confirm_reused_worker_with_sweep(
-            "worker-session", &worker_sink, Some("coordinator"), &worker_generation, "sweep",
-            || Ok(reports.lock().unwrap().remove(0)),
-        ));
-        let request_id = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
-        manager.respond_permission(&request_id, Some("confirm_restart".into()), Some("coordinator")).unwrap();
-        assert!(waiter.join().unwrap().unwrap());
-        manager.stop("coordinator");
-        let mut spawned = false;
-        let result = manager.with_spawn_generation(&generation, || spawned = true);
-        assert!(result.is_err());
-        assert!(!spawned);
-    }
-
-    #[test]
-    fn remaining_process_refuses_without_creating_confirmation() {
-        let manager = Arc::new(CodeManager::default());
-        let generation = manager.new_generation("worker-session");
-        let request_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let count = request_count.clone();
-        let responder = manager.clone();
-        let sink: Sink = Arc::new(move |env| {
-            if let acp::CodeEvent::Permission { request_id, .. } = env.event {
-                count.fetch_add(1, Ordering::SeqCst);
-                let _ = responder.respond_permission(&request_id, Some("confirm_restart".into()), Some("worker-session"));
-            }
-        });
-        let report = sweep_report(0, vec![remaining_process(77, "worker-helper")]);
-        let result = manager.confirm_reused_worker_with_sweep("worker-session", &sink, None, &generation, "sweep", || Ok(report.clone()));
-        assert!(result.unwrap_err().to_string().contains("77 (worker-helper)"));
-        assert_eq!(request_count.load(Ordering::SeqCst), 0);
-        assert!(manager.pending.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn unknown_only_confirmation_shows_unchecked_count() {
-        let manager = Arc::new(CodeManager::default());
-        let generation = manager.new_generation("worker-session");
-        let (tx, rx) = std::sync::mpsc::channel();
-        let sink: Sink = Arc::new(move |env| {
-            if let acp::CodeEvent::Permission { request_id, request } = env.event {
-                tx.send((request_id, request)).unwrap();
-            }
-        });
-        let reports = Arc::new(Mutex::new(vec![sweep_report(3, vec![]), sweep_report(3, vec![])]));
-        let worker_manager = manager.clone();
-        let worker_sink = sink.clone();
-        let worker_generation = generation.clone();
-        let waiter = std::thread::spawn(move || worker_manager.confirm_reused_worker_with_sweep(
-            "worker-session", &worker_sink, None, &worker_generation, "sweep",
-            || Ok(reports.lock().unwrap().remove(0)),
-        ));
-        let (request_id, request) = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
-        assert!(request["toolCall"]["_meta"]["patchbay"]["workerRestartConfirm"]["message"].as_str().unwrap().contains("3 processes could not be checked"));
-        manager.respond_permission(&request_id, Some("confirm_restart".into()), Some("worker-session")).unwrap();
-        assert!(waiter.join().unwrap().unwrap());
-    }
-
-    #[test]
-    fn post_confirmation_remaining_process_refuses() {
-        assert_post_confirmation_refused(
-            sweep_report(0, vec![]),
-            sweep_report(0, vec![remaining_process(78, "leftover")]),
-            "78 (leftover)",
-        );
-    }
-
-    #[test]
-    fn post_confirmation_unknown_increase_refuses() {
-        assert_post_confirmation_refused(sweep_report(1, vec![]), sweep_report(2, vec![]), "more unchecked processes");
-    }
-
-    fn assert_post_confirmation_refused(
-        initial: crate::teams::process_sweep::SweepReport,
-        after: crate::teams::process_sweep::SweepReport,
-        expected: &str,
-    ) {
-        let manager = Arc::new(CodeManager::default());
-        let generation = manager.new_generation("worker-session");
-        let (tx, rx) = std::sync::mpsc::channel();
-        let sink: Sink = Arc::new(move |env| {
-            if let acp::CodeEvent::Permission { request_id, .. } = env.event { tx.send(request_id).unwrap(); }
-        });
-        let reports = Arc::new(Mutex::new(vec![initial, after]));
-        let worker_manager = manager.clone();
-        let worker_sink = sink.clone();
-        let worker_generation = generation.clone();
-        let waiter = std::thread::spawn(move || worker_manager.confirm_reused_worker_with_sweep(
-            "worker-session", &worker_sink, None, &worker_generation, "sweep",
-            || Ok(reports.lock().unwrap().remove(0)),
-        ));
-        let request_id = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
-        manager.respond_permission(&request_id, Some("confirm_restart".into()), Some("worker-session")).unwrap();
-        assert!(waiter.join().unwrap().unwrap_err().to_string().contains(expected));
-    }
-
-    #[test]
-    fn clean_post_confirmation_resweep_allows_proceeding() {
-        let manager = Arc::new(CodeManager::default());
-        let generation = manager.new_generation("worker-session");
-        let (tx, rx) = std::sync::mpsc::channel();
-        let sink: Sink = Arc::new(move |env| {
-            if let acp::CodeEvent::Permission { request_id, .. } = env.event { tx.send(request_id).unwrap(); }
-        });
-        let reports = Arc::new(Mutex::new(vec![sweep_report(0, vec![]), sweep_report(0, vec![])]));
-        let worker_manager = manager.clone();
-        let worker_sink = sink.clone();
-        let worker_generation = generation.clone();
-        let waiter = std::thread::spawn(move || worker_manager.confirm_reused_worker_with_sweep(
-            "worker-session", &worker_sink, None, &worker_generation, "sweep",
-            || Ok(reports.lock().unwrap().remove(0)),
-        ));
-        let request_id = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
-        manager.respond_permission(&request_id, Some("confirm_restart".into()), Some("worker-session")).unwrap();
-        assert!(waiter.join().unwrap().unwrap());
-    }
-
-    #[test]
-    fn stopping_confirmation_owner_cancels_preflight_wait() {
-        let manager = Arc::new(CodeManager::default());
-        let (tx, rx) = std::sync::mpsc::channel();
-        let sink: Sink = Arc::new(move |env| {
-            if let acp::CodeEvent::Permission { .. } = env.event { tx.send(()).unwrap(); }
-        });
-        let waiter_manager = manager.clone();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let waiter = std::thread::spawn(move || {
-            let result = waiter_manager.confirm_reused_worker("worker-session", &sink, Some("coordinator"), 0, 0, 0, 0, true, 1, "complete");
-            let _ = done_tx.send(result);
-        });
-        rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
-        // This models Stop/archive on the coordinator while no UI is attached to answer the card.
-        manager.stop("coordinator");
-        let result = done_rx.recv_timeout(std::time::Duration::from_secs(2));
-        if result.is_err() {
-            manager.stop("worker-session");
-            let _ = done_rx.recv_timeout(std::time::Duration::from_secs(2));
-            panic!("stopping the confirmation owner did not cancel its pending request");
-        }
-        assert!(!result.unwrap().unwrap());
-        waiter.join().unwrap();
-        assert!(manager.pending.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn daemon_shutdown_cancels_unanswered_confirmation() {
-        let manager = Arc::new(CodeManager::default());
-        let (tx, rx) = std::sync::mpsc::channel();
-        let sink: Sink = Arc::new(move |env| {
-            if let acp::CodeEvent::Permission { .. } = env.event { tx.send(()).unwrap(); }
-        });
-        let waiter_manager = manager.clone();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let waiter = std::thread::spawn(move || {
-            let result = waiter_manager.confirm_reused_worker("worker-session", &sink, Some("coordinator"), 0, 0, 0, 2, false, 1, "incomplete");
-            let _ = done_tx.send(result);
-        });
-        rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
-        manager.stop_all();
-        assert!(!done_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap().unwrap());
-        waiter.join().unwrap();
-        assert!(manager.pending.lock().unwrap().is_empty());
     }
 
     fn insert_pending(m: &CodeManager, id: &str, offered: &[&str]) -> oneshot::Receiver<Option<String>> {

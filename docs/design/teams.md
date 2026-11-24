@@ -101,48 +101,13 @@ resume/relaunch use the same gate. This spawn-time protection does not affect an
 worker or non-worker sessions. Shared Git-directory write protection is not claimed until the Codex
 live check proves it.
 
-### Reusing a worker worktree
+### Fresh worker worktrees
 
-Every external agent process starts in its own Unix process group. Stopping a worker sends TERM,
-then KILL after a short grace period, and waits for live group members to exit. Patchbay-native
-shell commands use the same process-group stop: ESRCH means gone; EPERM is accepted only when a
-probe finds no live member; probe errors and groups still live after the deadline fail the session
-stop, preventing worktree reuse. On Windows, process-group/job-object cleanup is not implemented.
+Each dispatched worker gets a distinct worktree and branch. A stopped worker cannot be restarted in place; use **Restart with fresh context** or redispatch the item. A fresh-context restart checks the prior committed changes for agent configuration, instructions, environment loaders, Git configuration and package scripts before using its HEAD. When sensitive paths changed, refresh refuses and names them for review. Uncommitted files remain in the old worktree and are never copied; the coordinator receives its path for review and eventual cleanup.
 
-During startup, initialize, session creation, sign-in waits, and initial model/mode selection watch
-for Shutdown and child exit. At most 64 commands are buffered while startup is in progress;
-overflow gets an error. Shutdown takes priority and drains buffered prompts before they can reach
-the agent.
+Worker launch provenance is recorded before launch and permits one start. If team history is unavailable, known workers and agent-created sessions are refused; a user-created session without worker provenance can still start. A manually attached worker whose team database has been lost is indistinguishable from a user-created session; without the team database no team auto-allow applies.
 
-The manager waits for the full bounded close budget (15 seconds, plus a 2-second join margin),
-not just the initial graceful-close interval. Daemon shutdown sends Shutdown to every session,
-signals all known external-agent process groups concurrently, and waits up to one shared 17-second
-deadline. Patchbay-native session shutdown stops its registered shell groups and is awaited under
-that same overall deadline. A timed-out or unverified stop retains its agent handle, so another
-start cannot mistake it for a confirmed exit. Later start attempts show the worker PID and say that
-the worker could not be stopped and Patchbay must be restarted. A poisoned handle is not recovered
-in place; daemon restart is currently required to clear it.
-
-Before restarting, swapping, or redispatching a worker into a worktree with a recorded successful
-worker launch, Patchbay scans same-uid processes whose working directory or open files are inside
-that worktree. A live process that remains after termination refuses the start and names its PID
-and command (without path or arguments). Unknown-only scan results require a local-human
-confirmation, with the found, killed, remaining, unknown, and duration counts shown; after the
-answer, Patchbay scans again and refuses if a process remains or the unknown count increased.
-macOS uses libproc; Linux reads `/proc`. Outright scan errors refuse. PID, uid, start time, and
-worktree membership are rechecked immediately before TERM and KILL; these checks are best effort,
-not atomic. The confirmation defaults to Cancel and cannot be answered by an agent or mesh peer. A
-first dispatch into a fresh worktree does not ask. On Windows, sweeping is unsupported, so a worker
-cannot be restarted or redispatched in place; create a fresh worker worktree. The sweep logs process
-IDs and names, not worktree paths or command lines. The confirmation is bound to both its target
-worker and display owner: stopping or archiving either cancels it and refuses the start. If the UI
-disconnects without answering, the start remains pending until either session is stopped/archived
-or the daemon shuts down; daemon shutdown cancels pending confirmations and refuses the start.
-
-This is best effort: a setsid/double-forked descendant of an earlier worker can still race a
-human-confirmed restart in the same worktree; it requires a deliberately malicious earlier worker;
-closed structurally by fresh-worktree-per-spawn (follow-up). Hard links and in-worktree secret reads
-are not detected by the native worker controls.
+External agents still run in process groups and stopping them waits for their groups to exit. A stop that cannot be verified retains its handle and refuses another start.
 
 ## Templates and seats
 

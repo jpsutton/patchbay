@@ -261,6 +261,16 @@ ALTER TABLE code_sessions ADD COLUMN active_turn_since INTEGER;
 -- Which Antigravity login a provider uses: its Gemini home directory (`$GEMINI_HOME`), NULL
 -- for the default. Not synced: a path on one node means nothing on another.
 ALTER TABLE providers ADD COLUMN gemini_home TEXT;
+"#, r#"
+-- Local, durable provenance for dispatched workers. Claim once before launching.
+CREATE TABLE IF NOT EXISTS worker_spawn_provenance (
+    session_id TEXT PRIMARY KEY REFERENCES code_sessions(id) ON DELETE CASCADE,
+    claimed INTEGER NOT NULL DEFAULT 0 CHECK (claimed IN (0, 1))
+);
+CREATE TABLE IF NOT EXISTS session_launch_history (
+    session_id TEXT PRIMARY KEY REFERENCES code_sessions(id) ON DELETE CASCADE,
+    launched INTEGER NOT NULL CHECK (launched IN (0, 1))
+);
 "#];
 
 pub fn now_ms() -> i64 {
@@ -1374,6 +1384,38 @@ impl Db {
         Ok(conn.query_row("SELECT epoch FROM code_sessions WHERE id = ?1", [id], |r| r.get(0))?)
     }
 
+    /// Record a newly created worker before any launch. Never reset an existing claim.
+    pub fn record_worker_provenance(&self, id: &str) -> Result<()> {
+        self.conn().execute("INSERT INTO worker_spawn_provenance(session_id, claimed) VALUES (?1, 0)", [id])?;
+        Ok(())
+    }
+
+    pub fn worker_provenance_claimed(&self, id: &str) -> Result<Option<bool>> {
+        Ok(self.conn().query_row("SELECT claimed FROM worker_spawn_provenance WHERE session_id=?1", [id], |r| r.get::<_, bool>(0)).optional()?)
+    }
+
+    /// Atomically consume the only permitted start of this fresh worker session.
+    pub fn claim_worker_start(&self, id: &str) -> Result<bool> {
+        Ok(self.conn().execute("UPDATE worker_spawn_provenance SET claimed=1 WHERE session_id=?1 AND claimed=0", [id])? == 1)
+    }
+
+    /// Only the creation path can record an agent-created session as never launched.
+    pub fn record_pending_first_launch(&self, id: &str) -> Result<()> {
+        self.conn().execute("INSERT INTO session_launch_history(session_id, launched) VALUES (?1, 0)", [id])?;
+        Ok(())
+    }
+
+    /// Consume the first-launch exception once, before the agent can run.
+    pub fn claim_pending_first_launch(&self, id: &str) -> Result<bool> {
+        Ok(self.conn().execute("UPDATE session_launch_history SET launched=1 WHERE session_id=?1 AND launched=0", [id])? == 1)
+    }
+
+    /// Record all other starts; missing legacy history must never imply a first launch.
+    pub fn record_session_launched(&self, id: &str) -> Result<()> {
+        self.conn().execute("INSERT INTO session_launch_history(session_id, launched) VALUES (?1, 1) ON CONFLICT(session_id) DO UPDATE SET launched=1", [id])?;
+        Ok(())
+    }
+
     /// Archiving doesn't count as activity, so `updated_at` is left alone.
     pub fn set_code_session_archived(&self, id: &str, archived: bool) -> Result<()> {
         self.conn().execute(
@@ -1974,6 +2016,31 @@ mod tests {
         assert!(db.search_messages("\"\"", 10).unwrap().is_empty());
         db.delete_conversation(&c.id).unwrap();
         assert!(db.search_messages("lifetimes", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn worker_provenance_migration_is_idempotent() {
+        let path = std::env::temp_dir().join(format!("pb-provenance-{}.sqlite", new_id()));
+        {
+            let conn = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..MIGRATIONS.len() - 1] { conn.execute_batch(sql).unwrap(); }
+            conn.pragma_update(None, "user_version", (MIGRATIONS.len() - 1) as i64).unwrap();
+        }
+        let first = Db::open(&path).unwrap();
+        let session = first.create_code_session("/tmp", None, "grok", "default").unwrap();
+        first.record_worker_provenance(&session.id).unwrap();
+        first.record_pending_first_launch(&session.id).unwrap();
+        assert!(first.claim_pending_first_launch(&session.id).unwrap());
+        let version = first.with_conn(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))).unwrap();
+        let schema: String = first.with_conn(|c| c.query_row("SELECT sql FROM sqlite_master WHERE name='worker_spawn_provenance'", [], |r| r.get(0))).unwrap();
+        drop(first);
+        let second = Db::open(&path).unwrap();
+        assert_eq!(second.worker_provenance_claimed(&session.id).unwrap(), Some(false));
+        assert!(!second.claim_pending_first_launch(&session.id).unwrap());
+        assert_eq!(second.with_conn(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))).unwrap(), version);
+        assert_eq!(second.with_conn(|c| c.query_row("SELECT sql FROM sqlite_master WHERE name='worker_spawn_provenance'", [], |r| r.get::<_, String>(0))).unwrap(), schema);
+        drop(second);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

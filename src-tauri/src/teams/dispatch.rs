@@ -98,6 +98,7 @@ struct Plan {
     desk: String,
     role_name: String,
     base_commit: String,
+    previous_worktrees: Vec<String>,
 }
 
 impl TeamsDb {
@@ -228,6 +229,14 @@ impl TeamsDb {
         Ok(self.0.query_row("SELECT base_commit FROM dispatches WHERE team_id = ?1 AND item_id = ?2 ORDER BY id DESC LIMIT 1", params![team, item], |r| r.get(0)).optional()?)
     }
 
+    pub(crate) fn dispatch_base_for_session(&self, team: &str, session: &str) -> Result<String> {
+        let value: Option<Option<String>> = self.0.query_row(
+            "SELECT base_commit FROM dispatches WHERE team_id=?1 AND session_id=?2 ORDER BY id DESC LIMIT 1",
+            params![team, session], |r| r.get(0),
+        ).optional()?;
+        value.flatten().ok_or_else(|| anyhow!("worker dispatch base is unavailable; redispatch from the team base"))
+    }
+
     fn dispatch_team_item_of(&self, session: &str) -> Result<Option<(String, String)>> {
         Ok(self.0.query_row(
             "SELECT team_id, item_id FROM dispatches WHERE session_id = ?1 ORDER BY id DESC LIMIT 1",
@@ -251,126 +260,76 @@ impl TeamsDb {
         Ok(path)
     }
 
-    fn reused_worker_history(&self, team: &str, item: &str, current_session: &str) -> Result<bool> {
-        Ok(self.0.query_row(
-            "SELECT EXISTS(SELECT 1 FROM dispatches d JOIN session_process_facts f ON f.session_id=d.session_id AND f.launched_as_worker=1 WHERE d.team_id=?1 AND d.item_id=?2 AND d.session_id != ?3)",
-            params![team, item, current_session],
-            |r| r.get(0),
-        )?)
-    }
-
-    fn coordinator_session(&self, team: &str) -> Result<Option<String>> {
-        Ok(self.0.query_row(
-            "SELECT m.session_id FROM members m JOIN roles r ON r.id=m.role_id WHERE m.team_id=?1 AND m.left_at IS NULL AND r.standing=1 ORDER BY CASE WHEN m.seat='coordinator' THEN 0 ELSE 1 END LIMIT 1",
-            [team], |r| r.get(0),
-        ).optional()?)
-    }
 }
 
-pub(crate) struct ReuseContext {
-    pub coordinator_session: Option<String>,
-    pub history_unknown: bool,
-}
+/// Shared classification for start and online handoff. When team history is unavailable,
+/// agent-created sessions fail closed; user-created sessions without known provenance remain usable.
+#[derive(PartialEq, Eq)]
+enum WorkerClass { Ordinary, Worker, UnknownHistory }
 
-/// Return a confirmation context when a known worker is restarting in a path that may have been
-/// used before. Missing or unreadable history is treated as used, never as a first dispatch.
-pub(crate) fn worker_reuse_context(
-    data_dir: &Path,
-    db: &crate::db::Db,
-    manager: &crate::code::CodeManager,
-    session_id: &str,
-) -> Result<Option<ReuseContext>> {
-    let known = super::allow::daemon_knows_worker_session(session_id)
-        || manager.process_launched_as_worker(session_id);
-    if !data_dir.join("teams.db").is_file() {
-        return Ok(known.then_some(ReuseContext {
-            coordinator_session: None,
-            history_unknown: true,
-        }));
-    }
-    let tdb = match TeamsDb::open(data_dir) {
-        Ok(tdb) => tdb,
-        Err(e) if known => {
-            tracing::warn!(session=%session_id, error=%e, "worker reuse history unavailable; requiring local confirmation");
-            return Ok(Some(ReuseContext {
-                coordinator_session: None,
-                history_unknown: true,
-            }));
-        }
-        Err(e) => return Err(e),
+fn classify_worker(
+    data_dir: &Path, db: &crate::db::Db, manager: &crate::code::CodeManager,
+    session: &crate::db::CodeSession, known_before_stop: bool,
+) -> Result<WorkerClass> {
+    let known = known_before_stop || super::allow::daemon_knows_worker_session(&session.id)
+        || manager.process_launched_as_worker(&session.id)
+        || db.worker_provenance_claimed(&session.id)?.is_some();
+    if known { return Ok(WorkerClass::Worker); }
+    let lookup = || -> Result<bool> {
+        if !data_dir.join("teams.db").is_file() { bail!("team history unavailable"); }
+        let tdb = TeamsDb::open(data_dir)?;
+        let active: bool = tdb.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM members m JOIN roles r ON r.id=m.role_id WHERE m.session_id=?1 AND m.left_at IS NULL AND m.status != 'reserved' AND r.standing=0)",
+            [&session.id], |r| r.get(0),
+        )?;
+        Ok(active || tdb.launched_as_worker(&session.id)? || tdb.dispatched(&session.id)?)
     };
-    let is_worker: bool = match tdb.0.query_row(
+    match lookup() {
+        Ok(true) => Ok(WorkerClass::Worker),
+        Ok(false) => Ok(WorkerClass::Ordinary),
+        Err(_) if session.created_by.is_some() => Ok(WorkerClass::UnknownHistory),
+        Err(_) => Ok(WorkerClass::Ordinary),
+    }
+}
+
+/// A freshly bound worker session may launch once; every in-place restart is refused.
+pub(crate) fn claim_fresh_worker_start(
+    data_dir: &Path, db: &crate::db::Db, manager: &crate::code::CodeManager,
+    session: &crate::db::CodeSession, known_before_stop: bool,
+) -> Result<()> {
+    match classify_worker(data_dir, db, manager, session, known_before_stop)? {
+        WorkerClass::Ordinary => return Ok(()),
+        WorkerClass::UnknownHistory => {
+            if db.claim_pending_first_launch(&session.id)? { return Ok(()); }
+            bail!("team history is unavailable for this agent-created session; start a fresh session instead");
+        }
+        WorkerClass::Worker => {}
+    }
+    let refuse = || anyhow!("worker cannot restart in the same worktree; use Restart with fresh context or redispatch to a fresh session");
+    if db.worker_provenance_claimed(&session.id)? != Some(false) { return Err(refuse()); }
+    if !data_dir.join("teams.db").is_file() { return Err(refuse()); }
+    let tdb = TeamsDb::open(data_dir).map_err(|_| refuse())?;
+    let active: bool = tdb.0.query_row(
         "SELECT EXISTS(SELECT 1 FROM members m JOIN roles r ON r.id=m.role_id WHERE m.session_id=?1 AND m.left_at IS NULL AND m.status != 'reserved' AND r.standing=0)",
-        [session_id], |r| r.get(0),
-    ) {
-        Ok(value) => value || known,
-        Err(e) if known => {
-            tracing::warn!(session=%session_id, error=%e, "worker membership unavailable; requiring local confirmation");
-            return Ok(Some(ReuseContext { coordinator_session: None, history_unknown: true }));
-        }
-        Err(e) => return Err(e.into()),
-    };
-    if !is_worker {
-        return Ok(None);
+        [&session.id], |r| r.get(0),
+    )?;
+    if !active { return Err(refuse()); }
+    let (team_id, item) = tdb.dispatch_team_item_of(&session.id)?.ok_or_else(refuse)?;
+    let team = tdb.team(&team_id)?;
+    let assigned = tdb.assigned_worktree(&team, &item, Some(&session.id))?;
+    if Path::new(&session.cwd).canonicalize()? != assigned { return Err(refuse()); }
+    if !db.claim_worker_start(&session.id)? { return Err(refuse()); }
+    Ok(())
+}
+
+/// Workers cannot move their untrusted worktree through the generic handoff path.
+pub(crate) fn refuse_worker_handoff(state: &AppState, id: &str) -> Result<()> {
+    let session = state.db.get_code_session(id)?.ok_or_else(|| anyhow!("no such session"))?;
+    match classify_worker(&state.data_dir, &state.db, &state.code, &session, false)? {
+        WorkerClass::Ordinary => Ok(()),
+        WorkerClass::Worker => bail!("a team worker cannot be moved; redispatch the item on the target computer"),
+        WorkerClass::UnknownHistory => bail!("team history is unavailable for this agent-created session; start a fresh session instead"),
     }
-    let session = db
-        .get_code_session(session_id)?
-        .ok_or_else(|| anyhow!("worker session disappeared before reuse check"))?;
-    let root = real_session_root(&session.cwd)?;
-    for other in db.list_code_sessions()? {
-        if other.id == session_id || other.archived_at.is_some() || !manager.is_running(&other.id) {
-            continue;
-        }
-        let other_root = real_session_root(&other.cwd)?;
-        if other_root.starts_with(&root) {
-            bail!(
-                "worker restart refused before sweep: live session root {} is inside this worktree",
-                other_root.display()
-            );
-        }
-    }
-    let target = match tdb.dispatch_team_item_of(session_id) {
-        Ok(Some(target)) => target,
-        Ok(None) => {
-            return Ok(Some(ReuseContext {
-                coordinator_session: None,
-                history_unknown: true,
-            }));
-        }
-        Err(e) => {
-            tracing::warn!(session=%session_id, error=%e, "worker dispatch history unavailable; requiring local confirmation");
-            return Ok(Some(ReuseContext {
-                coordinator_session: None,
-                history_unknown: true,
-            }));
-        }
-    };
-    let (used_before_current, coordinator) = match (
-        tdb.reused_worker_history(&target.0, &target.1, session_id),
-        tdb.coordinator_session(&target.0),
-    ) {
-        (Ok(used), Ok(coordinator)) => (used, coordinator),
-        (history, coord) => {
-            tracing::warn!(session=%session_id, history_error=?history.err(), coordinator_error=?coord.err(), "worker reuse history incomplete; requiring local confirmation");
-            (true, None)
-        }
-    };
-    let current_has_run = match tdb.launched_as_worker(session_id) {
-        Ok(value) => value,
-        Err(e) => {
-            tracing::warn!(session=%session_id, error=%e, "worker launch history unavailable; requiring local confirmation");
-            return Ok(Some(ReuseContext {
-                coordinator_session: None,
-                history_unknown: true,
-            }));
-        }
-    };
-    Ok(
-        (used_before_current || current_has_run).then_some(ReuseContext {
-            coordinator_session: coordinator,
-            history_unknown: false,
-        }),
-    )
 }
 
 fn open_if_any(state: &AppState) -> Option<TeamsDb> {
@@ -517,20 +476,8 @@ pub(crate) fn gate_session_root(
 
     let root = real_session_root(&session.cwd)?;
 
-    let dispatch_target = if worker { tdb.dispatch_team_item_of(session_id)? } else { None };
-    let mut reusable_worktrees = std::collections::HashSet::new();
-    if let Some(target) = &dispatch_target {
-        for (id, worktree) in &active {
-            if root == *worktree && tdb.dispatch_team_item_of(id)?.as_ref() == Some(target) {
-                reusable_worktrees.insert(id.as_str());
-            }
-        }
-    }
     if let Some((other, worktree)) = active.iter().find(|(id, w)| {
-        if id == session_id || !(root.starts_with(w) || w.starts_with(&root)) { return false; }
-        // Re-dispatching the same item may reuse its stopped worker's worktree. A different live
-        // session in that tree is still refused by the live-session check below.
-        !reusable_worktrees.contains(id.as_str())
+        id != session_id && (root.starts_with(w) || w.starts_with(&root))
     }) {
         bail!("worker start refused: session root overlaps worker {other}'s worktree {}", worktree.display());
     }
@@ -683,6 +630,22 @@ fn plan(state: &AppState, desk: &str, args: &Value) -> Result<Plan> {
             git(cwd, &["rev-parse", "--verify", &format!("{branch_ref}^{{commit}}")])?
         }
     };
+    // Capture earlier paths before launching: they remain on disk and must be visible to the user.
+    let mut previous_worktrees = Vec::new();
+    {
+        let mut q = tdb.0.prepare("SELECT session_id, worktree_path FROM dispatches WHERE team_id=?1 AND item_id=?2 AND session_id IS NOT NULL ORDER BY id")?;
+        let rows = q.query_map(params![c.team.id, item.id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))?;
+        for row in rows {
+            let (session, path) = row?;
+            let path = match path {
+                Some(path) => Some(path),
+                None => state.db.get_code_session(&session)?.map(|s| s.cwd),
+            };
+            if let Some(path) = path {
+                if Path::new(&path).is_absolute() && !previous_worktrees.contains(&path) { previous_worktrees.push(path); }
+            }
+        }
+    }
     let (place, dispatch_id) = tdb.reserve(&c.team, seat, &item.id, desk, &base_commit)?;
     Ok(Plan {
         team: c.team,
@@ -695,6 +658,7 @@ fn plan(state: &AppState, desk: &str, args: &Value) -> Result<Plan> {
         desk: desk.to_owned(),
         role_name: roles.iter().find(|r| r.id == seat.role_id).map(|r| r.name.clone()).unwrap_or_default(),
         base_commit,
+        previous_worktrees,
     })
 }
 
@@ -714,28 +678,53 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
-/// `git worktree add` for `branch` from the team's `pr_base`; returns the worktree folder.
-/// `--` precedes every ref and path, and `pr_base` was checked when the team was made.
-fn make_worktree(team: &Team, item_id: &str, base_commit: &str) -> Result<(std::path::PathBuf, String)> {
+/// Create a distinct branch and worktree for each worker spawn.
+pub(crate) fn make_worktree(team: &Team, item_id: &str, base_commit: &str) -> Result<(PathBuf, String)> {
     let cwd = Path::new(&team.cwd);
-    // Resolved again now: empty → <cwd>/.trees; a symlink swapped in since create must not escape cwd.
     let root = team.effective_worktree_root()?;
-    let branch = item_id.to_lowercase();
-    let path = root.join(&branch);
-    if !path.starts_with(&root) || branch.contains('/') || branch.starts_with('-') {
+    if item_id.is_empty() || !item_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
         bail!("{item_id} is not usable as a worktree name");
     }
-    std::fs::create_dir_all(root)?;
+    let branch = format!("{}-{}", item_id.to_ascii_lowercase(), crate::db::new_id());
+    let path = root.join(&branch);
+    std::fs::create_dir_all(&root)?;
     let p = path.to_string_lossy().into_owned();
-    if path.exists() {
-        let listed = git(cwd, &["worktree", "list", "--porcelain"])?;
-        if !listed.lines().any(|line| line.strip_prefix("worktree ").is_some_and(|p| Path::new(p) == path)) { bail!("existing worker folder is not a registered worktree; review it before dispatching again"); }
-        let top = git(&path, &["rev-parse", "--show-toplevel"])?;
-        if Path::new(&top) != path.as_path() { bail!("existing worker folder is not the registered worktree; review it before dispatching again"); }
-        return Ok((path, branch));
-    }
     git(cwd, &["worktree", "add", "-b", &branch, "--", &p, base_commit])?;
     Ok((path, branch))
+}
+
+/// Files which could alter agent instructions or execute code during a fresh checkout or launch.
+fn trust_relevant(path: &str) -> bool {
+    path.split('/').any(|part| {
+        let part = part.to_ascii_lowercase();
+        matches!(part.as_str(), ".agents" | ".claude" | ".codex" | ".cursor" | ".gemini" | ".opencode" | ".vscode" | ".husky" | ".githooks" | ".git" | ".mcp.json" | ".gitconfig" | ".gitattributes" | ".gitmodules" | ".envrc" | ".npmrc" | "package.json" | "pnpm-workspace.yaml" | "agents.md" | "claude.md" | "gemini.md" | ".bashrc" | ".bash_profile" | ".profile" | ".zshenv" | ".zshrc" | ".zprofile")
+            || part == ".env" || part.starts_with(".env.")
+    })
+}
+
+/// Use only a committed HEAD whose changes from the original dispatch base have no trust-sensitive paths.
+pub(crate) fn trusted_refresh_head(repo: &Path, worktree: &Path, dispatch_base: &str) -> Result<String> {
+    let expected = worktree.canonicalize().context("previous worktree is unavailable")?;
+    let entries = git(repo, &["worktree", "list", "--porcelain", "-z"])?;
+    let mut found = false;
+    let mut head = None;
+    for field in entries.split('\0') {
+        if let Some(path) = field.strip_prefix("worktree ") {
+            found = Path::new(path).canonicalize().ok().as_ref() == Some(&expected);
+        } else if found && let Some(commit) = field.strip_prefix("HEAD ") {
+            head = Some(commit.to_owned());
+            break;
+        }
+    }
+    let head = head.ok_or_else(|| anyhow!("previous worktree is not registered with the team repository"))?;
+    let base = git(repo, &["rev-parse", "--verify", &format!("{dispatch_base}^{{commit}}")])?;
+    let changed = git(repo, &["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", &base, &head, "--"])?;
+    if changed.contains('\u{fffd}') { bail!("cannot verify non-UTF-8 changed paths; review the previous worker worktree"); }
+    let hits: Vec<_> = changed.split('\0').filter(|p| !p.is_empty() && trust_relevant(p)).collect();
+    if !hits.is_empty() {
+        bail!("worker refresh refused: trust-sensitive files changed: {}; review them or start from the dispatch base", hits.join(", "));
+    }
+    Ok(head)
 }
 
 fn remove_worktree(team: &Team, path: &Path, branch: &str) {
@@ -757,11 +746,6 @@ pub(crate) static FAKE_PROMPTS: std::sync::Mutex<Vec<(String, String)>> = std::s
 
 #[cfg(test)]
 pub(crate) static FAIL_START_AGENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-#[cfg(test)]
-pub(crate) static HOLD_REUSED_WORKER_CONFIRMATIONS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashSet<PathBuf>>,
-> = std::sync::LazyLock::new(Default::default);
 
 #[cfg(test)]
 pub(crate) async fn start_agent(state: &AppState, id: &str) -> Result<()> {
@@ -788,42 +772,7 @@ pub(crate) async fn start_agent(state: &AppState, id: &str) -> Result<()> {
         code.preflight_start(sink, &db, &data_dir, &session)
             .map(|_| ())
     });
-    let hold_confirmation = HOLD_REUSED_WORKER_CONFIRMATIONS
-        .lock()
-        .unwrap()
-        .contains(&state.data_dir);
-    let confirmer = if !hold_confirmation {
-        let pending = state.code.pending.clone();
-        let manager = state.code.clone();
-        Some(tokio::spawn(async move {
-            loop {
-                let requests: Vec<_> = pending
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter(|(_, entry)| entry.local_human_only)
-                    .map(|(request, entry)| (request.clone(), entry.session_id.clone()))
-                    .collect();
-                if !requests.is_empty() {
-                    for (request, owner) in requests {
-                        let _ = manager.respond_permission(
-                            &request,
-                            Some("confirm_restart".into()),
-                            Some(&owner),
-                        );
-                    }
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        }))
-    } else {
-        None
-    };
     result.await??;
-    if let Some(confirmer) = confirmer {
-        confirmer.abort();
-    }
     let mut rx = state.code.attach_test_agent(id);
     let id = id.to_owned();
     tokio::spawn(async move {
@@ -914,6 +863,7 @@ async fn start(state: &AppState, p: &Plan) -> Result<Value> {
         // Always set after create: stricter(seat, coordinator), never always-approve for workers.
         state.db.set_code_session_permission_mode(&session.id, &p.mode)?;
         state.db.set_code_session_created_by(&session.id, &p.desk)?;
+        state.db.record_worker_provenance(&session.id)?;
         state.db.set_code_session_title(&session.id, &format!("{} {}", p.item.id, super::clean(&p.item.title)), true)?;
         // Member before start: the launch reads the role from teams.db.
         TeamsDb::open(&state.data_dir)?.bind_reserved(&p.team.id, &p.place, &session.id, p.dispatch_id, &path)?;
@@ -946,6 +896,12 @@ async fn start(state: &AppState, p: &Plan) -> Result<Value> {
     changed(state, &tdb, &p.team.id, &format!("{} dispatched to {} ({} {})", p.item.id, p.role_name, p.agent, p.model.as_deref().unwrap_or("")));
     (state.emit)("mesh://changed", serde_json::json!({ "tables": ["code_sessions"] }));
     let mut note = "Started and briefed. Follow its progress with item_get; release it with member_release when the item is done, dropped or awaiting review.".to_owned();
+    if !p.previous_worktrees.is_empty() {
+        let message = format!("Previous worker worktrees remain on disk (review before cleanup): {}", p.previous_worktrees.join(", "));
+        note.push_str(&format!(" {message}"));
+        let event = crate::code::acp::Envelope { code_session_id: p.desk.clone(), event: crate::code::acp::CodeEvent::Notice { message } };
+        (state.emit)(crate::code::acp::EVENT, serde_json::to_value(event)?);
+    }
     let mut codex_sandbox = json!(null);
     if p.agent == "codex" && p.mode == "auto" {
         if let Some(why) = crate::code::agents::codex_worker_workspace_write_blocked(&path) {
@@ -1192,6 +1148,35 @@ mod tests {
     }
 
     #[test]
+    fn refresh_accepts_only_non_sensitive_committed_changes() {
+        let (root, base) = config_repo();
+        std::fs::write(root.join("ordinary.txt"), "work").unwrap();
+        git(&root, &["add", "--", "ordinary.txt"]).unwrap();
+        git(&root, &["-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-m", "work"]).unwrap();
+        assert_eq!(trusted_refresh_head(&root, &root, &base).unwrap(), git(&root, &["rev-parse", "HEAD"]).unwrap());
+    }
+
+    #[test]
+    fn refresh_refuses_trust_sensitive_committed_changes_and_names_them() {
+        let (root, base) = config_repo();
+        std::fs::write(root.join(".mcp.json"), "{} ").unwrap();
+        git(&root, &["add", "--", ".mcp.json"]).unwrap();
+        git(&root, &["-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-m", "config"]).unwrap();
+        let error = trusted_refresh_head(&root, &root, &base).unwrap_err().to_string();
+        assert!(error.contains(".mcp.json"), "{error}");
+    }
+
+    #[test]
+    fn assigned_worktree_refuses_path_outside_the_root() {
+        let (d, t, team) = setup();
+        std::fs::create_dir_all(d.join("proj/trees")).unwrap();
+        let outside = d.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        t.0.execute("INSERT INTO dispatches(team_id,item_id,seat,desk_session,session_id,worktree_path,at) VALUES (?1,'ITEM','workers','desk','worker',?2,0)", params![team.id, outside.canonicalize().unwrap().to_string_lossy()]).unwrap();
+        assert!(t.assigned_worktree(&team, "ITEM", Some("worker")).is_err());
+    }
+
+    #[test]
     fn assigned_worktree_uses_recorded_path_not_item_name_and_refuses_missing() {
         let (d, t, team) = setup();
         let path = d.join("proj/trees/fresh-unique-name");
@@ -1211,10 +1196,12 @@ mod tests {
         run(&["init", "-q", "-b", "main"]);
         run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]);
         let (path, branch) = make_worktree(&team, "DM-20261109-01", "HEAD").unwrap();
-        assert_eq!(branch, "dm-20261109-01");
+        assert!(branch.starts_with("dm-20261109-01-"));
         assert!(path.join(".git").exists() && path.starts_with(super::super::resolve(&d).unwrap().join("proj").join("trees")));
-        // The same item twice is refused by git (branch exists), not silently shared.
-        assert_eq!(make_worktree(&team, "DM-20261109-01", "HEAD").unwrap().0, path);
+        let (second, second_branch) = make_worktree(&team, "DM-20261109-01", "HEAD").unwrap();
+        assert_ne!(second, path);
+        assert!(second.join(".git").exists());
+        remove_worktree(&team, &second, &second_branch);
         remove_worktree(&team, &path, &branch);
         assert!(!path.exists());
         // A worktree folder swapped for a link to outside is refused (symlink setup is unix-only).
@@ -1260,7 +1247,7 @@ mod tests {
         run(&["init", "-q", "-b", "main"]);
         run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]);
         let (path, branch) = make_worktree(&team, "EM-20261112-01", "HEAD").unwrap();
-        assert_eq!(branch, "em-20261112-01");
+        assert!(branch.starts_with("em-20261112-01-"));
         assert!(path.join(".git").exists());
         assert!(path.starts_with(&root), "{path:?} under {root:?}");
         remove_worktree(&team, &path, &branch);
