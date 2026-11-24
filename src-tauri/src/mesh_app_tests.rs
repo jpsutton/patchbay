@@ -552,9 +552,13 @@ async fn remote_session_commands_and_terminal() {
     let note = a.state.db.get_setting(&format!("mesh.handoff.{}", s.id)).unwrap().unwrap();
     assert!(note.contains("taking over") && note.contains("User: hi"), "{note}");
 
-    // B only views the session: its partial transcript must not replace the host's cache.
-    save_code_transcript(&b.state, s.id.clone(), r#"{"v":1,"entries":[],"toolCalls":{}}"#.into()).await.unwrap();
-    assert_eq!(b.state.db.code_transcript(&s.id).unwrap(), None);
+    // B only views the session: its save goes to the host, the only writer of the cache. The cell is
+    // synced back, so B's copy is whatever the host holds once replication lands, not something B
+    // wrote (pb-20261121-05: asserting `None` raced that replication).
+    let partial = r#"{"v":1,"entries":[],"toolCalls":{}}"#;
+    save_code_transcript(&b.state, s.id.clone(), partial.into()).await.unwrap();
+    assert_eq!(a.state.db.code_transcript(&s.id).unwrap().as_deref(), Some(partial), "the save landed on the host");
+    until("the host's cache reaches B", 20, || b.state.db.code_transcript(&s.id).unwrap() == a.state.db.code_transcript(&s.id).unwrap()).await;
     save_code_transcript(&a.state, s.id.clone(), r#"{"v":1,"entries":[{"kind":"user","text":"host"}],"toolCalls":{}}"#.into())
         .await
         .unwrap();
