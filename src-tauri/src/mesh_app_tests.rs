@@ -5555,6 +5555,48 @@ async fn stopped_session_does_not_spawn_on_attach_but_spawns_on_prompt() {
     assert!(a.state.code.is_running(&s.id), "agent is now running");
 }
 
+// pb-20261117-08, condition 3: a window on another computer that opened a STOPPED session (attach
+// started nothing) sees the new process's events after its first send. Events travel to every
+// member by session id, not by a subscription made at attach, so the later start is followed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_remote_view_of_a_stopped_session_follows_the_process_its_first_send_starts() {
+    let (a, b) = (node("alpha-rebind"), node("bravo-rebind"));
+    link(&a, &b).await;
+    let proj = a.dir.join("proj");
+    repo(&proj);
+    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok", "default").unwrap();
+    until("session reaches B", 10, || b.state.db.get_code_session(&s.id).unwrap().is_some()).await;
+    let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
+    *a.state.code.test_started.lock().unwrap() = Some(started_tx);
 
+    // Opening it from B starts nothing on A.
+    let attach = code_attach(&b.state, s.id.clone(), None, None).await.unwrap();
+    assert_eq!(attach["running"], false, "{attach}");
+    assert!(!a.state.code.is_running(&s.id) && started.try_recv().is_err(), "attach started a process");
 
+    // B's first send starts it on A and delivers the text.
+    let agent = tokio::spawn(async move {
+        let (_, mut rx) = tokio::time::timeout(Duration::from_secs(5), started.recv()).await.expect("no process started").unwrap();
+        match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("no prompt").unwrap() {
+            AgentCmd::Prompt { msg, reply, .. } => {
+                assert_eq!(msg.text, "first send");
+                if let Some(reply) = reply {
+                    let _ = reply.send(Ok(code::acp::Delivery::Sent));
+                }
+            }
+            _ => panic!("expected AgentCmd::Prompt"),
+        }
+        rx
+    });
+    code_prompt(&b.state, s.id.clone(), "first send".into(), vec![], None, None, None).await.unwrap();
+    let _rx = agent.await.unwrap();
 
+    // The new process's output reaches B's window for that session.
+    emit(&a, &s.id, chunk("from the new process"));
+    until("B sees the new process's events", 10, || {
+        b.events.lock().unwrap().iter().any(|(n, p)| {
+            n == code::acp::EVENT && p["codeSessionId"] == s.id.as_str() && p["event"]["update"]["content"]["text"] == "from the new process"
+        })
+    })
+    .await;
+}
