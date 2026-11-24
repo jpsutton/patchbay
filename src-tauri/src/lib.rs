@@ -3062,6 +3062,16 @@ fn peer_path_base() -> std::path::PathBuf {
     code::agents::home_dir().unwrap_or_default()
 }
 
+/// A folder named for this computer must be a full path in its own form: the move dialog fills in
+/// the old host's folder, and `C:\…` on macOS or `/Users/…` on Windows would be taken as relative.
+fn refuse_relative_folder(cwd: &str) -> anyhow::Result<()> {
+    if !std::path::Path::new(cwd).is_absolute() {
+        let example = if cfg!(windows) { r"C:\Users\…" } else if cfg!(target_os = "macos") { "/Users/…" } else { "/home/…" };
+        anyhow::bail!("{cwd} isn't a full path on this computer; use one like {example}");
+    }
+    Ok(())
+}
+
 fn refuse_foreign_folder(creator_cwd: &str, cwd: &str, links: &dyn patchbay_agent::LinkReader) -> anyhow::Result<()> {
     let base = std::path::Path::new(creator_cwd);
     if patchbay_agent::foreign_target_with(base, base, links) {
@@ -3975,6 +3985,8 @@ async fn fetch_package_files(state: &AppState, host: &str, token: &str, meta: &h
 
 /// Target side: pull session `id` from its host into `cwd` here and take over the lease.
 async fn import_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Result<Option<String>> {
+    // Before anything else: a wrong-form folder must fail before the host stops its agent.
+    refuse_relative_folder(cwd)?;
     // The folder a mesh peer asked this computer to import into: judged before `local_commits`, the
     // existence checks and the unpack touch it.
     refuse_foreign_path(&peer_path_base(), std::path::Path::new(cwd), "the folder", &patchbay_agent::OsLinks)?;
@@ -4036,6 +4048,7 @@ async fn code_move(state: &AppState, id: String, target: String, cwd: String) ->
 /// comes along: the host's working folder can't be copied while it is offline, so the session
 /// carries on in a folder that already exists on this computer.
 async fn take_over_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Result<Option<String>> {
+    refuse_relative_folder(cwd)?;
     // The folder a mesh peer asked this computer to continue the session in: judged before `is_dir`.
     refuse_foreign_path(&peer_path_base(), std::path::Path::new(cwd), "the folder", &patchbay_agent::OsLinks)?;
     let s = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("no such session"))?;
