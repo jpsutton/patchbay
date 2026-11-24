@@ -1169,8 +1169,11 @@ mod tests {
         wt_git(&wt, &["config", "filter.lfs.clean", "cat >/dev/null; printf 'pointer\\n'"]);
         // Same length as the blob: git compares sizes before it runs a filter, so only an equal-size change reaches it.
         std::fs::write(wt.join("f.txt"), "POINTER\n").unwrap();
-        let user = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(&wt).args(["status", "--porcelain"]).output().unwrap();
+        // GIT_OPTIONAL_LOCKS=0: a plain `git status` otherwise refreshes (writes) the index entry with the file's new
+        // stat data, after which the done check would see a stat-clean file and never hash it.
+        let user = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_OPTIONAL_LOCKS", "0").arg("-C").arg(&wt).args(["status", "--porcelain"]).output().unwrap();
         assert!(user.status.success() && String::from_utf8_lossy(&user.stdout).trim().is_empty(), "control: the user's own git calls the file clean: {:?}", String::from_utf8_lossy(&user.stdout));
+        std::fs::write(wt.join("f.txt"), "POINTER\n").unwrap(); // new stat data again, like the sibling tests
         let err = t.set_item(&team.id, &id, Some("desk1"), &json!({ "status": "done" })).unwrap_err().to_string();
         assert_eq!(err, DONE_REQUIRES_CLEAN_WORKTREE);
     }
