@@ -666,13 +666,15 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String> {
     // No hooks (a tracked core.hooksPath folder like .husky could hold one the coordinator wrote),
     // no fsmonitor, no system config: this git runs as the host, not under an approval mode.
     let out = std::process::Command::new("git")
-        .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"])
+        .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "protocol.ext.allow=never"])
         // A global `git lfs install` puts a smudge filter in ~/.gitconfig; it must not run at checkout.
         .args(["-c", "filter.lfs.process=", "-c", "filter.lfs.smudge=", "-c", "filter.lfs.required=false", "-C"])
         .arg(cwd)
         .args(args)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_LFS_SKIP_SMUDGE", "1")
+        // A missing blob must not start a promisor fetch, which runs the configured upload-pack as the host.
+        .env("GIT_NO_LAZY_FETCH", "1")
         .output()
         .context("running git")?;
     if !out.status.success() {
@@ -735,7 +737,8 @@ fn refuse_repo_code_hooks(repo: &Path) -> Result<()> {
         .filter(|k| {
             let k = k.to_ascii_lowercase();
             k.starts_with("filter.") || k.starts_with("include.") || k.starts_with("includeif.") || k.starts_with("lfs.customtransfer.") || k.starts_with("lfs.extension.") || k.starts_with("credential.")
-                || matches!(k.as_str(), "submodule.recurse" | "core.fsmonitor" | "core.hookspath" | "lfs.standalonetransferagent" | "core.attributesfile" | "core.sshcommand" | "extensions.worktreeconfig")
+                || (k.starts_with("remote.") && [".promisor", ".uploadpack", ".receivepack", ".vcs"].iter().any(|e| k.ends_with(e)))
+                || matches!(k.as_str(), "submodule.recurse" | "core.fsmonitor" | "core.hookspath" | "lfs.standalonetransferagent" | "core.attributesfile" | "core.sshcommand" | "extensions.worktreeconfig" | "extensions.partialclone" | "core.gitproxy")
         })
         .collect();
     if !bad.is_empty() {
@@ -1314,7 +1317,7 @@ mod tests {
 
     #[test]
     fn refresh_refuses_repo_config_that_runs_code_at_checkout() {
-        for (key, value) in [("filter.x.smudge", "true"), ("include.path", "/dev/null"), ("includeIf.gitdir:/.path", "/dev/null"), ("submodule.recurse", "true"), ("core.fsmonitor", "true"), ("core.hooksPath", ".husky"), ("core.attributesFile", "attrs"), ("lfs.customtransfer.x.path", "x"), ("lfs.extension.x.clean", "x"), ("lfs.standalonetransferagent", "x"), ("core.sshCommand", "x"), ("credential.helper", "!x"), ("extensions.worktreeConfig", "true")] {
+        for (key, value) in [("filter.x.smudge", "true"), ("include.path", "/dev/null"), ("includeIf.gitdir:/.path", "/dev/null"), ("submodule.recurse", "true"), ("core.fsmonitor", "true"), ("core.hooksPath", ".husky"), ("core.attributesFile", "attrs"), ("lfs.customtransfer.x.path", "x"), ("lfs.extension.x.clean", "x"), ("lfs.standalonetransferagent", "x"), ("core.sshCommand", "x"), ("credential.helper", "!x"), ("extensions.worktreeConfig", "true"), ("extensions.partialClone", "p"), ("remote.p.promisor", "true"), ("remote.p.uploadpack", "x"), ("remote.p.receivepack", "x"), ("remote.p.vcs", "x"), ("core.gitProxy", "x")] {
             let (root, base) = config_repo();
             git(&root, &["config", "--local", key, value]).unwrap();
             let e = refresh_err(&root, &base);
@@ -1401,6 +1404,8 @@ mod tests {
         std::os::unix::fs::symlink(outside.join("trees"), d.join("proj/trees")).unwrap();
         let e = t.swap_member(&team.id, "old", "new", "workers", &role, true, Some(&fresh)).unwrap_err().to_string();
         assert!(e.contains("inside the team folder"), "{e}");
+        let live: i64 = t.0.query_row("SELECT COUNT(*) FROM members WHERE session_id='new'", [], |r| r.get(0)).unwrap();
+        assert_eq!(live, 0, "the refused swap leaves no new member");
     }
 
     #[cfg(unix)]
@@ -1412,11 +1417,8 @@ mod tests {
         let blob = String::from_utf8(blob.stdout).unwrap().trim().to_owned();
         let name = std::ffi::OsStr::from_bytes(b"bad\xffname");
         // Index entry only: not every filesystem can hold this name on disk.
-        let add = std::process::Command::new("git").arg("-C").arg(&root).args(["update-index", "--add", "--cacheinfo"]).arg(format!("100644,{blob},")).arg(name).output().unwrap();
-        if !add.status.success() {
-            let add = std::process::Command::new("git").arg("-C").arg(&root).args(["update-index", "--add", "--cacheinfo", "100644"]).arg(&blob).arg(name).output().unwrap();
-            assert!(add.status.success(), "{}", String::from_utf8_lossy(&add.stderr));
-        }
+        let add = std::process::Command::new("git").arg("-C").arg(&root).args(["update-index", "--add", "--cacheinfo", "100644"]).arg(&blob).arg(name).output().unwrap();
+        assert!(add.status.success(), "{}", String::from_utf8_lossy(&add.stderr));
         git(&root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"]).unwrap();
         assert!(refresh_err(&root, &base).contains("non-UTF-8"));
     }
@@ -1450,6 +1452,36 @@ mod tests {
         git(&root, &["config", "--local", "lfs.repositoryformatversion", "0"]).unwrap();
         git(&root, &["config", "--local", "lfs.https://example.test/r.git/info/lfs.access", "basic"]).unwrap();
         assert!(trusted_refresh_head(&root, &root, &base).is_ok());
+    }
+
+    #[test]
+    fn a_missing_blob_does_not_start_a_promisor_fetch_at_checkout() {
+        let (d, _t, team) = setup();
+        let cwd = d.join("proj");
+        git(&cwd, &["init", "-q", "-b", "main"]).unwrap();
+        // A commit whose tree names a blob that does not exist.
+        let tree = std::process::Command::new("git").arg("-C").arg(&cwd).args(["mktree", "--missing"]).stdin({
+            let f = d.join("tree-in");
+            std::fs::write(&f, "100644 blob 1111111111111111111111111111111111111111\tmissing.txt\n").unwrap();
+            std::fs::File::open(f).unwrap()
+        }).output().unwrap();
+        assert!(tree.status.success(), "{}", String::from_utf8_lossy(&tree.stderr));
+        let tree = String::from_utf8(tree.stdout).unwrap().trim().to_owned();
+        let commit = git(&cwd, &["-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", &tree, "-m", "x"]).unwrap();
+        git(&cwd, &["update-ref", "refs/heads/main", &commit]).unwrap();
+        let marker = d.join("uploadpack-ran");
+        git(&cwd, &["config", "core.repositoryformatversion", "1"]).unwrap();
+        git(&cwd, &["config", "extensions.partialclone", "p"]).unwrap();
+        git(&cwd, &["config", "remote.p.url", d.to_str().unwrap()]).unwrap();
+        git(&cwd, &["config", "remote.p.promisor", "true"]).unwrap();
+        git(&cwd, &["config", "remote.p.uploadpack", &format!("touch {}; false #", marker.display())]).unwrap();
+        let control = d.join("control");
+        let out = std::process::Command::new("git").arg("-C").arg(&cwd).args(["worktree", "add", "-q", "-b", "control", "--"]).arg(&control).arg("main").output().unwrap();
+        assert!(marker.exists(), "control: plain git runs the upload-pack for a missing blob: {}", String::from_utf8_lossy(&out.stderr));
+        std::fs::remove_file(&marker).unwrap();
+        let made = make_worktree(&team, "DM-20261109-01", "HEAD", false);
+        assert!(!marker.exists(), "the daemon's checkout must not start a promisor fetch");
+        let _ = made;
     }
 
     #[test]
