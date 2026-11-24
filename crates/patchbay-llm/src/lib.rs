@@ -10,5 +10,5 @@ mod sse;
 mod types;
 pub mod wire;
 
-pub use client::{Client, Config};
+pub use client::{Client, Config, require_google_https};
 pub use types::*;

@@ -1,6 +1,39 @@
 //! What the tests need from the machine they run on.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// A loopback server that answers every request with `status` (302, 307...) pointing at a SECOND
+/// loopback server. Returns the first one's base URL and the hit counts of (first, second): a client
+/// that follows the redirect shows up as a hit on the second, and so would carry its credentials
+/// there (pb-20261117-10). Both serve until the test's runtime ends.
+pub async fn redirect_trap(status: u16) -> (String, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (first, second) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_port = target.local_addr().unwrap().port();
+    let hits = second.clone();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = target.accept().await {
+            hits.fetch_add(1, Ordering::SeqCst);
+            let _ = sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}").await;
+        }
+    });
+    let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin_port = origin.local_addr().unwrap().port();
+    let hits = first.clone();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = origin.accept().await {
+            hits.fetch_add(1, Ordering::SeqCst);
+            let mut buf = vec![0u8; 16384];
+            let _ = sock.read(&mut buf).await;
+            let reply = format!("HTTP/1.1 {status} Redirect\r\nlocation: http://127.0.0.1:{target_port}/elsewhere\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+            let _ = sock.write_all(reply.as_bytes()).await;
+        }
+    });
+    (format!("http://127.0.0.1:{origin_port}"), first, second)
+}
 
 /// A fresh folder under the temp dir whose path leaves room for a Unix socket inside it: macOS
 /// puts `temp_dir()` under `/var/folders/…` (about 50 characters) and caps a socket path at
