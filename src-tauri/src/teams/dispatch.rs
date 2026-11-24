@@ -666,7 +666,8 @@ fn plan(state: &AppState, desk: &str, args: &Value) -> Result<Plan> {
 /// like .husky could hold one the coordinator wrote), no fsmonitor, no system config, no inherited `GIT_*`
 /// location or config overrides, no lfs filter (a global `git lfs install` puts one in ~/.gitconfig), and no
 /// promisor fetch for a missing blob (it runs the configured upload-pack as the host). This git runs as the
-/// host, not under an approval mode.
+/// host, not under an approval mode. Boundary: global and XDG config is read as the user's own (only the human
+/// writes ~/.gitconfig and .git/config); a global filter or promisor key is not checked here.
 pub(crate) fn hardened_git(cwd: &Path) -> std::process::Command {
     hardened_git_with(cwd, std::env::vars_os().map(|(k, _)| k))
 }
@@ -674,7 +675,7 @@ pub(crate) fn hardened_git(cwd: &Path) -> std::process::Command {
 fn hardened_git_with(cwd: &Path, inherited: impl IntoIterator<Item = std::ffi::OsString>) -> std::process::Command {
     let mut cmd = std::process::Command::new("git");
     cmd.args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "protocol.ext.allow=never"])
-        .args(["-c", "filter.lfs.process=", "-c", "filter.lfs.smudge=", "-c", "filter.lfs.required=false", "-C"])
+        .args(["-c", "filter.lfs.process=", "-c", "filter.lfs.smudge=", "-c", "filter.lfs.clean=", "-c", "filter.lfs.required=false", "-C"])
         .arg(cwd);
     for key in inherited {
         // Windows env names are case-insensitive. GIT_EXEC_PATH is the daemon's own (a portable git needs it);
@@ -744,14 +745,9 @@ fn trust_relevant(path: &str) -> bool {
         })
 }
 
-/// Refuse a checkout when the shared repository config could run code at `worktree add`. Every spawn refuses the
-/// keys git itself acts on (promisor remotes, proxies, includes, config-defined hooks), since the lazy-fetch environment switch
-/// needs git 2.44+. fsmonitor and sshCommand are not among them: the wrapper overrides fsmonitor on the command
-/// line, and ssh only runs for a fetch, which the refused keys and the environment switch rule out. A refresh,
-/// which follows an untrusted worker, also refuses filters, lfs, credentials, those two, attributes and
-/// `extensions.worktreeConfig` (a fresh spawn reads `config.worktree` with the same filter instead, so sparse
-/// checkouts keep working).
-fn refuse_repo_code_hooks(repo: &Path, refresh: bool) -> Result<()> {
+/// Names of the repository's local config keys, plus `config.worktree` when the extension is on. Git prints
+/// section and variable names lowercased but a quoted subsection exactly as written.
+fn repo_config_keys(repo: &Path) -> Result<String> {
     let mut keys = git(repo, &["config", "--local", "--name-only", "--list", "-z"])?;
     // `worktree add` copies $GIT_DIR/config.worktree, which `--local` does not read; git reads it only when
     // the extension is on, so read it exactly then and fail closed on any error.
@@ -763,23 +759,72 @@ fn refuse_repo_code_hooks(repo: &Path, refresh: bool) -> Result<()> {
             keys.push_str(&git(repo, &["config", "--worktree", "--name-only", "--list", "-z"])?);
         }
     }
-    let bad: Vec<String> = keys
+    Ok(keys)
+}
+
+/// The only filter keys a spawn accepts, matched exactly as git prints them: every daemon git call blanks these.
+/// Filter drivers are matched case-sensitively, so `filter.LFS.smudge` or a `filter "lfs.x"` subsection is a
+/// different driver that the overrides do not cover.
+const BLANKED_LFS_FILTER_KEYS: [&str; 4] = ["filter.lfs.clean", "filter.lfs.smudge", "filter.lfs.process", "filter.lfs.required"];
+
+/// Repository config keys that can run code in a daemon git call. Every spawn refuses the keys git itself acts
+/// on (promisor remotes, proxies, includes, config-defined hooks, custom filters), since the lazy-fetch
+/// environment switch needs git 2.44+. fsmonitor and sshCommand are not among them: the wrapper overrides
+/// fsmonitor on the command line, and ssh only runs for a fetch, which the refused keys and the environment
+/// switch rule out. A refresh, which follows an untrusted worker, also refuses every filter key, lfs included,
+/// credentials, those two, and `extensions.worktreeConfig` (a fresh spawn reads `config.worktree` with the same
+/// filter instead, so sparse checkouts keep working). Keys are returned as git prints them.
+fn repo_code_hook_keys(repo: &Path, refresh: bool) -> Result<Vec<String>> {
+    let keys = repo_config_keys(repo)?;
+    Ok(keys
         .split('\0')
-        .map(str::to_ascii_lowercase)
-        .filter(|k| {
+        .filter(|raw| {
+            let k = raw.to_ascii_lowercase();
             let spawn = k.starts_with("include.") || k.starts_with("includeif.") || k.starts_with("hook.")
+                || (k.starts_with("filter.") && !BLANKED_LFS_FILTER_KEYS.contains(raw))
                 || (k.starts_with("remote.") && [".promisor", ".uploadpack", ".receivepack", ".vcs"].iter().any(|e| k.ends_with(e)))
                 || matches!(k.as_str(), "extensions.partialclone" | "core.gitproxy");
             let more = k.starts_with("filter.") || k.starts_with("lfs.customtransfer.") || k.starts_with("lfs.extension.") || k.starts_with("credential.")
                 || matches!(k.as_str(), "submodule.recurse" | "core.hookspath" | "core.fsmonitor" | "core.sshcommand" | "lfs.standalonetransferagent" | "core.attributesfile" | "extensions.worktreeconfig");
             spawn || (refresh && more)
         })
+        .map(str::to_owned)
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
-        .collect();
+        .collect())
+}
+
+/// Config keys are attacker-chosen strings (a quoted subsection can hold control characters or text aimed at the
+/// coordinator agent) and reach it through error messages. Echo each key escaped with `{:?}`, at most five keys
+/// and about 200 characters, with a `+N more` suffix.
+fn describe_keys(keys: &[String]) -> String {
+    let mut out = String::new();
+    for (i, k) in keys.iter().enumerate() {
+        let item = format!("{k:?}");
+        let budget = 200usize.saturating_sub(out.len());
+        let over = i == 5 || budget == 0;
+        if over || item.chars().count() > budget {
+            if !over {
+                out.push_str(&item.chars().take(budget).collect::<String>());
+                out.push('…');
+            }
+            out.push_str(&format!(" +{} more", keys.len() - i - usize::from(!over)));
+            break;
+        }
+        if !out.is_empty() {
+            out.push_str(", ");
+        }
+        out.push_str(&item);
+    }
+    out
+}
+
+/// Refuse a checkout when the shared repository config could run code at `worktree add`.
+fn refuse_repo_code_hooks(repo: &Path, refresh: bool) -> Result<()> {
+    let bad = repo_code_hook_keys(repo, refresh)?;
     let what = if refresh { "refresh" } else { "spawn" };
     if !bad.is_empty() {
-        bail!("worker {what} refused: repository git config sets {}; a person must review or remove them", bad.join(", "));
+        bail!("worker {what} refused: repository git config sets {}; a person must review or remove them", describe_keys(&bad));
     }
     if refresh {
         let attrs = git(repo, &["rev-parse", "--git-path", "info/attributes"])?;
@@ -788,6 +833,27 @@ fn refuse_repo_code_hooks(repo: &Path, refresh: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Refuse to run `git status` for the durable-done check when it could run repository code: any spawn-set key
+/// (the check reads the same config a spawn does), or a gitlink in the index (status would enter the nested
+/// repository and use its own config and attributes; `--ignore-submodules=all` then keeps status out of it).
+/// Residual: the config check and the status are separate git calls; any running worker that can write the
+/// shared repository config (all worker worktrees share it) could add a filter or include in that window.
+pub(crate) fn refuse_unsafe_status(repo: &Path) -> Result<()> {
+    let keys = repo_code_hook_keys(repo, false)?;
+    let gitlink = git(repo, &["ls-files", "--stage", "-z"])?.split('\0').any(|l| l.starts_with("160000 "));
+    if keys.is_empty() && !gitlink {
+        return Ok(());
+    }
+    let mut parts = Vec::new();
+    if !keys.is_empty() {
+        parts.push(format!("config {}", describe_keys(&keys)));
+    }
+    if gitlink {
+        parts.push("a gitlink (submodule or nested repository) in the index".to_owned());
+    }
+    bail!("Cannot mark item done: the repository could run code during the status check ({}); a person must review or remove it, or provide a PR URL", parts.join("; "));
 }
 
 /// Use only a committed HEAD whose changes from the original dispatch base have no trust-sensitive paths.
@@ -1356,7 +1422,7 @@ mod tests {
 
     #[test]
     fn refresh_refuses_repo_config_that_runs_code_at_checkout() {
-        for (key, value) in [("filter.x.smudge", "true"), ("include.path", "/dev/null"), ("includeIf.gitdir:/.path", "/dev/null"), ("submodule.recurse", "true"), ("core.fsmonitor", "true"), ("core.hooksPath", ".husky"), ("core.attributesFile", "attrs"), ("lfs.customtransfer.x.path", "x"), ("lfs.extension.x.clean", "x"), ("lfs.standalonetransferagent", "x"), ("core.sshCommand", "x"), ("credential.helper", "!x"), ("extensions.worktreeConfig", "true"), ("hook.x.command", "x"), ("extensions.partialClone", "p"), ("remote.p.promisor", "true"), ("remote.p.uploadpack", "x"), ("remote.p.receivepack", "x"), ("remote.p.vcs", "x"), ("core.gitProxy", "x")] {
+        for (key, value) in [("filter.x.smudge", "true"), ("include.path", "/dev/null"), ("includeIf.gitdir:/.path", "/dev/null"), ("submodule.recurse", "true"), ("core.fsmonitor", "true"), ("core.hooksPath", ".husky"), ("core.attributesFile", "attrs"), ("lfs.customtransfer.x.path", "x"), ("lfs.extension.x.clean", "x"), ("lfs.standalonetransferagent", "x"), ("core.sshCommand", "x"), ("credential.helper", "!x"), ("extensions.worktreeConfig", "true"), ("filter.lfs.smudge", "x"), ("hook.x.command", "x"), ("extensions.partialClone", "p"), ("remote.p.promisor", "true"), ("remote.p.uploadpack", "x"), ("remote.p.receivepack", "x"), ("remote.p.vcs", "x"), ("core.gitProxy", "x")] {
             let (root, base) = config_repo();
             git(&root, &["config", "core.repositoryformatversion", "1"]).unwrap(); // lets extensions.* be honoured
             git(&root, &["config", "--local", key, value]).unwrap();
@@ -1536,7 +1602,7 @@ mod tests {
 
     #[test]
     fn a_fresh_spawn_refuses_repo_config_git_acts_on() {
-        for (key, value) in [("extensions.partialClone", "p"), ("remote.p.promisor", "true"), ("remote.p.uploadpack", "x"), ("remote.p.receivepack", "x"), ("remote.p.vcs", "x"), ("core.gitProxy", "x"), ("hook.x.command", "x"), ("include.path", "/dev/null"), ("includeIf.gitdir:/.path", "/dev/null")] {
+        for (key, value) in [("extensions.partialClone", "p"), ("remote.p.promisor", "true"), ("remote.p.uploadpack", "x"), ("remote.p.receivepack", "x"), ("remote.p.vcs", "x"), ("core.gitProxy", "x"), ("hook.x.command", "x"), ("filter.x.smudge", "x"), ("filter.x.clean", "x"), ("filter.x.process", "x"), ("include.path", "/dev/null"), ("includeIf.gitdir:/.path", "/dev/null")] {
             let (d, _t, team) = setup();
             let cwd = d.join("proj");
             git(&cwd, &["init", "-q", "-b", "main"]).unwrap();
@@ -1565,7 +1631,7 @@ mod tests {
 
     #[test]
     fn a_fresh_spawn_reads_config_worktree_when_the_extension_is_on() {
-        for (line, refused) in [("[remote \"p\"]\n\tpromisor = true\n", true), ("[include]\n\tpath = /dev/null\n", true), ("[hook \"x\"]\n\tcommand = x\n", true), ("[core]\n\tsparseCheckout = true\n", false)] {
+        for (line, refused) in [("[remote \"p\"]\n\tpromisor = true\n", true), ("[include]\n\tpath = /dev/null\n", true), ("[hook \"x\"]\n\tcommand = x\n", true), ("[filter \"x\"]\n\tclean = x\n", true), ("[filter \"x\"]\n\tsmudge = x\n", true), ("[filter \"x\"]\n\tprocess = x\n", true), ("[filter \"lfs\"]\n\tsmudge = x\n", false), ("[core]\n\tsparseCheckout = true\n", false)] {
             let (d, _t, team) = setup();
             let cwd = d.join("proj");
             git(&cwd, &["init", "-q", "-b", "main"]).unwrap();
@@ -1581,6 +1647,93 @@ mod tests {
                 assert!(made.is_ok(), "{line}: a harmless key (sparse checkout) must not block a spawn");
             }
         }
+    }
+
+    #[test]
+    fn a_fresh_spawn_accepts_lfs_filter_keys_but_a_refresh_refuses_them() {
+        let (d, _t, team) = setup();
+        let cwd = d.join("proj");
+        git(&cwd, &["init", "-q", "-b", "main"]).unwrap();
+        git(&cwd, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]).unwrap();
+        for k in ["filter.lfs.clean", "filter.lfs.smudge", "filter.lfs.process", "filter.lfs.required"] {
+            git(&cwd, &["config", "--local", k, "x"]).unwrap();
+        }
+        assert!(make_worktree(&team, "DM-20261109-01", "HEAD", false).is_ok());
+        let e = make_worktree(&team, "DM-20261109-02", "HEAD", true).unwrap_err().to_string();
+        assert!(e.contains("worker refresh refused") && e.contains("filter.lfs.clean"), "{e}");
+    }
+
+    #[test]
+    fn a_fresh_spawn_neutralises_the_exact_lfs_filters_at_checkout() {
+        let (d, _t, team) = setup();
+        let cwd = d.join("proj");
+        let plain = |args: &[&str]| assert!(std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").arg("-C").arg(&cwd).args(args).output().unwrap().status.success(), "{args:?}");
+        plain(&["init", "-q", "-b", "main"]);
+        std::fs::write(cwd.join(".gitattributes"), "* filter=lfs\n").unwrap();
+        std::fs::write(cwd.join("a.txt"), "x").unwrap();
+        plain(&["add", "-A"]);
+        plain(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base"]);
+        let marker = d.join("lfs-ran");
+        let cmd = format!("touch {}; cat", marker.display());
+        for k in ["filter.lfs.clean", "filter.lfs.smudge"] { plain(&["config", k, &cmd]); }
+        plain(&["config", "filter.lfs.process", &format!("touch {}", marker.display())]);
+        plain(&["config", "filter.lfs.required", "true"]);
+        let control = d.join("control");
+        let _ = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").arg("-C").arg(&cwd).args(["worktree", "add", "-q", "-b", "control", "--"]).arg(&control).arg("main").output().unwrap();
+        assert!(marker.exists(), "control: plain git runs the lfs filter at checkout");
+        std::fs::remove_file(&marker).unwrap();
+        let made = make_worktree(&team, "DM-20261109-01", "HEAD", false);
+        assert!(!marker.exists(), "the overrides keep the lfs filter from running at checkout");
+        assert!(made.is_ok(), "a fresh spawn accepts the blanked lfs keys");
+    }
+
+    #[test]
+    fn filters_that_only_look_like_lfs_are_refused_on_spawn_and_listed() {
+        for key in ["filter.LFS.smudge", "filter.lfs.x.smudge", "filter.Lfs.clean"] {
+            let (d, _t, team) = setup();
+            let cwd = d.join("proj");
+            git(&cwd, &["init", "-q", "-b", "main"]).unwrap();
+            git(&cwd, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]).unwrap();
+            git(&cwd, &["config", "--local", key, "x"]).unwrap();
+            let e = make_worktree(&team, "DM-20261109-01", "HEAD", false).unwrap_err().to_string();
+            assert!(e.contains("worker spawn refused") && e.contains(key), "{key}: {e}");
+            assert!(repo_code_hook_keys(&cwd, false).unwrap().iter().any(|k| k == key), "{key}");
+            let e = refuse_unsafe_status(&cwd).unwrap_err().to_string();
+            assert!(e.contains(key), "{key}: {e}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_keys_are_escaped_and_capped_in_every_refusal_message() {
+        use std::os::unix::ffi::OsStrExt;
+        let (d, _t, team) = setup();
+        let cwd = d.join("proj");
+        git(&cwd, &["init", "-q", "-b", "main"]).unwrap();
+        git(&cwd, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]).unwrap();
+        let esc = std::ffi::OsStr::from_bytes(b"filter.a\x1b[2Jb.smudge");
+        let long = format!("filter.{}.smudge", "a".repeat(300));
+        for key in [esc.to_os_string(), long.clone().into()] {
+            let out = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").arg("-C").arg(&cwd).args(["config", "--local"]).arg(&key).arg("x").output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        }
+        for e in [
+            make_worktree(&team, "DM-20261109-01", "HEAD", false).unwrap_err().to_string(),
+            make_worktree(&team, "DM-20261109-02", "HEAD", true).unwrap_err().to_string(),
+            refuse_unsafe_status(&cwd).unwrap_err().to_string(),
+        ] {
+            assert!(!e.contains('\x1b') && !e.contains(&"a".repeat(300)), "raw control byte or uncapped key: {e:?}");
+            assert!(e.contains("\\u{1b}"), "the escape byte is shown escaped: {e:?}");
+            assert!(e.len() < 400, "capped: {} chars", e.len());
+        }
+    }
+
+    #[test]
+    fn describe_keys_keeps_five_keys_and_counts_the_rest() {
+        let keys: Vec<String> = (0..8).map(|i| format!("filter.k{i}.smudge")).collect();
+        let text = describe_keys(&keys);
+        assert!(text.contains("filter.k4.smudge") && !text.contains("filter.k5.smudge") && text.ends_with("+3 more"), "{text}");
+        assert_eq!(describe_keys(&keys[..2]), "\"filter.k0.smudge\", \"filter.k1.smudge\"");
     }
 
     #[test]
@@ -1614,6 +1767,9 @@ mod tests {
         assert_eq!(envs.get(&OsString::from("GIT_CONFIG_NOSYSTEM")), Some(&Some("1".to_owned())));
         let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(args.contains(&"protocol.ext.allow=never".to_owned()) && args.contains(&"core.hooksPath=/dev/null".to_owned()));
+        for lfs in ["filter.lfs.process=", "filter.lfs.smudge=", "filter.lfs.clean=", "filter.lfs.required=false"] {
+            assert!(args.contains(&lfs.to_owned()), "{lfs}");
+        }
     }
 
     #[test]
@@ -1622,7 +1778,7 @@ mod tests {
         let cwd = d.join("proj");
         git(&cwd, &["init", "-q", "-b", "main"]).unwrap();
         git(&cwd, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]).unwrap();
-        git(&cwd, &["config", "--local", "filter.x.smudge", "true"]).unwrap();
+        git(&cwd, &["config", "--local", "credential.helper", "!x"]).unwrap();
         let e = make_worktree(&team, "DM-20261109-01", "HEAD", true).unwrap_err().to_string();
         assert!(e.contains("repository git config"), "{e}");
         assert!(make_worktree(&team, "DM-20261109-01", "HEAD", false).is_ok(), "a fresh dispatch is not refused");
