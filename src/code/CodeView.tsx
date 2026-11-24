@@ -1590,6 +1590,9 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     try {
       const made = await api.codeFork(activeId, ordinal, entry?.text ?? "");
       if (entry) seedDraft(`code:${made.id}`, entry.text, entry.attachments ?? []);
+      // Forking is an explicit start: opening a stopped session starts nothing (pb-20261117-08), so the
+      // new fork's agent is started here, by the same start the Start button uses (code_start).
+      await api.codeStart(made.id).catch((e) => setToast(`The fork was made but its agent did not start: ${errorText(e)}`));
       await refreshCodeSessions();
       // A phone's gateway can list sessions before the host's new row reaches it: show it anyway.
       if (!useStore.getState().codeSessions.some((x) => x.id === made.id)) {

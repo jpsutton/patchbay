@@ -38,6 +38,16 @@ const isRunningBlock = codeViewSrc.slice(isRunningAt, codeViewSrc.indexOf("});",
 assert(isRunningBlock.includes("if (!running) {\n        attach(activeId);"), `when not running, CodeView calls attach, not start: ${isRunningBlock}`);
 assert(!isRunningBlock.includes("start(activeId)"), `when not running, CodeView does not call start: ${isRunningBlock}`);
 
+// (2b) Forking is an explicit start: the new fork opens stopped, so the fork action starts it
+// itself (the same code_start the Start button uses), after the fork exists and before it is shown.
+const forkAt = codeViewSrc.indexOf("const forkSession = async");
+assert(forkAt >= 0, "CodeView.tsx defines forkSession");
+const forkBlock = codeViewSrc.slice(forkAt, codeViewSrc.indexOf("forkRef.current = forkSession", forkAt));
+const madeAt = forkBlock.indexOf("api.codeFork(");
+const startAt = forkBlock.indexOf("api.codeStart(made.id)");
+const selectAt = forkBlock.indexOf("selectCodeSession(made.id)");
+assert(madeAt >= 0 && startAt > madeAt && selectAt > startAt, `forkSession must start the new fork between creating and showing it: ${forkBlock}`);
+
 // (3) Executable flow: attach on a stopped session with mock API
 async function simulateAttach(id: string, codeAttachResponse: { running: boolean; offline?: boolean }) {
   let codeStartCalls = 0;
