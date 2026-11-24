@@ -28,6 +28,10 @@ const notRunningBranch = storeSrc.slice(notRunningAt, notRunningEnd);
 assert(!notRunningBranch.includes("startAgent"), `!info.running branch must not call startAgent: ${notRunningBranch}`);
 assert(!notRunningBranch.includes("codeStart"), `!info.running branch must not call codeStart: ${notRunningBranch}`);
 assert(notRunningBranch.includes('status: "idle"'), `!info.running branch sets neutral idle status: ${notRunningBranch}`);
+assert(
+  /entries: history\?\.entries/.test(notRunningBranch) && !/history,\s*\n?\s*earlier,\s*status: "idle"/.test(notRunningBranch),
+  `!info.running branch adopts the saved conversation as entries (browsing is read-only, not empty): ${notRunningBranch}`,
+);
 
 // (2) Invariant: CodeView mount effect calls attach instead of start when !running
 const codeViewSrc = readFileSync(new URL("../code/CodeView.tsx", import.meta.url), "utf8");
