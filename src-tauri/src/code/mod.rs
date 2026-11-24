@@ -11,6 +11,7 @@ pub mod mcp;
 pub mod native;
 pub mod opencode_state;
 pub mod antigravity_plan;
+pub mod cancel_note;
 pub mod cursor_plan;
 pub mod grok_plan;
 pub mod permissions;
@@ -83,6 +84,8 @@ pub enum TurnEnd {
 pub struct CodeManager {
     agents: Mutex<HashMap<String, Agent>>,
     pub pending: PendingPermissions,
+    /// Why a turn with a card open was cancelled, until the agent and the senders are told.
+    pub cancel_notes: cancel_note::CancelNotes,
     /// Event sinks retained so coordinator-initiated redispatch can publish a local confirmation.
     event_sinks: Mutex<HashMap<String, Sink>>,
     process_source: Mutex<Option<Arc<dyn crate::teams::process_sweep::ProcessSource>>>,
@@ -552,10 +555,53 @@ impl CodeManager {
             .ok_or_else(|| anyhow!("agent is not running for this session"))
     }
 
-    pub fn send(&self, code_session_id: &str, cmd: AgentCmd) -> Result<()> {
+    pub fn send(&self, code_session_id: &str, mut cmd: AgentCmd) -> Result<()> {
+        // Send now, a guard stop and a shutdown with a card open are explained to the agent's next
+        // prompt and to the senders (pb-20261121-01): the agent CLI would otherwise report it as the
+        // user rejecting the call. A user's own Stop leaves no note: it is the human's hard brake, the
+        // agent must not be invited to re-run the call, and a Stop is not a failure to tell senders of.
+        match &mut cmd {
+            AgentCmd::Prompt { msg, force, .. } => {
+                if *force {
+                    let why = "the user sent a new message with Send now";
+                    self.note_cancel(code_session_id, why, "send_now", None, false);
+                }
+                if let Some(note) = self.cancel_notes.take_for_prompt(code_session_id) {
+                    cancel_note::append_reminder(&mut msg.blocks, &note.line());
+                }
+            }
+            _ => {}
+        }
+        self.send_raw(code_session_id, cmd)
+    }
+
+    fn send_raw(&self, code_session_id: &str, cmd: AgentCmd) -> Result<()> {
         self.sender(code_session_id)?
             .send(cmd)
             .map_err(|_| anyhow!("agent stopped"))
+    }
+
+    /// Whether a tool-approval card is open for the session: cancelling now answers it "cancelled".
+    pub fn has_open_card(&self, code_session_id: &str) -> bool {
+        self.pending.lock().unwrap().values().any(|p| {
+            !p.local_human_only && (p.session_id == code_session_id || p.target_session_id.as_deref() == Some(code_session_id))
+        })
+    }
+
+    /// Leave the reason for a cancel that is about to happen. The agent is told only when a card is
+    /// open (else no tool call was cancelled); the senders when one is open or `always_senders`.
+    fn note_cancel(&self, code_session_id: &str, reason: &str, kind: &'static str, resets_at: Option<u64>, always_senders: bool) {
+        let card = self.has_open_card(code_session_id);
+        if card || always_senders {
+            let note = cancel_note::Note::new(reason, kind, resets_at);
+            self.cancel_notes.record(code_session_id, note, card, true);
+        }
+    }
+
+    /// The plan-limit guard stops a running turn: `reason` says what ran out and when it resets.
+    pub fn cancel_for_limit(&self, code_session_id: &str, reason: &str, resets_at: Option<u64>) -> Result<()> {
+        self.note_cancel(code_session_id, reason, "usage_limit_stop", resets_at, true);
+        self.send_raw(code_session_id, AgentCmd::Cancel)
     }
 
     /// Send a prompt: a new turn, or mid-turn steered into the running one or queued behind it.
@@ -912,6 +958,7 @@ impl CodeManager {
     pub fn stop(&self, code_session_id: &str) {
         self.invalidate_generation(code_session_id);
         self.cancel_reuse_confirmations(code_session_id);
+        self.note_cancel(code_session_id, "the session was stopped", "shutdown", None, false);
         if let Some(a) = self.agents.lock().unwrap().get_mut(code_session_id) {
             a.stopping = true;
             request_agent_shutdown(a);
@@ -926,6 +973,7 @@ impl CodeManager {
 
     fn stop_and_wait_with_group(&self, code_session_id: &str, timeout: std::time::Duration) -> (bool, Option<u32>) {
         self.cancel_reuse_confirmations(code_session_id);
+        self.note_cancel(code_session_id, "the session was stopped", "shutdown", None, false);
         let process_group = {
             let mut agents = self.agents.lock().unwrap();
             let Some(agent) = agents.get_mut(code_session_id) else {
@@ -1238,6 +1286,139 @@ mod tests {
             paths: Vec::new(),
             paths_complete: true,
         }
+    }
+
+    /// pb-20261121-01: a registered fake agent whose commands the test reads.
+    fn fake_agent(manager: &CodeManager, id: &str) -> mpsc::UnboundedReceiver<AgentCmd> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        manager.agents.lock().unwrap().insert(id.into(), Agent {
+            tx,
+            stop_requested: Arc::new(AtomicBool::new(false)),
+            thread: std::thread::spawn(|| {}),
+            stopping: false,
+            launched_as_worker: false,
+            process_group: Arc::new(AtomicU32::new(0)),
+            group_stop_failed: Arc::new(AtomicBool::new(false)),
+        });
+        rx
+    }
+
+    /// A tool-approval card open for `id`, as an agent's `session/request_permission` leaves it.
+    fn open_card(manager: &CodeManager, id: &str) {
+        let (tx, _rx) = oneshot::channel();
+        manager.pending.lock().unwrap().insert(
+            "card".into(),
+            acp::PendingPermission { session_id: id.into(), target_session_id: None, local_human_only: false, offered: vec![], tx },
+        );
+    }
+
+    fn user_msg(text: &str) -> acp::UserMessage {
+        acp::UserMessage {
+            id: "m".into(),
+            blocks: vec![serde_json::json!({ "type": "text", "text": text })],
+            text: text.into(),
+            origin: "user".into(),
+            attachments: serde_json::Value::Null,
+        }
+    }
+
+    /// The text blocks of the next prompt the agent was handed.
+    fn next_prompt_blocks(rx: &mut mpsc::UnboundedReceiver<AgentCmd>) -> Vec<String> {
+        loop {
+            match rx.try_recv().expect("a prompt was sent") {
+                AgentCmd::Prompt { msg, .. } => {
+                    return msg.blocks.iter().map(|b| b["text"].as_str().unwrap_or_default().to_owned()).collect();
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    fn assert_told(blocks: &[String], because: &str) {
+        assert_eq!(blocks.len(), 2, "the message, then the reminder: {blocks:?}");
+        assert_eq!(blocks[0], "carry on", "the message stays first: an agent previews a prompt by its first text");
+        assert!(blocks[1].starts_with("<system-reminder>\nPatchbay cancelled your last tool call because "), "{blocks:?}");
+        assert!(blocks[1].contains(because), "reason {because:?} missing: {blocks:?}");
+        assert!(blocks[1].contains("the user did not reject it. Retry it if still needed.\n</system-reminder>"), "{blocks:?}");
+    }
+
+    #[test]
+    fn a_plan_limit_stop_with_a_card_open_reminds_the_next_prompt_once() {
+        let m = CodeManager::default();
+        let mut rx = fake_agent(&m, "s");
+        open_card(&m, "s");
+        m.cancel_for_limit("s", "the 5-hour usage limit was reached (99%); it resets in 3h 48m", Some(1_800_000_000)).unwrap();
+        assert!(matches!(rx.try_recv(), Ok(AgentCmd::Cancel)));
+        let sender = m.cancel_notes.take_for_senders("s").expect("the senders are told too");
+        assert_eq!((sender.kind, sender.resets_at), ("usage_limit_stop", Some(1_800_000_000)));
+        m.send("s", AgentCmd::Prompt { msg: user_msg("carry on"), force: false, reply: None }).unwrap();
+        assert_told(&next_prompt_blocks(&mut rx), "usage limit was reached (99%); it resets in 3h 48m");
+        m.send("s", AgentCmd::Prompt { msg: user_msg("again"), force: false, reply: None }).unwrap();
+        assert_eq!(next_prompt_blocks(&mut rx), ["again"], "used once, then cleared");
+    }
+
+    #[test]
+    fn a_send_now_with_a_card_open_reminds_that_message() {
+        let m = CodeManager::default();
+        let mut rx = fake_agent(&m, "s");
+        open_card(&m, "s");
+        m.send("s", AgentCmd::Prompt { msg: user_msg("carry on"), force: true, reply: None }).unwrap();
+        assert_told(&next_prompt_blocks(&mut rx), "Send now");
+        assert_eq!(m.cancel_notes.take_for_senders("s").map(|n| n.kind), Some("send_now"));
+    }
+
+    #[test]
+    fn a_user_stop_with_a_card_open_leaves_no_note() {
+        let m = CodeManager::default();
+        let mut rx = fake_agent(&m, "s");
+        open_card(&m, "s");
+        m.send("s", AgentCmd::Cancel).unwrap();
+        assert!(matches!(rx.try_recv(), Ok(AgentCmd::Cancel)));
+        m.send("s", AgentCmd::Prompt { msg: user_msg("carry on"), force: false, reply: None }).unwrap();
+        assert_eq!(next_prompt_blocks(&mut rx), ["carry on"], "the agent is not told to retry a call the user stopped");
+        assert!(m.cancel_notes.take_for_senders("s").is_none(), "a user Stop is not a failure for the senders");
+    }
+
+    #[test]
+    fn a_shutdown_with_a_card_open_leaves_the_note_for_the_restarted_agent() {
+        let m = CodeManager::default();
+        let _rx = fake_agent(&m, "s");
+        open_card(&m, "s");
+        m.stop("s");
+        // The agent is gone; the manager outlives it, so the next agent's first prompt carries the line.
+        let mut rx = fake_agent(&m, "s");
+        m.send("s", AgentCmd::Prompt { msg: user_msg("carry on"), force: false, reply: None }).unwrap();
+        assert_told(&next_prompt_blocks(&mut rx), "the session was stopped");
+        assert_eq!(m.cancel_notes.take_for_senders("s").map(|n| n.kind), Some("shutdown"));
+    }
+
+    /// No card, no tool call cancelled: the agent is not told it lost one. A guard stop still tells
+    /// the senders, because their message's turn was cut short.
+    #[test]
+    fn without_a_card_the_agent_is_not_told_but_a_guard_stop_still_tells_the_senders() {
+        let m = CodeManager::default();
+        let mut rx = fake_agent(&m, "s");
+        m.send("s", AgentCmd::Cancel).unwrap();
+        m.send("s", AgentCmd::Prompt { msg: user_msg("carry on"), force: true, reply: None }).unwrap();
+        assert_eq!(next_prompt_blocks(&mut rx), ["carry on"]);
+        assert!(m.cancel_notes.take_for_senders("s").is_none());
+        m.cancel_for_limit("s", "the 5-hour usage limit was reached (99%); it resets in 1h", None).unwrap();
+        m.send("s", AgentCmd::Prompt { msg: user_msg("carry on"), force: false, reply: None }).unwrap();
+        assert_eq!(next_prompt_blocks(&mut rx), ["carry on"]);
+        assert_eq!(m.cancel_notes.take_for_senders("s").map(|n| n.kind), Some("usage_limit_stop"));
+    }
+
+    /// A restart confirmation is a human-only synthetic card, not a tool call.
+    #[test]
+    fn a_human_only_confirmation_is_not_a_tool_card() {
+        let m = CodeManager::default();
+        let _rx = fake_agent(&m, "s");
+        let (tx, _r) = oneshot::channel();
+        m.pending.lock().unwrap().insert(
+            "c".into(),
+            acp::PendingPermission { session_id: "s".into(), target_session_id: None, local_human_only: true, offered: vec![], tx },
+        );
+        assert!(!m.has_open_card("s"));
     }
 
     #[test]
