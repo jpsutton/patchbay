@@ -4722,6 +4722,15 @@ async fn codex_project_config_gate_runs_on_restart_and_redispatch_routes() {
     let worker = first["sessionId"].as_str().unwrap().to_owned();
     let worktree = PathBuf::from(first["worktree"].as_str().unwrap());
 
+    // A missing assignment must refuse the Codex spawn gate even when the old item path exists.
+    let t = rusqlite::Connection::open(a.state.data_dir.join("teams.db")).unwrap();
+    t.execute("UPDATE dispatches SET worktree_path=NULL WHERE session_id=?1", [&worker]).unwrap();
+    let session = a.state.db.get_code_session(&worker).unwrap().unwrap();
+    let err = teams::gate_session_start(&a.state.db, &a.state.data_dir, &a.state.code, &session).unwrap_err();
+    assert!(format!("{err:#}").contains("assigned worktree"));
+    t.execute("UPDATE dispatches SET worktree_path=?2 WHERE session_id=?1", rusqlite::params![worker, worktree.canonicalize().unwrap().to_string_lossy()]).unwrap();
+    drop(t);
+
     // A known worker fails closed if the Teams DB disappears before a start/relaunch.
     let scan_probe = std::sync::Arc::new(teams::process_sweep::TestProcessSource::empty());
     a.state.code.set_process_source_for_test(scan_probe.clone());
@@ -5185,6 +5194,9 @@ async fn worker_refresh_moves_item_worktree_branch_and_leaves_dispatched_by_unch
     // New session has worktree folder, coordinator as created_by, and worktree remains on disk
     let new_sess = a.state.db.get_code_session(&s2).unwrap().unwrap();
     assert_eq!(new_sess.cwd, worktree_str);
+    let t = rusqlite::Connection::open(a.state.data_dir.join("teams.db")).unwrap();
+    let recorded: String = t.query_row("SELECT worktree_path FROM dispatches WHERE session_id=?1", [&s2], |r| r.get(0)).unwrap();
+    assert_eq!(PathBuf::from(recorded), PathBuf::from(&worktree_str).canonicalize().unwrap());
     assert_eq!(new_sess.created_by.as_deref(), Some(coord.id.as_str()));
     assert!(Path::new(&worktree_str).exists());
 

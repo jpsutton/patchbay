@@ -119,6 +119,8 @@ CREATE TABLE IF NOT EXISTS session_process_facts (
 "#, r#"
 -- Forward repair: migration 7's side effect was displaced when session_process_facts was added.
 -- Re-run the idempotent ensure for databases already stamped at the prior final version.
+"#, r#"
+-- A dispatch's worktree is an explicit assignment; legacy NULL records fail closed.
 "#];
 
 /// Per-step side effects for migrations whose SQL is intentionally empty (idempotent ALTER).
@@ -132,6 +134,7 @@ fn migration_side_effect(conn: &Connection, index: usize) -> Result<()> {
         7 => ensure_column(conn, "dispatches", "base_commit", "TEXT"),
         // Index 9 self-heals databases opened by 22cebe68, whose final version omitted this column.
         9 => ensure_column(conn, "dispatches", "base_commit", "TEXT"),
+        10 => ensure_column(conn, "dispatches", "worktree_path", "TEXT"),
         _ => Ok(()),
     }
 }
@@ -880,18 +883,18 @@ impl TeamsDb {
         )?;
 
         if is_worker {
-            let old_dispatch: Option<(String, String, String, Option<String>, i64)> = self
+            let old_dispatch: Option<(String, String, String, Option<String>, i64, Option<String>)> = self
                 .0
                 .query_row(
-                    "SELECT item_id, seat, desk_session, base_commit, at FROM dispatches WHERE team_id = ?1 AND session_id = ?2",
+                    "SELECT item_id, seat, desk_session, base_commit, at, worktree_path FROM dispatches WHERE team_id = ?1 AND session_id = ?2",
                     params![team_id, old_session],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
                 )
                 .optional()?;
-            if let Some((item, st, desk, base, at)) = old_dispatch {
+            if let Some((item, st, desk, base, at, worktree)) = old_dispatch {
                 self.0.execute(
-                    "INSERT INTO dispatches(team_id, item_id, seat, desk_session, session_id, base_commit, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![team_id, item, st, desk, new_session, base, at],
+                    "INSERT INTO dispatches(team_id, item_id, seat, desk_session, session_id, base_commit, at, worktree_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![team_id, item, st, desk, new_session, base, at, worktree],
                 )?;
             }
             if let Some(item) = &item_id {
@@ -1960,7 +1963,7 @@ mod tests {
             ("item_events", &["id", "team_id", "item_id", "at", "actor_session", "kind", "text"]),
             ("id_seq", &["team_id", "scope", "n"]),
             ("decisions", &["team_id", "id", "item_id", "question", "options_json", "recommendation", "class", "opened_by", "advisor_verdict", "advisor_choice", "advisor_text", "user_answer", "status", "created_at", "resolved_at"]),
-            ("dispatches", &["id", "team_id", "item_id", "seat", "desk_session", "session_id", "base_commit", "at"]),
+            ("dispatches", &["id", "team_id", "item_id", "seat", "desk_session", "session_id", "base_commit", "at", "worktree_path"]),
             ("session_process_facts", &["session_id", "launched_as_worker"]),
         ];
         for (table, columns) in expected {
@@ -2043,14 +2046,14 @@ mod tests {
 
         let first = TeamsDb::open(&d).unwrap();
         assert_teams_schema(&first.0);
-        assert_eq!(first.0.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 10);
+        assert_eq!(first.0.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), MIGRATIONS.len() as i64);
         let repaired_schema = schema_signature(&first.0);
         drop(first);
 
         let second = TeamsDb::open(&d).unwrap();
         assert_teams_schema(&second.0);
         assert_eq!(schema_signature(&second.0), repaired_schema, "second open is idempotent");
-        assert_eq!(second.0.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 10);
+        assert_eq!(second.0.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), MIGRATIONS.len() as i64);
     }
 
     #[test]
@@ -2433,7 +2436,7 @@ mod tests {
             params![team.id, it3.id],
         )
         .unwrap();
-        t.set_item(&team.id, &it3.id, None, &serde_json::json!({ "status": "done", "assignee": "s1" })).unwrap();
+        t.set_item(&team.id, &it3.id, None, &serde_json::json!({ "status": "done", "assignee": "s1", "prUrl": "https://example.test/pr/1" })).unwrap();
 
         // 5 notes on it1: only last 3 should appear
         for i in 1..=5 {

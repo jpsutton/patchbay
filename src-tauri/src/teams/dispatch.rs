@@ -152,7 +152,8 @@ impl TeamsDb {
     }
 
     /// Give a reserved place its session.
-    fn bind_reserved(&self, team_id: &str, place: &str, session: &str, dispatch_id: i64) -> Result<()> {
+    fn bind_reserved(&self, team_id: &str, place: &str, session: &str, dispatch_id: i64, worktree: &Path) -> Result<()> {
+        let worktree = worktree.canonicalize().context("cannot record assigned worktree")?;
         let tx = self.0.unchecked_transaction()?;
         let n = self.0.execute(
             "UPDATE members SET session_id = ?3, status = 'active' WHERE team_id = ?1 AND session_id = ?2 AND status = 'reserved'",
@@ -161,10 +162,11 @@ impl TeamsDb {
         if n != 1 {
             bail!("the reserved place is gone");
         }
-        self.0.execute(
-            "UPDATE dispatches SET session_id = ?3 WHERE team_id = ?1 AND id = ?2",
-            params![team_id, dispatch_id, session],
+        let n = self.0.execute(
+            "UPDATE dispatches SET session_id = ?3, worktree_path = ?4 WHERE team_id = ?1 AND id = ?2 AND session_id IS NULL",
+            params![team_id, dispatch_id, session, worktree.to_string_lossy()],
         )?;
+        if n != 1 { bail!("the reserved dispatch is gone or already bound"); }
         tx.commit()?;
         Ok(())
     }
@@ -231,6 +233,22 @@ impl TeamsDb {
             "SELECT team_id, item_id FROM dispatches WHERE session_id = ?1 ORDER BY id DESC LIMIT 1",
             [session], |r| Ok((r.get(0)?, r.get(1)?)),
         ).optional()?)
+    }
+
+    /// Resolve the exact assignment recorded for a dispatch, rejecting missing or escaped paths.
+    pub(crate) fn assigned_worktree(&self, team: &Team, item: &str, session: Option<&str>) -> Result<PathBuf> {
+        let stored: Option<Option<String>> = self.0.query_row(
+            "SELECT worktree_path FROM dispatches WHERE team_id=?1 AND item_id=?2 AND session_id IS NOT NULL AND (?3 IS NULL OR session_id=?3) ORDER BY id DESC LIMIT 1",
+            params![team.id, item, session], |r| r.get(0),
+        ).optional()?;
+        let path = stored.flatten().filter(|s| !s.is_empty()).ok_or_else(|| anyhow!("assigned worktree is not recorded; review the worker or provide a PR URL"))?;
+        let root = team.effective_worktree_root()?.canonicalize().context("assigned worktree root is unavailable")?;
+        let recorded = PathBuf::from(path);
+        let path = recorded.canonicalize().context("assigned worktree is unavailable")?;
+        if path != recorded || !path.is_dir() || path == root || !path.starts_with(&root) {
+            bail!("assigned worktree is not a directory inside the team's worktree root");
+        }
+        Ok(path)
     }
 
     fn reused_worker_history(&self, team: &str, item: &str, current_session: &str) -> Result<bool> {
@@ -534,7 +552,7 @@ pub(crate) fn gate_session_root(
         ).optional()?;
         let team_row = if let Some((team_id, item)) = dispatched {
             let team_row = tdb.team(&team_id)?;
-            let assigned_root = team_row.effective_worktree_root()?.join(item.to_lowercase()).canonicalize()?;
+            let assigned_root = tdb.assigned_worktree(&team_row, &item, Some(session_id))?;
             if root != assigned_root { bail!("worker spawn refused: session root resolves outside its assigned worktree"); }
             team_row
         } else if let Some((team_row, _)) = tdb.membership(session_id)? {
@@ -898,7 +916,7 @@ async fn start(state: &AppState, p: &Plan) -> Result<Value> {
         state.db.set_code_session_created_by(&session.id, &p.desk)?;
         state.db.set_code_session_title(&session.id, &format!("{} {}", p.item.id, super::clean(&p.item.title)), true)?;
         // Member before start: the launch reads the role from teams.db.
-        TeamsDb::open(&state.data_dir)?.bind_reserved(&p.team.id, &p.place, &session.id, p.dispatch_id)?;
+        TeamsDb::open(&state.data_dir)?.bind_reserved(&p.team.id, &p.place, &session.id, p.dispatch_id, &path)?;
         start_agent(state, &session.id).await?;
         let node = state.mesh.node_id().to_owned();
         crate::code_prompt_local(state, session.id.clone(), brief(p, &path, &branch, &hooks_path), Vec::new(), Vec::new(), format!("agent:{node}:{}", p.desk), None, false).await?;
@@ -1094,7 +1112,7 @@ mod tests {
         t.cancel_reserved(&team.id, &a);
         let (c, _) = t.reserve(&team, &seat, "i3", "desk", "0123456789abcdef0123456789abcdef01234567").unwrap();
         // Binding makes a real member; releasing frees the place.
-        t.bind_reserved(&team.id, &b, "w-b", bid).unwrap();
+        t.bind_reserved(&team.id, &b, "w-b", bid, Path::new(&team.cwd)).unwrap();
         assert_eq!(t.members(&team.id).unwrap().len(), 1);
         assert!(t.dispatched("w-b").unwrap() && !t.dispatched("w-x").unwrap());
         assert!(t.reserve(&team, &seat, "i4", "desk", "0123456789abcdef0123456789abcdef01234567").is_err());
@@ -1112,7 +1130,7 @@ mod tests {
         let names: Vec<String> = (0..MAX_PER_HOUR - 1).map(|n| format!("x{n}")).collect();
         add_items(&t, &team, &names.iter().map(String::as_str).collect::<Vec<_>>());
         let (p, pid) = t.reserve(&team, &seat, "i1", "desk", "0123456789abcdef0123456789abcdef01234567").unwrap();
-        t.bind_reserved(&team.id, &p, "w1", pid).unwrap();
+        t.bind_reserved(&team.id, &p, "w1", pid, Path::new(&team.cwd)).unwrap();
         assert!(t.reserve(&team, &seat, "i1", "desk", "0123456789abcdef0123456789abcdef01234567").unwrap_err().to_string().contains("already has a worker"));
         for n in 0..(MAX_PER_HOUR - 1) {
             t.reserve(&team, &seat, &format!("x{n}"), "desk", "0123456789abcdef0123456789abcdef01234567").unwrap();
@@ -1171,6 +1189,18 @@ mod tests {
         assert!(!codex_seat.acknowledged(true), "tmp wording change re-requires ack");
         codex_seat.unasked_ack = Some(with_tmp);
         assert!(codex_seat.acknowledged(true));
+    }
+
+    #[test]
+    fn assigned_worktree_uses_recorded_path_not_item_name_and_refuses_missing() {
+        let (d, t, team) = setup();
+        let path = d.join("proj/trees/fresh-unique-name");
+        std::fs::create_dir_all(&path).unwrap();
+        t.0.execute("INSERT INTO dispatches(team_id,item_id,seat,desk_session,session_id,worktree_path,at) VALUES (?1,'ITEM','workers','desk','worker',?2,0)", params![team.id, path.canonicalize().unwrap().to_string_lossy()]).unwrap();
+        assert_eq!(t.assigned_worktree(&team, "ITEM", Some("worker")).unwrap(), path.canonicalize().unwrap());
+        assert!(t.assigned_worktree(&team, "ITEM", Some("other")).is_err());
+        std::fs::remove_dir(&path).unwrap();
+        assert!(t.assigned_worktree(&team, "ITEM", Some("worker")).is_err());
     }
 
     #[test]
@@ -1270,7 +1300,7 @@ mod tests {
             t.cancel_reserved(&team.id, &place);
         }
         let (place, id) = t.reserve(&team, &seat, "i1", "desk", "0123456789abcdef0123456789abcdef01234567").unwrap();
-        t.bind_reserved(&team.id, &place, "w1", id).unwrap();
+        t.bind_reserved(&team.id, &place, "w1", id, Path::new(&team.cwd)).unwrap();
         let bound: i64 = t.0.query_row("SELECT COUNT(*) FROM dispatches WHERE session_id IS NOT NULL", [], |r| r.get(0)).unwrap();
         assert_eq!((bound, t.dispatched_sessions("desk").unwrap()), (1, vec!["w1".to_owned()]));
     }
