@@ -1025,9 +1025,15 @@ mod tests {
     }
 
     fn seed_dispatch(t: &TeamsDb, team: &Team, item_id: &str) {
+        // Record the path form production does (`bind_reserved` stores `canonicalize()`, a `\\?\` verbatim path on
+        // Windows); `assigned_worktree` requires the recorded path to equal its own canonical form, so the
+        // directory's parent is canonicalised here and the item folder joined, as `add_item_worktree` creates it.
+        let root = team.effective_worktree_root().unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let recorded = root.canonicalize().unwrap().join(item_id.to_lowercase());
         t.0.execute(
             "INSERT INTO dispatches(team_id, item_id, seat, desk_session, session_id, worktree_path, at) VALUES (?1, ?2, 'workers', 'desk1', 'worker', ?3, 0)",
-            params![team.id, item_id, team.effective_worktree_root().unwrap().join(item_id.to_lowercase()).to_string_lossy()],
+            params![team.id, item_id, recorded.to_string_lossy()],
         )
         .unwrap();
     }
@@ -1096,7 +1102,7 @@ mod tests {
         run(&["add", "-A"]);
         run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "work"]);
         let marker = d.join("clean-ran");
-        run(&["config", "filter.x.clean", &format!("touch {}; cat", marker.display())]);
+        run(&["config", "filter.x.clean", &format!("touch {}; cat", crate::test_support::sh_path(&marker))]);
         std::fs::write(wt.join("f.txt"), "one").unwrap(); // same bytes, new stat data: status must hash it
         let plain = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(&wt).args(["status", "--porcelain"]).output().unwrap();
         assert!(plain.status.success() && marker.exists(), "control: plain git status runs the clean filter");
@@ -1139,9 +1145,9 @@ mod tests {
     fn done_neutralises_the_exact_lfs_filters_instead_of_refusing() {
         let (d, t, team, id, wt) = filtered_done_fixture("lfs");
         let marker = d.join("lfs-ran");
-        let cmd = format!("touch {}; cat", marker.display());
+        let cmd = format!("touch {}; cat", crate::test_support::sh_path(&marker));
         for k in ["filter.lfs.clean", "filter.lfs.smudge"] { wt_git(&wt, &["config", k, &cmd]); }
-        wt_git(&wt, &["config", "filter.lfs.process", &format!("touch {}", marker.display())]);
+        wt_git(&wt, &["config", "filter.lfs.process", &format!("touch {}", crate::test_support::sh_path(&marker))]);
         wt_git(&wt, &["config", "filter.lfs.required", "true"]);
         assert_plain_status_runs_it(&wt, &marker);
         assert_eq!(t.set_item(&team.id, &id, Some("desk1"), &json!({ "status": "done" })).unwrap().status, "done");
@@ -1174,7 +1180,7 @@ mod tests {
         for (driver, key) in [("LFS", "filter.LFS.clean"), ("lfs.x", "filter.lfs.x.clean")] {
             let (d, t, team, id, wt) = filtered_done_fixture(driver);
             let marker = d.join("ran");
-            wt_git(&wt, &["config", key, &format!("touch {}; cat", marker.display())]);
+            wt_git(&wt, &["config", key, &format!("touch {}; cat", crate::test_support::sh_path(&marker))]);
             assert_plain_status_runs_it(&wt, &marker);
             let err = t.set_item(&team.id, &id, Some("desk1"), &json!({ "status": "done" })).unwrap_err().to_string();
             assert!(err.contains("could run code") && err.contains(key), "{key}: {err}");
@@ -1187,7 +1193,7 @@ mod tests {
         let (d, t, team, id, wt) = filtered_done_fixture("x");
         let marker = d.join("ran");
         let inc = d.join("inc.cfg");
-        std::fs::write(&inc, format!("[filter \"x\"]\n\tclean = touch {}; cat\n", marker.display())).unwrap();
+        std::fs::write(&inc, format!("[filter \"x\"]\n\tclean = touch {}; cat\n", crate::test_support::sh_path(&marker))).unwrap();
         wt_git(&wt, &["config", "include.path", inc.to_str().unwrap()]);
         assert_plain_status_runs_it(&wt, &marker);
         let err = t.set_item(&team.id, &id, Some("desk1"), &json!({ "status": "done" })).unwrap_err().to_string();
@@ -1206,7 +1212,7 @@ mod tests {
         std::fs::write(sub.join("g.txt"), "g").unwrap();
         wt_git(&sub, &["add", "-A"]);
         wt_git(&sub, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "n"]);
-        wt_git(&sub, &["config", "filter.x.clean", &format!("touch {}; cat", marker.display())]);
+        wt_git(&sub, &["config", "filter.x.clean", &format!("touch {}; cat", crate::test_support::sh_path(&marker))]);
         wt_git(&wt, &["add", "-A"]);
         wt_git(&wt, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "gitlink"]);
         std::fs::write(sub.join("g.txt"), "g").unwrap(); // stat-changed inside the nested repository

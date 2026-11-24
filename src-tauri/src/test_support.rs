@@ -4,6 +4,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// A path as a POSIX shell reads it. Planted `touch <marker>` filter and hook commands run through `sh`, which
+/// eats the backslashes of a Windows path; the forward-slash form works in Git for Windows' sh and elsewhere.
+pub fn sh_path(p: &Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
+}
+
 /// A loopback server that answers every request with `status` (302, 307...) pointing at a SECOND
 /// loopback server. Returns the first one's base URL and the hit counts of (first, second): a client
 /// that follows the redirect shows up as a hit on the second, and so would carry its credentials

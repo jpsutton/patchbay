@@ -1542,7 +1542,7 @@ mod tests {
         for args in [&["add", "-A", "--"][..], &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base"][..]] {
             assert!(std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(&cwd).args(args).status().unwrap().success());
         }
-        git(&cwd, &["config", "filter.lfs.process", &format!("touch {}", marker.display())]).unwrap();
+        git(&cwd, &["config", "filter.lfs.process", &format!("touch {}", crate::test_support::sh_path(&marker))]).unwrap();
         let control = d.join("control");
         let out = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(&cwd).args(["worktree", "add", "-q", "-b", "control", "--"]).arg(&control).arg("main").output().unwrap();
         assert!(marker.exists(), "control: plain git starts the filter: {}", String::from_utf8_lossy(&out.stderr));
@@ -1587,7 +1587,7 @@ mod tests {
         git(&cwd, &["config", "extensions.partialclone", "p"]).unwrap();
         git(&cwd, &["config", "remote.p.url", d.to_str().unwrap()]).unwrap();
         git(&cwd, &["config", "remote.p.promisor", "true"]).unwrap();
-        git(&cwd, &["config", "remote.p.uploadpack", &format!("touch {}; false #", marker.display())]).unwrap();
+        git(&cwd, &["config", "remote.p.uploadpack", &format!("touch {}; false #", crate::test_support::sh_path(&marker))]).unwrap();
         let control = d.join("control");
         let out = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(&cwd).args(["worktree", "add", "-q", "-b", "control", "--"]).arg(&control).arg("main").output().unwrap();
         assert!(marker.exists(), "control: plain git runs the upload-pack for a missing blob: {}", String::from_utf8_lossy(&out.stderr));
@@ -1621,7 +1621,7 @@ mod tests {
         git(&cwd, &["init", "-q", "-b", "main"]).unwrap();
         git(&cwd, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]).unwrap();
         let marker = d.join("fsmonitor-ran");
-        git(&cwd, &["config", "--local", "core.fsmonitor", &format!("touch {}; false", marker.display())]).unwrap();
+        git(&cwd, &["config", "--local", "core.fsmonitor", &format!("touch {}; false", crate::test_support::sh_path(&marker))]).unwrap();
         git(&cwd, &["config", "--local", "core.sshCommand", "x"]).unwrap();
         assert!(make_worktree(&team, "DM-20261109-01", "HEAD", false).is_ok());
         assert!(!marker.exists(), "the command-line override keeps the configured fsmonitor from running");
@@ -1674,9 +1674,9 @@ mod tests {
         plain(&["add", "-A"]);
         plain(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base"]);
         let marker = d.join("lfs-ran");
-        let cmd = format!("touch {}; cat", marker.display());
+        let cmd = format!("touch {}; cat", crate::test_support::sh_path(&marker));
         for k in ["filter.lfs.clean", "filter.lfs.smudge"] { plain(&["config", k, &cmd]); }
-        plain(&["config", "filter.lfs.process", &format!("touch {}", marker.display())]);
+        plain(&["config", "filter.lfs.process", &format!("touch {}", crate::test_support::sh_path(&marker))]);
         plain(&["config", "filter.lfs.required", "true"]);
         let control = d.join("control");
         // Setup and control run without system config: a runner with `git lfs install --system` would turn the
