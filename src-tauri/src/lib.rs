@@ -1189,8 +1189,8 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     // The same hook says how the turn ended; a failed one tells its origin senders (pb-20261111-28).
     // A thread of its own, like the dropped-queue notice above: the agent's runtime can end with it.
     if let Some(bridge) = state.agent_message_bridge.get()
-        && let Some(ended) = bridge.log_code_event(&env.code_session_id, &env.event)
-        && ended.failure.is_some()
+        && let Some(mut ended) = bridge.log_code_event(&env.code_session_id, &env.event)
+        && cancel_reason_as_failure(state, &mut ended)
     {
         let state = state.clone();
         std::thread::spawn(move || {
@@ -1938,7 +1938,8 @@ fn enforce_cursor_plan_limit(state: &AppState) {
             continue;
         }
         tracing::info!("cursor usage limit: stopping {id}");
-        if state.code.send(&id, AgentCmd::Cancel).is_err() {
+        log_guard_stop(state, "cursor", "cursor", None, &id);
+        if state.code.cancel_for_limit(&id, &hit.reason(now), u64::try_from(hit.resets_at).ok()).is_err() {
             state.code.cursor_plan.turn_ended(&id);
             continue;
         }
@@ -2186,6 +2187,16 @@ fn plan_account_label(state: &AppState, account: &str) -> String {
     account.to_owned()
 }
 
+/// One line in the delivery log (`agent-messaging-mcp.log`) for each session a usage guard cancels,
+/// so a halted seat can be traced to the stop (pb-20261121-01). The account is a short hash, never
+/// the login's name or id.
+fn log_guard_stop(state: &AppState, plan: &str, account: &str, percent: Option<u32>, session: &str) {
+    if let Some(bridge) = state.agent_message_bridge.get() {
+        let card_open = state.code.has_open_card(session);
+        bridge.log_guard_stop(plan, account, percent, session, card_open);
+    }
+}
+
 /// Cancel every running turn on a Claude plan account past its usage limit. The agent stops
 /// cleanly, its session stays resumable, and queued prompts go back to their composers.
 fn enforce_plan_limit(state: &AppState) {
@@ -2202,7 +2213,8 @@ fn enforce_plan_limit(state: &AppState) {
             continue;
         }
         tracing::info!("usage limit: stopping {id} ({} at {}%)", hit.what, hit.percent);
-        if state.code.send(&id, AgentCmd::Cancel).is_err() {
+        log_guard_stop(state, "claude", &account, Some(hit.percent), &id);
+        if state.code.cancel_for_limit(&id, &hit.reason(now), u64::try_from(hit.resets_at).ok()).is_err() {
             state.code.plan.turn_ended(&id);
             continue;
         }
@@ -3351,6 +3363,27 @@ fn note_notice_failure(state: &AppState, sender_session: &str, target_id: &str, 
     if let Some(bridge) = state.agent_message_bridge.get() {
         bridge.log_notice_failed(sender_session, target_id, kind);
     }
+}
+
+/// A turn cancelled with a card open ends with no failure, so its senders would hear nothing: give
+/// it the reason the cancel left (`usage_limit_stop`, `send_now`; a user Stop and a shutdown leave
+/// none for senders) as the failure kind, and the one notice goes out on the existing channel
+/// (pb-20261121-01). A turn that ended any other way drops a note left for it, except that a quit
+/// (`aborted`) keeps the note for the restarted agent's first prompt. Returns whether the turn now
+/// has a failure to tell.
+fn cancel_reason_as_failure(state: &AppState, ended: &mut turn_failure::TurnEnded) -> bool {
+    if ended.outcome == "aborted" {
+        // The agent is gone (a stop or quit; not a failure, so nobody is told), but the note for the
+        // restarted agent's first prompt must outlive its exit.
+        state.code.cancel_notes.clear_senders(&ended.session_id);
+    } else if ended.outcome != "cancelled" {
+        state.code.cancel_notes.clear(&ended.session_id);
+    } else if ended.failure.is_none()
+        && let Some(note) = state.code.cancel_notes.take_for_senders(&ended.session_id)
+    {
+        ended.failure = Some(turn_failure::Failure { kind: note.kind.to_owned(), resets_at: note.resets_at });
+    }
+    ended.failure.is_some()
 }
 
 /// One more notice kind on the same channel as the drop notice (pb-20261107-30): the recipient's
