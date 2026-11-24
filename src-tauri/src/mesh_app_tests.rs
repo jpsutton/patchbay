@@ -5492,6 +5492,115 @@ async fn worker_in_own_worktree_attaches_beside_a_live_coordinator() {
     teams::team_attach(&a.state, team, worker.id, "workers".into()).await.unwrap();
 }
 
+// pb-20261117-08: Opening/attaching to a stopped session must NOT start the agent process.
+// A prompt sent to a stopped session starts the agent process on demand.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stopped_session_does_not_spawn_on_attach_but_spawns_on_prompt() {
+    let a = node("no-autostart");
+    let proj = a.dir.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None, "patchbay", "default").unwrap();
+
+    let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
+    *a.state.code.test_started.lock().unwrap() = Some(started_tx);
+
+    // 1. Session is initially stopped.
+    assert!(!a.state.code.is_running(&s.id), "session agent is initially not running");
+
+    // 2. Open / attach: code_attach_local does not start the agent.
+    let attach = code_attach_local(&a.state, &s.id);
+    assert_eq!(attach["running"], false);
+    assert!(!a.state.code.is_running(&s.id), "attaching does not start the agent");
+    assert!(started.try_recv().is_err(), "no process was spawned on attach");
+
+    // 3. Prompting a stopped session:
+    // With on-demand spawn in code_prompt_local: starts the agent and delivers the prompt.
+    // Planted red: without on-demand spawn, code_prompt_local returns Err("agent is not running").
+    let session_id = s.id.clone();
+    let agent_task = tokio::spawn(async move {
+        let (id, mut rx) = tokio::time::timeout(std::time::Duration::from_secs(5), started.recv())
+            .await
+            .expect("timeout waiting for agent to start")
+            .expect("started channel open");
+        assert_eq!(id, session_id);
+        let cmd = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timeout waiting for prompt command")
+            .expect("prompt command received");
+        match cmd {
+            AgentCmd::Prompt { msg, reply, .. } => {
+                assert_eq!(msg.text, "start on prompt");
+                if let Some(reply) = reply {
+                    let _ = reply.send(Ok(code::acp::Delivery::Sent));
+                }
+            }
+            other => panic!("expected AgentCmd::Prompt"),
+        }
+        rx
+    });
+
+    let delivery = code_prompt_local(
+        &a.state,
+        s.id.clone(),
+        "start on prompt".into(),
+        Vec::new(),
+        Vec::new(),
+        "user".into(),
+        None,
+        false,
+    )
+    .await;
+    let _rx = agent_task.await.unwrap();
+    assert!(delivery.is_ok(), "prompt succeeds after on-demand start: {:?}", delivery.err());
+    assert!(a.state.code.is_running(&s.id), "agent is now running");
+}
+
+// pb-20261117-08, condition 3: a window on another computer that opened a STOPPED session (attach
+// started nothing) sees the new process's events after its first send. Events travel to every
+// member by session id, not by a subscription made at attach, so the later start is followed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_remote_view_of_a_stopped_session_follows_the_process_its_first_send_starts() {
+    let (a, b) = (node("alpha-rebind"), node("bravo-rebind"));
+    link(&a, &b).await;
+    let proj = a.dir.join("proj");
+    repo(&proj);
+    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok", "default").unwrap();
+    until("session reaches B", 10, || b.state.db.get_code_session(&s.id).unwrap().is_some()).await;
+    let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
+    *a.state.code.test_started.lock().unwrap() = Some(started_tx);
+
+    // Opening it from B starts nothing on A.
+    let attach = code_attach(&b.state, s.id.clone(), None, None).await.unwrap();
+    assert_eq!(attach["running"], false, "{attach}");
+    assert!(!a.state.code.is_running(&s.id) && started.try_recv().is_err(), "attach started a process");
+
+    // B's first send starts it on A and delivers the text.
+    let agent = tokio::spawn(async move {
+        let (_, mut rx) = tokio::time::timeout(Duration::from_secs(5), started.recv()).await.expect("no process started").unwrap();
+        match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("no prompt").unwrap() {
+            AgentCmd::Prompt { msg, reply, .. } => {
+                assert_eq!(msg.text, "first send");
+                if let Some(reply) = reply {
+                    let _ = reply.send(Ok(code::acp::Delivery::Sent));
+                }
+            }
+            _ => panic!("expected AgentCmd::Prompt"),
+        }
+        rx
+    });
+    code_prompt(&b.state, s.id.clone(), "first send".into(), vec![], None, None, None).await.unwrap();
+    let _rx = agent.await.unwrap();
+
+    // The new process's output reaches B's window for that session.
+    emit(&a, &s.id, chunk("from the new process"));
+    until("B sees the new process's events", 10, || {
+        b.events.lock().unwrap().iter().any(|(n, p)| {
+            n == code::acp::EVENT && p["codeSessionId"] == s.id.as_str() && p["event"]["update"]["content"]["text"] == "from the new process"
+        })
+    })
+    .await;
+}
+
 /// pb-20261121-01: a permission answer that cannot reach the node hosting the session must fail
 /// loudly and leave the card open. It must never answer `None`, which the agent reports as the
 /// user rejecting the tool call.

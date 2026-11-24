@@ -1686,7 +1686,21 @@ export const useStore = create<Store>((set, get) => ({
         set((st) => ({ code: { ...st.code, [id]: { ...emptyCode(), history, earlier, status: "exited" } } }));
         return;
       }
-      await get().startAgent(id);
+      // Browsing is read-only but not empty: the saved conversation shows as entries, as it does once
+      // an agent is running, and no process is started (pb-20261117-08).
+      set((st) => ({
+        code: {
+          ...st.code,
+          [id]: {
+            ...emptyCode(),
+            history: null,
+            entries: history?.entries ?? [],
+            toolCalls: history ? endBackground(history.toolCalls) : {},
+            earlier,
+            status: "idle",
+          },
+        },
+      }));
       return;
     }
     const rev = get().agentConfigRev;
