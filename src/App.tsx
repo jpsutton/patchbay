@@ -497,6 +497,7 @@ function planKindForSession(
     const provider = model && providers.find((p) => p.id === model.providerId);
     if (provider?.authMode === "claude_login") return "claude";
     if (provider?.authMode === "grok_login") return "grok";
+    if (provider?.authMode === "antigravity_login") return "antigravity";
   }
   return null;
 }

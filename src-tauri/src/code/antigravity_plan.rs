@@ -5,31 +5,19 @@
 //! `daily-cloudcode-pa.googleapis.com` with the signed-in Google OAuth token. Patchbay polls the
 //! same endpoint while an Antigravity session is running or the plan blade is open.
 //!
-//! Auth comes from Antigravity's own login on disk / keychain (`~/.gemini/…`). Token refresh uses
-//! Antigravity's public installed-app OAuth client (RFC 8252): the client id/secret are read from
-//! a local Antigravity CLI/IDE binary (they are not a confidentiality boundary; authorization is
-//! the user's refresh token already on the machine). They are never embedded in this repo. Never
-//! log access or refresh tokens.
-//!
-//! Sources are read in `AUTH_SOURCE_ORDER`: the disk files agy itself writes first, the login
-//! keychain item last. That item was created by Google's client with its own code signature in
-//! its ACL, so a read from Patchbay raises SecurityAgent's authorization dialog and blocks the
-//! calling thread until somebody answers it — indefinitely on a machine nobody is sitting at.
-//! Every source read therefore runs in `spawn_blocking`, the keychain read is single-flight
-//! with an exponential failure backoff, and a resolved login is cached (`AUTH_CACHE_SECS`) so
-//! the quota poll neither re-reads sources nor re-prompts every `TICK`.
+//! OAuth credentials and refresh are provided by `crate::antigravity_auth`, shared with Gemini
+//! provider requests. The quota poller keeps only report and blade state here.
 //!
 //! `gemini-api-key` auth has no OAuth quota: the poller records an `unavailable` report instead.
 //! Reports fan out over the mesh tagged with the account id so peers on the same Google login can
 //! skip re-polling.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow};
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -39,11 +27,6 @@ pub const FRESH_SECS: i64 = 270;
 pub const TICK: Duration = Duration::from_secs(30);
 
 const QUOTA_URL: &str = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
-const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-
-const KEYCHAIN_SERVICE: &str = "gemini";
-const KEYCHAIN_ACCOUNT: &str = "antigravity";
-const KEYRING_B64_PREFIX: &str = "go-keyring-base64:";
 
 /// One quota bucket from `retrieveUserQuotaSummary` (`gemini-5h`, `3p-weekly`, …).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -237,651 +220,78 @@ pub fn now() -> i64 {
 pub struct AntigravityPlanGuard {
     latest: Mutex<Option<AntigravityPlanLimits>>,
     blade_open: AtomicBool,
-    /// In-memory refreshed access token so we do not rewrite Antigravity's credential store.
-    refreshed: Mutex<Option<CachedToken>>,
-    /// Login last resolved from the sources, so the poll does not re-read them every `TICK`.
-    auth: Mutex<Option<CachedAuth>>,
-    /// Single-flight + failure backoff for the last-resort keychain read.
-    keychain: Mutex<KeychainFallback>,
-}
-
-#[derive(Clone)]
-struct CachedToken {
-    access_token: String,
-    /// Unix seconds when this access token should be treated as expired.
-    expires_at: i64,
-}
-
-struct CachedAuth {
-    auth: AntigravityAuth,
-    /// Unix seconds when `auth` was read from the sources.
-    resolved_at: i64,
-}
-
-/// How long a resolved login is reused before the sources are read again. Far longer than
-/// `TICK`, so the poll stops re-reading sources every 30 seconds; short enough that a
-/// re-login (possibly with a different account) reaches the poller reasonably soon.
-const AUTH_CACHE_SECS: i64 = 600;
-
-/// State of the keychain fallback: one read at a time, never inside its failure backoff.
-#[derive(Default)]
-struct KeychainFallback {
-    /// A read is held in `spawn_blocking` right now — possibly forever behind an unanswered
-    /// SecurityAgent dialog. No second attempt is ever started, so at most one dialog can be
-    /// up and at most one blocking thread can be held; a task dropped mid-read leaves the
-    /// slot taken, which fails safe (no further prompts).
-    in_flight: bool,
-    /// Consecutive failed attempts (denied, cancelled, or no such item).
-    failures: u32,
-    /// Unix seconds before the keychain may be tried again.
-    next_attempt_at: i64,
 }
 
 impl AntigravityPlanGuard {
-    pub fn record(&self, limits: AntigravityPlanLimits) {
-        *self.latest.lock().unwrap() = Some(limits);
-    }
-
-    pub fn latest(&self) -> Option<AntigravityPlanLimits> {
-        self.latest.lock().unwrap().clone()
-    }
-
-    pub fn set_blade_open(&self, open: bool) {
-        self.blade_open.store(open, Ordering::Relaxed);
-    }
-
-    pub fn blade_open(&self) -> bool {
-        self.blade_open.load(Ordering::Relaxed)
-    }
-
+    pub fn record(&self, limits: AntigravityPlanLimits) { *self.latest.lock().unwrap() = Some(limits); }
+    pub fn latest(&self) -> Option<AntigravityPlanLimits> { self.latest.lock().unwrap().clone() }
+    pub fn set_blade_open(&self, open: bool) { self.blade_open.store(open, Ordering::Relaxed); }
+    pub fn blade_open(&self) -> bool { self.blade_open.load(Ordering::Relaxed) }
     pub fn adopt_mesh(&self, limits: AntigravityPlanLimits, local_account: Option<&str>) -> bool {
-        if local_account.is_some_and(|a| a != limits.account_id) {
-            return false;
-        }
+        if local_account.is_some_and(|a| a != limits.account_id) { return false; }
         let mut slot = self.latest.lock().unwrap();
-        if slot.as_ref().is_some_and(|old| old.observed_at >= limits.observed_at) {
-            return false;
-        }
-        *slot = Some(limits);
-        true
-    }
-
-    fn cached_access(&self, now: i64) -> Option<String> {
-        let slot = self.refreshed.lock().unwrap();
-        let t = slot.as_ref()?;
-        if t.expires_at <= now + 60 {
-            return None;
-        }
-        Some(t.access_token.clone())
-    }
-
-    fn store_cached(&self, access_token: String, expires_at: i64) {
-        *self.refreshed.lock().unwrap() = Some(CachedToken { access_token, expires_at });
-    }
-
-    /// The cached login while it is younger than `AUTH_CACHE_SECS`.
-    fn cached_auth(&self, now: i64) -> Option<AntigravityAuth> {
-        let slot = self.auth.lock().unwrap();
-        let cached = slot.as_ref()?;
-        (now.saturating_sub(cached.resolved_at) < AUTH_CACHE_SECS).then(|| cached.auth.clone())
-    }
-
-    /// Remember a login resolved from the sources; only successful loads are cached.
-    fn store_auth(&self, auth: AntigravityAuth, now: i64) {
-        *self.auth.lock().unwrap() = Some(CachedAuth { auth, resolved_at: now });
-    }
-
-    /// Take the single keychain attempt slot when the backoff allows one. False while an
-    /// attempt is in flight or inside the backoff window: the caller must not touch the
-    /// keychain then, because that read can raise a modal prompt and block until answered.
-    fn keychain_begin_attempt(&self, now: i64) -> bool {
-        let mut k = self.keychain.lock().unwrap();
-        if k.in_flight || now < k.next_attempt_at {
-            return false;
-        }
-        k.in_flight = true;
-        true
-    }
-
-    /// The keychain read succeeded: an item we can read stops being a problem.
-    fn keychain_attempt_succeeded(&self) {
-        let mut k = self.keychain.lock().unwrap();
-        k.in_flight = false;
-        k.failures = 0;
-        k.next_attempt_at = 0;
-    }
-
-    /// The keychain read failed (denied/cancelled/absent): back off exponentially so the poll
-    /// never re-prompts every `TICK`.
-    fn keychain_attempt_failed(&self, now: i64) {
-        let mut k = self.keychain.lock().unwrap();
-        k.in_flight = false;
-        k.failures = k.failures.saturating_add(1);
-        k.next_attempt_at = now + keychain_backoff_secs(k.failures);
+        if slot.as_ref().is_some_and(|old| old.observed_at >= limits.observed_at) { return false; }
+        *slot = Some(limits); true
     }
 }
 
-/// Local Antigravity / Gemini OAuth login used for the quota poll.
-#[derive(Debug, Clone)]
-pub struct AntigravityAuth {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
-    /// Expiry of `access_token` in unix seconds, when known.
-    pub access_expires_at: Option<i64>,
-    pub account_id: String,
-    pub email: Option<String>,
-}
+/// Shared OAuth credentials used by provider requests and quota polling.
+pub use crate::antigravity_auth::AntigravityAuth;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AntigravityAuthKind {
-    Oauth,
-    /// Gemini API key (or anything else without Cloud Code OAuth quota).
-    ApiKey,
-    /// No Antigravity auth configured.
-    Missing,
-}
+pub enum AntigravityAuthKind { Oauth, ApiKey, Missing }
 
-/// What `~/.gemini/antigravity-acp/settings.json` says about sign-in.
-pub fn auth_kind() -> AntigravityAuthKind {
-    let Some(path) = antigravity_acp_settings() else {
-        return AntigravityAuthKind::Missing;
-    };
-    let Ok(bytes) = std::fs::read(&path) else {
-        return AntigravityAuthKind::Missing;
-    };
-    let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
-        return AntigravityAuthKind::Missing;
-    };
-    match v.pointer("/auth/type").and_then(Value::as_str) {
-        Some("oauth-personal") | Some("oauth-business") => AntigravityAuthKind::Oauth,
-        Some("gemini-api-key") | Some("agent-platform") => AntigravityAuthKind::ApiKey,
-        Some(_) => AntigravityAuthKind::ApiKey,
-        None => AntigravityAuthKind::Missing,
-    }
-}
-
-fn antigravity_acp_settings() -> Option<PathBuf> {
-    Some(gemini_home()?.join("antigravity-acp").join("settings.json"))
+/// Read the local auth marker. Token resolution itself is delegated to the shared auth module.
+pub async fn auth_kind() -> AntigravityAuthKind {
+    tokio::task::spawn_blocking(|| {
+        let Some(path) = gemini_home().map(|h| h.join("antigravity-acp/settings.json")) else { return AntigravityAuthKind::Missing };
+        let Ok(bytes) = std::fs::read(path) else { return AntigravityAuthKind::Missing };
+        let Ok(v) = serde_json::from_slice::<Value>(&bytes) else { return AntigravityAuthKind::Missing };
+        match v.pointer("/auth/type").and_then(Value::as_str) {
+            Some("oauth-personal") | Some("oauth-business") => AntigravityAuthKind::Oauth,
+            Some("gemini-api-key") | Some("agent-platform") => AntigravityAuthKind::ApiKey,
+            Some(_) => AntigravityAuthKind::ApiKey,
+            None => AntigravityAuthKind::Missing,
+        }
+    }).await.unwrap_or(AntigravityAuthKind::Missing)
 }
 
 fn gemini_home() -> Option<PathBuf> {
-    std::env::var_os("GEMINI_HOME")
-        .map(PathBuf::from)
-        .or_else(|| crate::code::agents::home_dir().map(|h| h.join(".gemini")))
+    crate::antigravity_auth::resolve_dir(None).ok()
 }
 
-/// Read a usable access token (refreshing when stale). `None` when there is no OAuth login.
-///
-/// The sources are resolved at most once per `AUTH_CACHE_SECS` — never once per `TICK` — and
-/// never on a runtime thread: file reads and the last-resort keychain read both run in
-/// `spawn_blocking` (see `resolve_auth`), so a slow volume or an unanswered keychain dialog
-/// cannot freeze the app, its commands, or the mesh.
-pub async fn load_auth(guard: &AntigravityPlanGuard) -> Option<AntigravityAuth> {
-    let now = now();
-    let mut auth = match guard.cached_auth(now) {
-        Some(auth) => auth,
-        None => {
-            let auth = resolve_auth(guard).await?;
-            guard.store_auth(auth.clone(), now);
-            auth
-        }
-    };
-    if let Some(access) = guard.cached_access(now) {
-        // Identity comes from the resolved login; the refreshed access token wins over it.
-        auth.access_token = access;
-        auth.access_expires_at = None;
-        return Some(auth);
-    }
-    if auth.access_expires_at.is_some_and(|t| t > now + 60) {
-        return Some(auth);
-    }
-    let Some(refresh) = auth.refresh_token.clone() else {
-        // Use whatever access token we have; a 401 will surface on fetch.
-        return Some(auth);
-    };
-    match refresh_access_token(&refresh).await {
-        Ok((access, expires_in)) => {
-            let expires_at = now + expires_in.max(0);
-            guard.store_cached(access.clone(), expires_at);
-            auth.access_token = access;
-            auth.access_expires_at = Some(expires_at);
-            Some(auth)
-        }
-        Err(e) => {
-            tracing::debug!("antigravity plan: token refresh failed: {e:#}");
-            // Fall through with the on-disk access token if any.
-            if auth.access_token.is_empty() {
-                None
-            } else {
-                Some(auth)
-            }
-        }
-    }
-}
-
-/// Where a login can be read from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AuthSource {
-    /// `~/.gemini/antigravity-cli/antigravity-oauth-token`, written by agy.
-    CliTokenFile,
-    /// `~/.gemini/oauth_creds.json`, written by the Antigravity IDE.
-    OauthCreds,
-    /// The login keychain item (`gemini`/`antigravity`). Google's client created it with its
-    /// own code signature in the ACL, so a read from Patchbay raises SecurityAgent's
-    /// authorization dialog and blocks the calling thread until someone answers it — forever
-    /// on a machine nobody is sitting at. A last resort only, and only off the runtime.
-    Keychain,
-}
-
-/// Sources in resolution order: what agy itself writes on disk first (cheap, prompt-free),
-/// the keychain last. Reading the keychain before the disk files — the original order this
-/// module shipped with — made every quota poll a modal prompt on any machine where the
-/// item's ACL no longer matched Patchbay's signature, which a rebuild of
-/// `/Applications` guarantees; unanswered, each prompt blocked a runtime worker until the
-/// dialog was answered.
-const AUTH_SOURCE_ORDER: [AuthSource; 3] =
-    [AuthSource::CliTokenFile, AuthSource::OauthCreds, AuthSource::Keychain];
-
-/// Seconds to wait before touching the keychain again after `failures` failed attempts.
-/// Exponential and always longer than `TICK`: a denied or unanswered prompt must never
-/// become a prompt every 30 seconds.
-fn keychain_backoff_secs(failures: u32) -> i64 {
-    match failures {
-        0 => 0,
-        1 => 300,    // 5 min
-        2 => 1_800,  // 30 min
-        3 => 21_600, // 6 h
-        _ => 86_400, // a day
-    }
-}
-
-/// Resolve the login for the poll: disk sources first, the keychain only when both are
-/// missing or invalid. Every read runs in `spawn_blocking` — the keychain read goes through
-/// `SecItemCopyMatching`, which blocks its thread until SecurityAgent's dialog is answered
-/// (Apple: "SecItemCopyMatching blocks the calling thread"), and this runs on the shared
-/// async runtime that serves every command, background loop, and the mesh.
-async fn resolve_auth(guard: &AntigravityPlanGuard) -> Option<AntigravityAuth> {
-    let disk = tokio::task::spawn_blocking(read_disk_auth).await.ok().flatten();
-    if disk.is_some() {
-        return disk;
-    }
-    // Both disk sources missing/invalid: the keychain may prompt, so it is gated — one
-    // attempt at a time, and never inside a failure backoff. While the gate is closed the
-    // poll records `unavailable` (see `poll_antigravity_plan`) instead of retrying.
-    let now = now();
-    if !guard.keychain_begin_attempt(now) {
-        tracing::debug!("antigravity plan: keychain fallback deferred (in flight or backing off)");
-        return None;
-    }
-    let read = tokio::task::spawn_blocking(read_keychain_auth).await;
-    match read.ok().flatten() {
-        Some(auth) => {
-            guard.keychain_attempt_succeeded();
-            Some(auth)
-        }
-        None => {
-            guard.keychain_attempt_failed(now);
-            None
-        }
-    }
-}
-
-/// The login from the disk sources only — everything in `AUTH_SOURCE_ORDER` before the
-/// keychain — so this can never raise a prompt.
-fn read_disk_auth() -> Option<AntigravityAuth> {
-    select_auth(&AUTH_SOURCE_ORDER[..AUTH_SOURCE_ORDER.len() - 1], read_auth_source)
-}
-
-/// The first source that yields a login. Factored out of `resolve_auth` so tests can prove
-/// the ordering with a fake reader: no real keyring, no prompt.
-fn select_auth(
-    order: &[AuthSource],
-    mut read: impl FnMut(AuthSource) -> Option<AntigravityAuth>,
-) -> Option<AntigravityAuth> {
-    order.iter().find_map(|&source| read(source))
-}
-
-fn read_auth_source(source: AuthSource) -> Option<AntigravityAuth> {
-    match source {
-        AuthSource::CliTokenFile => read_cli_token_file(),
-        AuthSource::OauthCreds => read_oauth_creds(),
-        AuthSource::Keychain => read_keychain_auth(),
-    }
-}
-
-/// The login keychain item. **Blocks the calling thread** until SecurityAgent's dialog is
-/// answered (or returns an error when the item is absent/denied): callers must gate it
-/// (single-flight + backoff, see `resolve_auth`) and run it in `spawn_blocking`.
-fn read_keychain_auth() -> Option<AntigravityAuth> {
-    let raw = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-        .ok()?
-        .get_password()
-        .ok()?;
-    let json = if let Some(b64) = raw.strip_prefix(KEYRING_B64_PREFIX) {
-        let bytes = base64::engine::general_purpose::STANDARD.decode(b64.trim()).ok()?;
-        serde_json::from_slice::<Value>(&bytes).ok()?
-    } else {
-        serde_json::from_str::<Value>(&raw).ok()?
-    };
-    auth_from_wrapped_token(&json, json.get("id_token_email").and_then(Value::as_str).map(str::to_owned))
-}
-
-fn read_cli_token_file() -> Option<AntigravityAuth> {
-    let path = gemini_home()?.join("antigravity-cli").join("antigravity-oauth-token");
-    let v = read_json(&path)?;
-    let email = v
-        .get("id_token_email")
-        .or_else(|| v.get("email"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .or_else(|| email_from_id_token(v.get("id_token").and_then(Value::as_str)));
-    auth_from_wrapped_token(&v, email)
-}
-
-fn read_oauth_creds() -> Option<AntigravityAuth> {
-    let path = gemini_home()?.join("oauth_creds.json");
-    let v = read_json(&path)?;
-    let access = v.get("access_token").and_then(Value::as_str).filter(|s| !s.is_empty())?.to_owned();
-    let refresh = v
-        .get("refresh_token")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-    let expiry = v.get("expiry_date").and_then(|n| {
-        n.as_i64()
-            .or_else(|| n.as_f64().map(|f| f as i64))
-            .map(|ms| if ms > 10_000_000_000 { ms / 1000 } else { ms })
-    });
-    let email = email_from_id_token(v.get("id_token").and_then(Value::as_str))
-        .or_else(active_google_email);
-    let account_id = email
-        .clone()
-        .unwrap_or_else(|| format!("token:{}", &access[..access.len().min(16)]));
-    Some(AntigravityAuth {
-        access_token: access,
-        refresh_token: refresh,
-        access_expires_at: expiry,
-        account_id,
-        email,
-    })
-}
-
-fn auth_from_wrapped_token(v: &Value, email_hint: Option<String>) -> Option<AntigravityAuth> {
-    let token = v.get("token").unwrap_or(v);
-    let access = token
-        .get("access_token")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())?
-        .to_owned();
-    let refresh = token
-        .get("refresh_token")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-    let expiry = token
-        .get("expiry")
-        .and_then(Value::as_str)
-        .and_then(chrono_parse_rfc3339)
-        .or_else(|| {
-            token.get("expiry_date").and_then(|n| {
-                n.as_i64()
-                    .or_else(|| n.as_f64().map(|f| f as i64))
-                    .map(|ms| if ms > 10_000_000_000 { ms / 1000 } else { ms })
-            })
-        });
-    let email = email_hint
-        .or_else(|| email_from_id_token(v.get("id_token").and_then(Value::as_str)))
-        .or_else(active_google_email);
-    let account_id = email
-        .clone()
-        .unwrap_or_else(|| format!("token:{}", &access[..access.len().min(16)]));
-    Some(AntigravityAuth {
-        access_token: access,
-        refresh_token: refresh,
-        access_expires_at: expiry,
-        account_id,
-        email,
-    })
-}
-
-fn active_google_email() -> Option<String> {
-    let v = read_json(&gemini_home()?.join("google_accounts.json"))?;
-    v.get("active")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-}
-
-fn email_from_id_token(token: Option<&str>) -> Option<String> {
-    let claims = jwt_claims(token?)?;
-    claims
-        .get("email")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-}
-
-fn jwt_claims(token: &str) -> Option<Value> {
-    let payload = token.split('.').nth(1)?;
-    let padded = match payload.len() % 4 {
-        0 => payload.to_owned(),
-        2 => format!("{payload}=="),
-        3 => format!("{payload}="),
-        _ => return None,
-    };
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(padded.trim_end_matches('='))
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(&padded))
-        .ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
-fn read_json(path: &Path) -> Option<Value> {
-    let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
-struct OauthClient {
-    client_id: String,
-    client_secret: String,
-}
-
-fn oauth_clients() -> Result<Vec<OauthClient>> {
-    let clients = discover_oauth_clients_from_install();
-    if clients.is_empty() {
-        return Err(anyhow!(
-            "Antigravity OAuth client not found in a local install (agy / language_server)"
-        ));
-    }
-    Ok(clients)
-}
-
-fn discover_oauth_clients_from_install() -> Vec<OauthClient> {
-    for path in antigravity_binary_candidates() {
-        let clients = scan_binary_for_oauth_clients(&path);
-        if !clients.is_empty() {
-            return clients;
-        }
-    }
-    Vec::new()
-}
-
-fn antigravity_binary_candidates() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Some(home) = gemini_home() {
-        out.push(home.join("bin/agy"));
-        out.push(home.join("antigravity/bin/agy"));
-        out.push(home.join("antigravity-cli/bin/agy"));
-    }
-    if let Some(p) = crate::code::agents::which("agy") {
-        out.push(p);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        out.push(PathBuf::from(
-            "/Applications/Antigravity.app/Contents/Resources/bin/language_server",
-        ));
-        out.push(PathBuf::from(
-            "/Applications/Antigravity IDE.app/Contents/Resources/app/extensions/antigravity/bin/language_server",
-        ));
-    }
-    out
-}
-
-fn scan_binary_for_oauth_clients(path: &Path) -> Vec<OauthClient> {
-    let Ok(data) = std::fs::read(path) else {
-        return Vec::new();
-    };
-    let ids = find_google_client_ids(&data);
-    let secrets = find_gocspx_secrets(&data);
-    let mut out = Vec::new();
-    for id in &ids {
-        for secret in &secrets {
-            out.push(OauthClient {
-                client_id: id.clone(),
-                client_secret: secret.clone(),
-            });
-        }
-    }
-    out
-}
-
-/// Google OAuth installed-app client ids look like `NNNN-xxxx.apps.googleusercontent.com`.
-fn find_google_client_ids(data: &[u8]) -> Vec<String> {
-    let needle = b".apps.googleusercontent.com";
-    let mut out = Vec::new();
-    let mut i = 0;
-    while let Some(rel) = data[i..].windows(needle.len()).position(|w| w == needle) {
-        let end = i + rel + needle.len();
-        let mut start = i + rel;
-        while start > 0 {
-            let b = data[start - 1];
-            if b.is_ascii_digit() || b.is_ascii_lowercase() || b == b'-' {
-                start -= 1;
-            } else {
-                break;
-            }
-        }
-        // Walk-back may eat preceding lowercase letters; client ids always start with a digit.
-        let slice = &data[start..end];
-        let dig = slice.iter().position(|b| b.is_ascii_digit()).unwrap_or(slice.len());
-        let s = String::from_utf8_lossy(&slice[dig..]).into_owned();
-        if s.contains('-') && s.chars().next().is_some_and(|c| c.is_ascii_digit()) && !out.contains(&s) {
-            out.push(s);
-        }
-        i = end;
-    }
-    out
-}
-
-/// Go packs adjacent string literals without NULs; strip a trailing English remnant if present.
-fn find_gocspx_secrets(data: &[u8]) -> Vec<String> {
-    const NEEDLE: &[u8] = b"GOCSPX-";
-    let mut out = Vec::new();
-    let mut i = 0;
-    while let Some(rel) = data[i..].windows(NEEDLE.len()).position(|w| w == NEEDLE) {
-        let start = i + rel;
-        let rest = &data[start..];
-        let end = rest
-            .iter()
-            .position(|&b| !(b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
-            .unwrap_or(rest.len());
-        let mut s = String::from_utf8_lossy(&rest[..end]).into_owned();
-        // Go packs the next string literal with no NUL; cut before known remnants.
-        for trail in ["decoding", "https", "field"] {
-            if let Some(idx) = s.find(trail) {
-                if idx >= 16 {
-                    s.truncate(idx);
-                    break;
-                }
-            }
-        }
-        if s.starts_with("GOCSPX-") && s.len() >= 20 && !out.contains(&s) {
-            out.push(s);
-        }
-        i = start + NEEDLE.len();
-    }
-    out
-}
-
-async fn refresh_access_token(refresh_token: &str) -> Result<(String, i64)> {
-    let clients = oauth_clients()?;
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()?;
-    let mut last_status = None;
-    for client in &clients {
-        let resp = http
-            .post(TOKEN_URL)
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .form(&[
-                ("client_id", client.client_id.as_str()),
-                ("client_secret", client.client_secret.as_str()),
-                ("refresh_token", refresh_token),
-                ("grant_type", "refresh_token"),
-            ])
-            .send()
-            .await?;
-        let status = resp.status();
-        let body: Value = resp.json().await?;
-        if !status.is_success() {
-            last_status = Some(status);
-            continue;
-        }
-        let access = body
-            .get("access_token")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow!("token refresh response missing access_token"))?
-            .to_owned();
-        let expires_in = body.get("expires_in").and_then(Value::as_i64).unwrap_or(3600);
-        return Ok((access, expires_in));
-    }
-    Err(anyhow!(
-        "Google token refresh HTTP {}",
-        last_status.map(|s| s.to_string()).unwrap_or_else(|| "failed".into())
-    ))
-}
-
-fn user_agent() -> String {
-    let ver = read_agy_version().unwrap_or_else(|| "1.4.12".into());
-    // Cloud Code gates Gemini buckets on a current Antigravity client identity. Legacy
-    // `antigravity/hub/1.0.0` (and bare `antigravity`) can omit Gemini groups entirely.
-    format!("antigravity/cli/{ver}")
-}
-
-fn read_agy_version() -> Option<String> {
-    for path in [
-        gemini_home()?.join("bin/agy.version.json"),
-        gemini_home()?.join("antigravity-cli/agy.version.json"),
-    ] {
-        if let Some(v) = read_json(&path)
-            && let Some(ver) = v.get("version").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
-        {
-            return Some(ver.to_owned());
-        }
-    }
-    None
+pub async fn load_auth_for(gemini_home: Option<&str>) -> Option<AntigravityAuth> {
+    crate::antigravity_auth::load_auth(gemini_home).await
 }
 
 /// Fetch the quota summary for the local Antigravity OAuth login.
 pub async fn fetch(auth: &AntigravityAuth) -> Result<AntigravityPlanLimits> {
+    fetch_from(QUOTA_URL, auth).await
+}
+
+/// `fetch` against `url` (a test points it at a loopback server).
+async fn fetch_from(url: &str, auth: &AntigravityAuth) -> Result<AntigravityPlanLimits> {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
-        .user_agent(user_agent())
+        // No redirects: a 3xx would send the bearer token wherever the server points.
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(auth.user_agent())
         .build()?;
     // Consumer Antigravity accounts use an empty project; `SetProjectID("")` is what the CLI logs.
     // Do not invent a hard-coded GCP project id.
     let resp = http
-        .post(QUOTA_URL)
+        .post(url)
         .header("Authorization", format!("Bearer {}", auth.access_token))
         .header("Content-Type", "application/json")
+        .header("x-goog-api-client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
+        .header("client-metadata", r#"{"ideType":"ANTIGRAVITY","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}"#)
         .body("{}")
         .send()
         .await?;
     let status = resp.status();
+    if status.is_redirection() {
+        return Err(anyhow!("Antigravity quota answered a redirect (HTTP {status}); Patchbay does not follow redirects with a login token"));
+    }
     let body: Value = resp.json().await?;
     if !status.is_success() {
         return Err(anyhow!("Antigravity quota HTTP {status}"));
@@ -894,20 +304,6 @@ pub async fn fetch(auth: &AntigravityAuth) -> Result<AntigravityPlanLimits> {
 mod tests {
     use super::*;
 
-    /// Both account-id forms the auth readers produce pass the sender gate: the Google email, and the
-    /// last-resort `token:<first 16 characters>`.
-    #[test]
-    fn every_identity_form_passes_the_sender_gate() {
-        let _g = crate::test_support::gemini_home_lock();
-        let with_email = auth_from_wrapped_token(&serde_json::json!({ "access_token": "ya29.a0AfH6SMBx1234567890abcdef" }), Some("me@example.com".into())).unwrap();
-        assert_eq!(with_email.account_id, "me@example.com");
-        let fingerprint = auth_from_wrapped_token(&serde_json::json!({ "access_token": "ya29.a0AfH6SMBx1234567890abcdef" }), None).unwrap();
-        // (a google_accounts.json under the scratch HOME could name an email instead; both forms pass.)
-        for id in [with_email.account_id, fingerprint.account_id] {
-            assert!(crate::is_portable_provider_account_id(&id), "{id:?} must pass the gate");
-        }
-        assert!(crate::is_portable_provider_account_id("token:ya29.a0AfH6SMBx12"), "a truncated 16-character prefix");
-    }
     use serde_json::json;
 
     fn sample_body() -> Value {
@@ -989,6 +385,22 @@ mod tests {
         assert!(AntigravityPlanLimits::from_response("x".into(), None, &json!({ "groups": [] }), 1).is_none());
     }
 
+    /// The quota call does not follow a 302/307 (its bearer token would go with it).
+    #[tokio::test]
+    async fn the_quota_call_does_not_follow_a_redirect() {
+        use std::sync::atomic::Ordering;
+        let auth = AntigravityAuth {
+            access_token: "TOKEN".into(), refresh_token: None, access_expires_at: None,
+            account_id: "account@example.test".into(), email: None, client_version: "9.8.7".into(),
+        };
+        for status in [302u16, 307] {
+            let (base, first, second) = crate::test_support::redirect_trap(status).await;
+            let e = fetch_from(&base, &auth).await.unwrap_err().to_string();
+            assert!(e.contains("redirect") && !e.contains("TOKEN"), "{status}: {e}");
+            assert_eq!((first.load(Ordering::SeqCst), second.load(Ordering::SeqCst)), (1, 0), "{status}: followed");
+        }
+    }
+
     #[test]
     fn parses_reset_times() {
         assert_eq!(chrono_parse_rfc3339("2026-11-08T12:50:06Z"), Some(1_794_142_206));
@@ -1035,162 +447,5 @@ mod tests {
         assert!((g.latest().unwrap().buckets[0].remaining_fraction - 0.5).abs() < 1e-9);
     }
 
-    #[test]
-    fn strips_go_concat_secret_suffix() {
-        // Go packs string literals without NULs; a real binary often appends the next symbol name.
-        let blob = b"xxGOCSPX-TestInstalledAppSecret99decodingyy";
-        assert_eq!(
-            find_gocspx_secrets(blob),
-            vec!["GOCSPX-TestInstalledAppSecret99".to_owned()]
-        );
-    }
 
-    #[test]
-    fn finds_google_client_id_in_blob() {
-        let blob = b"pad999000111222-aaaaaaaaaaaaaaaaaaaaaaaaaaaa.apps.googleusercontent.com\0end";
-        let ids = find_google_client_ids(blob);
-        assert_eq!(ids, vec!["999000111222-aaaaaaaaaaaaaaaaaaaaaaaaaaaa.apps.googleusercontent.com".to_owned()]);
-    }
-
-    fn fake_auth(account: &str) -> AntigravityAuth {
-        AntigravityAuth {
-            access_token: "access".into(),
-            refresh_token: Some("refresh".into()),
-            access_expires_at: None,
-            account_id: account.into(),
-            email: Some(account.into()),
-        }
-    }
-
-    /// Regression (pb-20261107-01): the disk sources agy writes must be preferred over the
-    /// keychain item, which raises a modal SecurityAgent prompt for any signature but
-    /// Google's. Proven with a fake reader — no real keyring is ever touched.
-    #[test]
-    fn disk_sources_are_preferred_over_the_keychain() {
-        assert_eq!(
-            AUTH_SOURCE_ORDER,
-            [AuthSource::CliTokenFile, AuthSource::OauthCreds, AuthSource::Keychain]
-        );
-        // With a disk login present the keychain reader is never consulted: no prompt.
-        let mut seen = Vec::new();
-        let auth = select_auth(&AUTH_SOURCE_ORDER, |source| {
-            seen.push(source);
-            (source == AuthSource::OauthCreds).then(|| fake_auth("disk@example"))
-        })
-        .unwrap();
-        assert_eq!(auth.account_id, "disk@example");
-        assert_eq!(seen, vec![AuthSource::CliTokenFile, AuthSource::OauthCreds], "keychain untouched");
-        // Only when both disk sources miss does the keychain get its turn.
-        let mut seen = Vec::new();
-        let auth = select_auth(&AUTH_SOURCE_ORDER, |source| {
-            seen.push(source);
-            (source == AuthSource::Keychain).then(|| fake_auth("keychain@example"))
-        })
-        .unwrap();
-        assert_eq!(auth.account_id, "keychain@example");
-        assert_eq!(seen, AUTH_SOURCE_ORDER, "the keychain is the last resort");
-        // Nothing readable anywhere: no login, and the poll's disk-only view never includes
-        // the keychain (that is `resolve_auth`'s gated step).
-        assert!(select_auth(&AUTH_SOURCE_ORDER, |_| None).is_none());
-        assert_eq!(
-            &AUTH_SOURCE_ORDER[..AUTH_SOURCE_ORDER.len() - 1],
-            &[AuthSource::CliTokenFile, AuthSource::OauthCreds]
-        );
-    }
-
-    /// Regression (pb-20261107-01): a denied/cancelled keychain read must back off instead of
-    /// re-prompting every `TICK`, and a read in flight must never start a second one.
-    #[test]
-    fn keychain_failure_backs_off_instead_of_prompting_every_tick() {
-        // A backoff that does not outlive the poll interval would re-prompt every tick.
-        assert!(keychain_backoff_secs(1) > TICK.as_secs() as i64);
-        assert!(keychain_backoff_secs(5) >= keychain_backoff_secs(4), "never shrinks");
-
-        let g = AntigravityPlanGuard::default();
-        let mut t = 1_000_000;
-        assert!(g.keychain_begin_attempt(t), "first attempt allowed");
-        assert!(
-            !g.keychain_begin_attempt(t + 1),
-            "single-flight: an unanswered dialog never starts a second read"
-        );
-        g.keychain_attempt_failed(t);
-        for secs in [TICK.as_secs() as i64, 2 * TICK.as_secs() as i64, keychain_backoff_secs(1) - 1] {
-            assert!(!g.keychain_begin_attempt(t + secs), "tick +{secs}s must not retry the keychain");
-        }
-        t += keychain_backoff_secs(1);
-        assert!(g.keychain_begin_attempt(t), "retried once the backoff elapsed");
-        g.keychain_attempt_failed(t);
-        for secs in [TICK.as_secs() as i64, keychain_backoff_secs(2) - 1] {
-            assert!(!g.keychain_begin_attempt(t + secs), "a second failure backs off further");
-        }
-        t += keychain_backoff_secs(2);
-        assert!(g.keychain_begin_attempt(t));
-        g.keychain_attempt_succeeded();
-        assert!(g.keychain_begin_attempt(t + 1), "a successful read clears the backoff");
-    }
-
-    /// Regression (pb-20261107-01): with OAuth configured but no readable login, the poll
-    /// records the existing `unavailable` report kind — and neither re-reads the keychain
-    /// (the gate is pre-failed here, so this test can never reach a real keyring) nor
-    /// re-polling every tick (the fresh report gates the loop).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn poll_records_unavailable_without_retrying_the_keychain_every_tick() {
-        let _env = crate::test_support::gemini_home_lock();
-        // OAuth configured, no token files on disk: the login is unreadable.
-        let gemini = std::env::temp_dir().join(format!("pb-gemini-{}", &crate::db::new_id()[..8]));
-        std::fs::create_dir_all(gemini.join("antigravity-acp")).unwrap();
-        std::fs::write(
-            gemini.join("antigravity-acp").join("settings.json"),
-            br#"{"auth": {"type": "oauth-personal"}}"#,
-        )
-        .unwrap();
-        unsafe { std::env::set_var("GEMINI_HOME", &gemini) };
-
-        let dir = crate::test_support::short_dir("agpoll");
-        std::fs::create_dir_all(&dir).unwrap();
-        let db = std::sync::Arc::new(crate::db::Db::open(&dir.join("db.sqlite")).unwrap());
-        let mesh = crate::mesh::Mesh::new(
-            db.clone(),
-            dir.clone(),
-            std::sync::Arc::new(crate::mesh::keys::MemKeyStore::default()),
-        )
-        .unwrap();
-        let emit: crate::mesh::node::UiSink = std::sync::Arc::new(|_: &str, _: Value| {});
-        let state = crate::AppState::new(db, dir.clone(), mesh, emit);
-        state.code.antigravity_plan.set_blade_open(true);
-        // The keychain fallback has already failed once (denied): the gate under test. This
-        // is also what keeps the test from ever reaching the real keyring, which on a
-        // machine that has the item would raise the very modal dialog this bug is about.
-        state.code.antigravity_plan.keychain_attempt_failed(now());
-
-        crate::poll_antigravity_plan(&state).await;
-        let first = state.code.antigravity_plan.latest().expect("an `unavailable` report is recorded");
-        assert!(first.unavailable.is_some(), "records the existing `unavailable` report kind");
-        assert!(first.is_fresh(now()), "fresh for FRESH_SECS: the loop skips it next tick");
-        {
-            let k = state.code.antigravity_plan.keychain.lock().unwrap();
-            assert_eq!(k.failures, 1, "no second keychain attempt was made");
-            assert!(!k.in_flight, "no keychain read is pending");
-        }
-
-        // Even once the report goes stale and the poll really runs again, the backoff still
-        // refuses the keychain: only the prompt-free disk sources are consulted.
-        let mut stale = first.clone();
-        stale.observed_at = now() - FRESH_SECS - 1;
-        state.code.antigravity_plan.record(stale);
-        crate::poll_antigravity_plan(&state).await;
-        assert!(
-            state.code.antigravity_plan.latest().unwrap().unavailable.is_some(),
-            "the `unavailable` report is recorded again"
-        );
-        assert_eq!(
-            state.code.antigravity_plan.keychain.lock().unwrap().failures,
-            1,
-            "the stale re-poll did not retry the keychain"
-        );
-
-        unsafe { std::env::remove_var("GEMINI_HOME") };
-        let _ = std::fs::remove_dir_all(&gemini);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }

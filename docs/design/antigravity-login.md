@@ -1,6 +1,6 @@
 # Antigravity subscription login
 
-An Antigravity subscription login lets a Gemini provider use the Google sign-in already held by `agy` or Antigravity IDE. Patchbay uses the Cloud Code service to discover models and stream Chat and native-agent requests, and reports the account's plan quota in the session gauge. This document records the locked v1 design for `pb-20261117-10`; it describes intended behavior, not a completed implementation.
+An Antigravity subscription login lets a Gemini provider use the Google sign-in already held by `agy` or Antigravity IDE. Patchbay uses the Cloud Code service to discover models and stream Chat and native-agent requests, and reports the account's plan quota in the session gauge. This document records the locked v1 design for `pb-20261117-10`.
 
 ## Goal
 
@@ -23,7 +23,7 @@ Every file and Keychain read runs in `spawn_blocking`. Keychain access is single
 
 Token refresh posts `grant_type=refresh_token`, the refresh token, and the discovered client credentials to Google's documented token endpoint, `https://oauth2.googleapis.com/token`. Refreshed access tokens are cached in memory per login; the existing quota implementation does not rewrite the credential store. Google describes installed desktop applications as public clients and documents the browser-based installed-app authorization-code flow and refresh-token exchange (see [OAuth 2.0 for Desktop Apps](https://developers.google.com/identity/protocols/oauth2/native-app)).
 
-The current `src-tauri/src/code/antigravity_plan.rs` implements refresh-token exchange and reads already-created credentials; it does not implement an interactive authorization-code sign-in in this module. The v1 design extracts the shared resolution and refresh support into `antigravity_auth`, parameterized by `gemini_home`, so the provider and quota poller share it. The source is currently environment/default-home based; per-provider home behavior is part of the locked v1 design.
+The pre-v1 `src-tauri/src/code/antigravity_plan.rs` implements refresh-token exchange for an existing login; it does not implement an interactive authorization-code sign-in in this module. The v1 design extracts the shared resolution and refresh support into `antigravity_auth`, parameterized by `gemini_home`, so the provider and quota poller share one resolver and per-home cache.
 
 ## Requests
 
@@ -82,6 +82,6 @@ David and Jared's project accepts the residual risk that Google may change or di
 
 ## Design notes and source discrepancies
 
-- The existing quota code refreshes a stored token and reads the default/environment Gemini home. The locked provider design adds per-provider `gemini_home` resolution; this document follows the plan for v1.
-- The current quota source applies Keychain fallback after the two disk sources without a default-home-only guard. The locked v1 specification requires Keychain access only for the default home; the design follows that requirement.
-- The plan calls the refresh support an RFC 8252 installed-app OAuth flow. The inspected source implements refresh-token exchange for an existing login, not interactive installed-app authorization. This document describes that distinction rather than claiming interactive sign-in already exists.
+- Phase B source review confirmed the prior quota implementation resolved only the environment/default home and allowed Keychain fallback after disk misses. The v1 design therefore adds a provider-selected home and restricts Keychain fallback to the default home; both are implementation requirements, not claims about the pre-v1 behavior.
+- The plan calls the refresh support an RFC 8252 installed-app OAuth flow. The inspected implementation performs refresh-token exchange for an existing login, not interactive installed-app authorization. The v1 provider reuses that refresh path; it does not add browser sign-in.
+- The locked wire design matches the implementation target in plan section C. The exact `daily-cloudcode-pa.googleapis.com/v1internal` methods remain undocumented/internal, as described above.
