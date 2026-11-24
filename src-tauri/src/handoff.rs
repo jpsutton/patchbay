@@ -164,13 +164,17 @@ fn shipped_objects(top: &Path, commit: &str, known: &[String]) -> Result<Vec<(St
         .stderr(Stdio::piped());
     patchbay_agent::proc::NoWindow::no_window(&mut cmd);
     let mut child = cmd.spawn().context("running git cat-file --batch-check")?;
-    {
-        let mut stdin = child.stdin.take().context("git cat-file --batch-check stdin")?;
-        let mut names = shas.join("\n");
-        names.push('\n');
-        stdin.write_all(names.as_bytes()).context("writing object names to git cat-file")?;
-    }
+    // Fed from its own thread: git answers while it reads, so writing every name before reading
+    // deadlocks once both pipes fill (a few thousand objects on Windows' small pipe buffer).
+    let mut stdin = child.stdin.take().context("git cat-file --batch-check stdin")?;
+    let mut names = shas.join("\n");
+    names.push('\n');
+    let feeder = std::thread::spawn(move || stdin.write_all(names.as_bytes()));
     let out = child.wait_with_output().context("running git cat-file --batch-check")?;
+    feeder
+        .join()
+        .map_err(|_| anyhow::anyhow!("git cat-file --batch-check feeder panicked"))?
+        .context("writing object names to git cat-file")?;
     if !out.status.success() {
         bail!("git cat-file --batch-check: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
@@ -797,5 +801,29 @@ mod tests {
         let b1 = std::fs::metadata(d1.join("workspace.bundle")).unwrap().len();
         let b2 = std::fs::metadata(d2.join("workspace.bundle")).unwrap().len();
         assert!(b2 < b1, "the repeat bundle ({b2} B) should be smaller than the first ({b1} B)");
+    }
+
+    #[test]
+    fn sizes_many_objects_without_pipe_deadlock() {
+        // More object names than both pipes hold: writing them all before reading hung a move.
+        let src = std::env::temp_dir().join(format!("pb-handoff-many-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&src).unwrap();
+        sh(&src, &["init", "-q", "-b", "main"]);
+        const N: usize = 12_000;
+        for i in 0..N {
+            std::fs::write(src.join(format!("f{i}.txt")), i.to_string()).unwrap();
+        }
+        sh(&src, &["add", "-A"]);
+        sh(&src, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "many"]);
+        let head = git(&src, &["rev-parse", "HEAD"]).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dir = src.clone();
+        std::thread::spawn(move || tx.send(shipped_objects(&dir, &head, &[]).map(|v| v.len())));
+        let n = rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("shipped_objects hung: cat-file pipe deadlock")
+            .unwrap();
+        assert_eq!(n, N + 2, "every blob plus the tree and the commit");
+        let _ = std::fs::remove_dir_all(&src);
     }
 }
