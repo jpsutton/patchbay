@@ -745,14 +745,8 @@ fn trust_relevant(path: &str) -> bool {
         })
 }
 
-/// Refuse a checkout when the shared repository config could run code at `worktree add`. Every spawn refuses the
-/// keys git itself acts on (promisor remotes, proxies, includes, config-defined hooks), since the lazy-fetch environment switch
-/// needs git 2.44+. fsmonitor and sshCommand are not among them: the wrapper overrides fsmonitor on the command
-/// line, and ssh only runs for a fetch, which the refused keys and the environment switch rule out. A refresh,
-/// which follows an untrusted worker, also refuses filters, lfs, credentials, those two, attributes and
-/// `extensions.worktreeConfig` (a fresh spawn reads `config.worktree` with the same filter instead, so sparse
-/// checkouts keep working).
-/// Names of the repository's local config keys, plus `config.worktree` when the extension is on.
+/// Names of the repository's local config keys, plus `config.worktree` when the extension is on. Git prints
+/// section and variable names lowercased but a quoted subsection exactly as written.
 fn repo_config_keys(repo: &Path) -> Result<String> {
     let mut keys = git(repo, &["config", "--local", "--name-only", "--list", "-z"])?;
     // `worktree add` copies $GIT_DIR/config.worktree, which `--local` does not read; git reads it only when
@@ -768,31 +762,41 @@ fn repo_config_keys(repo: &Path) -> Result<String> {
     Ok(keys)
 }
 
-/// Custom (non-lfs) filter keys in the repository config; the clean filter runs on a stat-changed file at
-/// `git status`, and a smudge filter at checkout. The lfs ones are blanked on every daemon git call.
-pub(crate) fn custom_filter_keys(repo: &Path) -> Result<Vec<String>> {
-    Ok(repo_config_keys(repo)?.split('\0').map(str::to_ascii_lowercase)
-        .filter(|k| k.starts_with("filter.") && !k.starts_with("filter.lfs."))
-        .collect::<std::collections::BTreeSet<_>>().into_iter().collect())
-}
+/// The only filter keys a spawn accepts, matched exactly as git prints them: every daemon git call blanks these.
+/// Filter drivers are matched case-sensitively, so `filter.LFS.smudge` or a `filter "lfs.x"` subsection is a
+/// different driver that the overrides do not cover.
+const BLANKED_LFS_FILTER_KEYS: [&str; 4] = ["filter.lfs.clean", "filter.lfs.smudge", "filter.lfs.process", "filter.lfs.required"];
 
-fn refuse_repo_code_hooks(repo: &Path, refresh: bool) -> Result<()> {
+/// Repository config keys that can run code in a daemon git call. Every spawn refuses the keys git itself acts
+/// on (promisor remotes, proxies, includes, config-defined hooks, custom filters), since the lazy-fetch
+/// environment switch needs git 2.44+. fsmonitor and sshCommand are not among them: the wrapper overrides
+/// fsmonitor on the command line, and ssh only runs for a fetch, which the refused keys and the environment
+/// switch rule out. A refresh, which follows an untrusted worker, also refuses every filter key, lfs included,
+/// credentials, those two, and `extensions.worktreeConfig` (a fresh spawn reads `config.worktree` with the same
+/// filter instead, so sparse checkouts keep working). Keys are returned as git prints them.
+fn repo_code_hook_keys(repo: &Path, refresh: bool) -> Result<Vec<String>> {
     let keys = repo_config_keys(repo)?;
-    let bad: Vec<String> = keys
+    Ok(keys
         .split('\0')
-        .map(str::to_ascii_lowercase)
-        .filter(|k| {
+        .filter(|raw| {
+            let k = raw.to_ascii_lowercase();
             let spawn = k.starts_with("include.") || k.starts_with("includeif.") || k.starts_with("hook.")
-                || (k.starts_with("filter.") && !k.starts_with("filter.lfs."))
+                || (k.starts_with("filter.") && !BLANKED_LFS_FILTER_KEYS.contains(raw))
                 || (k.starts_with("remote.") && [".promisor", ".uploadpack", ".receivepack", ".vcs"].iter().any(|e| k.ends_with(e)))
                 || matches!(k.as_str(), "extensions.partialclone" | "core.gitproxy");
-            let more = k.starts_with("filter.lfs.") || k.starts_with("lfs.customtransfer.") || k.starts_with("lfs.extension.") || k.starts_with("credential.")
+            let more = k.starts_with("filter.") || k.starts_with("lfs.customtransfer.") || k.starts_with("lfs.extension.") || k.starts_with("credential.")
                 || matches!(k.as_str(), "submodule.recurse" | "core.hookspath" | "core.fsmonitor" | "core.sshcommand" | "lfs.standalonetransferagent" | "core.attributesfile" | "extensions.worktreeconfig");
             spawn || (refresh && more)
         })
+        .map(str::to_owned)
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
-        .collect();
+        .collect())
+}
+
+/// Refuse a checkout when the shared repository config could run code at `worktree add`.
+fn refuse_repo_code_hooks(repo: &Path, refresh: bool) -> Result<()> {
+    let bad = repo_code_hook_keys(repo, refresh)?;
     let what = if refresh { "refresh" } else { "spawn" };
     if !bad.is_empty() {
         bail!("worker {what} refused: repository git config sets {}; a person must review or remove them", bad.join(", "));
@@ -804,6 +808,24 @@ fn refuse_repo_code_hooks(repo: &Path, refresh: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Refuse to run `git status` for the durable-done check when it could run repository code: any spawn-set key
+/// (the check reads the same config a spawn does), or a gitlink in the index (status would enter the nested
+/// repository and use its own config and attributes). Residual: the check and the status are separate git
+/// calls, so a live worker rewriting the config in that window is not caught.
+pub(crate) fn refuse_unsafe_status(repo: &Path) -> Result<()> {
+    let mut bad = repo_code_hook_keys(repo, false)?;
+    if git(repo, &["ls-files", "--stage", "-z"])?.split('\0').any(|l| l.starts_with("160000 ")) {
+        bad.push("a submodule or nested repository (gitlink) in the index".to_owned());
+    }
+    if bad.is_empty() {
+        return Ok(());
+    }
+    let mut list = bad.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+    if bad.len() > 5 { list.push_str(", ..."); }
+    list.truncate(list.char_indices().nth(200).map_or(list.len(), |(i, _)| i));
+    bail!("Cannot mark item done: the repository could run code during the status check ({list}); a person must review or remove it, or provide a PR URL");
 }
 
 /// Use only a committed HEAD whose changes from the original dispatch base have no trust-sensitive paths.
@@ -1611,6 +1633,46 @@ mod tests {
         assert!(make_worktree(&team, "DM-20261109-01", "HEAD", false).is_ok());
         let e = make_worktree(&team, "DM-20261109-02", "HEAD", true).unwrap_err().to_string();
         assert!(e.contains("worker refresh refused") && e.contains("filter.lfs.clean"), "{e}");
+    }
+
+    #[test]
+    fn a_fresh_spawn_neutralises_the_exact_lfs_filters_at_checkout() {
+        let (d, _t, team) = setup();
+        let cwd = d.join("proj");
+        let plain = |args: &[&str]| assert!(std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").arg("-C").arg(&cwd).args(args).output().unwrap().status.success(), "{args:?}");
+        plain(&["init", "-q", "-b", "main"]);
+        std::fs::write(cwd.join(".gitattributes"), "* filter=lfs\n").unwrap();
+        std::fs::write(cwd.join("a.txt"), "x").unwrap();
+        plain(&["add", "-A"]);
+        plain(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base"]);
+        let marker = d.join("lfs-ran");
+        let cmd = format!("touch {}; cat", marker.display());
+        for k in ["filter.lfs.clean", "filter.lfs.smudge"] { plain(&["config", k, &cmd]); }
+        plain(&["config", "filter.lfs.process", &format!("touch {}", marker.display())]);
+        plain(&["config", "filter.lfs.required", "true"]);
+        let control = d.join("control");
+        let _ = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").arg("-C").arg(&cwd).args(["worktree", "add", "-q", "-b", "control", "--"]).arg(&control).arg("main").output().unwrap();
+        assert!(marker.exists(), "control: plain git runs the lfs filter at checkout");
+        std::fs::remove_file(&marker).unwrap();
+        let made = make_worktree(&team, "DM-20261109-01", "HEAD", false);
+        assert!(!marker.exists(), "the overrides keep the lfs filter from running at checkout");
+        assert!(made.is_ok(), "a fresh spawn accepts the blanked lfs keys");
+    }
+
+    #[test]
+    fn filters_that_only_look_like_lfs_are_refused_on_spawn_and_listed() {
+        for key in ["filter.LFS.smudge", "filter.lfs.x.smudge", "filter.Lfs.clean"] {
+            let (d, _t, team) = setup();
+            let cwd = d.join("proj");
+            git(&cwd, &["init", "-q", "-b", "main"]).unwrap();
+            git(&cwd, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]).unwrap();
+            git(&cwd, &["config", "--local", key, "x"]).unwrap();
+            let e = make_worktree(&team, "DM-20261109-01", "HEAD", false).unwrap_err().to_string();
+            assert!(e.contains("worker spawn refused") && e.contains(key), "{key}: {e}");
+            assert!(repo_code_hook_keys(&cwd, false).unwrap().iter().any(|k| k == key), "{key}");
+            let e = refuse_unsafe_status(&cwd).unwrap_err().to_string();
+            assert!(e.contains(key), "{key}: {e}");
+        }
     }
 
     #[test]
