@@ -1337,8 +1337,7 @@ fn allow_worker_commit(
     if !tpl.allow_worker_commit {
         return None;
     }
-    let worktree_root = team.effective_worktree_root().ok()?;
-    let worktree = worktree_root.join(item_id.to_lowercase());
+    let worktree = tdb.assigned_worktree(&team, item_id, Some(session)).ok()?;
     // Fail closed: no request cwd ⇒ no auto-approve (do not use session cwd).
     let call_cwd = worker_request_cwd(tool_call)?;
     if !paths_equal(Path::new(call_cwd), &worktree) {
@@ -1821,9 +1820,7 @@ pub fn enrich_worker_git_permission(data_dir: &Path, session: &str, raw: &mut Va
     };
     let display_cwd = tool_call["rawInput"]["cwd"].as_str().unwrap_or("").to_owned();
     let worktree = member.item_id.as_ref().and_then(|id| {
-        team.effective_worktree_root()
-            .ok()
-            .map(|root| root.join(id.to_lowercase()))
+        tdb.assigned_worktree(&team, id, Some(session)).ok()
     });
     let hooks_path = worker_safe_hooks_dir(data_dir, &team.id);
     let (tmpl_ok, tmpl_label, tmpl_reason, _verb) = if unclassifiable {
@@ -2240,6 +2237,7 @@ mod tests {
         );
         t.attach(&team.id, "w1", "workers").unwrap();
         t.0.execute("UPDATE members SET item_id = ?1 WHERE session_id = 'w1'", [item_id]).unwrap();
+        t.0.execute("INSERT INTO dispatches(team_id,item_id,seat,desk_session,session_id,worktree_path,at) VALUES (?1,?2,'workers','desk','w1',?3,0)", rusqlite::params![team.id,item_id,worktree.canonicalize().unwrap().to_string_lossy()]).unwrap();
         // Tests model a dispatch-spawned worker (F-E launched-scrubbed fact + R2-1 handshake version).
         t.mark_git_env_scrubbed("w1").unwrap();
         t.mark_acp_runtime_version("w1", "2.2.2").unwrap();
@@ -2312,6 +2310,31 @@ mod tests {
 
     fn git_exec_empty_cwd(command: &str) -> Value {
         json!({ "title": command, "kind": "execute", "rawInput": { "command": command, "cwd": "" } })
+    }
+
+    #[test]
+    fn worker_auto_allow_refuses_missing_assignment() {
+        let (d, wt, _, _, _) = worker_commit_fixture(true);
+        let call = git_exec(&wt, "ls");
+        assert!(allow_team_tool(&d, "w1", GIT_AGENT, &call, &options(), &wt).is_some());
+        TeamsDb::open(&d).unwrap().0.execute("UPDATE dispatches SET worktree_path=NULL WHERE session_id='w1'", []).unwrap();
+        assert!(allow_team_tool(&d, "w1", GIT_AGENT, &call, &options(), &wt).is_none());
+    }
+
+    #[test]
+    fn worker_prompt_does_not_claim_template_when_assignment_missing() {
+        if skip_without_clean_git() { return; }
+        let (d, wt, _, _, safe) = worker_commit_fixture(true);
+        std::fs::write(Path::new(&wt).join("hello.txt"), "hello").unwrap();
+        let cmd = git_cmd(&safe, "add -- hello.txt");
+        let raw = || json!({"toolCall": {"kind": "execute", "rawInput": {"command": cmd, "cwd": wt}}, "options": [{"kind":"allow_once","optionId":"yes"}]});
+        let mut valid = raw();
+        enrich_worker_git_permission(&d, "w1", &mut valid);
+        assert_eq!(valid["toolCall"]["_meta"]["patchbay"]["templateMatch"]["ok"], true);
+        TeamsDb::open(&d).unwrap().0.execute("UPDATE dispatches SET worktree_path=NULL WHERE session_id='w1'", []).unwrap();
+        let mut missing = raw();
+        enrich_worker_git_permission(&d, "w1", &mut missing);
+        assert_eq!(missing["toolCall"]["_meta"]["patchbay"]["templateMatch"]["ok"], false);
     }
 
     #[test]

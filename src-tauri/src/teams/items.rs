@@ -273,7 +273,7 @@ impl TeamsDb {
             }
             // Done needs durable evidence: a PR URL, or a clean worktree with commits ahead of base.
             if key == "status" && new == "done" && pr_url_after.is_empty() {
-                ensure_done_is_durable(&self.team(team_id)?, id)?;
+                ensure_done_is_durable(self, &self.team(team_id)?, id)?;
             }
             let stored: Option<&str> = if matches!(column, "member_session" | "pr_url") && new.is_empty() { None } else { Some(new.as_str()) };
             self.0.execute(
@@ -517,12 +517,9 @@ fn is_well_formed_https_pr_url(s: &str) -> bool {
 }
 
 /// When marking done without a PR URL, the item's worktree must be clean and ahead of `pr_base`.
-/// Missing worktree folders are skipped (no local evidence to inspect).
-fn ensure_done_is_durable(team: &Team, item_id: &str) -> Result<()> {
-    let path = team.effective_worktree_root()?.join(item_id.to_lowercase());
-    if !path.is_dir() {
-        return Ok(());
-    }
+/// A missing worktree is not evidence of a clean, committed result.
+fn ensure_done_is_durable(tdb: &TeamsDb, team: &Team, item_id: &str) -> Result<()> {
+    let path = tdb.assigned_worktree(team, item_id, None).context("Cannot mark item done: assigned worktree is unavailable")?;
     let status = git_in(&path, &["status", "--porcelain"])?;
     if !status.is_empty() {
         bail!("{DONE_REQUIRES_CLEAN_WORKTREE}");
@@ -1030,8 +1027,8 @@ mod tests {
 
     fn seed_dispatch(t: &TeamsDb, team: &Team, item_id: &str) {
         t.0.execute(
-            "INSERT INTO dispatches(team_id, item_id, seat, desk_session, at) VALUES (?1, ?2, 'workers', 'desk1', 0)",
-            params![team.id, item_id],
+            "INSERT INTO dispatches(team_id, item_id, seat, desk_session, session_id, worktree_path, at) VALUES (?1, ?2, 'workers', 'desk1', 'worker', ?3, 0)",
+            params![team.id, item_id, team.effective_worktree_root().unwrap().join(item_id.to_lowercase()).to_string_lossy()],
         )
         .unwrap();
     }
@@ -1077,6 +1074,15 @@ mod tests {
         );
         // Clearing is allowed.
         assert!(t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "prUrl": null, "status": "triaged" })).is_ok());
+    }
+
+    #[test]
+    fn done_refuses_missing_recorded_worktree() {
+        let (_d, t, team) = setup_with_git_worktree();
+        let item = t.add_item(&team, Some("desk1"), "20261109", "missing", "task", "normal", "").unwrap();
+        seed_dispatch(&t, &team, &item.id);
+        let err = t.set_item(&team.id, &item.id, Some("desk1"), &json!({"status": "done"})).unwrap_err();
+        assert!(format!("{err:#}").contains("assigned worktree"));
     }
 
     #[test]
@@ -1141,7 +1147,8 @@ mod tests {
         .unwrap();
         let reviewed = t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "status": "awaiting-review" })).unwrap();
         assert_eq!(reviewed.status, "awaiting-review");
-        assert_eq!(t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "status": "done" })).unwrap().status, "done");
+        assert!(t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "status": "done" })).is_err());
+        assert_eq!(t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "status": "done", "prUrl": "https://example.test/pr/1" })).unwrap().status, "done");
     }
 
     #[test]
