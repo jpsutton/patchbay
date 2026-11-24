@@ -666,10 +666,13 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String> {
     // No hooks (a tracked core.hooksPath folder like .husky could hold one the coordinator wrote),
     // no fsmonitor, no system config: this git runs as the host, not under an approval mode.
     let out = std::process::Command::new("git")
-        .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C"])
+        .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"])
+        // A global `git lfs install` puts a smudge filter in ~/.gitconfig; it must not run at checkout.
+        .args(["-c", "filter.lfs.process=", "-c", "filter.lfs.smudge=", "-c", "filter.lfs.required=false", "-C"])
         .arg(cwd)
         .args(args)
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_LFS_SKIP_SMUDGE", "1")
         .output()
         .context("running git")?;
     if !out.status.success() {
@@ -681,7 +684,8 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String> {
 }
 
 /// Create a distinct branch and worktree for each worker spawn.
-pub(crate) fn make_worktree(team: &Team, item_id: &str, base_commit: &str) -> Result<(PathBuf, String)> {
+/// `refresh` also refuses repository config that can run code at checkout, right before `worktree add`.
+pub(crate) fn make_worktree(team: &Team, item_id: &str, base_commit: &str, refresh: bool) -> Result<(PathBuf, String)> {
     let cwd = Path::new(&team.cwd);
     let root = team.effective_worktree_root()?;
     if item_id.is_empty() || !item_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
@@ -696,6 +700,9 @@ pub(crate) fn make_worktree(team: &Team, item_id: &str, base_commit: &str) -> Re
         if name.to_str().is_none_or(trust_relevant) {
             bail!("worktree folder holds {}, which can steer agents; review and remove it", name.to_string_lossy());
         }
+    }
+    if refresh {
+        refuse_repo_code_hooks(cwd)?;
     }
     let p = path.to_string_lossy().into_owned();
     git(cwd, &["worktree", "add", "-b", &branch, "--", &p, base_commit])?;
@@ -727,7 +734,8 @@ fn refuse_repo_code_hooks(repo: &Path) -> Result<()> {
         .split('\0')
         .filter(|k| {
             let k = k.to_ascii_lowercase();
-            k.starts_with("filter.") || k.starts_with("include.") || k.starts_with("includeif.") || matches!(k.as_str(), "submodule.recurse" | "core.fsmonitor" | "core.hookspath")
+            k.starts_with("filter.") || k.starts_with("include.") || k.starts_with("includeif.") || k.starts_with("lfs.customtransfer.") || k.starts_with("lfs.extension.") || k.starts_with("credential.")
+                || matches!(k.as_str(), "submodule.recurse" | "core.fsmonitor" | "core.hookspath" | "lfs.standalonetransferagent" | "core.attributesfile" | "core.sshcommand" | "extensions.worktreeconfig")
         })
         .collect();
     if !bad.is_empty() {
@@ -886,7 +894,7 @@ async fn start(state: &AppState, p: &Plan) -> Result<Value> {
     let team = p.team.clone();
     let item_id = p.item.id.clone();
     let base_commit = p.base_commit.clone();
-    let (path, branch) = tokio::task::spawn_blocking(move || make_worktree(&team, &item_id, &base_commit)).await??;
+    let (path, branch) = tokio::task::spawn_blocking(move || make_worktree(&team, &item_id, &base_commit, false)).await??;
     let data_dir = state.data_dir.clone();
     let team_id = p.team.id.clone();
     let hooks_path = tokio::task::spawn_blocking(move || {
@@ -1277,7 +1285,9 @@ mod tests {
 
         for name in ["config.toml", ".env.local", "sub/.vscode/tasks.json", "pac\u{212a}age.json"] {
             commit_file(&root, name, "x");
-            assert!(trusted_refresh_head(&root, &root, &mid).is_err(), "{name}");
+            let e = refresh_err(&root, &mid);
+            // A Kelvin-sign name may fold onto the existing ASCII file on disk, so it only has to refuse.
+            assert!(e.contains("trust-sensitive files changed") && (!name.is_ascii() || e.contains(name)), "{name}: {e}");
             git(&root, &["reset", "-q", "--hard", &mid]).unwrap();
         }
         let _ = base;
@@ -1304,7 +1314,7 @@ mod tests {
 
     #[test]
     fn refresh_refuses_repo_config_that_runs_code_at_checkout() {
-        for (key, value) in [("filter.x.smudge", "true"), ("include.path", "/dev/null"), ("includeIf.gitdir:/.path", "/dev/null"), ("submodule.recurse", "true"), ("core.fsmonitor", "true"), ("core.hooksPath", ".husky")] {
+        for (key, value) in [("filter.x.smudge", "true"), ("include.path", "/dev/null"), ("includeIf.gitdir:/.path", "/dev/null"), ("submodule.recurse", "true"), ("core.fsmonitor", "true"), ("core.hooksPath", ".husky"), ("core.attributesFile", "attrs"), ("lfs.customtransfer.x.path", "x"), ("lfs.extension.x.clean", "x"), ("lfs.standalonetransferagent", "x"), ("core.sshCommand", "x"), ("credential.helper", "!x"), ("extensions.worktreeConfig", "true")] {
             let (root, base) = config_repo();
             git(&root, &["config", "--local", key, value]).unwrap();
             let e = refresh_err(&root, &base);
@@ -1335,7 +1345,7 @@ mod tests {
         let out = std::process::Command::new("git").arg("-C").arg(&cwd).args(["worktree", "add", "-q", "-b", "control", "--"]).arg(&control).arg("main").output().unwrap();
         assert!(out.status.success() && marker.exists(), "control: plain git runs the shared hook");
         std::fs::remove_file(&marker).unwrap();
-        make_worktree(&team, "DM-20261109-01", "HEAD").unwrap();
+        make_worktree(&team, "DM-20261109-01", "HEAD", false).unwrap();
         assert!(!marker.exists(), "the daemon's worktree add must not run the shared hook");
     }
 
@@ -1345,31 +1355,113 @@ mod tests {
         let cwd = d.join("proj");
         git(&cwd, &["init", "-q", "-b", "main"]).unwrap();
         git(&cwd, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]).unwrap();
-        make_worktree(&team, "DM-20261109-01", "HEAD").unwrap();
+        make_worktree(&team, "DM-20261109-01", "HEAD", false).unwrap();
         let root = d.join("proj/trees");
         std::fs::write(root.join("CLAUDE.md"), "steer").unwrap();
-        assert!(make_worktree(&team, "DM-20261109-02", "HEAD").unwrap_err().to_string().contains("CLAUDE.md"));
+        assert!(make_worktree(&team, "DM-20261109-02", "HEAD", false).unwrap_err().to_string().contains("CLAUDE.md"));
         std::fs::remove_file(root.join("CLAUDE.md")).unwrap();
-        assert!(make_worktree(&team, "DM-20261109-02", "HEAD").is_ok());
+        assert!(make_worktree(&team, "DM-20261109-02", "HEAD", false).is_ok());
     }
 
     #[cfg(unix)]
-    #[test]
-    fn swap_member_refuses_when_the_worktree_root_became_a_link_to_outside() {
+    fn swap_fixture() -> (std::path::PathBuf, TeamsDb, Team, String, PathBuf) {
         let (d, t, team) = setup();
         let cwd = d.join("proj");
         git(&cwd, &["init", "-q", "-b", "main"]).unwrap();
         git(&cwd, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]).unwrap();
         let old = t.attach(&team.id, "old", "workers").unwrap();
         t.0.execute("INSERT INTO dispatches(team_id,item_id,seat,desk_session,session_id,base_commit,at,worktree_path) VALUES (?1,'I','workers','desk','old','b',0,'x')", params![team.id]).unwrap();
-        let (fresh, _) = make_worktree(&team, "DM-20261109-01", "HEAD").unwrap();
+        let (fresh, _) = make_worktree(&team, "DM-20261109-01", "HEAD", false).unwrap();
+        (d, t, team, old.role_id, fresh)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swap_member_refuses_a_fresh_worktree_swapped_for_a_link_to_outside_the_root() {
+        // This is the check at the swap itself: the root still resolves, the new tree no longer lies inside it.
+        let (d, t, team, role, fresh) = swap_fixture();
+        let outside = d.join("proj/elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::remove_dir_all(&fresh).ok();
+        std::os::unix::fs::symlink(&outside, &fresh).unwrap();
+        let e = t.swap_member(&team.id, "old", "new", "workers", &role, true, Some(&fresh)).unwrap_err().to_string();
+        assert!(e.contains("outside the team worktree root"), "{e}");
+        let live: i64 = t.0.query_row("SELECT COUNT(*) FROM members WHERE session_id='new'", [], |r| r.get(0)).unwrap();
+        assert_eq!(live, 0, "the refused swap leaves no new member");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swap_member_refuses_when_the_worktree_root_became_a_link_to_outside() {
+        // A root pointing outside the team folder fails earlier, while the root is resolved.
+        let (d, t, team, role, fresh) = swap_fixture();
         let outside = d.join("outside");
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::rename(d.join("proj/trees"), outside.join("trees")).unwrap();
         std::os::unix::fs::symlink(outside.join("trees"), d.join("proj/trees")).unwrap();
-        assert!(t.swap_member(&team.id, "old", "new", "workers", &old.role_id, true, Some(&fresh)).is_err());
-        let live: i64 = t.0.query_row("SELECT COUNT(*) FROM members WHERE session_id='new'", [], |r| r.get(0)).unwrap();
-        assert_eq!(live, 0, "the refused swap leaves no new member");
+        let e = t.swap_member(&team.id, "old", "new", "workers", &role, true, Some(&fresh)).unwrap_err().to_string();
+        assert!(e.contains("inside the team folder"), "{e}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_refuses_a_non_utf8_changed_name() {
+        use std::os::unix::ffi::OsStrExt;
+        let (root, base) = config_repo();
+        let blob = std::process::Command::new("git").arg("-C").arg(&root).args(["hash-object", "-w", "--stdin"]).stdin(std::process::Stdio::null()).output().unwrap();
+        let blob = String::from_utf8(blob.stdout).unwrap().trim().to_owned();
+        let name = std::ffi::OsStr::from_bytes(b"bad\xffname");
+        // Index entry only: not every filesystem can hold this name on disk.
+        let add = std::process::Command::new("git").arg("-C").arg(&root).args(["update-index", "--add", "--cacheinfo"]).arg(format!("100644,{blob},")).arg(name).output().unwrap();
+        if !add.status.success() {
+            let add = std::process::Command::new("git").arg("-C").arg(&root).args(["update-index", "--add", "--cacheinfo", "100644"]).arg(&blob).arg(name).output().unwrap();
+            assert!(add.status.success(), "{}", String::from_utf8_lossy(&add.stderr));
+        }
+        git(&root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"]).unwrap();
+        assert!(refresh_err(&root, &base).contains("non-UTF-8"));
+    }
+
+    #[test]
+    fn an_lfs_filter_process_does_not_run_at_checkout() {
+        // The same override covers a filter that `git lfs install` put in ~/.gitconfig; a local key stands in for it.
+        let (d, _t, team) = setup();
+        let cwd = d.join("proj");
+        git(&cwd, &["init", "-q", "-b", "main"]).unwrap();
+        let marker = d.join("filter-ran");
+        std::fs::write(cwd.join(".gitattributes"), "*.bin filter=lfs\n").unwrap();
+        std::fs::write(cwd.join("a.bin"), "x").unwrap();
+        // Setup runs without the user's global config (it may hold a real lfs filter) and without our overrides.
+        for args in [&["add", "-A", "--"][..], &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base"][..]] {
+            assert!(std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").arg("-C").arg(&cwd).args(args).status().unwrap().success());
+        }
+        git(&cwd, &["config", "filter.lfs.process", &format!("touch {}", marker.display())]).unwrap();
+        let control = d.join("control");
+        let out = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").arg("-C").arg(&cwd).args(["worktree", "add", "-q", "-b", "control", "--"]).arg(&control).arg("main").output().unwrap();
+        assert!(marker.exists(), "control: plain git starts the filter: {}", String::from_utf8_lossy(&out.stderr));
+        std::fs::remove_file(&marker).unwrap();
+        let made = make_worktree(&team, "DM-20261109-01", "HEAD", false);
+        assert!(!marker.exists(), "the daemon's checkout must not start an lfs filter");
+        made.unwrap();
+    }
+
+    #[test]
+    fn refresh_accepts_the_local_keys_git_lfs_writes_itself() {
+        let (root, base) = config_repo();
+        git(&root, &["config", "--local", "lfs.repositoryformatversion", "0"]).unwrap();
+        git(&root, &["config", "--local", "lfs.https://example.test/r.git/info/lfs.access", "basic"]).unwrap();
+        assert!(trusted_refresh_head(&root, &root, &base).is_ok());
+    }
+
+    #[test]
+    fn refresh_checks_repo_config_again_right_before_worktree_add() {
+        let (d, _t, team) = setup();
+        let cwd = d.join("proj");
+        git(&cwd, &["init", "-q", "-b", "main"]).unwrap();
+        git(&cwd, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]).unwrap();
+        git(&cwd, &["config", "--local", "filter.x.smudge", "true"]).unwrap();
+        let e = make_worktree(&team, "DM-20261109-01", "HEAD", true).unwrap_err().to_string();
+        assert!(e.contains("repository git config"), "{e}");
+        assert!(make_worktree(&team, "DM-20261109-01", "HEAD", false).is_ok(), "a fresh dispatch is not refused");
     }
 
     #[test]
@@ -1401,10 +1493,10 @@ mod tests {
         let run = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&cwd).args(args).output().unwrap().status.success(), "{args:?}");
         run(&["init", "-q", "-b", "main"]);
         run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]);
-        let (path, branch) = make_worktree(&team, "DM-20261109-01", "HEAD").unwrap();
+        let (path, branch) = make_worktree(&team, "DM-20261109-01", "HEAD", false).unwrap();
         assert!(branch.starts_with("dm-20261109-01-"));
         assert!(path.join(".git").exists() && path.starts_with(super::super::resolve(&d).unwrap().join("proj").join("trees")));
-        let (second, second_branch) = make_worktree(&team, "DM-20261109-01", "HEAD").unwrap();
+        let (second, second_branch) = make_worktree(&team, "DM-20261109-01", "HEAD", false).unwrap();
         assert_ne!(second, path);
         assert!(second.join(".git").exists());
         remove_worktree(&team, &second, &second_branch);
@@ -1418,7 +1510,7 @@ mod tests {
             let mut linked = team.clone();
             linked.worktree_root = d.join("proj/swapped").to_string_lossy().into_owned();
             std::os::unix::fs::symlink(&outside, d.join("proj/swapped")).unwrap();
-            assert!(make_worktree(&linked, "DM-20261109-03", "HEAD").unwrap_err().to_string().contains("inside the team folder"));
+            assert!(make_worktree(&linked, "DM-20261109-03", "HEAD", false).unwrap_err().to_string().contains("inside the team folder"));
         }
         // The planner now resolves `pr_base` to its exact commit before calling make_worktree.
     }
@@ -1452,7 +1544,7 @@ mod tests {
         let run = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&cwd).args(args).output().unwrap().status.success(), "{args:?}");
         run(&["init", "-q", "-b", "main"]);
         run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]);
-        let (path, branch) = make_worktree(&team, "EM-20261112-01", "HEAD").unwrap();
+        let (path, branch) = make_worktree(&team, "EM-20261112-01", "HEAD", false).unwrap();
         assert!(branch.starts_with("em-20261112-01-"));
         assert!(path.join(".git").exists());
         assert!(path.starts_with(&root), "{path:?} under {root:?}");
@@ -1479,7 +1571,7 @@ mod tests {
         run(&["worktree", "add", "-q", "-b", "control", "--", d.join("control").to_str().unwrap(), "main"]);
         assert!(marker.exists(), "control: the hook should run under plain git");
         std::fs::remove_file(&marker).unwrap();
-        let (path, _) = make_worktree(&team, "DM-20261109-01", "HEAD").unwrap();
+        let (path, _) = make_worktree(&team, "DM-20261109-01", "HEAD", false).unwrap();
         assert!(path.exists() && !marker.exists(), "dispatch must not run repo hooks");
     }
 

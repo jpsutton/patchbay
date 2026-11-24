@@ -1789,7 +1789,7 @@ async fn restart_member_inner(
         let old_path = tdb.assigned_worktree(&team, item, Some(old_session_id))?;
         let dispatch_base = tdb.dispatch_base_for_session(team_id, old_session_id)?;
         let head = dispatch::trusted_refresh_head(Path::new(&team.cwd), &old_path, &dispatch_base)?;
-        let (fresh, _branch) = dispatch::make_worktree(&team, item, &head)?;
+        let (fresh, _branch) = dispatch::make_worktree(&team, item, &head, true)?;
         handoff_note.push_str("\nThis is a fresh worktree at the previous worker's last commit; its uncommitted changes were left behind.");
         Some((old_path, fresh))
     } else { None };
