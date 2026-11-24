@@ -794,12 +794,37 @@ fn repo_code_hook_keys(repo: &Path, refresh: bool) -> Result<Vec<String>> {
         .collect())
 }
 
+/// Config keys are attacker-chosen strings (a quoted subsection can hold control characters or text aimed at the
+/// coordinator agent) and reach it through error messages. Echo each key escaped with `{:?}`, at most five keys
+/// and about 200 characters, with a `+N more` suffix.
+fn describe_keys(keys: &[String]) -> String {
+    let mut out = String::new();
+    for (i, k) in keys.iter().enumerate() {
+        let item = format!("{k:?}");
+        let budget = 200usize.saturating_sub(out.len());
+        let over = i == 5 || budget == 0;
+        if over || item.chars().count() > budget {
+            if !over {
+                out.push_str(&item.chars().take(budget).collect::<String>());
+                out.push('…');
+            }
+            out.push_str(&format!(" +{} more", keys.len() - i - usize::from(!over)));
+            break;
+        }
+        if !out.is_empty() {
+            out.push_str(", ");
+        }
+        out.push_str(&item);
+    }
+    out
+}
+
 /// Refuse a checkout when the shared repository config could run code at `worktree add`.
 fn refuse_repo_code_hooks(repo: &Path, refresh: bool) -> Result<()> {
     let bad = repo_code_hook_keys(repo, refresh)?;
     let what = if refresh { "refresh" } else { "spawn" };
     if !bad.is_empty() {
-        bail!("worker {what} refused: repository git config sets {}; a person must review or remove them", bad.join(", "));
+        bail!("worker {what} refused: repository git config sets {}; a person must review or remove them", describe_keys(&bad));
     }
     if refresh {
         let attrs = git(repo, &["rev-parse", "--git-path", "info/attributes"])?;
@@ -812,20 +837,23 @@ fn refuse_repo_code_hooks(repo: &Path, refresh: bool) -> Result<()> {
 
 /// Refuse to run `git status` for the durable-done check when it could run repository code: any spawn-set key
 /// (the check reads the same config a spawn does), or a gitlink in the index (status would enter the nested
-/// repository and use its own config and attributes). Residual: the check and the status are separate git
-/// calls, so a live worker rewriting the config in that window is not caught.
+/// repository and use its own config and attributes; `--ignore-submodules=all` then keeps status out of it).
+/// Residual: the config check and the status are separate git calls; any running worker that can write the
+/// shared repository config (all worker worktrees share it) could add a filter or include in that window.
 pub(crate) fn refuse_unsafe_status(repo: &Path) -> Result<()> {
-    let mut bad = repo_code_hook_keys(repo, false)?;
-    if git(repo, &["ls-files", "--stage", "-z"])?.split('\0').any(|l| l.starts_with("160000 ")) {
-        bad.push("a submodule or nested repository (gitlink) in the index".to_owned());
-    }
-    if bad.is_empty() {
+    let keys = repo_code_hook_keys(repo, false)?;
+    let gitlink = git(repo, &["ls-files", "--stage", "-z"])?.split('\0').any(|l| l.starts_with("160000 "));
+    if keys.is_empty() && !gitlink {
         return Ok(());
     }
-    let mut list = bad.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
-    if bad.len() > 5 { list.push_str(", ..."); }
-    list.truncate(list.char_indices().nth(200).map_or(list.len(), |(i, _)| i));
-    bail!("Cannot mark item done: the repository could run code during the status check ({list}); a person must review or remove it, or provide a PR URL");
+    let mut parts = Vec::new();
+    if !keys.is_empty() {
+        parts.push(format!("config {}", describe_keys(&keys)));
+    }
+    if gitlink {
+        parts.push("a gitlink (submodule or nested repository) in the index".to_owned());
+    }
+    bail!("Cannot mark item done: the repository could run code during the status check ({}); a person must review or remove it, or provide a PR URL", parts.join("; "));
 }
 
 /// Use only a committed HEAD whose changes from the original dispatch base have no trust-sensitive paths.
@@ -1673,6 +1701,39 @@ mod tests {
             let e = refuse_unsafe_status(&cwd).unwrap_err().to_string();
             assert!(e.contains(key), "{key}: {e}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_keys_are_escaped_and_capped_in_every_refusal_message() {
+        use std::os::unix::ffi::OsStrExt;
+        let (d, _t, team) = setup();
+        let cwd = d.join("proj");
+        git(&cwd, &["init", "-q", "-b", "main"]).unwrap();
+        git(&cwd, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]).unwrap();
+        let esc = std::ffi::OsStr::from_bytes(b"filter.a\x1b[2Jb.smudge");
+        let long = format!("filter.{}.smudge", "a".repeat(300));
+        for key in [esc.to_os_string(), long.clone().into()] {
+            let out = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").arg("-C").arg(&cwd).args(["config", "--local"]).arg(&key).arg("x").output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        }
+        for e in [
+            make_worktree(&team, "DM-20261109-01", "HEAD", false).unwrap_err().to_string(),
+            make_worktree(&team, "DM-20261109-02", "HEAD", true).unwrap_err().to_string(),
+            refuse_unsafe_status(&cwd).unwrap_err().to_string(),
+        ] {
+            assert!(!e.contains('\x1b') && !e.contains(&"a".repeat(300)), "raw control byte or uncapped key: {e:?}");
+            assert!(e.contains("\\u{1b}"), "the escape byte is shown escaped: {e:?}");
+            assert!(e.len() < 400, "capped: {} chars", e.len());
+        }
+    }
+
+    #[test]
+    fn describe_keys_keeps_five_keys_and_counts_the_rest() {
+        let keys: Vec<String> = (0..8).map(|i| format!("filter.k{i}.smudge")).collect();
+        let text = describe_keys(&keys);
+        assert!(text.contains("filter.k4.smudge") && !text.contains("filter.k5.smudge") && text.ends_with("+3 more"), "{text}");
+        assert_eq!(describe_keys(&keys[..2]), "\"filter.k0.smudge\", \"filter.k1.smudge\"");
     }
 
     #[test]
