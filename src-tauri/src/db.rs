@@ -257,6 +257,10 @@ ALTER TABLE providers ADD COLUMN extra_names TEXT;
 -- Not synced: turn liveness belongs to the node running the turn; a flag on one node means
 -- nothing on another (a synced copy would pop the picker on every other node).
 ALTER TABLE code_sessions ADD COLUMN active_turn_since INTEGER;
+"#, r#"
+-- Which Antigravity login a provider uses: its Gemini home directory (`$GEMINI_HOME`), NULL
+-- for the default. Not synced: a path on one node means nothing on another.
+ALTER TABLE providers ADD COLUMN gemini_home TEXT;
 "#];
 
 pub fn now_ms() -> i64 {
@@ -306,6 +310,8 @@ pub enum AuthMode {
     ClaudeLogin,
     /// Reuse Grok Build's subscription OAuth token from `~/.grok/auth.json`.
     GrokLogin,
+    /// Reuse Antigravity's subscription OAuth token from its Gemini home.
+    AntigravityLogin,
 }
 
 impl AuthMode {
@@ -314,6 +320,7 @@ impl AuthMode {
             Self::ApiKey => "api_key",
             Self::ClaudeLogin => "claude_login",
             Self::GrokLogin => "grok_login",
+            Self::AntigravityLogin => "antigravity_login",
         }
     }
 
@@ -321,6 +328,7 @@ impl AuthMode {
         match s {
             "claude_login" => Self::ClaudeLogin,
             "grok_login" => Self::GrokLogin,
+            "antigravity_login" => Self::AntigravityLogin,
             _ => Self::ApiKey,
         }
     }
@@ -359,6 +367,9 @@ pub struct Provider {
     /// For `GrokLogin`: the Grok home directory whose login to use (`None`: `$GROK_HOME`, else `~/.grok`).
     #[serde(default)]
     pub grok_home: Option<String>,
+    /// For `AntigravityLogin`: the Gemini home whose login to use (`None`: `$GEMINI_HOME`, else `~/.gemini`).
+    #[serde(default)]
+    pub gemini_home: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -674,7 +685,7 @@ impl Db {
     pub fn list_providers(&self) -> Result<Vec<(Provider, Option<String>)>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, name, kind, base_url, inline_key, auth_mode, claude_config_dir, grok_home FROM providers ORDER BY created_at",
+            "SELECT id, name, kind, base_url, inline_key, auth_mode, claude_config_dir, grok_home, gemini_home FROM providers ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -687,6 +698,7 @@ impl Db {
                     auth_mode: AuthMode::parse(&r.get::<_, String>(5)?),
                     claude_config_dir: r.get(6)?,
                     grok_home: r.get(7)?,
+                    gemini_home: r.get(8)?,
                 },
                 r.get::<_, Option<String>>(4)?,
             ))
@@ -700,10 +712,10 @@ impl Db {
 
     pub fn upsert_provider(&self, p: &Provider, inline_key: Option<&str>) -> Result<()> {
         self.conn().execute(
-            "INSERT INTO providers (id, name, kind, base_url, inline_key, created_at, auth_mode, claude_config_dir, grok_home)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO providers (id, name, kind, base_url, inline_key, created_at, auth_mode, claude_config_dir, grok_home, gemini_home)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET name = ?2, kind = ?3, base_url = ?4,
-               inline_key = COALESCE(?5, inline_key), auth_mode = ?7, claude_config_dir = ?8, grok_home = ?9",
+               inline_key = COALESCE(?5, inline_key), auth_mode = ?7, claude_config_dir = ?8, grok_home = ?9, gemini_home = ?10",
             params![
                 p.id,
                 p.name,
@@ -713,7 +725,8 @@ impl Db {
                 now_ms(),
                 p.auth_mode.as_str(),
                 p.claude_config_dir,
-                p.grok_home
+                p.grok_home,
+                p.gemini_home
             ],
         )?;
         Ok(())

@@ -5,17 +5,20 @@ import { useStore } from "../lib/store";
 
 /** Where Grok Build's own sign-in is served from; a Grok login provider points here. */
 const GROK_PROXY_URL = "https://cli-chat-proxy.grok.com/v1";
+const ANTIGRAVITY_URL = "https://daily-cloudcode-pa.googleapis.com";
 
 /** The subscription login each API type can use, when it has one. */
 const LOGIN_MODE: Partial<Record<ProviderKind, AuthMode>> = {
   anthropic: "claude_login",
   openai_responses: "grok_login",
+  gemini: "antigravity_login",
 };
 
 const PRESETS: { label: string; kind: ProviderKind; baseUrl: string; authMode?: AuthMode }[] = [
   { label: "OpenAI", kind: "openai_chat", baseUrl: "https://api.openai.com/v1" },
   { label: "Anthropic", kind: "anthropic", baseUrl: "https://api.anthropic.com/v1" },
   { label: "Grok (subscription)", kind: "openai_responses", baseUrl: GROK_PROXY_URL, authMode: "grok_login" },
+  { label: "Antigravity (subscription)", kind: "gemini", baseUrl: ANTIGRAVITY_URL, authMode: "antigravity_login" },
   { label: "Google Gemini", kind: "gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta" },
   { label: "OpenRouter", kind: "openai_chat", baseUrl: "https://openrouter.ai/api/v1" },
   { label: "Ollama (local)", kind: "openai_chat", baseUrl: "http://localhost:11434/v1" },
@@ -62,11 +65,13 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
   const [authMode, setAuthMode] = useState<AuthMode>(provider?.authMode ?? "api_key");
   const [claudeDir, setClaudeDir] = useState(provider?.claudeConfigDir ?? "");
   const [grokHome, setGrokHome] = useState(provider?.grokHome ?? "");
+  const [geminiHome, setGeminiHome] = useState(provider?.geminiHome ?? "");
   const [busy, setBusy] = useState(false);
   const setToast = useStore((s) => s.setToast);
   const useClaudeLogin = kind === "anthropic" && authMode === "claude_login";
   const useGrokLogin = kind === "openai_responses" && authMode === "grok_login";
-  const useLogin = useClaudeLogin || useGrokLogin;
+  const useAntigravityLogin = kind === "gemini" && authMode === "antigravity_login";
+  const useLogin = useClaudeLogin || useGrokLogin || useAntigravityLogin;
 
   useEffect(() => {
     setName(provider?.name ?? "");
@@ -75,6 +80,7 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
     setAuthMode(provider?.authMode ?? "api_key");
     setClaudeDir(provider?.claudeConfigDir ?? "");
     setGrokHome(provider?.grokHome ?? "");
+    setGeminiHome(provider?.geminiHome ?? "");
     setKey("");
   }, [provider?.id]);
 
@@ -165,6 +171,26 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
           </span>
         </label>
       )}
+      {kind === "gemini" && (
+        <label className="flex items-start gap-2 text-xs text-muted">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={useAntigravityLogin}
+            onChange={(e) => {
+              setAuthMode(e.target.checked ? "antigravity_login" : "api_key");
+              if (e.target.checked) setBaseUrl(ANTIGRAVITY_URL);
+            }}
+          />
+          <span>
+            Use Antigravity login (subscription)
+            <span className="mt-0.5 block text-muted">
+              Reuses the login from agy or Antigravity IDE on this machine. Uses your Antigravity / Google AI plan
+              quota, not a Gemini API key. Use {ANTIGRAVITY_URL}.
+            </span>
+          </span>
+        </label>
+      )}
       {useGrokLogin && (
         <>
           <label className="flex flex-col gap-1 text-xs text-muted">
@@ -184,7 +210,21 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
           <p className="text-xs text-ok">Signed in via grok on this machine — no API key stored.</p>
         </>
       )}
-      {useGrokLogin ? null : useClaudeLogin ? (
+      {useAntigravityLogin ? (
+        <>
+          <label className="flex flex-col gap-1 text-xs text-muted">
+            Gemini home
+            <input
+              className={`${input} font-mono`}
+              value={geminiHome}
+              onChange={(e) => setGeminiHome(e.target.value)}
+              placeholder="$GEMINI_HOME, else ~/.gemini (default)"
+            />
+            <span>To use another Google account, enter the Gemini home it uses. Add one provider per account.</span>
+          </label>
+          <p className="text-xs text-ok">Signed in via Antigravity on this machine — no API key stored.</p>
+        </>
+      ) : useGrokLogin ? null : useClaudeLogin ? (
         <>
           <label className="flex flex-col gap-1 text-xs text-muted">
             Claude config directory
@@ -233,6 +273,7 @@ function ProviderEditor({ provider, onSaved }: { provider: Provider | null; onSa
                 authMode: useLogin ? authMode : "api_key",
                 claudeConfigDir: useClaudeLogin ? claudeDir : undefined,
                 grokHome: useGrokLogin ? grokHome : undefined,
+                geminiHome: useAntigravityLogin ? geminiHome : undefined,
                 apiKey: useLogin ? "" : key ? key : undefined,
               });
               setKey("");

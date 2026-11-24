@@ -9,7 +9,11 @@ fn model_name(cfg: &Config) -> &str {
 }
 
 pub fn url(cfg: &Config) -> String {
-    format!("{}/models/{}:streamGenerateContent?alt=sse", cfg.base_url, model_name(cfg))
+    if cfg.cloud_code {
+        format!("{}/v1internal:streamGenerateContent?alt=sse", cfg.base_url.trim_end_matches('/'))
+    } else {
+        format!("{}/models/{}:streamGenerateContent?alt=sse", cfg.base_url, model_name(cfg))
+    }
 }
 
 pub fn body(cfg: &Config, req: &Request) -> Value {
@@ -47,11 +51,21 @@ pub fn body(cfg: &Config, req: &Request) -> Value {
     }
     let mut tools: Vec<Value> = Vec::new();
     if !req.tools.is_empty() {
-        tools.push(json!({"functionDeclarations": req.tools.iter().map(|t| json!({
-            "name": t.name,
-            "description": t.description,
-            "parametersJsonSchema": t.parameters,
-        })).collect::<Vec<_>>()}));
+        tools.push(json!({"functionDeclarations": req.tools.iter().map(|t| {
+            if cfg.cloud_code {
+                json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": sanitize_cloud_code_schema(&t.parameters),
+                })
+            } else {
+                json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "parametersJsonSchema": t.parameters,
+                })
+            }
+        }).collect::<Vec<_>>()}));
         b["toolConfig"] = json!({"functionCallingConfig": match &req.tool_choice {
             ToolChoice::Auto => json!({"mode": "AUTO"}),
             ToolChoice::Required => json!({"mode": "ANY"}),
@@ -65,7 +79,29 @@ pub fn body(cfg: &Config, req: &Request) -> Value {
     if !tools.is_empty() {
         b["tools"] = json!(tools);
     }
-    b
+    if cfg.cloud_code {
+        json!({
+            "project": cfg.cloud_code_project.as_deref().unwrap_or(""),
+            "model": model_name(cfg),
+            "userPromptId": crate::client::request_id(),
+            "request": b,
+        })
+    } else {
+        b
+    }
+}
+
+fn sanitize_cloud_code_schema(schema: &Value) -> Value {
+    match schema {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .filter(|(key, _)| !matches!(key.as_str(), "$schema" | "additionalProperties"))
+                .map(|(key, value)| (key.clone(), sanitize_cloud_code_schema(value)))
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(values.iter().map(sanitize_cloud_code_schema).collect()),
+        other => other.clone(),
+    }
 }
 
 /// Gemini 3 takes a level, 2.x a token budget.
@@ -149,7 +185,8 @@ pub struct GeminiParser {
 
 impl Parser for GeminiParser {
     fn event(&mut self, _name: Option<&str>, data: &str, out: &mut Vec<Event>) -> Result<()> {
-        let v = json_parse(data)?;
+        let raw = json_parse(data)?;
+        let v = raw.get("response").unwrap_or(&raw);
         if let Some(e) = stream_error(&v) {
             return Err(e);
         }
@@ -220,6 +257,7 @@ impl Parser for GeminiParser {
             return Err(Error {
                 message: "the stream ended without a reply".into(),
                 status: None,
+                code: None,
                 retryable: true,
                 cancelled: false,
                 retry_after: None,
@@ -278,6 +316,55 @@ mod tests {
         c.effort = Some(Effort::None);
         let b = body(&c, &Request::simple("s", "hi"));
         assert_eq!(b["generationConfig"]["thinkingConfig"]["thinkingBudget"], 0);
+    }
+
+    #[test]
+    fn cloud_code_uses_wrapped_envelope_and_sanitized_parameters() {
+        let mut c = Config::new(WireFormat::Gemini, "https://daily-cloudcode-pa.googleapis.com", "models/claude-sonnet");
+        c.cloud_code = true;
+        c.cloud_code_project = Some("project-123".into());
+        c.cloud_code_login_id = Some("account@example.test".into());
+        let mut req = Request::simple("system", "hello");
+        req.tools.push(ToolSpec {
+            name: "lookup".into(),
+            description: "look up a value".into(),
+            parameters: json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {"q": {"type": "string", "$schema": "ignored"}}
+            }),
+        });
+
+        let u = url(&c);
+        let b = body(&c, &req);
+        assert_eq!(u, "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse");
+        assert_eq!(b["project"], "project-123");
+        assert_eq!(b["model"], "claude-sonnet");
+        assert!(b["userPromptId"].as_str().is_some_and(|s| !s.is_empty()));
+        assert_eq!(b["request"]["contents"][0]["parts"][0]["text"], "hello");
+        assert_eq!(b["request"]["systemInstruction"]["parts"][0]["text"], "system");
+        assert_eq!(b["request"]["tools"][0]["functionDeclarations"][0]["parameters"]["type"], "object");
+        assert!(b["request"]["tools"][0]["functionDeclarations"][0]["parameters"].get("$schema").is_none());
+        assert!(b["request"]["tools"][0]["functionDeclarations"][0]["parameters"].get("additionalProperties").is_none());
+    }
+
+    #[test]
+    fn parses_wrapped_cloud_code_response_events() {
+        let mut p: Box<dyn Parser> = Box::new(GeminiParser::default());
+        let mut out = Vec::new();
+        p.event(
+            None,
+            r#"{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"q":"x"}},"thoughtSignature":"SIG"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1},"modelVersion":"cloud-model"}}"#,
+            &mut out,
+        )
+        .unwrap();
+        let r = p.finish().unwrap();
+        assert_eq!(r.stop, StopReason::ToolUse);
+        assert_eq!(r.model.as_deref(), Some("cloud-model"));
+        assert_eq!(r.usage.as_ref().map(|u| (u.input, u.output)), Some((3, 1)));
+        let call = r.message.tool_calls().next().unwrap();
+        assert_eq!(call.signature.as_deref(), Some("SIG"));
     }
 
     #[test]

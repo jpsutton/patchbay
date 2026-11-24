@@ -101,6 +101,7 @@ mod tests {
         let err = Err(patchbay_llm::Error {
             message: "no data for 180s".into(),
             status: None,
+            code: None,
             retryable: true,
             cancelled: false,
             retry_after: None,
