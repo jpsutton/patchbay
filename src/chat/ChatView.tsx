@@ -26,6 +26,7 @@ import {
 } from "../components/icons";
 import { ModelRing } from "../lib/cable";
 import { JumpToBottom, ScrollFade, useStickyScroll } from "../lib/useStickyScroll";
+import { useHeaderFit } from "../lib/useHeaderFit";
 import { CopyButton, copyText } from "../components/CopyButton";
 import { ListenButton, ReadAloudButton, useSpeakingId, useStopSpeechWhenHidden } from "../components/ReadAloudButton";
 import { speakingNow, stopSpeech, speakText } from "../lib/speech";
@@ -562,9 +563,14 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
     return c == null ? sum : (sum ?? 0) + c;
   }, null);
 
+  // What the header gives up to fit: 1 the width menu, 2 also export; the window controls and the
+  // title always stay.
+  const headerRef = useRef<HTMLElement>(null);
+  const level = useHeaderFit(headerRef, 2, activeId);
+
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
-      <header {...drag} className={`flex h-12 shrink-0 items-center gap-1 border-b border-line pr-3 ${leading ? "pl-1" : "pl-6"}`}>
+      <header ref={headerRef} {...drag} className={`flex h-12 shrink-0 items-center gap-1 border-b border-line pr-3 ${leading ? "pl-1" : "pl-6"}`}>
         {leading}
         <h1 {...drag} className="mr-2 min-w-0 flex-1 truncate text-[15px] font-medium">
           {conv?.title ?? "New chat"}
@@ -578,8 +584,8 @@ export function ChatView({ leading, controls }: { leading?: ReactNode; controls?
         >
           <ScrollTextIcon />
         </HeaderButton>
-        {!isRemoteApp() && <WidthMenu />}
-        {!isRemoteApp() && (
+        {!isRemoteApp() && level < 1 && <WidthMenu />}
+        {!isRemoteApp() && level < 2 && (
           <ExportMenu
             disabled={!conv || messages.length === 0}
             onExport={(f) =>

@@ -53,6 +53,8 @@ Opening such a session connects you to its agent without interrupting it. Prompt
 
 Code agents can also discover other unarchived Code sessions and message one by name across the mesh. Patchbay starts an idle recipient. A busy one gets the message mid-turn when its agent can take mid-turn prompts; otherwise the message waits for the turn to end, or the recipient can pull it in mid-turn with its messaging tools. A recipient can reply by messaging the sender's session. All admitted mesh members share the existing full-trust control boundary.
 
+An agent can also send a file to another session with the built-in `send_file` tool. Patchbay carries it across the mesh, relaying through a third computer if the two can't reach each other, checks it and saves it in the recipient session's folder under `.patchbay/inbox/`. The recipient agent is told where it landed. Nothing needs to be installed on either computer.
+
 The terminal panel opens a shell on the computer that runs the session, wherever you are.
 
 ## Moving a session

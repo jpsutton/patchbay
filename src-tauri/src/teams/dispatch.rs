@@ -109,15 +109,20 @@ impl TeamsDb {
             bail!("the {} seat is full ({taken} of {}); release a worker first", seat.seat, seat.count);
         }
         let now = now_ms();
-        let since = |ms: i64| -> Result<i64> {
-            Ok(self.0.query_row("SELECT COUNT(*) FROM dispatches WHERE team_id = ?1 AND at > ?2", params![team.id, now - ms], |r| r.get(0))?)
+        // A full budget refuses with the wait until a slot frees: the dispatch that frees it is the
+        // one `max` back from the newest, and it leaves the window `window` ms after it was made.
+        let check = |window: i64, max: i64, what: String| -> Result<()> {
+            let mut q = self.0.prepare("SELECT at FROM dispatches WHERE team_id = ?1 AND at > ?2 ORDER BY at")?;
+            let recent: Vec<i64> = q.query_map(params![team.id, now - window], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            if recent.len() as i64 >= max {
+                let left_ms = (recent[recent.len() - max as usize] + window - now).max(0);
+                let secs = ((left_ms + 999) / 1000).max(1) as u64;
+                return Err(crate::agent_messaging::RateLimited::new(what, "dispatching another worker", secs).into());
+            }
+            Ok(())
         };
-        if since(HOUR_MS)? >= MAX_PER_HOUR {
-            bail!("rate limit: at most {MAX_PER_HOUR} dispatches per hour per team");
-        }
-        if since(24 * HOUR_MS)? >= MAX_PER_DAY {
-            bail!("rate limit: at most {MAX_PER_DAY} dispatches per day per team");
-        }
+        check(HOUR_MS, MAX_PER_HOUR, format!("at most {MAX_PER_HOUR} dispatches per hour per team"))?;
+        check(24 * HOUR_MS, MAX_PER_DAY, format!("at most {MAX_PER_DAY} dispatches per day per team"))?;
         // Re-checked under the write lock: two dispatches of one item can't both pass.
         let status = self.item(&team.id, item)?.status;
         if !matches!(status.as_str(), "noticed" | "triaged" | "blocked") {
@@ -1112,7 +1117,12 @@ mod tests {
         for n in 0..(MAX_PER_HOUR - 1) {
             t.reserve(&team, &seat, &format!("x{n}"), "desk", "0123456789abcdef0123456789abcdef01234567").unwrap();
         }
-        assert!(t.reserve(&team, &seat, "late", "desk", "0123456789abcdef0123456789abcdef01234567").unwrap_err().to_string().contains("rate limit"));
+        let err = t.reserve(&team, &seat, "late", "desk", "0123456789abcdef0123456789abcdef01234567").unwrap_err();
+        assert!(err.to_string().contains("rate limit"));
+        // The oldest dispatch in the hour frees the slot: just under an hour from now.
+        let limited = err.downcast_ref::<crate::agent_messaging::RateLimited>().expect("a RateLimited error");
+        assert!((3590..=3600).contains(&limited.retry_after_secs), "{}", limited.retry_after_secs);
+        assert!(err.to_string().contains(&format!("Wait {} seconds before dispatching another worker", limited.retry_after_secs)));
     }
 
     #[test]

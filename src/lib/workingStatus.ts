@@ -11,6 +11,8 @@ export const FLOWING_MS = 3000;
 export const QUIET_MS = 5000;
 /** Silence this long, with no tool running, is worth a warning (and a Stop button). */
 export const STALL_MS = 30_000;
+/** Default tool stall threshold (10 minutes), matching `Preferences::stall_notice_minutes` in `src-tauri/src/prefs.rs:431`. */
+export const TOOL_STALL_MS = 10 * 60 * 1000;
 /** Rough characters per token, for the live counter. */
 export const CHARS_PER_TOKEN = 4;
 
@@ -64,6 +66,7 @@ export function workingStatus(
     lastPhase: Phase | null;
     turnStartedAt: number | null;
     turnChars: number;
+    toolStallMs?: number | null;
   },
   now = Date.now(),
 ): WorkingStatus {
@@ -77,20 +80,28 @@ export function workingStatus(
   const idleMs = ref > 0 ? Math.max(0, now - ref) : null;
   const turnMs = s.turnStartedAt != null ? Math.max(0, now - s.turnStartedAt) : null;
   const tokens = Math.round(s.turnChars / CHARS_PER_TOKEN);
+  const toolLimit = s.toolStallMs && s.toolStallMs > 0 ? s.toolStallMs : TOOL_STALL_MS;
 
   let kind: StatusKind;
-  if (tool) kind = "tool";
-  else if (
+  if (tool && idleMs != null && idleMs >= toolLimit) {
+    kind = "stalled";
+  } else if (tool) {
+    kind = "tool";
+  } else if (
     fresh &&
     idleMs != null &&
     idleMs < FLOWING_MS &&
     (s.lastPhase === "thinking" || s.lastPhase === "writing")
   ) {
     kind = s.lastPhase;
-  } else if (idleMs != null && idleMs >= STALL_MS) kind = "stalled";
-  else kind = "waiting";
+  } else if (idleMs != null && idleMs >= STALL_MS) {
+    kind = "stalled";
+  } else {
+    kind = "waiting";
+  }
 
-  return { kind, tool, idleMs, quiet: !tool && idleMs != null && idleMs >= QUIET_MS, turnMs, tokens };
+  const quiet = (tool && kind === "stalled") || (!tool && idleMs != null && idleMs >= QUIET_MS);
+  return { kind, tool, idleMs, quiet, turnMs, tokens };
 }
 
 /** "8s", "2m 14s", "1h 05m". */

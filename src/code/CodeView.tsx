@@ -44,6 +44,7 @@ import { PermissionCard, PlanDocCard, planDocOf, StopButton, ToolCallCard, ToolG
 import { toolDescription } from "./toolLabel";
 import { SignInCard } from "./SignInCard";
 import { WorkingIndicator } from "./WorkingIndicator";
+import { workingStatus } from "../lib/workingStatus";
 import { SubagentsPanel } from "./SubagentsPanel";
 import { TranscriptRows, type TranscriptRow } from "./TranscriptRows";
 import { DiffView, diffStats } from "./DiffView";
@@ -92,6 +93,7 @@ import { Toggle } from "../components/Toggle";
 import { AgentImage, AttachedImage } from "../components/AgentImage";
 import { ModelRing } from "../lib/cable";
 import { JumpToBottom, ScrollFade, useStickyScroll } from "../lib/useStickyScroll";
+import { useHeaderFit } from "../lib/useHeaderFit";
 import { Dot } from "../components/Dot";
 
 
@@ -215,7 +217,29 @@ function MoreOptions({
   }, [open]);
   if (options.length === 0) return null;
   // The phone's options sheet and the composer's overflow menu already list every option on its own labeled row.
-  if (rows || overflow) return options.map((o) => <ConfigChip key={o.id} option={o} disabled={disabled} onSet={onSet} />);
+  if (rows || overflow) {
+    return options.map((o) =>
+      // The overflow menu shows an on/off option as a labelled row with a switch, as the options popup does.
+      overflow && !rows && isOnOff(o) ? (
+        <div key={o.id} className="flex items-center justify-between gap-3 rounded-md px-2.5 py-2">
+          <div className="min-w-0">
+            <div className="text-[13px] text-fg">{optionName(o)}</div>
+            {o.description && <div className="text-[12px] leading-4 text-muted">{o.description}</div>}
+          </div>
+          <div className="shrink-0">
+            <Toggle
+              label={optionName(o)}
+              checked={o.currentValue === "on"}
+              disabled={disabled}
+              onChange={(on) => onSet(o, on ? "on" : "off")}
+            />
+          </div>
+        </div>
+      ) : (
+        <ConfigChip key={o.id} option={o} disabled={disabled} onSet={onSet} />
+      ),
+    );
+  }
   const names = options.map(optionName).join(", ");
   return (
     <div ref={ref} className="relative shrink-0">
@@ -1057,13 +1081,6 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   /** The header's "more" menu in a narrow pane: where it opens, when it's open. */
   const [more, setMore] = useState<{ x: number; y: number } | null>(null);
   const moreRef = useRef<HTMLDivElement>(null);
-  /**
-   * What a split pane's header gives up to fit: 0 nothing, 1 mode and approvals to a second row, 2 also
-   * the path, agent label and rarely used buttons (into a "more" menu), 3 also Activity, Changes and
-   * Terminal. Chosen by measuring the header, not by its width: what has to fit varies (the window
-   * buttons in the rightmost pane, a long title, the agent's modes).
-   */
-  const [level, setLevel] = useState(0);
   const headerRef = useRef<HTMLElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [viewWidth, setViewWidth] = useState(0);
@@ -1076,9 +1093,6 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     ro.observe(el);
     return () => ro.disconnect();
   }, [!!session]);
-  /** The header width each level needed when it overflowed, to know when a wider pane lets one go back. */
-  const needed = useRef<number[]>([]);
-  const fitHeader = useRef<() => void>(() => {});
   /** Forces a re-render when the post-foreground idle window expires. */
   const [, setIdleTick] = useState(0);
   const sticky = useStickyScroll([state?.entries, state?.toolCalls, state?.permissions, state?.auth]);
@@ -1202,30 +1216,14 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   // Only the focused pane reads aloud and takes window-wide input.
   const pane = useContext(PaneContext);
   const split = !!pane?.split;
-  fitHeader.current = () => {
-    const el = headerRef.current;
-    if (!split || !el) {
-      if (level !== 0) setLevel(0);
-      return;
-    }
-    const room = el.clientWidth;
-    // The title keeps a minimum width, so a header with too much in it overflows.
-    if (el.scrollWidth > room + 1) {
-      if (level < 3) {
-        needed.current[level] = el.scrollWidth;
-        setLevel(level + 1);
-      }
-    } else if (level > 0 && room >= (needed.current[level - 1] ?? Infinity)) setLevel(level - 1);
-  };
-  // After every render, so a longer title or a new badge is noticed; the observer catches resizes.
-  useLayoutEffect(() => fitHeader.current());
-  useEffect(() => {
-    const el = headerRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(() => fitHeader.current());
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [split, !!session]);
+  /**
+   * What the header gives up to fit, least important first: 0 nothing, 1 mode and approvals to a
+   * second row, 2 also the path, agent label, host badge and the rarely used buttons (into a "more"
+   * menu), 3 also Activity, Changes, Files and Terminal, and the divider. The window controls and the
+   * session title are never given up: they stay last in the bar and the title truncates for them.
+   * Measured from the header, in every pane, split or not.
+   */
+  const level = useHeaderFit(headerRef, 3, `${split}:${session?.id}`);
   const paneFocused = pane?.focused ?? true;
   const isDrawerOpen = blade !== null && !remote && viewWidth < 600 && paneFocused;
   useEffect(() => {
@@ -1253,6 +1251,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
     el.focus();
   }, [remote, viewActive, activeId, focusStatus]);
   const listenOn = useStore((s) => s.prefs.readAloudListen);
+  const stallNoticeMinutes = useStore((s) => s.prefs.stallNoticeMinutes);
   const skipListen = useRef(false);
   useStopSpeechWhenHidden();
   // Live reading: each agent message is spoken as it finishes, in order, for the length of a
@@ -1705,19 +1704,23 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
   }
 
   const needsYou = (s?.permissions.length ?? 0) > 0 || (s?.questions.length ?? 0) > 0 || !!s?.auth;
-  // The status light: amber = needs you, blue = working, green = ready, red = stopped.
+  const toolStallMs = stallNoticeMinutes && stallNoticeMinutes > 0 ? stallNoticeMinutes * 60 * 1000 : undefined;
+  const stalled = working && (s?.stalled != null || (s && workingStatus(toolStallMs ? { ...s, toolStallMs } : s).kind === "stalled"));
+  // The status light: amber = needs you, warn = stalled, blue = working, green = ready, red = stopped.
   const dot = needsYou
     ? { className: "text-accent signal-pulse", halo: 3 }
-    : working
-      ? { className: "text-live", halo: 3 }
-      : status === "ready"
-        ? { className: "text-ok", halo: 3 }
-        : status === "starting"
-          ? { className: "text-accent signal-pulse" }
-          : status === "exited"
-            ? { className: "text-danger" }
-            : { className: "text-faint" };
-  const dotLabel = needsYou ? "needs you" : working ? "working" : status;
+    : stalled
+      ? { className: "text-warn", halo: 3 }
+      : working
+        ? { className: "text-live", halo: 3 }
+        : status === "ready"
+          ? { className: "text-ok", halo: 3 }
+          : status === "starting"
+            ? { className: "text-accent signal-pulse" }
+            : status === "exited"
+              ? { className: "text-danger" }
+              : { className: "text-faint" };
+  const dotLabel = needsYou ? "needs you" : stalled ? "stalled" : working ? "working" : status;
 
   const stopTurn = () => {
     if (s?.busy) skipListen.current = true;
@@ -1947,7 +1950,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
           </span>
         )}
         {/* The minimum is on this box, not the title: only then does a crowded header overflow (which is how
-            `fitHeader` notices) instead of the title drawing over its neighbours. The last level lets it shrink. */}
+            `useHeaderFit` notices) instead of the title drawing over its neighbours. The last level lets it shrink. */}
         <div
           {...drag}
           className="mx-2.5 flex min-w-0 flex-1 items-baseline gap-2.5"
@@ -1974,7 +1977,7 @@ export function CodeView({ leading }: { leading?: ReactNode } = {}) {
             {gapsButton}
           </>
         )}
-        <div className="mx-1 h-5 w-px bg-line" />
+        {level < 3 && <div className="mx-1 h-5 w-px bg-line" />}
         {!remote && level < 2 && <WidthMenu />}
         {!remote && level < 2 && (
           <ExportMenu

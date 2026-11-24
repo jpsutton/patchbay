@@ -11,6 +11,7 @@ mod daemon_link;
 #[cfg(feature = "desktop")]
 mod desktop;
 pub mod fd_limit;
+mod file_transfer;
 mod files;
 mod gateway;
 mod handoff;
@@ -4077,6 +4078,13 @@ impl mesh::RpcHandler for MeshRpc {
                     param(&p, "message")?,
                 )
                 .await
+            }
+            // Agent file transfer (file_transfer.rs): the target host pulls an offered file.
+            "code.file_offer" => file_transfer::accept_offer(state, &from, &p).await,
+            "code.file_chunk" => file_transfer::serve_chunk(&from, &p).await,
+            "code.file_done" => {
+                file_transfer::drop_offer(&from, param(&p, "token")?);
+                Ok(Value::Null)
             }
             "code.cancel" => {
                 ensure_local_host(state, &id()?)?;
