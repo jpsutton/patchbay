@@ -18,28 +18,25 @@ use crate::{AppState, CmdError, CmdResult, session_activity};
 pub(crate) mod allow;
 mod dispatch;
 mod items;
-pub(crate) mod process_sweep;
 pub use allow::{
     allow_team_tool, enrich_worker_git_permission, forget_worker_session, is_active_team_member,
     is_worker_seat_member, remember_worker_session, strip_agent_patchbay_fields,
     worker_git_floor_must_ask,
 };
-pub(crate) use dispatch::worker_reuse_context;
+pub(crate) use dispatch::{claim_fresh_worker_start, refuse_worker_handoff};
 pub use dispatch::{
     check_seat_agent, dispatched_by, is_active_dispatched_worker, is_active_dispatched_worker_in,
     is_dispatched, is_dispatched_in, strip_forged_tags,
 };
-pub(crate) fn sweep_worker_worktree(root: &Path, worker_pgid: Option<u32>) -> anyhow::Result<process_sweep::SweepReport> {
-    process_sweep::sweep(root, std::process::id(), worker_pgid)
-}
 
 pub(crate) fn gate_session_start(db: &crate::db::Db, data_dir: &Path, manager: &crate::code::CodeManager, session: &crate::db::CodeSession) -> Result<()> {
     dispatch::gate_session_root(data_dir, db, manager, &session.id, None)
 }
 #[cfg(test)]
 pub(crate) use dispatch::FAIL_START_AGENT;
+/// The prompt each refreshed session was sent, so a test can see what the new worker is told.
 #[cfg(test)]
-pub(crate) use dispatch::HOLD_REUSED_WORKER_CONFIRMATIONS;
+pub(crate) static REFRESH_PROMPTS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
 #[cfg(test)]
 pub fn dispatch_prompts() -> Vec<(String, String)> {
     dispatch::FAKE_PROMPTS.lock().unwrap().clone()
@@ -856,6 +853,7 @@ impl TeamsDb {
         seat: &str,
         role_id: &str,
         is_worker: bool,
+        new_worktree: Option<&Path>,
     ) -> Result<Member> {
         let tx = rusqlite::Transaction::new_unchecked(&self.0, rusqlite::TransactionBehavior::Immediate)?;
         let now = now_ms();
@@ -891,10 +889,15 @@ impl TeamsDb {
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
                 )
                 .optional()?;
-            if let Some((item, st, desk, base, at, worktree)) = old_dispatch {
+            if let Some((item, st, desk, base, at, _old_worktree)) = old_dispatch {
+                let worktree = new_worktree.ok_or_else(|| anyhow!("fresh worker worktree is required"))?.canonicalize()?;
+                let root = self.team(team_id)?.effective_worktree_root()?.canonicalize()?;
+                if worktree == root || !worktree.starts_with(&root) {
+                    bail!("fresh worker worktree is outside the team worktree root");
+                }
                 self.0.execute(
                     "INSERT INTO dispatches(team_id, item_id, seat, desk_session, session_id, base_commit, at, worktree_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![team_id, item, st, desk, new_session, base, at, worktree],
+                    params![team_id, item, st, desk, new_session, base, at, worktree.to_string_lossy()],
                 )?;
             }
             if let Some(item) = &item_id {
@@ -1766,7 +1769,7 @@ async fn restart_member_inner(
     };
 
     // Build hand-off note before making any changes.
-    let handoff_note = build_handoff_note(&tdb, team_id, old_session_id, old_member.item_id.as_deref())?;
+    let mut handoff_note = build_handoff_note(&tdb, team_id, old_session_id, old_member.item_id.as_deref())?;
 
     // Stop the old process group before CodeManager sweeps/requires human confirmation; its
     // spawn path then gates before and after launch preparation.
@@ -1779,6 +1782,17 @@ async fn restart_member_inner(
     if let Some(bridge) = state.agent_message_bridge.get() {
         bridge.revoke(old_session_id);
     }
+    // A worker refresh starts from the old committed HEAD in a different worktree. Uncommitted
+    // files are left untouched; never copy them into the new agent's writable root.
+    let fresh_worktree = if is_worker {
+        let item = old_member.item_id.as_deref().ok_or_else(|| anyhow!("worker has no dispatch item; redispatch it from the team base"))?;
+        let old_path = tdb.assigned_worktree(&team, item, Some(old_session_id))?;
+        let dispatch_base = tdb.dispatch_base_for_session(team_id, old_session_id)?;
+        let head = dispatch::trusted_refresh_head(Path::new(&team.cwd), &old_path, &dispatch_base)?;
+        let (fresh, _branch) = dispatch::make_worktree(&team, item, &head, true)?;
+        handoff_note.push_str("\nThis is a fresh worktree at the previous worker's last commit; its uncommitted changes were left behind.");
+        Some((old_path, fresh))
+    } else { None };
     crate::archive_code_session(state, old_session_id, true).await?;
     let act = session_activity(state, old_session_id);
     if state.code.is_busy(old_session_id)
@@ -1794,7 +1808,7 @@ async fn restart_member_inner(
     }
 
     // Swap, start, brief with rollback.
-    let cwd = old_session.cwd.clone();
+    let cwd = fresh_worktree.as_ref().map(|(_, fresh)| fresh.to_string_lossy().into_owned()).unwrap_or_else(|| old_session.cwd.clone());
     let new_session = match crate::create_code_session_local(state, &cwd, model.as_deref(), Some(agent), None) {
         Ok(s) => s,
         Err(e) => {
@@ -1804,6 +1818,7 @@ async fn restart_member_inner(
     };
     if let Err(e) = (|| -> Result<()> {
         state.db.set_code_session_permission_mode(&new_session.id, &mode)?;
+        if is_worker { state.db.record_worker_provenance(&new_session.id)?; }
         if let Some(created_by) = &old_session.created_by {
             state.db.set_code_session_created_by(&new_session.id, created_by)?;
         }
@@ -1822,6 +1837,7 @@ async fn restart_member_inner(
         &old_member.seat,
         &old_member.role_id,
         is_worker,
+        fresh_worktree.as_ref().map(|(_, fresh)| fresh.as_path()),
     ) {
         Ok(m) => m,
         Err(e) => {
@@ -1846,6 +1862,8 @@ async fn restart_member_inner(
             handoff_note
         };
 
+        #[cfg(test)]
+        REFRESH_PROMPTS.lock().unwrap().push((new_session.id.clone(), prompt_text.clone()));
         let sender_session_id = if is_worker {
             coord_session.as_ref().map(|s| s.id.as_str()).unwrap_or(old_session_id)
         } else {
@@ -1879,6 +1897,12 @@ async fn restart_member_inner(
         return Err(e);
     }
 
+    if let Some((old_path, _)) = &fresh_worktree {
+        let target = coord_session_id.as_deref().unwrap_or(&new_session.id);
+        let message = format!("The previous worker worktree remains at {}; uncommitted changes were not copied. Remove it only after reviewing or discarding its contents.", old_path.display());
+        let event = crate::code::acp::Envelope { code_session_id: target.to_owned(), event: crate::code::acp::CodeEvent::Notice { message } };
+        (state.emit)(crate::code::acp::EVENT, serde_json::to_value(event)?);
+    }
     export(&tdb, &state.db, team_id, &format!("session {old_session_id} restarted as {}", new_session.id));
     (state.emit)("mesh://changed", serde_json::json!({ "tables": ["code_sessions"] }));
     Ok(new_member)

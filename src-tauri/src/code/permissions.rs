@@ -124,13 +124,23 @@ pub fn mode_allows(mode: &str, class: Class) -> bool {
     }
 }
 
+/// Agent config and instruction names, matched as any path component. One list: `protected` (what asks)
+/// and the team refresh trust check (what a worker commit may not change) both read it.
+pub(crate) const AGENT_CONFIG: &[&str] = &[
+    ".git", ".claude", ".cursor", ".grok", ".opencode", ".kilocode", ".codex", ".agents", ".agent", ".gemini", ".mcp.json",
+    "opencode.json", "opencode.jsonc", ".kilocoderules", ".cursorrules", "claude.local.md", "agents.override.md",
+];
+
+/// Whether these path components name agent config; `config.toml` counts only at the project root.
+pub(crate) fn agent_config_path(comps: &[&str]) -> bool {
+    comps.iter().any(|c| AGENT_CONFIG.iter().any(|d| same_component(c, d)))
+        || (comps.len() == 1 && same_component(comps[0], "config.toml"))
+}
+
 /// Inside the project, but git internals, the agents' own config and secrets still ask.
 fn protected(rel: &Path) -> bool {
-    const DIRS: &[&str] = &[".git", ".claude", ".cursor", ".grok", ".opencode", ".kilocode", ".codex", ".agents", ".gemini", ".mcp.json", "opencode.json"];
     let comps: Vec<&str> = rel.iter().filter_map(|c| c.to_str()).collect();
-    if comps.iter().any(|c| DIRS.iter().any(|d| same_component(c, d)))
-        || (comps.len() == 1 && same_component(comps[0], "config.toml"))
-    {
+    if agent_config_path(&comps) {
         return true;
     }
     comps.last().is_some_and(|name| {

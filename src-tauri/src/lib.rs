@@ -1156,15 +1156,6 @@ fn outbound_provider_report<L: serde::Serialize>(account_id: &str, limits: &L) -
 
 fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     use code::acp::CodeEvent;
-    let local_human_only = match &env.event {
-        CodeEvent::Permission { request, .. } => {
-            request["toolCall"]["_meta"]["patchbay"]["workerRestartConfirm"].is_object()
-        }
-        CodeEvent::PermissionResolved { request_id } => {
-            state.code.take_local_confirmation_resolution(request_id)
-        }
-        _ => false,
-    };
     // A queue that died with its loop (pb-20261111-74): tell every peer sender its message
     // was dropped, never delivered — here, where the mesh lives. Not a window event (the
     // window hears `Unqueued` from the loop), so it never reaches the delivery log either.
@@ -1378,10 +1369,6 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
             }
         }
         // Stamped with its point, so phones and windows can resume from it.
-        if local_human_only {
-            (state.emit)(code::acp::EVENT, serde_json::to_value(&env).unwrap_or_default());
-            return;
-        }
         let v = mesh.broadcast_event(code::acp::EVENT, serde_json::to_value(&env).unwrap_or_default());
         (state.emit)(code::acp::EVENT, v);
     }
@@ -3156,6 +3143,8 @@ pub(crate) async fn create_agent_session(
     let session = create_code_session_local(state, &cwd, model, Some(agent), None)?;
     // A failure past this point would leave an empty session that still counts toward the cap.
     let started: anyhow::Result<()> = async {
+        // Only a newly created child can claim its first start with unavailable team history.
+        state.db.record_pending_first_launch(&session.id)?;
         // Inherit rather than seed from prefs: a restricted creator can't spawn a looser session.
         state.db.set_code_session_permission_mode(&session.id, &creator.permission_mode)?;
         state.db.set_code_session_created_by(&session.id, creator_id)?;
@@ -3897,6 +3886,7 @@ fn local_commits(cwd: &str) -> Vec<String> {
 /// Host side: package a session for another node (`kind` = handoff).
 async fn package_local(state: &AppState, id: &str, kind: &str, have: Vec<String>) -> anyhow::Result<serde_json::Value> {
     ensure_local_host(state, id)?;
+    teams::refuse_worker_handoff(state, id)?;
     // Older computers asked for `checkpoint` packages after every turn; the workspace is only copied on a move.
     if kind != "handoff" {
         anyhow::bail!("only a move copies the working folder");

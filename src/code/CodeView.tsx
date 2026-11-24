@@ -26,6 +26,7 @@ import {
   type Entry,
 } from "../lib/store";
 import { HostBadge, MoveDialog, OfflineHostBanner } from "./HostControls";
+import { CodeErrorEntry } from "./CodeErrorEntry";
 import { Composer, seedDraft } from "../components/Composer";
 import { loadWidth, ResizeHandle, saveWidth } from "../components/ResizeHandle";
 import { MessageTime } from "../components/MessageTime";
@@ -706,11 +707,7 @@ const EntryView = memo(function EntryView({
       return tc ? <ToolCallCard tc={tc} autoApproved={autoApproved} /> : null;
     }
     case "error":
-      return (
-        <div className="whitespace-pre-wrap rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
-          {e.text}
-        </div>
-      );
+      return <CodeErrorEntry text={e.text} />;
     case "info":
       return <div className="text-center text-[12px] text-faint">{e.text}</div>;
     case "harness":
