@@ -470,13 +470,10 @@ impl Caller {
     }
 }
 
-/// Host-side git for durable-done checks. Mirrors dispatch's safe flags (no hooks / system config).
+/// Host-side git for durable-done checks, through dispatch's hardened wrapper.
 fn git_in(cwd: &Path, args: &[&str]) -> Result<String> {
-    let out = std::process::Command::new("git")
-        .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C"])
-        .arg(cwd)
+    let out = super::dispatch::hardened_git(cwd)
         .args(args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .context("running git")?;
     if !out.status.success() {
