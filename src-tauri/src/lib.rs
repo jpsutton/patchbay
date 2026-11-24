@@ -3362,11 +3362,17 @@ fn note_notice_failure(state: &AppState, sender_session: &str, target_id: &str, 
 }
 
 /// A turn cancelled with a card open ends with no failure, so its senders would hear nothing: give
-/// it the reason the cancel left (`usage_limit_stop`, `send_now`, `shutdown`; a user Stop leaves none) as the
-/// failure kind, and the one notice goes out on the existing channel (pb-20261121-01). A turn that
-/// ended any other way drops a note left for it. Returns whether the turn now has a failure to tell.
+/// it the reason the cancel left (`usage_limit_stop`, `send_now`; a user Stop and a shutdown leave
+/// none for senders) as the failure kind, and the one notice goes out on the existing channel
+/// (pb-20261121-01). A turn that ended any other way drops a note left for it, except that a quit
+/// (`aborted`) keeps the note for the restarted agent's first prompt. Returns whether the turn now
+/// has a failure to tell.
 fn cancel_reason_as_failure(state: &AppState, ended: &mut turn_failure::TurnEnded) -> bool {
-    if ended.outcome != "cancelled" {
+    if ended.outcome == "aborted" {
+        // The agent is gone (a stop or quit; not a failure, so nobody is told), but the note for the
+        // restarted agent's first prompt must outlive its exit.
+        state.code.cancel_notes.clear_senders(&ended.session_id);
+    } else if ended.outcome != "cancelled" {
         state.code.cancel_notes.clear(&ended.session_id);
     } else if ended.failure.is_none()
         && let Some(note) = state.code.cancel_notes.take_for_senders(&ended.session_id)

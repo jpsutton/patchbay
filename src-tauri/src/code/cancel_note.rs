@@ -66,6 +66,12 @@ impl CancelNotes {
         self.senders.lock().unwrap().remove(session);
     }
 
+    /// The turn ended with the agent gone (a stop or quit): its senders are not told, but the note for
+    /// the restarted agent's first prompt stays.
+    pub fn clear_senders(&self, session: &str) {
+        self.senders.lock().unwrap().remove(session);
+    }
+
     pub fn take_for_prompt(&self, session: &str) -> Option<Note> {
         fresh(self.prompt.lock().unwrap().remove(session))
     }

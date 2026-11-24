@@ -5539,3 +5539,24 @@ fn a_cancelled_turn_tells_its_senders_the_reason_once() {
     assert!(!cancel_reason_as_failure(&a.state, &mut ended("ok")));
     assert!(!cancel_reason_as_failure(&a.state, &mut ended("cancelled")), "a later cancel is not blamed on the old reason");
 }
+
+// pb-20261121-01: a shutdown ends its turn "aborted" (the agent exits). Its senders are not told (a
+// stop or quit is not a failure), but the reminder for the restarted agent's first prompt survives.
+#[test]
+fn a_shutdown_end_keeps_the_prompt_note_and_tells_no_senders() {
+    let a = node("alpha-shutdown");
+    let mut e = turn_failure::TurnEnded {
+        session_id: "s1".into(),
+        turn_id: "t".into(),
+        outcome: "aborted",
+        messages: vec![],
+        tool_calls: 0,
+        failure: None,
+    };
+    a.state.code.cancel_notes.record("s1", code::cancel_note::Note::new("the session was stopped", "shutdown", None), true, true);
+    assert!(!cancel_reason_as_failure(&a.state, &mut e), "senders are not told on a shutdown");
+    assert!(e.failure.is_none());
+    assert!(a.state.code.cancel_notes.take_for_senders("s1").is_none(), "the senders note is gone");
+    let kept = a.state.code.cancel_notes.take_for_prompt("s1").expect("the restarted agent is still told");
+    assert_eq!(kept.kind, "shutdown");
+}
