@@ -307,6 +307,21 @@ fn the_shared_refusal_asks_nothing_about_a_share_and_judges_a_link_by_its_target
 /// found") and without waiting for the network: the folder a phone lists (`fs.dirs`), the folder it
 /// starts a session in (`code.create`), the folder a peer imports a session into (`code.import`), and the
 /// file an agent shares (`confined_share_path`).
+/// A move or take-over into the other OS's path form (the dialog pre-fills the old host's folder)
+/// is refused on the target before the host is asked for anything: "no such session" would mean
+/// the check came too late.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_folder_in_the_other_os_form_is_refused_before_the_host_is_asked() {
+    let n = node("os-path");
+    let foreign = if cfg!(windows) { "/Users/me/WorkTimeAnalysis" } else { r"C:\Users\me\WorkTimeAnalysis" };
+    for cwd in [foreign, "relative/folder"] {
+        let e = import_local(&n.state, "no-such-session", cwd).await.unwrap_err().to_string();
+        assert!(e.contains("isn't a full path on this computer"), "code.import {cwd}: {e}");
+        let e = take_over_local(&n.state, "no-such-session", cwd).await.unwrap_err().to_string();
+        assert!(e.contains("isn't a full path on this computer"), "code.take_over {cwd}: {e}");
+    }
+}
+
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn peer_and_agent_named_paths_on_a_share_are_refused_before_they_are_touched() {
