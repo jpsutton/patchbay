@@ -662,19 +662,33 @@ fn plan(state: &AppState, desk: &str, args: &Value) -> Result<Plan> {
     })
 }
 
-fn git(cwd: &Path, args: &[&str]) -> Result<String> {
-    // No hooks (a tracked core.hooksPath folder like .husky could hold one the coordinator wrote),
-    // no fsmonitor, no system config: this git runs as the host, not under an approval mode.
-    let out = std::process::Command::new("git")
-        .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "protocol.ext.allow=never"])
-        // A global `git lfs install` puts a smudge filter in ~/.gitconfig; it must not run at checkout.
+/// Host-side git, shared by dispatch and the durable-done checks: no hooks (a tracked core.hooksPath folder
+/// like .husky could hold one the coordinator wrote), no fsmonitor, no system config, no inherited `GIT_*`
+/// location or config overrides, no lfs filter (a global `git lfs install` puts one in ~/.gitconfig), and no
+/// promisor fetch for a missing blob (it runs the configured upload-pack as the host). This git runs as the
+/// host, not under an approval mode.
+pub(crate) fn hardened_git(cwd: &Path) -> std::process::Command {
+    hardened_git_with(cwd, std::env::vars().map(|(k, _)| k))
+}
+
+fn hardened_git_with(cwd: &Path, inherited: impl IntoIterator<Item = String>) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "protocol.ext.allow=never"])
         .args(["-c", "filter.lfs.process=", "-c", "filter.lfs.smudge=", "-c", "filter.lfs.required=false", "-C"])
-        .arg(cwd)
+        .arg(cwd);
+    for key in inherited {
+        if key.starts_with("GIT_") {
+            cmd.env_remove(key);
+        }
+    }
+    // GIT_NO_LAZY_FETCH needs git 2.44+; older git ignores it, so the refusal of promisor config stays.
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_LFS_SKIP_SMUDGE", "1").env("GIT_NO_LAZY_FETCH", "1");
+    cmd
+}
+
+fn git(cwd: &Path, args: &[&str]) -> Result<String> {
+    let out = hardened_git(cwd)
         .args(args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_LFS_SKIP_SMUDGE", "1")
-        // A missing blob must not start a promisor fetch, which runs the configured upload-pack as the host.
-        .env("GIT_NO_LAZY_FETCH", "1")
         .output()
         .context("running git")?;
     if !out.status.success() {
@@ -686,7 +700,7 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String> {
 }
 
 /// Create a distinct branch and worktree for each worker spawn.
-/// `refresh` also refuses repository config that can run code at checkout, right before `worktree add`.
+/// Refuses repository config that can run code at checkout right before `worktree add`; `refresh` refuses more.
 pub(crate) fn make_worktree(team: &Team, item_id: &str, base_commit: &str, refresh: bool) -> Result<(PathBuf, String)> {
     let cwd = Path::new(&team.cwd);
     let root = team.effective_worktree_root()?;
@@ -703,9 +717,7 @@ pub(crate) fn make_worktree(team: &Team, item_id: &str, base_commit: &str, refre
             bail!("worktree folder holds {}, which can steer agents; review and remove it", name.to_string_lossy());
         }
     }
-    if refresh {
-        refuse_repo_code_hooks(cwd)?;
-    }
+    refuse_repo_code_hooks(cwd, refresh)?;
     let p = path.to_string_lossy().into_owned();
     git(cwd, &["worktree", "add", "-b", &branch, "--", &p, base_commit])?;
     Ok((path, branch))
@@ -729,31 +741,40 @@ fn trust_relevant(path: &str) -> bool {
         })
 }
 
-/// Refuse a refresh checkout when the shared repository config or attributes could run code at `worktree add`.
-fn refuse_repo_code_hooks(repo: &Path) -> Result<()> {
+/// Refuse a checkout when the shared repository config could run code at `worktree add`. Every spawn refuses the
+/// keys git itself acts on (promisor remotes, proxies, fsmonitor, ssh command, includes), since the
+/// lazy-fetch environment switch needs git 2.44+. A refresh, which follows an untrusted worker, also refuses
+/// filters, lfs, credentials and attributes.
+fn refuse_repo_code_hooks(repo: &Path, refresh: bool) -> Result<()> {
     let keys = git(repo, &["config", "--local", "--name-only", "--list", "-z"])?;
     let bad: Vec<&str> = keys
         .split('\0')
         .filter(|k| {
             let k = k.to_ascii_lowercase();
-            k.starts_with("filter.") || k.starts_with("include.") || k.starts_with("includeif.") || k.starts_with("lfs.customtransfer.") || k.starts_with("lfs.extension.") || k.starts_with("credential.")
+            let spawn = k.starts_with("include.") || k.starts_with("includeif.")
                 || (k.starts_with("remote.") && [".promisor", ".uploadpack", ".receivepack", ".vcs"].iter().any(|e| k.ends_with(e)))
-                || matches!(k.as_str(), "submodule.recurse" | "core.fsmonitor" | "core.hookspath" | "lfs.standalonetransferagent" | "core.attributesfile" | "core.sshcommand" | "extensions.worktreeconfig" | "extensions.partialclone" | "core.gitproxy")
+                || matches!(k.as_str(), "core.fsmonitor" | "core.sshcommand" | "extensions.partialclone" | "core.gitproxy");
+            let more = k.starts_with("filter.") || k.starts_with("lfs.customtransfer.") || k.starts_with("lfs.extension.") || k.starts_with("credential.")
+                || matches!(k.as_str(), "submodule.recurse" | "core.hookspath" | "lfs.standalonetransferagent" | "core.attributesfile" | "extensions.worktreeconfig");
+            spawn || (refresh && more)
         })
         .collect();
+    let what = if refresh { "refresh" } else { "spawn" };
     if !bad.is_empty() {
-        bail!("worker refresh refused: repository git config sets {}; a person must review or remove them", bad.join(", "));
+        bail!("worker {what} refused: repository git config sets {}; a person must review or remove them", bad.join(", "));
     }
-    let attrs = git(repo, &["rev-parse", "--git-path", "info/attributes"])?;
-    if repo.join(attrs).exists() {
-        bail!("worker refresh refused: the repository has .git/info/attributes; a person must review or remove it");
+    if refresh {
+        let attrs = git(repo, &["rev-parse", "--git-path", "info/attributes"])?;
+        if repo.join(attrs).exists() {
+            bail!("worker refresh refused: the repository has .git/info/attributes; a person must review or remove it");
+        }
     }
     Ok(())
 }
 
 /// Use only a committed HEAD whose changes from the original dispatch base have no trust-sensitive paths.
 pub(crate) fn trusted_refresh_head(repo: &Path, worktree: &Path, dispatch_base: &str) -> Result<String> {
-    refuse_repo_code_hooks(repo)?;
+    refuse_repo_code_hooks(repo, true)?;
     let expected = worktree.canonicalize().context("previous worktree is unavailable")?;
     let entries = git(repo, &["worktree", "list", "--porcelain", "-z"])?;
     let mut found = false;
@@ -1476,12 +1497,43 @@ mod tests {
         git(&cwd, &["config", "remote.p.promisor", "true"]).unwrap();
         git(&cwd, &["config", "remote.p.uploadpack", &format!("touch {}; false #", marker.display())]).unwrap();
         let control = d.join("control");
-        let out = std::process::Command::new("git").arg("-C").arg(&cwd).args(["worktree", "add", "-q", "-b", "control", "--"]).arg(&control).arg("main").output().unwrap();
+        let out = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").arg("-C").arg(&cwd).args(["worktree", "add", "-q", "-b", "control", "--"]).arg(&control).arg("main").output().unwrap();
         assert!(marker.exists(), "control: plain git runs the upload-pack for a missing blob: {}", String::from_utf8_lossy(&out.stderr));
         std::fs::remove_file(&marker).unwrap();
-        let made = make_worktree(&team, "DM-20261109-01", "HEAD", false);
+        // The wrapper itself, below the config refusal: the env switch is the second line of defence.
+        let daemon = d.join("daemon");
+        let made = git(&cwd, &["worktree", "add", "-q", "-b", "daemon", "--", daemon.to_str().unwrap(), "main"]);
         assert!(!marker.exists(), "the daemon's checkout must not start a promisor fetch");
-        let _ = made;
+        assert!(made.unwrap_err().to_string().contains("git worktree failed"), "git must really have run and failed on the missing blob");
+        let _ = team;
+    }
+
+    #[test]
+    fn a_fresh_spawn_refuses_repo_config_git_acts_on() {
+        for (key, value) in [("extensions.partialClone", "p"), ("remote.p.promisor", "true"), ("remote.p.uploadpack", "x"), ("remote.p.receivepack", "x"), ("remote.p.vcs", "x"), ("core.gitProxy", "x"), ("core.fsmonitor", "true"), ("core.sshCommand", "x"), ("include.path", "/dev/null"), ("includeIf.gitdir:/.path", "/dev/null")] {
+            let (d, _t, team) = setup();
+            let cwd = d.join("proj");
+            git(&cwd, &["init", "-q", "-b", "main"]).unwrap();
+            git(&cwd, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]).unwrap();
+            git(&cwd, &["config", "--local", key, value]).unwrap();
+            let e = make_worktree(&team, "DM-20261109-01", "HEAD", false).unwrap_err().to_string();
+            assert!(e.contains("worker spawn refused") && e.contains("repository git config"), "{key}: {e}");
+            assert!(!e.contains(d.to_str().unwrap()), "no path in the refusal: {e}");
+        }
+    }
+
+    #[test]
+    fn hardened_git_scrubs_inherited_git_env_and_sets_its_own() {
+        let cmd = hardened_git_with(Path::new("/x"), ["GIT_DIR", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_GLOBAL", "PATH"].map(String::from));
+        let envs: std::collections::HashMap<_, _> = cmd.get_envs().map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned()))).collect();
+        for gone in ["GIT_DIR", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_GLOBAL"] {
+            assert_eq!(envs.get(gone), Some(&None), "{gone} must be removed");
+        }
+        assert!(!envs.contains_key("PATH"));
+        assert_eq!(envs.get("GIT_NO_LAZY_FETCH"), Some(&Some("1".to_owned())));
+        assert_eq!(envs.get("GIT_CONFIG_NOSYSTEM"), Some(&Some("1".to_owned())));
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(args.contains(&"protocol.ext.allow=never".to_owned()) && args.contains(&"core.hooksPath=/dev/null".to_owned()));
     }
 
     #[test]
