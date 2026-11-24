@@ -4,10 +4,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// A path as a POSIX shell reads it. Planted `touch <marker>` filter and hook commands run through `sh`, which
-/// eats the backslashes of a Windows path; the forward-slash form works in Git for Windows' sh and elsewhere.
+/// A path as a POSIX shell reads it. Planted filter and hook commands run through `sh`, which eats the backslashes
+/// of a Windows path; the forward-slash form works in Git for Windows' sh and elsewhere.
 pub fn sh_path(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
+}
+
+/// A shell command that creates `marker`. A redirect is a `sh` builtin, so it needs no `touch` on PATH (the PATH a
+/// Windows `cargo test` runs with has none; Git's own `sh` is found by git itself).
+pub fn mark_cmd(marker: &Path) -> String {
+    format!("echo x > '{}'", sh_path(marker))
 }
 
 /// A loopback server that answers every request with `status` (302, 307...) pointing at a SECOND
