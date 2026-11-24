@@ -5010,6 +5010,10 @@ async fn worker_refresh_moves_item_worktree_branch_and_leaves_dispatched_by_unch
     assert_ne!(s1, s2);
     assert_eq!(member.item_id.as_deref(), Some(item_id.as_str()));
     assert_eq!(member.seat, "workers");
+    // The new worker's prompt says its tree is fresh, but never where the old tree is.
+    let seen = teams::REFRESH_PROMPTS.lock().unwrap().iter().find(|(id, _)| *id == s2).map(|(_, p)| p.clone()).expect("refresh prompt recorded");
+    assert!(seen.contains("fresh worktree at the previous worker"), "{seen}");
+    assert!(!seen.contains(&worktree_str) && !seen.contains(old_path.canonicalize().unwrap().to_str().unwrap()), "the old worktree path must not reach the new worker: {seen}");
 
     // Old session is archived
     let old_sess = a.state.db.get_code_session(&s1).unwrap().unwrap();
@@ -5037,6 +5041,85 @@ async fn worker_refresh_moves_item_worktree_branch_and_leaves_dispatched_by_unch
     let d_sessions = tdb.dispatched_sessions(&coord.id).unwrap();
     assert!(d_sessions.contains(&s1));
     assert!(d_sessions.contains(&s2));
+}
+
+/// A team with a coordinator and two dispatched workers on separate items.
+async fn two_worker_fixture(name: &str) -> (Node, String, String, [(String, PathBuf); 2]) {
+    let a = node(name);
+    let p = a.dir.join("proj");
+    repo(&p);
+    let cwd = p.to_string_lossy().into_owned();
+    let coord = a.state.db.create_code_session(&cwd, None, "grok", "default").unwrap();
+    let raw = teams::list_team_templates(&a.state).await.unwrap().into_iter().find(|t| t.id == "builtin-triage-desk").unwrap();
+    let mut value = serde_json::to_value(&raw).unwrap();
+    for s in value["seats"].as_array_mut().unwrap() {
+        if s["seat"] == "workers" {
+            s["count"] = json!(2);
+            s["agent"] = json!("patchbay");
+            s["choices"] = json!([{ "agent": "codex", "model": null }]);
+            s["allowUnasked"] = json!(true);
+        }
+    }
+    value["id"] = json!(null);
+    value["name"] = json!("two-workers");
+    let tpl = teams::save_template(&a.state, serde_json::from_value(value).unwrap()).await.unwrap();
+    let team = teams::create_team(&a.state, serde_json::from_value(json!({
+        "templateId": tpl.id, "slug": "tw", "idPrefix": "TW", "cwd": cwd, "worktreeRoot": p.join("trees").to_string_lossy(),
+        "exportDir": a.dir.join("out").to_string_lossy(),
+    })).unwrap()).await.unwrap();
+    teams::team_attach(&a.state, team.id.clone(), coord.id.clone(), "coordinator".into()).await.unwrap();
+    let mut workers = Vec::new();
+    for title in ["one", "two"] {
+        let it = teams::call_tool(&a.state, &coord.id, "item_add", &json!({"title": title, "plan": "p"})).await.unwrap();
+        let w = teams::call_tool(&a.state, &coord.id, "dispatch_item", &json!({"itemId": it["id"]})).await.unwrap();
+        workers.push((w["sessionId"].as_str().unwrap().to_owned(), PathBuf::from(w["worktree"].as_str().unwrap())));
+    }
+    let [w1, w2]: [(String, PathBuf); 2] = workers.try_into().unwrap();
+    (a, team.id, coord.id, [w1, w2])
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refresh_refuses_an_old_worktree_swapped_for_a_symlink() {
+    let (a, team, _coord, [(s1, old), (_s2, other)]) = two_worker_fixture("refresh-symlink-swap").await;
+    let trees = a.dir.join("proj/trees");
+    let outside = a.dir.join("outside");
+    repo(&outside);
+    let moved = a.dir.join("old-moved");
+    std::fs::rename(&old, &moved).unwrap();
+    // (a) a link to a repository outside the root, (b) a link at another worker's registered tree.
+    for target in [outside.clone(), other.clone()] {
+        std::os::unix::fs::symlink(&target, &old).unwrap();
+        let (sessions, entries) = (a.state.db.list_code_sessions().unwrap().len(), std::fs::read_dir(&trees).unwrap().count());
+        let err = teams::team_restart_member(&a.state, team.clone(), s1.clone()).await.unwrap_err().0;
+        assert!(err.contains("assigned worktree"), "{target:?}: {err}");
+        assert_eq!(a.state.db.list_code_sessions().unwrap().len(), sessions, "no new session");
+        assert_eq!(std::fs::read_dir(&trees).unwrap().count(), entries, "no new worktree");
+        assert!(a.state.db.get_code_session(&s1).unwrap().unwrap().archived_at.is_none());
+        std::fs::remove_file(&old).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_ordinary_session_inside_a_fresh_workers_tree_is_refused_by_code_start() {
+    let (a, _team, _coord, [(_s1, tree), _]) = two_worker_fixture("seat-swap-overlap").await;
+    let intruder = a.state.db.create_code_session(&tree.to_string_lossy(), None, "patchbay", "default").unwrap();
+    let err = code_start_local(&a.state, intruder.id).await.unwrap_err().to_string();
+    assert!(err.contains("inside worker worktree"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_concurrent_first_starts_of_a_fresh_worker_launch_once() {
+    let (a, _team, _coord, [(s1, _), _]) = two_worker_fixture("concurrent-claim").await;
+    // Dispatch already consumed the one start; put the scratch DB back to "never launched".
+    let raw = rusqlite::Connection::open(a.dir.join("db.sqlite")).unwrap();
+    assert_eq!(raw.execute("UPDATE worker_spawn_provenance SET claimed=0 WHERE session_id=?1", [&s1]).unwrap(), 1);
+    let session = a.state.db.get_code_session(&s1).unwrap().unwrap();
+    let results: Vec<bool> = std::thread::scope(|sc| {
+        let handles: Vec<_> = (0..4).map(|_| sc.spawn(|| teams::claim_fresh_worker_start(&a.state.data_dir, &a.state.db, &a.state.code, &session, false).is_ok())).collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert_eq!(results.iter().filter(|ok| **ok).count(), 1, "{results:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

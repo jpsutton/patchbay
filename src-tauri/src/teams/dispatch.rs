@@ -673,7 +673,9 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String> {
         .output()
         .context("running git")?;
     if !out.status.success() {
-        bail!("git {} failed: {}", args.first().copied().unwrap_or(""), String::from_utf8_lossy(&out.stderr).trim());
+        // stderr can carry absolute paths and reaches the requester through errors; keep it in the log.
+        tracing::warn!("git {} failed: {}", args.first().copied().unwrap_or(""), String::from_utf8_lossy(&out.stderr).trim());
+        bail!("git {} failed", args.first().copied().unwrap_or(""));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
@@ -688,22 +690,59 @@ pub(crate) fn make_worktree(team: &Team, item_id: &str, base_commit: &str) -> Re
     let branch = format!("{}-{}", item_id.to_ascii_lowercase(), crate::db::new_id());
     let path = root.join(&branch);
     std::fs::create_dir_all(&root)?;
+    // Agents read instruction files from parent folders, and an untracked one here reaches every worker unseen.
+    for entry in std::fs::read_dir(&root)? {
+        let name = entry?.file_name();
+        if name.to_str().is_none_or(trust_relevant) {
+            bail!("worktree folder holds {}, which can steer agents; review and remove it", name.to_string_lossy());
+        }
+    }
     let p = path.to_string_lossy().into_owned();
     git(cwd, &["worktree", "add", "-b", &branch, "--", &p, base_commit])?;
     Ok((path, branch))
 }
 
 /// Files which could alter agent instructions or execute code during a fresh checkout or launch.
+/// Non-ASCII names are refused outright: filesystems case-fold some of them onto ASCII names.
+/// Residual, not listed: Makefile, justfile, pyproject.toml, setup.py, .tool-versions, Cargo.toml, build.rs, go.mod
+/// (they run only through a build, test or language server the worker's own gate does not cover).
 fn trust_relevant(path: &str) -> bool {
-    path.split('/').any(|part| {
-        let part = part.to_ascii_lowercase();
-        matches!(part.as_str(), ".agents" | ".claude" | ".codex" | ".cursor" | ".gemini" | ".opencode" | ".vscode" | ".husky" | ".githooks" | ".git" | ".mcp.json" | ".gitconfig" | ".gitattributes" | ".gitmodules" | ".envrc" | ".npmrc" | "package.json" | "pnpm-workspace.yaml" | "agents.md" | "claude.md" | "gemini.md" | ".bashrc" | ".bash_profile" | ".profile" | ".zshenv" | ".zshrc" | ".zprofile")
-            || part == ".env" || part.starts_with(".env.")
-    })
+    if !path.is_ascii() {
+        return true;
+    }
+    let comps: Vec<&str> = path.split('/').collect();
+    crate::code::permissions::agent_config_path(&comps)
+        || comps.iter().any(|part| {
+            let part = part.to_ascii_lowercase();
+            matches!(part.as_str(), ".vscode" | ".husky" | ".githooks" | ".gitconfig" | ".gitattributes" | ".gitmodules" | ".envrc" | ".npmrc" | "package.json" | "pnpm-workspace.yaml" | "agents.md" | "claude.md" | "gemini.md" | ".bashrc" | ".bash_profile" | ".profile" | ".zshenv" | ".zshrc" | ".zprofile"
+                | ".yarnrc" | ".yarnrc.yml" | ".yarn" | ".pnpmfile.cjs" | "bunfig.toml" | ".cargo" | ".pre-commit-config.yaml" | "mise.toml" | ".mise.toml" | ".mise")
+                || part == ".env" || part.starts_with(".env.")
+        })
+}
+
+/// Refuse a refresh checkout when the shared repository config or attributes could run code at `worktree add`.
+fn refuse_repo_code_hooks(repo: &Path) -> Result<()> {
+    let keys = git(repo, &["config", "--local", "--name-only", "--list", "-z"])?;
+    let bad: Vec<&str> = keys
+        .split('\0')
+        .filter(|k| {
+            let k = k.to_ascii_lowercase();
+            k.starts_with("filter.") || k.starts_with("include.") || k.starts_with("includeif.") || matches!(k.as_str(), "submodule.recurse" | "core.fsmonitor" | "core.hookspath")
+        })
+        .collect();
+    if !bad.is_empty() {
+        bail!("worker refresh refused: repository git config sets {}; a person must review or remove them", bad.join(", "));
+    }
+    let attrs = git(repo, &["rev-parse", "--git-path", "info/attributes"])?;
+    if repo.join(attrs).exists() {
+        bail!("worker refresh refused: the repository has .git/info/attributes; a person must review or remove it");
+    }
+    Ok(())
 }
 
 /// Use only a committed HEAD whose changes from the original dispatch base have no trust-sensitive paths.
 pub(crate) fn trusted_refresh_head(repo: &Path, worktree: &Path, dispatch_base: &str) -> Result<String> {
+    refuse_repo_code_hooks(repo)?;
     let expected = worktree.canonicalize().context("previous worktree is unavailable")?;
     let entries = git(repo, &["worktree", "list", "--porcelain", "-z"])?;
     let mut found = false;
@@ -1164,6 +1203,173 @@ mod tests {
         git(&root, &["-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-m", "config"]).unwrap();
         let error = trusted_refresh_head(&root, &root, &base).unwrap_err().to_string();
         assert!(error.contains(".mcp.json"), "{error}");
+    }
+
+    fn commit_file(root: &Path, name: &str, body: &str) {
+        let p = root.join(name);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, body).unwrap();
+        git(root, &["add", "-A", "--"]).unwrap();
+        git(root, &["-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-q", "-m", "x"]).unwrap();
+    }
+
+    fn refresh_err(root: &Path, base: &str) -> String {
+        trusted_refresh_head(root, root, base).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn trust_relevant_table() {
+        for path in [
+            ".claude/settings.json", ".CLAUDE/settings.json", "sub/.vscode/tasks.json", "sub/Package.JSON", ".env", ".env.local", ".ENV.production",
+            "opencode.json", "OpenCode.jsonc", ".grok/x", ".kilocode/rules/a.md", ".kilocoderules", ".agent/rules/a.md", "config.toml", "CLAUDE.local.md",
+            "AGENTS.override.md", ".cursorrules", ".yarnrc", ".yarnrc.yml", ".yarn/plugins/p.cjs", ".pnpmfile.cjs", "bunfig.toml", ".cargo/config.toml",
+            ".pre-commit-config.yaml", "mise.toml", ".mise.toml", ".mise/config.toml", "pnpm-workspace.yaml",
+            // A Kelvin sign and a long s fold onto ASCII names on some filesystems.
+            "pac\u{212a}age.json", ".vscode/AGENT\u{17f}.md", "caf\u{e9}.txt",
+        ] {
+            assert!(trust_relevant(path), "{path} should refuse");
+        }
+        for path in ["src/main.rs", "sub/config.toml", "README.md", "Makefile", "Cargo.toml", "docs/agents/notes.md"] {
+            assert!(!trust_relevant(path), "{path} should pass");
+        }
+    }
+
+    #[test]
+    fn refresh_refuses_each_kind_of_sensitive_change() {
+        // Deleting a protected file, renaming one out of a protected folder, a mode-only change,
+        // a symlink replacing a file, a root config.toml, .env.local and a non-ASCII name.
+        let (root, base) = config_repo();
+        commit_file(&root, ".claude/settings.json", "{}");
+        commit_file(&root, "package.json", "{}");
+        commit_file(&root, "notes.txt", "n");
+        let mid = git(&root, &["rev-parse", "HEAD"]).unwrap();
+        git(&root, &["rm", "-q", "--", ".claude/settings.json"]).unwrap();
+        git(&root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "del"]).unwrap();
+        assert!(refresh_err(&root, &mid).contains(".claude/settings.json"));
+        git(&root, &["reset", "-q", "--hard", &mid]).unwrap();
+
+        git(&root, &["mv", ".claude/settings.json", "moved.json"]).unwrap();
+        git(&root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "mv"]).unwrap();
+        assert!(refresh_err(&root, &mid).contains(".claude/settings.json"), "--no-renames reports the old name");
+        git(&root, &["reset", "-q", "--hard", &mid]).unwrap();
+
+        #[cfg(unix)]
+        {
+            git(&root, &["update-index", "--chmod=+x", "package.json"]).unwrap();
+            git(&root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "mode"]).unwrap();
+            assert!(refresh_err(&root, &mid).contains("package.json"), "mode-only change");
+            git(&root, &["reset", "-q", "--hard", &mid]).unwrap();
+
+            std::fs::remove_file(root.join("notes.txt")).unwrap();
+            std::os::unix::fs::symlink(".claude/settings.json", root.join("notes.txt")).unwrap();
+            git(&root, &["add", "-A", "--"]).unwrap();
+            git(&root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "link"]).unwrap();
+            // A symlink replacing an ordinary file is itself allowed to differ; it must not hide a listed name.
+            assert!(trusted_refresh_head(&root, &root, &mid).is_ok());
+            git(&root, &["reset", "-q", "--hard", &mid]).unwrap();
+            std::fs::remove_file(root.join("package.json")).unwrap();
+            std::os::unix::fs::symlink("elsewhere", root.join("package.json")).unwrap();
+            git(&root, &["add", "-A", "--"]).unwrap();
+            git(&root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "link2"]).unwrap();
+            assert!(refresh_err(&root, &mid).contains("package.json"), "file replaced by a symlink");
+            git(&root, &["reset", "-q", "--hard", &mid]).unwrap();
+        }
+
+        for name in ["config.toml", ".env.local", "sub/.vscode/tasks.json", "pac\u{212a}age.json"] {
+            commit_file(&root, name, "x");
+            assert!(trusted_refresh_head(&root, &root, &mid).is_err(), "{name}");
+            git(&root, &["reset", "-q", "--hard", &mid]).unwrap();
+        }
+        let _ = base;
+    }
+
+    #[test]
+    fn refresh_refuses_an_unregistered_worktree_and_hides_git_errors() {
+        let (root, base) = config_repo();
+        let stray = std::env::temp_dir().join(format!("pb-stray-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&stray).unwrap();
+        let e = format!("{:#}", trusted_refresh_head(&root, &stray, &base).unwrap_err());
+        assert!(e.contains("not registered"), "{e}");
+        let e = format!("{:#}", trusted_refresh_head(&root, &root, "0000000000000000000000000000000000000000").unwrap_err());
+        assert!(!e.contains(root.to_str().unwrap()) && !e.contains("fatal"), "git stderr must not reach the requester: {e}");
+    }
+
+    #[test]
+    fn missing_or_null_dispatch_base_refuses() {
+        let (_d, t, team) = setup();
+        t.0.execute("INSERT INTO dispatches(team_id,item_id,seat,desk_session,session_id,base_commit,at) VALUES (?1,'I','workers','desk','w',NULL,0)", params![team.id]).unwrap();
+        assert!(t.dispatch_base_for_session(&team.id, "w").is_err());
+        assert!(t.dispatch_base_for_session(&team.id, "nobody").is_err());
+    }
+
+    #[test]
+    fn refresh_refuses_repo_config_that_runs_code_at_checkout() {
+        for (key, value) in [("filter.x.smudge", "true"), ("include.path", "/dev/null"), ("includeIf.gitdir:/.path", "/dev/null"), ("submodule.recurse", "true"), ("core.fsmonitor", "true"), ("core.hooksPath", ".husky")] {
+            let (root, base) = config_repo();
+            git(&root, &["config", "--local", key, value]).unwrap();
+            let e = refresh_err(&root, &base);
+            assert!(e.contains("repository git config"), "{key}: {e}");
+        }
+        let (root, base) = config_repo();
+        std::fs::create_dir_all(root.join(".git/info")).unwrap();
+        std::fs::write(root.join(".git/info/attributes"), "* filter=x\n").unwrap();
+        assert!(refresh_err(&root, &base).contains("info/attributes"));
+        let (clean, clean_base) = config_repo();
+        assert!(trusted_refresh_head(&clean, &clean, &clean_base).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shared_post_checkout_hook_does_not_run_on_worktree_add() {
+        use std::os::unix::fs::PermissionsExt;
+        let (d, _t, team) = setup();
+        let cwd = d.join("proj");
+        git(&cwd, &["init", "-q", "-b", "main"]).unwrap();
+        git(&cwd, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]).unwrap();
+        let marker = d.join("hook-ran");
+        let hook = cwd.join(".git/hooks/post-checkout");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let control = d.join("control");
+        let out = std::process::Command::new("git").arg("-C").arg(&cwd).args(["worktree", "add", "-q", "-b", "control", "--"]).arg(&control).arg("main").output().unwrap();
+        assert!(out.status.success() && marker.exists(), "control: plain git runs the shared hook");
+        std::fs::remove_file(&marker).unwrap();
+        make_worktree(&team, "DM-20261109-01", "HEAD").unwrap();
+        assert!(!marker.exists(), "the daemon's worktree add must not run the shared hook");
+    }
+
+    #[test]
+    fn a_planted_file_in_the_worktree_root_refuses_spawn() {
+        let (d, _t, team) = setup();
+        let cwd = d.join("proj");
+        git(&cwd, &["init", "-q", "-b", "main"]).unwrap();
+        git(&cwd, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]).unwrap();
+        make_worktree(&team, "DM-20261109-01", "HEAD").unwrap();
+        let root = d.join("proj/trees");
+        std::fs::write(root.join("CLAUDE.md"), "steer").unwrap();
+        assert!(make_worktree(&team, "DM-20261109-02", "HEAD").unwrap_err().to_string().contains("CLAUDE.md"));
+        std::fs::remove_file(root.join("CLAUDE.md")).unwrap();
+        assert!(make_worktree(&team, "DM-20261109-02", "HEAD").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swap_member_refuses_when_the_worktree_root_became_a_link_to_outside() {
+        let (d, t, team) = setup();
+        let cwd = d.join("proj");
+        git(&cwd, &["init", "-q", "-b", "main"]).unwrap();
+        git(&cwd, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"]).unwrap();
+        let old = t.attach(&team.id, "old", "workers").unwrap();
+        t.0.execute("INSERT INTO dispatches(team_id,item_id,seat,desk_session,session_id,base_commit,at,worktree_path) VALUES (?1,'I','workers','desk','old','b',0,'x')", params![team.id]).unwrap();
+        let (fresh, _) = make_worktree(&team, "DM-20261109-01", "HEAD").unwrap();
+        let outside = d.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::rename(d.join("proj/trees"), outside.join("trees")).unwrap();
+        std::os::unix::fs::symlink(outside.join("trees"), d.join("proj/trees")).unwrap();
+        assert!(t.swap_member(&team.id, "old", "new", "workers", &old.role_id, true, Some(&fresh)).is_err());
+        let live: i64 = t.0.query_row("SELECT COUNT(*) FROM members WHERE session_id='new'", [], |r| r.get(0)).unwrap();
+        assert_eq!(live, 0, "the refused swap leaves no new member");
     }
 
     #[test]

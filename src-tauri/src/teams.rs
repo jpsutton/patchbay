@@ -34,6 +34,9 @@ pub(crate) fn gate_session_start(db: &crate::db::Db, data_dir: &Path, manager: &
 }
 #[cfg(test)]
 pub(crate) use dispatch::FAIL_START_AGENT;
+/// The prompt each refreshed session was sent, so a test can see what the new worker is told.
+#[cfg(test)]
+pub(crate) static REFRESH_PROMPTS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
 #[cfg(test)]
 pub fn dispatch_prompts() -> Vec<(String, String)> {
     dispatch::FAKE_PROMPTS.lock().unwrap().clone()
@@ -1787,7 +1790,7 @@ async fn restart_member_inner(
         let dispatch_base = tdb.dispatch_base_for_session(team_id, old_session_id)?;
         let head = dispatch::trusted_refresh_head(Path::new(&team.cwd), &old_path, &dispatch_base)?;
         let (fresh, _branch) = dispatch::make_worktree(&team, item, &head)?;
-        handoff_note.push_str(&format!("\nPrevious worker worktree (uncommitted changes remain there): {}", old_path.display()));
+        handoff_note.push_str("\nThis is a fresh worktree at the previous worker's last commit; its uncommitted changes were left behind.");
         Some((old_path, fresh))
     } else { None };
     crate::archive_code_session(state, old_session_id, true).await?;
@@ -1859,6 +1862,8 @@ async fn restart_member_inner(
             handoff_note
         };
 
+        #[cfg(test)]
+        REFRESH_PROMPTS.lock().unwrap().push((new_session.id.clone(), prompt_text.clone()));
         let sender_session_id = if is_worker {
             coord_session.as_ref().map(|s| s.id.as_str()).unwrap_or(old_session_id)
         } else {
