@@ -517,6 +517,11 @@ fn is_well_formed_https_pr_url(s: &str) -> bool {
 /// A missing worktree is not evidence of a clean, committed result.
 fn ensure_done_is_durable(tdb: &TeamsDb, team: &Team, item_id: &str) -> Result<()> {
     let path = tdb.assigned_worktree(team, item_id, None).context("Cannot mark item done: assigned worktree is unavailable")?;
+    // `git status` runs a clean filter on a stat-changed file as the host; refuse rather than run a custom one.
+    let filters = super::dispatch::custom_filter_keys(&path)?;
+    if !filters.is_empty() {
+        bail!("Cannot mark item done: the repository git config defines filters ({}); a person must review or remove them, or provide a PR URL", filters.join(", "));
+    }
     let status = git_in(&path, &["status", "--porcelain"])?;
     if !status.is_empty() {
         bail!("{DONE_REQUIRES_CLEAN_WORKTREE}");
@@ -1080,6 +1085,29 @@ mod tests {
         seed_dispatch(&t, &team, &item.id);
         let err = t.set_item(&team.id, &item.id, Some("desk1"), &json!({"status": "done"})).unwrap_err();
         assert!(format!("{err:#}").contains("assigned worktree"));
+    }
+
+    #[test]
+    fn done_refuses_a_custom_clean_filter_instead_of_running_it() {
+        let (d, t, team) = setup_with_git_worktree();
+        let i = t.add_item(&team, Some("desk1"), "20261109", "Filtered", "task", "normal", "").unwrap();
+        seed_dispatch(&t, &team, &i.id);
+        let wt = add_item_worktree(&team, &i.id);
+        let run = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&wt).args(args).output().unwrap().status.success(), "{args:?}");
+        std::fs::write(wt.join(".gitattributes"), "* filter=x\n").unwrap();
+        std::fs::write(wt.join("f.txt"), "one").unwrap();
+        run(&["add", "-A"]);
+        run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "work"]);
+        let marker = d.join("clean-ran");
+        run(&["config", "filter.x.clean", &format!("touch {}; cat", marker.display())]);
+        std::fs::write(wt.join("f.txt"), "one").unwrap(); // same bytes, new stat data: status must hash it
+        let plain = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").arg("-C").arg(&wt).args(["status", "--porcelain"]).output().unwrap();
+        assert!(plain.status.success() && marker.exists(), "control: plain git status runs the clean filter");
+        std::fs::remove_file(&marker).unwrap();
+        std::fs::write(wt.join("f.txt"), "one").unwrap();
+        let err = t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "status": "done" })).unwrap_err().to_string();
+        assert!(err.contains("filters") && err.contains("filter.x.clean"), "{err}");
+        assert!(!marker.exists(), "the done check must not run the clean filter");
     }
 
     #[test]
