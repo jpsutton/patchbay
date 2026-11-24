@@ -16,7 +16,7 @@ const MAX_AGE_SECS: u64 = 24 * 3600;
 pub struct Note {
     /// What the agent is told, after "because": a person can read it as is.
     pub reason: String,
-    /// The structured kind the notice carries: `usage_limit_stop`, `user_stop`, `send_now`, `shutdown`.
+    /// The structured kind the notice carries: `usage_limit_stop`, `send_now`, `shutdown`.
     pub kind: &'static str,
     pub resets_at: Option<u64>,
     at: u64,
@@ -94,14 +94,14 @@ mod tests {
     #[test]
     fn a_note_is_used_once_and_names_the_reason() {
         let n = CancelNotes::default();
-        n.record("s", Note::new("you pressed Stop", "user_stop", None), true, true);
+        n.record("s", Note::new("the user sent a new message with Send now", "send_now", None), true, true);
         let first = n.take_for_prompt("s").expect("the agent is told");
         assert_eq!(
             first.line(),
-            "Patchbay cancelled your last tool call because you pressed Stop; the user did not reject it. Retry it if still needed."
+            "Patchbay cancelled your last tool call because the user sent a new message with Send now; the user did not reject it. Retry it if still needed."
         );
         assert!(n.take_for_prompt("s").is_none(), "used once, then cleared");
-        assert_eq!(n.take_for_senders("s").map(|x| x.kind), Some("user_stop"));
+        assert_eq!(n.take_for_senders("s").map(|x| x.kind), Some("send_now"));
         assert!(n.take_for_senders("s").is_none());
     }
 

@@ -3362,7 +3362,7 @@ fn note_notice_failure(state: &AppState, sender_session: &str, target_id: &str, 
 }
 
 /// A turn cancelled with a card open ends with no failure, so its senders would hear nothing: give
-/// it the reason the cancel left (`usage_limit_stop`, `user_stop`, `send_now`, `shutdown`) as the
+/// it the reason the cancel left (`usage_limit_stop`, `send_now`, `shutdown`; a user Stop leaves none) as the
 /// failure kind, and the one notice goes out on the existing channel (pb-20261121-01). A turn that
 /// ended any other way drops a note left for it. Returns whether the turn now has a failure to tell.
 fn cancel_reason_as_failure(state: &AppState, ended: &mut turn_failure::TurnEnded) -> bool {

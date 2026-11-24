@@ -556,10 +556,11 @@ impl CodeManager {
     }
 
     pub fn send(&self, code_session_id: &str, mut cmd: AgentCmd) -> Result<()> {
-        // Every cancel with a card open is explained to the agent's next prompt and to the senders
-        // (pb-20261121-01): the agent CLI would otherwise report it as the user rejecting the call.
+        // Send now, a guard stop and a shutdown with a card open are explained to the agent's next
+        // prompt and to the senders (pb-20261121-01): the agent CLI would otherwise report it as the
+        // user rejecting the call. A user's own Stop leaves no note: it is the human's hard brake, the
+        // agent must not be invited to re-run the call, and a Stop is not a failure to tell senders of.
         match &mut cmd {
-            AgentCmd::Cancel => self.note_cancel(code_session_id, "you pressed Stop", "user_stop", None, false),
             AgentCmd::Prompt { msg, force, .. } => {
                 if *force {
                     let why = "the user sent a new message with Send now";
@@ -1367,14 +1368,15 @@ mod tests {
     }
 
     #[test]
-    fn a_stop_press_with_a_card_open_reminds_the_next_prompt() {
+    fn a_user_stop_with_a_card_open_leaves_no_note() {
         let m = CodeManager::default();
         let mut rx = fake_agent(&m, "s");
         open_card(&m, "s");
         m.send("s", AgentCmd::Cancel).unwrap();
+        assert!(matches!(rx.try_recv(), Ok(AgentCmd::Cancel)));
         m.send("s", AgentCmd::Prompt { msg: user_msg("carry on"), force: false, reply: None }).unwrap();
-        assert_told(&next_prompt_blocks(&mut rx), "you pressed Stop");
-        assert_eq!(m.cancel_notes.take_for_senders("s").map(|n| n.kind), Some("user_stop"));
+        assert_eq!(next_prompt_blocks(&mut rx), ["carry on"], "the agent is not told to retry a call the user stopped");
+        assert!(m.cancel_notes.take_for_senders("s").is_none(), "a user Stop is not a failure for the senders");
     }
 
     #[test]
