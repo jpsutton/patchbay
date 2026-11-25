@@ -1,0 +1,11 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Patchbay apt repository</title>
+<style>body{font:16px/1.5 system-ui,sans-serif;max-width:40rem;margin:3rem auto;padding:0 1rem}pre{overflow-x:auto}</style>
+<h1>Patchbay apt repository</h1>
+<p>Debian 12 or newer and Ubuntu 24.04 or newer, on 64-bit ARM.</p>
+<pre>curl -fsSL https://jpsutton.github.io/patchbay/apt/patchbay-archive-keyring.gpg | sudo tee /usr/share/keyrings/patchbay.gpg &gt;/dev/null
+echo "deb [signed-by=/usr/share/keyrings/patchbay.gpg] https://jpsutton.github.io/patchbay/apt stable main" | sudo tee /etc/apt/sources.list.d/patchbay.list
+sudo apt update &amp;&amp; sudo apt install patchbay</pre>
+<p>Key fingerprint: <code>0D3A064DDF8B635FD85894E9B3A7618B4B88E5D7</code></p>

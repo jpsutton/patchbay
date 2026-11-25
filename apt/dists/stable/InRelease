@@ -1,0 +1,33 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Architectures: arm64
+Codename: stable
+Components: main
+Date: Wed, 25 Nov 2026 00:35:29 +0000
+Label: Patchbay
+Origin: Patchbay
+Suite: stable
+MD5Sum:
+ 8631104347c758c1281f0873fd33d069             4461 main/binary-arm64/Packages
+ 2f05a1195fff992768b7db503f3d1f94             1643 main/binary-arm64/Packages.gz
+ 87388ed3c36465d0ea00a7aef4609962             1628 main/binary-arm64/Packages.xz
+SHA1:
+ c373c346610d699322f2521b7bb19369dac3f822             4461 main/binary-arm64/Packages
+ 63829b7111eaec4eb5eb2aa9409c3340f96b5744             1643 main/binary-arm64/Packages.gz
+ ccff3f8de23caaa37180b3ecc46759a1aea05a1d             1628 main/binary-arm64/Packages.xz
+SHA256:
+ f7122993816f58a34c2513951aa872b5d143c3989307a48bd24df908cfd8320e             4461 main/binary-arm64/Packages
+ 8bcd6c9328061fa631abdd7649b56c2bc0cae8120382a999e168f7f6a7ca4f08             1643 main/binary-arm64/Packages.gz
+ 268bf97c31e7bbdc82a0944467c37d96b2b86018d31d743d8882885b919d684f             1628 main/binary-arm64/Packages.xz
+SHA512:
+ 999ef0d11120a8d1c87501ddbd6f48e661cb08d4af5fd9afe501278ec3d027374bded350627e18b45a1dc276193b7ddde63882112371e7730af3b1a56304ac14             4461 main/binary-arm64/Packages
+ 8f3a760dbb2e997851cbca681d6b42ec243791ed301e68018fe420733e475da93ec1f5aa43ffbb19530f1e29904c4504f760c032cbde9e2b9633fa9fcb2917b7             1643 main/binary-arm64/Packages.gz
+ ae6eed1c340cfc5b631340eaf03dd3c5d939c93c706a61254dfa43e981c4ae396fe40754e28eab729dad4ffd31d2931dee78a8da43fb220989cd024059c7c560             1628 main/binary-arm64/Packages.xz
+-----BEGIN PGP SIGNATURE-----
+
+iHUEARYKAB0WIQQNOgZN34tjX9hYlOmzp2GLS4jl1wUCawYtUQAKCRCzp2GLS4jl
+16aJAQDfm/YyFxgVJN5JWJsAU1WCbYqMs8qk7gkTbFjYicg9WQEAkvUQ1ENJNihf
+TpqbvEf3FdGryVjDvapv1DIDNS2pqAY=
+=l7je
+-----END PGP SIGNATURE-----
