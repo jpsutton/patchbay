@@ -828,6 +828,12 @@ impl Inner {
                             .and_then(|r| r.app_version.clone())
                             .or_else(|| st.remote_versions.get(&m.node_id).cloned())
                     },
+                    // From its last link report, like appVersion; null for older nodes and phones.
+                    "os": if m.node_id == self.me {
+                        Some(std::env::consts::OS.to_owned())
+                    } else {
+                        st.links.get(&m.node_id).and_then(|r| r.os.clone())
+                    },
                 })
             })
             .collect();
@@ -2251,6 +2257,7 @@ impl Inner {
                     .keys()
                     .filter_map(|id| st.remote_versions.get(id).map(|v| (id.clone(), v.clone())))
                     .collect(),
+                os: Some(std::env::consts::OS.to_owned()),
             }
         };
         self.broadcast(Msg::Links(report));

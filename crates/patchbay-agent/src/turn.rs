@@ -49,6 +49,7 @@ pub(crate) fn cut_off_call(calls: &[ToolCall], stop: &StopReason) -> Option<usiz
     (!complete).then_some(last)
 }
 
+#[derive(Debug)]
 pub struct TurnResult {
     pub stop_reason: &'static str,
     pub usage: Totals,
@@ -410,15 +411,17 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
         .unwrap_or_default();
     let user = Message::with_parts(Role::User, parts);
     session.store.append(&Entry::Msg { m: user.clone() });
-    {
+    let turn_start = {
         let mut st = session.state.lock().await;
+        let idx = st.messages.len();
         session.prompts.lock().unwrap().push(PromptRec {
-            msg_index: st.messages.len(),
+            msg_index: idx,
             preview,
             files: Default::default(),
         });
         st.messages.push(user);
-    }
+        idx
+    };
 
     let mut totals = Totals::default();
     // Times a Stop hook kept this turn going; capped so a hook can't loop forever.
@@ -431,6 +434,8 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
     let mut round_start = 0usize;
     // Tokens of this turn that goal checks have counted already.
     let mut goal_seen = 0u64;
+    // Context overflow compact-and-retry at most once per turn; a second overflow fails loud.
+    let mut overflow_compacted = false;
     'steps: for step in 0usize.. {
         if cancel.is_cancelled() {
             return Ok(TurnResult { stop_reason: "cancelled", usage: totals });
@@ -493,6 +498,20 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
                     session.state.lock().await.messages.push(m);
                 }
                 return Ok(TurnResult { stop_reason: "cancelled", usage: totals });
+            }
+            Err(e) if e.is_context_overflow() && !overflow_compacted => {
+                overflow_compacted = true;
+                session.text_chunk(
+                    "agent_thought_chunk",
+                    "Context limit reached; summarizing conversation and retrying turn...\n",
+                );
+                if let Err(compact_err) = compact::compact_overflow(&session, &mc, turn_start, &cancel).await {
+                    if compact_err == "cancelled" {
+                        return Ok(TurnResult { stop_reason: "cancelled", usage: totals });
+                    }
+                    return Err(format!("Context overflow occurred and compaction failed: {compact_err} (original error: {e})"));
+                }
+                continue 'steps;
             }
             Err(e) => return Err(e.to_string()),
         };
@@ -1300,4 +1319,367 @@ mod tests {
         assert!(checked >= 6, "the check looked at only {checked} path arguments: did the schema shape change?");
     }
 
+    struct MockOverflowHost {
+        base_url: String,
+        window: Option<u64>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::host::Host for MockOverflowHost {
+        fn models(&self) -> Vec<crate::host::ModelInfo> {
+            vec![crate::host::ModelInfo { id: "mock-model".into(), name: "Mock".into(), effort: None }]
+        }
+        async fn model_client(&self, _model_id: &str) -> Result<crate::host::ModelClient, String> {
+            let mut cfg = patchbay_llm::Config::new(patchbay_llm::WireFormat::ChatCompletions, &self.base_url, "mock-model");
+            cfg.max_retries = 0;
+            Ok(crate::host::ModelClient {
+                client: patchbay_llm::Client::new(cfg),
+                system_prefix: Vec::new(),
+                context_window: self.window,
+                auto_compact_percent: None,
+                plan_guarded: false,
+            })
+        }
+        fn data_dir(&self) -> std::path::PathBuf {
+            std::env::temp_dir()
+        }
+    }
+
+    async fn read_http_request<R: tokio::io::AsyncRead + Unpin>(stream: &mut R) -> (String, String) {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        let mut temp = [0u8; 1024];
+        let header_end;
+        let content_length;
+        loop {
+            let n = match stream.read(&mut temp).await {
+                Ok(0) | Err(_) => return (String::new(), String::new()),
+                Ok(n) => n,
+            };
+            buf.extend_from_slice(&temp[..n]);
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                header_end = pos + 4;
+                let headers_str = String::from_utf8_lossy(&buf[..pos]);
+                content_length = headers_str
+                    .lines()
+                    .find_map(|line| {
+                        let lower = line.to_ascii_lowercase();
+                        if lower.starts_with("content-length:") {
+                            lower.split(':').nth(1)?.trim().parse::<usize>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0);
+                break;
+            }
+        }
+        let total_needed = header_end + content_length;
+        while buf.len() < total_needed {
+            let n = match stream.read(&mut temp).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            buf.extend_from_slice(&temp[..n]);
+        }
+        let headers = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+        let body = String::from_utf8_lossy(&buf[header_end..total_needed.min(buf.len())]).into_owned();
+        (headers, body)
+    }
+
+    async fn write_http_response<W: tokio::io::AsyncWrite + Unpin>(stream: &mut W, status: u16, content_type: &str, body: &str) {
+        use tokio::io::AsyncWriteExt;
+        let status_line = match status {
+            200 => "HTTP/1.1 200 OK",
+            400 => "HTTP/1.1 400 Bad Request",
+            413 => "HTTP/1.1 413 Payload Too Large",
+            429 => "HTTP/1.1 429 Too Many Requests",
+            _ => "HTTP/1.1 500 Internal Server Error",
+        };
+        let resp = format!(
+            "{status_line}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(resp.as_bytes()).await;
+    }
+
+    async fn write_sse_response<W: tokio::io::AsyncWrite + Unpin>(stream: &mut W, text: &str) {
+        use tokio::io::AsyncWriteExt;
+        let event1 = json!({"choices":[{"delta":{"content": text},"finish_reason":null}]});
+        let event2 = json!({"choices":[{"delta":{},"finish_reason":"stop"}]});
+        let sse_body = format!("data: {event1}\n\ndata: {event2}\n\ndata: [DONE]\n\n");
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse_body}",
+            sse_body.len()
+        );
+        let _ = stream.write_all(resp.as_bytes()).await;
+    }
+
+    #[tokio::test]
+    async fn context_overflow_without_context_window_compacts_and_retries_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let count = request_count.clone();
+        let retried_body = Arc::new(tokio::sync::Mutex::new(String::new()));
+        let retried_save = retried_body.clone();
+
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let (headers, body) = read_http_request(&mut sock).await;
+                if headers.is_empty() {
+                    continue;
+                }
+                let c = count.fetch_add(1, Ordering::SeqCst);
+                if c == 0 {
+                    // Request 1: Initial turn step -> reject with HTTP 400 context_length_exceeded
+                    let err = json!({
+                        "error": {
+                            "code": "context_length_exceeded",
+                            "message": "This model's maximum context length is 1000 tokens."
+                        }
+                    });
+                    write_http_response(&mut sock, 400, "application/json", &err.to_string()).await;
+                } else if c == 1 {
+                    // Request 2: Compaction request -> answer with summary
+                    assert!(body.contains("conversation") || body.contains("summary") || body.contains("compact"), "expected compaction request: {body}");
+                    write_sse_response(&mut sock, "Earlier conversation: User set up project.").await;
+                } else if c == 2 {
+                    // Request 3: Retried turn step -> verify user prompt is preserved verbatim!
+                    *retried_save.lock().await = body.clone();
+                    write_sse_response(&mut sock, "Continuing with the user request after compaction.").await;
+                    break;
+                }
+            }
+        });
+
+        let (a, b) = tokio::io::duplex(1 << 16);
+        let (peer, _incoming) = crate::rpc::connect(a, b);
+        let cwd = std::env::temp_dir().join(format!("pb-overflow-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let host = Arc::new(MockOverflowHost {
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            window: None, // UNSET context window
+        });
+
+        let session = Session::new("overflow-session-1".into(), cwd.clone(), host, peer, "mock-model".into(), Mode::Default);
+        // Seed some history
+        {
+            let mut st = session.state.lock().await;
+            st.messages.push(Message::user("initial setup question"));
+            st.messages.push(Message::assistant("initial setup reply with details"));
+        }
+
+        let prompt = json!([{"type": "text", "text": "current prompt asking to proceed with task"}]);
+        let result = run_turn(session.clone(), &prompt, CancellationToken::new()).await.unwrap();
+
+        assert_eq!(result.stop_reason, "end_turn");
+        assert_eq!(request_count.load(Ordering::SeqCst), 3);
+        let retried = retried_body.lock().await.clone();
+        assert!(retried.contains("current prompt asking to proceed with task"), "Retried request must contain user prompt verbatim: {retried}");
+        assert!(retried.contains("Earlier conversation: User set up project"), "Retried request must contain summary: {retried}");
+
+        let _ = server.await;
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[tokio::test]
+    async fn second_context_overflow_after_compaction_fails_loud() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let count = request_count.clone();
+
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let (headers, body) = read_http_request(&mut sock).await;
+                if headers.is_empty() {
+                    continue;
+                }
+                let c = count.fetch_add(1, Ordering::SeqCst);
+                if c == 0 {
+                    // Request 1: Initial turn step -> 400 overflow
+                    let err = json!({"error": {"code": "context_length_exceeded", "message": "This model's maximum context length is 1000 tokens."}});
+                    write_http_response(&mut sock, 400, "application/json", &err.to_string()).await;
+                } else if c == 1 {
+                    // Request 2: Compaction -> succeeds
+                    assert!(body.contains("conversation") || body.contains("summary") || body.contains("compact"));
+                    write_sse_response(&mut sock, "Earlier conversation summary.").await;
+                } else if c == 2 {
+                    // Request 3: Retried turn step -> overflows again!
+                    let err = json!({"error": {"code": "context_length_exceeded", "message": "This model's maximum context length is 1000 tokens."}});
+                    write_http_response(&mut sock, 400, "application/json", &err.to_string()).await;
+                    break;
+                }
+            }
+        });
+
+        let (a, b) = tokio::io::duplex(1 << 16);
+        let (peer, _incoming) = crate::rpc::connect(a, b);
+        let cwd = std::env::temp_dir().join(format!("pb-overflow-test-2-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let host = Arc::new(MockOverflowHost {
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            window: None,
+        });
+
+        let session = Session::new("overflow-session-2".into(), cwd.clone(), host, peer, "mock-model".into(), Mode::Default);
+        let prompt = json!([{"type": "text", "text": "task prompt"}]);
+        let err = run_turn(session.clone(), &prompt, CancellationToken::new()).await.unwrap_err();
+
+        assert!(err.contains("maximum context length"), "expected overflow error, got: {err}");
+        assert_eq!(request_count.load(Ordering::SeqCst), 3, "must make exactly 3 requests (no loop)");
+
+        let _ = server.await;
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[tokio::test]
+    async fn compaction_overflow_fails_loud_and_does_not_loop() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let count = request_count.clone();
+
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let (headers, body) = read_http_request(&mut sock).await;
+                if headers.is_empty() {
+                    continue;
+                }
+                let c = count.fetch_add(1, Ordering::SeqCst);
+                if c == 0 {
+                    // Request 1: Initial turn step -> 400 overflow
+                    let err = json!({"error": {"code": "context_length_exceeded", "message": "This model's maximum context length is 1000 tokens."}});
+                    write_http_response(&mut sock, 400, "application/json", &err.to_string()).await;
+                } else if c == 1 {
+                    // Request 2: Compaction call itself rejects (exceeds byte limit)!
+                    assert!(body.contains("conversation") || body.contains("summary") || body.contains("compact"));
+                    let err = json!({"error": {"code": "context_length_exceeded", "message": "compaction request exceeds maximum context length of 500 bytes"}});
+                    write_http_response(&mut sock, 400, "application/json", &err.to_string()).await;
+                    break;
+                }
+            }
+        });
+
+        let (a, b) = tokio::io::duplex(1 << 16);
+        let (peer, _incoming) = crate::rpc::connect(a, b);
+        let cwd = std::env::temp_dir().join(format!("pb-overflow-test-3-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let host = Arc::new(MockOverflowHost {
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            window: None,
+        });
+
+        let session = Session::new("overflow-session-3".into(), cwd.clone(), host, peer, "mock-model".into(), Mode::Default);
+        let prompt = json!([{"type": "text", "text": "task prompt"}]);
+        let err = run_turn(session.clone(), &prompt, CancellationToken::new()).await.unwrap_err();
+
+        assert!(err.contains("compaction failed"), "expected compaction failure message, got: {err}");
+        assert_eq!(request_count.load(Ordering::SeqCst), 2, "must make exactly 2 requests (no loop)");
+
+        let _ = server.await;
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[tokio::test]
+    async fn tool_execution_count_unchanged_across_overflow_retry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let count = request_count.clone();
+
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let (headers, body) = read_http_request(&mut sock).await;
+                if headers.is_empty() {
+                    continue;
+                }
+                let c = count.fetch_add(1, Ordering::SeqCst);
+                if c == 0 {
+                    // Step 0: emit a Write tool call
+                    let event1 = json!({
+                        "choices": [{
+                            "delta": {
+                                "tool_calls": [{
+                                    "id": "write_1",
+                                    "type": "function",
+                                    "function": {"name": "Write", "arguments": "{\"file_path\":\"output.txt\",\"content\":\"hello\"}"}
+                                }]
+                            },
+                            "finish_reason": null
+                        }]
+                    });
+                    let event2 = json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]});
+                    let sse_body = format!("data: {event1}\n\ndata: {event2}\n\ndata: [DONE]\n\n");
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse_body}",
+                        sse_body.len()
+                    );
+                    let _ = tokio::io::AsyncWriteExt::write_all(&mut sock, resp.as_bytes()).await;
+                } else if c == 1 {
+                    // Step 1: fails with 400 context overflow
+                    let err = json!({"error": {"code": "context_length_exceeded", "message": "This model's maximum context length is 1000 tokens."}});
+                    write_http_response(&mut sock, 400, "application/json", &err.to_string()).await;
+                } else if c == 2 {
+                    // Step 2: compaction request -> succeeds
+                    assert!(body.contains("conversation") || body.contains("summary") || body.contains("compact"));
+                    write_sse_response(&mut sock, "Earlier conversation: User wrote output.txt.").await;
+                } else if c == 3 {
+                    // Step 3: retried step 1 -> succeeds with end_turn
+                    write_sse_response(&mut sock, "All done!").await;
+                    break;
+                }
+            }
+        });
+
+        let (a, b) = tokio::io::duplex(1 << 16);
+        let (peer, mut incoming) = crate::rpc::connect(a, b);
+        let tool_permission_count = Arc::new(AtomicUsize::new(0));
+        let perm_count = tool_permission_count.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = incoming.recv().await {
+                if let crate::rpc::Incoming::Request { method, reply, .. } = msg {
+                    if method == "session/request_permission" {
+                        perm_count.fetch_add(1, Ordering::SeqCst);
+                        reply.send(Ok(json!({"outcome": {"outcome": "selected", "optionId": "allow"}})));
+                    } else {
+                        reply.send(Ok(Value::Null));
+                    }
+                }
+            }
+        });
+
+        let cwd = std::env::temp_dir().join(format!("pb-overflow-test-4-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let host = Arc::new(MockOverflowHost {
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            window: None,
+        });
+
+        let session = Session::new("overflow-session-4".into(), cwd.clone(), host, peer, "mock-model".into(), Mode::Default);
+        let prompt = json!([{"type": "text", "text": "write the output file"}]);
+        let result = run_turn(session.clone(), &prompt, CancellationToken::new()).await.unwrap();
+
+        assert_eq!(result.stop_reason, "end_turn");
+        assert_eq!(request_count.load(Ordering::SeqCst), 4);
+        // The Write tool was executed in step 0, and was NOT re-executed when step 1 overflowed and retried.
+        assert_eq!(tool_permission_count.load(Ordering::SeqCst), 1, "tool was executed exactly once across the turn");
+        assert_eq!(std::fs::read_to_string(cwd.join("output.txt")).unwrap(), "hello");
+
+        let _ = server.await;
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
 }

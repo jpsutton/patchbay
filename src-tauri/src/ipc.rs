@@ -588,7 +588,7 @@ mod tests {
             has_key: true,
             auth_mode: Default::default(),
             claude_config_dir: None,
-            grok_home: None,
+            grok_home: None, gemini_home: None,
         };
         state.db.upsert_provider(&prov, Some("mock-key")).unwrap();
         state

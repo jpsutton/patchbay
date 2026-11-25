@@ -17,3 +17,13 @@ export function pathOf(text: string): string | null {
   if (/^\.+$/.test(t) || /^\d+(?:\.\d+)+$/.test(t)) return null;
   return t;
 }
+
+/**
+ * Whether `path` is a full path on a computer running `os` (Rust's `std::env::consts::OS`), as
+ * that computer's `Path::is_absolute` sees it; null when the OS is unknown (older peers).
+ */
+export function fullPathOn(path: string, os: string | null | undefined): boolean | null {
+  if (!os) return null;
+  const p = path.trim();
+  return os === "windows" ? /^(?:[A-Za-z]:[\\/]|[\\/]{2})/.test(p) : p.startsWith("/");
+}

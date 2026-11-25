@@ -3,6 +3,7 @@ mod attachments;
 mod chat;
 mod claude_auth;
 mod grok_auth;
+mod antigravity_auth;
 mod code;
 mod db;
 #[cfg(feature = "desktop")]
@@ -235,6 +236,9 @@ struct ProviderInput {
     /// For Grok login: another Grok home directory (`GROK_HOME`) to sign in with.
     #[serde(default)]
     grok_home: Option<String>,
+    /// For Antigravity login: another Gemini home (`GEMINI_HOME`) to sign in with.
+    #[serde(default)]
+    gemini_home: Option<String>,
 }
 
 async fn list_providers(state: &AppState) -> CmdResult<Vec<Provider>> {
@@ -246,6 +250,7 @@ async fn save_provider(state: &AppState, input: ProviderInput) -> CmdResult<Prov
         (db::ProviderKind::Anthropic, db::AuthMode::ClaudeLogin) => db::AuthMode::ClaudeLogin,
         // Grok's proxy speaks the Responses API.
         (db::ProviderKind::OpenaiResponses, db::AuthMode::GrokLogin) => db::AuthMode::GrokLogin,
+        (db::ProviderKind::Gemini, db::AuthMode::AntigravityLogin) => db::AuthMode::AntigravityLogin,
         _ => db::AuthMode::ApiKey,
     };
     let p = Provider {
@@ -262,6 +267,10 @@ async fn save_provider(state: &AppState, input: ProviderInput) -> CmdResult<Prov
             .grok_home
             .map(|d| d.trim().to_owned())
             .filter(|d| !d.is_empty() && auth_mode == db::AuthMode::GrokLogin),
+        gemini_home: input
+            .gemini_home
+            .map(|d| d.trim().to_owned())
+            .filter(|d| !d.is_empty() && auth_mode == db::AuthMode::AntigravityLogin),
         auth_mode,
     };
     if p.name.is_empty() || p.base_url.is_empty() {
@@ -276,8 +285,11 @@ async fn save_provider(state: &AppState, input: ProviderInput) -> CmdResult<Prov
         // The error says where it looked and to run `grok login`.
         grok_auth::check(p.grok_home.as_deref())?;
     }
+    if p.auth_mode == db::AuthMode::AntigravityLogin {
+        antigravity_auth::check(p.gemini_home.as_deref()).await?;
+    }
     state.db.upsert_provider(&p, None)?;
-    if matches!(p.auth_mode, db::AuthMode::ClaudeLogin | db::AuthMode::GrokLogin) {
+    if matches!(p.auth_mode, db::AuthMode::ClaudeLogin | db::AuthMode::GrokLogin | db::AuthMode::AntigravityLogin) {
         providers::delete_key(&p.id);
         state.db.clear_inline_key(&p.id)?;
     } else {
@@ -335,6 +347,7 @@ async fn discover_models(
     let auth = match p.auth_mode {
         db::AuthMode::ClaudeLogin => providers::Auth::ClaudeLogin,
         db::AuthMode::GrokLogin => providers::Auth::GrokLogin,
+        db::AuthMode::AntigravityLogin => providers::Auth::AntigravityLogin,
         db::AuthMode::ApiKey => providers::Auth::Key,
     };
     let mut grok_user = None;
@@ -345,9 +358,13 @@ async fn discover_models(
             grok_user = Some(c.user_id);
             Some(c.token)
         }
+        providers::Auth::AntigravityLogin => None,
         providers::Auth::Key => providers::load_key(&p.id, inline.as_deref()),
     };
     let extras = providers::required_extras(&state.db, &providers::Keyring, &p.id)?;
+    if auth == providers::Auth::AntigravityLogin {
+        return Ok(providers::discover_antigravity_models(&p.base_url, p.gemini_home.as_deref(), &extras).await?);
+    }
     Ok(providers::discover_models_for(&p.kind, &p.base_url, key.as_deref(), auth, grok_user.as_deref(), &extras).await?)
 }
 
@@ -1139,15 +1156,6 @@ fn outbound_provider_report<L: serde::Serialize>(account_id: &str, limits: &L) -
 
 fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     use code::acp::CodeEvent;
-    let local_human_only = match &env.event {
-        CodeEvent::Permission { request, .. } => {
-            request["toolCall"]["_meta"]["patchbay"]["workerRestartConfirm"].is_object()
-        }
-        CodeEvent::PermissionResolved { request_id } => {
-            state.code.take_local_confirmation_resolution(request_id)
-        }
-        _ => false,
-    };
     // A queue that died with its loop (pb-20261111-74): tell every peer sender its message
     // was dropped, never delivered — here, where the mesh lives. Not a window event (the
     // window hears `Unqueued` from the loop), so it never reaches the delivery log either.
@@ -1172,8 +1180,8 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
     // The same hook says how the turn ended; a failed one tells its origin senders (pb-20261111-28).
     // A thread of its own, like the dropped-queue notice above: the agent's runtime can end with it.
     if let Some(bridge) = state.agent_message_bridge.get()
-        && let Some(ended) = bridge.log_code_event(&env.code_session_id, &env.event)
-        && ended.failure.is_some()
+        && let Some(mut ended) = bridge.log_code_event(&env.code_session_id, &env.event)
+        && cancel_reason_as_failure(state, &mut ended)
     {
         let state = state.clone();
         std::thread::spawn(move || {
@@ -1361,10 +1369,6 @@ fn on_code_event(state: &AppState, env: code::acp::Envelope) {
             }
         }
         // Stamped with its point, so phones and windows can resume from it.
-        if local_human_only {
-            (state.emit)(code::acp::EVENT, serde_json::to_value(&env).unwrap_or_default());
-            return;
-        }
         let v = mesh.broadcast_event(code::acp::EVENT, serde_json::to_value(&env).unwrap_or_default());
         (state.emit)(code::acp::EVENT, v);
     }
@@ -1726,7 +1730,7 @@ pub(crate) fn session_plan_usage_local(state: &AppState, id: &str) -> Option<Ses
     if on_cursor_session(state, id) {
         return Some(SessionPlanUsageView::Cursor { limits: state.code.cursor_plan.latest() });
     }
-    if on_antigravity_session(state, id) {
+    if on_antigravity_session(state, id) || antigravity_provider_for_session(state, id).is_some() {
         return Some(SessionPlanUsageView::Antigravity {
             limits: state.code.antigravity_plan.latest(),
         });
@@ -1792,6 +1796,15 @@ fn on_antigravity_session(state: &AppState, id: &str) -> bool {
         .is_some_and(|s| code::agents::AgentKind::parse(&s.agent) == Some(code::agents::AgentKind::Antigravity))
 }
 
+fn antigravity_provider_for_session(state: &AppState, id: &str) -> Option<Provider> {
+    let session = state.db.get_code_session(id).ok().flatten()?;
+    if !matches!(session.agent.as_str(), "patchbay" | "grok") { return None; }
+    let model_ref = session.model_ref?;
+    let model = state.db.get_model(&model_ref).ok().flatten()?;
+    let (provider, _) = state.db.get_provider(&model.provider_id).ok().flatten()?;
+    (provider.kind == db::ProviderKind::Gemini && provider.auth_mode == db::AuthMode::AntigravityLogin).then_some(provider)
+}
+
 fn any_running_cursor(state: &AppState) -> bool {
     state
         .db
@@ -1809,7 +1822,14 @@ fn any_running_antigravity(state: &AppState) -> bool {
         .ok()
         .into_iter()
         .flatten()
-        .any(|s| s.agent == code::agents::AgentKind::Antigravity.id() && state.code.is_running(&s.id))
+        .any(|s| state.code.is_running(&s.id) && (s.agent == code::agents::AgentKind::Antigravity.id() || antigravity_provider_for_session(state, &s.id).is_some()))
+}
+
+fn running_antigravity_home(state: &AppState) -> Option<String> {
+    state.db.list_code_sessions().ok()?.into_iter()
+        .filter(|s| state.code.is_running(&s.id))
+        .find_map(|s| antigravity_provider_for_session(state, &s.id))
+        .and_then(|p| p.gemini_home)
 }
 
 /// Take an Antigravity plan report seen here, or a newer one from another member for the same account.
@@ -1847,7 +1867,8 @@ async fn poll_antigravity_plan(state: &AppState) {
     if state.code.antigravity_plan.latest().is_some_and(|l| l.is_fresh(now)) {
         return;
     }
-    match code::antigravity_plan::auth_kind() {
+    let gemini_home = running_antigravity_home(state);
+    if gemini_home.is_none() { match code::antigravity_plan::auth_kind().await {
         code::antigravity_plan::AntigravityAuthKind::ApiKey => {
             let email = None;
             let limits = code::antigravity_plan::AntigravityPlanLimits::unavailable(
@@ -1864,8 +1885,8 @@ async fn poll_antigravity_plan(state: &AppState) {
             return;
         }
         code::antigravity_plan::AntigravityAuthKind::Oauth => {}
-    }
-    let Some(auth) = code::antigravity_plan::load_auth(&state.code.antigravity_plan).await else {
+    }}
+    let Some(auth) = code::antigravity_plan::load_auth_for(gemini_home.as_deref()).await else {
         tracing::debug!("antigravity plan: no readable local Google OAuth login");
         // No usable login (disk sources missing/invalid and the keychain fallback denied or
         // deferred): record the `unavailable` report instead of retrying — and therefore
@@ -1904,7 +1925,8 @@ fn enforce_cursor_plan_limit(state: &AppState) {
             continue;
         }
         tracing::info!("cursor usage limit: stopping {id}");
-        if state.code.send(&id, AgentCmd::Cancel).is_err() {
+        log_guard_stop(state, "cursor", "cursor", None, &id);
+        if state.code.cancel_for_limit(&id, &hit.reason(now), u64::try_from(hit.resets_at).ok()).is_err() {
             state.code.cursor_plan.turn_ended(&id);
             continue;
         }
@@ -2061,7 +2083,7 @@ fn provider_plan_account(p: &Provider) -> Option<String> {
     match p.auth_mode {
         db::AuthMode::ClaudeLogin => claude_auth::account_for(p.claude_config_dir.as_deref()).ok().map(|a| a.0),
         db::AuthMode::GrokLogin => grok_auth::resolve_dir(p.grok_home.as_deref()).ok().map(|d| grok_auth::account(&d).0),
-        db::AuthMode::ApiKey => None,
+        db::AuthMode::ApiKey | db::AuthMode::AntigravityLogin => None,
     }
 }
 
@@ -2123,7 +2145,7 @@ fn plan_account(state: &AppState, prefs: &prefs::Preferences, id: &str) -> Optio
             .and_then(|(p, _)| match p.auth_mode {
                 db::AuthMode::ClaudeLogin => claude_auth::account_for(p.claude_config_dir.as_deref()).ok(),
                 db::AuthMode::GrokLogin => grok_auth::resolve_dir(p.grok_home.as_deref()).ok().map(|d| grok_auth::account(&d)),
-                db::AuthMode::ApiKey => None,
+                db::AuthMode::ApiKey | db::AuthMode::AntigravityLogin => None,
             }),
         _ => None,
     }
@@ -2152,6 +2174,16 @@ fn plan_account_label(state: &AppState, account: &str) -> String {
     account.to_owned()
 }
 
+/// One line in the delivery log (`agent-messaging-mcp.log`) for each session a usage guard cancels,
+/// so a halted seat can be traced to the stop (pb-20261121-01). The account is a short hash, never
+/// the login's name or id.
+fn log_guard_stop(state: &AppState, plan: &str, account: &str, percent: Option<u32>, session: &str) {
+    if let Some(bridge) = state.agent_message_bridge.get() {
+        let card_open = state.code.has_open_card(session);
+        bridge.log_guard_stop(plan, account, percent, session, card_open);
+    }
+}
+
 /// Cancel every running turn on a Claude plan account past its usage limit. The agent stops
 /// cleanly, its session stays resumable, and queued prompts go back to their composers.
 fn enforce_plan_limit(state: &AppState) {
@@ -2168,7 +2200,8 @@ fn enforce_plan_limit(state: &AppState) {
             continue;
         }
         tracing::info!("usage limit: stopping {id} ({} at {}%)", hit.what, hit.percent);
-        if state.code.send(&id, AgentCmd::Cancel).is_err() {
+        log_guard_stop(state, "claude", &account, Some(hit.percent), &id);
+        if state.code.cancel_for_limit(&id, &hit.reason(now), u64::try_from(hit.resets_at).ok()).is_err() {
             state.code.plan.turn_ended(&id);
             continue;
         }
@@ -2708,6 +2741,10 @@ async fn code_prompt_local(
         }
         anyhow::bail!("Not sent. {}", hit.message(now));
     }
+    // An idle session may have no live agent process; start it so the message can run.
+    if !state.code.is_running(&id) {
+        code_start_local(state, id.clone()).await?;
+    }
     // Stage 6d: one prompt boundary for team seats (dispatch brief, team_send → send_agent_message,
     // create brief, seat swap handoff, mesh agent message, human prompts). Agent-origin text is
     // neutralized so ACP `parseCommand` cannot see a leading `/`; any `/mcp` that still reaches
@@ -3012,6 +3049,16 @@ fn peer_path_base() -> std::path::PathBuf {
     code::agents::home_dir().unwrap_or_default()
 }
 
+/// A folder named for this computer must be a full path in its own form: the move dialog fills in
+/// the old host's folder, and `C:\…` on macOS or `/Users/…` on Windows would be taken as relative.
+fn refuse_relative_folder(cwd: &str) -> anyhow::Result<()> {
+    if !std::path::Path::new(cwd).is_absolute() {
+        let example = if cfg!(windows) { r"C:\Users\…" } else if cfg!(target_os = "macos") { "/Users/…" } else { "/home/…" };
+        anyhow::bail!("{cwd} isn't a full path on this computer; use one like {example}");
+    }
+    Ok(())
+}
+
 fn refuse_foreign_folder(creator_cwd: &str, cwd: &str, links: &dyn patchbay_agent::LinkReader) -> anyhow::Result<()> {
     let base = std::path::Path::new(creator_cwd);
     if patchbay_agent::foreign_target_with(base, base, links) {
@@ -3096,6 +3143,8 @@ pub(crate) async fn create_agent_session(
     let session = create_code_session_local(state, &cwd, model, Some(agent), None)?;
     // A failure past this point would leave an empty session that still counts toward the cap.
     let started: anyhow::Result<()> = async {
+        // Only a newly created child can claim its first start with unavailable team history.
+        state.db.record_pending_first_launch(&session.id)?;
         // Inherit rather than seed from prefs: a restricted creator can't spawn a looser session.
         state.db.set_code_session_permission_mode(&session.id, &creator.permission_mode)?;
         state.db.set_code_session_created_by(&session.id, creator_id)?;
@@ -3298,8 +3347,42 @@ async fn tell_senders_of_dropped(
             m.message_id, target_title, target_id, reason
         );
         // from_node is THIS node (the queue's host runs the notice); the target may be remote.
-        let _ = send_agent_message(state, state.mesh.node_id(), target_id, session, &text).await;
+        let sent = send_agent_message(state, state.mesh.node_id(), target_id, session, &text).await;
+        note_notice_failure(state, session, target_id, sent);
     }
+}
+
+/// A notice to a sender that could not be delivered leaves a trace (pb-20261117-22): a warning and a
+/// `msg_notice_failed` line in the delivery log, with the two session ids and a fixed `kind`
+/// (`plan_limit` is the recipient's usage-limit stop). Never the error's text or a message body.
+fn note_notice_failure(state: &AppState, sender_session: &str, target_id: &str, sent: anyhow::Result<serde_json::Value>) {
+    let Err(e) = sent else { return };
+    let kind = agent_messaging::notice_failure_kind(&e);
+    tracing::warn!(sender = sender_session, target = target_id, kind, "a notice to a sender was not delivered");
+    if let Some(bridge) = state.agent_message_bridge.get() {
+        bridge.log_notice_failed(sender_session, target_id, kind);
+    }
+}
+
+/// A turn cancelled with a card open ends with no failure, so its senders would hear nothing: give
+/// it the reason the cancel left (`usage_limit_stop`, `send_now`; a user Stop and a shutdown leave
+/// none for senders) as the failure kind, and the one notice goes out on the existing channel
+/// (pb-20261121-01). A turn that ended any other way drops a note left for it, except that a quit
+/// (`aborted`) keeps the note for the restarted agent's first prompt. Returns whether the turn now
+/// has a failure to tell.
+fn cancel_reason_as_failure(state: &AppState, ended: &mut turn_failure::TurnEnded) -> bool {
+    if ended.outcome == "aborted" {
+        // The agent is gone (a stop or quit; not a failure, so nobody is told), but the note for the
+        // restarted agent's first prompt must outlive its exit.
+        state.code.cancel_notes.clear_senders(&ended.session_id);
+    } else if ended.outcome != "cancelled" {
+        state.code.cancel_notes.clear(&ended.session_id);
+    } else if ended.failure.is_none()
+        && let Some(note) = state.code.cancel_notes.take_for_senders(&ended.session_id)
+    {
+        ended.failure = Some(turn_failure::Failure { kind: note.kind.to_owned(), resets_at: note.resets_at });
+    }
+    ended.failure.is_some()
 }
 
 /// One more notice kind on the same channel as the drop notice (pb-20261107-30): the recipient's
@@ -3331,7 +3414,8 @@ async fn notify_turn_failure(state: &AppState, ended: turn_failure::TurnEnded) {
         };
         let notice = turn_failure::notice_json(&m.id, target_id, &title, &failure, rewake_at);
         let text = format!("{} {notice}", turn_failure::NOTICE_TAG);
-        let _ = send_agent_message(state, state.mesh.node_id(), target_id, sender_session, &text).await;
+        let sent = send_agent_message(state, state.mesh.node_id(), target_id, sender_session, &text).await;
+        note_notice_failure(state, sender_session, target_id, sent);
     }
 }
 
@@ -3802,6 +3886,7 @@ fn local_commits(cwd: &str) -> Vec<String> {
 /// Host side: package a session for another node (`kind` = handoff).
 async fn package_local(state: &AppState, id: &str, kind: &str, have: Vec<String>) -> anyhow::Result<serde_json::Value> {
     ensure_local_host(state, id)?;
+    teams::refuse_worker_handoff(state, id)?;
     // Older computers asked for `checkpoint` packages after every turn; the workspace is only copied on a move.
     if kind != "handoff" {
         anyhow::bail!("only a move copies the working folder");
@@ -3890,6 +3975,8 @@ async fn fetch_package_files(state: &AppState, host: &str, token: &str, meta: &h
 
 /// Target side: pull session `id` from its host into `cwd` here and take over the lease.
 async fn import_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Result<Option<String>> {
+    // Before anything else: a wrong-form folder must fail before the host stops its agent.
+    refuse_relative_folder(cwd)?;
     // The folder a mesh peer asked this computer to import into: judged before `local_commits`, the
     // existence checks and the unpack touch it.
     refuse_foreign_path(&peer_path_base(), std::path::Path::new(cwd), "the folder", &patchbay_agent::OsLinks)?;
@@ -3951,6 +4038,7 @@ async fn code_move(state: &AppState, id: String, target: String, cwd: String) ->
 /// comes along: the host's working folder can't be copied while it is offline, so the session
 /// carries on in a folder that already exists on this computer.
 async fn take_over_local(state: &AppState, id: &str, cwd: &str) -> anyhow::Result<Option<String>> {
+    refuse_relative_folder(cwd)?;
     // The folder a mesh peer asked this computer to continue the session in: judged before `is_dir`.
     refuse_foreign_path(&peer_path_base(), std::path::Path::new(cwd), "the folder", &patchbay_agent::OsLinks)?;
     let s = state.db.get_code_session(id)?.ok_or_else(|| anyhow::anyhow!("no such session"))?;

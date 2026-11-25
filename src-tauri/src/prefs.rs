@@ -104,6 +104,10 @@ pub struct Preferences {
     /// Say so in the transcript, and mark the session stalled, when a turn has had nothing from
     /// the agent for this many minutes (`code::stall`); 0 = off. Nothing is cancelled.
     pub stall_notice_minutes: u32,
+    /// Turn on Codex's `default_mode_request_user_input` feature, so it asks questions through the
+    /// blocking tool (a question card) instead of `request_user_input_async`, whose questions the
+    /// ACP adapter drops. Off by default: Codex marks the feature under development.
+    pub codex_question_forms: bool,
 
     // ---- Grok Build ----
     /// default | auto | always-approve
@@ -248,6 +252,7 @@ impl Default for Preferences {
             cursor_usage_limit: UsageLimit::cursor_default(),
             auto_archive_days: None,
             stall_notice_minutes: crate::code::stall::DEFAULT_MINUTES,
+            codex_question_forms: false,
             permission_mode: "default".into(),
             agent_instructions: String::new(),
             web_fetch: false,

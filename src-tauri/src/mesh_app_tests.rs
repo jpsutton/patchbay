@@ -22,6 +22,8 @@ const PHONE_GATEWAY_SWITCH_SAFETY_NET: u64 = 120;
 struct Node {
     state: AppState,
     events: Arc<Mutex<Vec<(String, Value)>>>,
+    /// When each of `events` arrived, index for index (pb-20261117-22: how late a notice came).
+    stamps: Arc<Mutex<Vec<std::time::Instant>>>,
     /// LAST, so it drops after the database and mesh above have let go of their files.
     dir: crate::test_support::TestDir,
 }
@@ -43,8 +45,17 @@ fn node(name: &str) -> Node {
     mesh.set_config(Some(name), Some("127.0.0.1:0"), None).unwrap();
     let events = Arc::new(Mutex::new(Vec::new()));
     let ev = events.clone();
-    let emit: mesh::node::UiSink = Arc::new(move |n: &str, p: Value| ev.lock().unwrap().push((n.to_owned(), p)));
-    Node { state: AppState::new(db, dir.to_path_buf(), mesh, emit), events, dir }
+    // Poison-proof: a test that fails while it holds `events` (an assert message printing them) poisons
+// the lock, and a sink that then panics inside `Node::drop` turns that failure into an abort ("panic
+// in a destructor during cleanup") with the real assertion lost.
+    let stamps = Arc::new(Mutex::new(Vec::new()));
+    let st = stamps.clone();
+    let emit: mesh::node::UiSink = Arc::new(move |n: &str, p: Value| {
+        let mut events = ev.lock().unwrap_or_else(|e| e.into_inner());
+        events.push((n.to_owned(), p));
+        st.lock().unwrap_or_else(|e| e.into_inner()).push(std::time::Instant::now());
+    });
+    Node { state: AppState::new(db, dir.to_path_buf(), mesh, emit), events, stamps, dir }
 }
 
 /// A node's folder (database, WAL, attachment stores) is gone once the node is dropped: these
@@ -296,6 +307,21 @@ fn the_shared_refusal_asks_nothing_about_a_share_and_judges_a_link_by_its_target
 /// found") and without waiting for the network: the folder a phone lists (`fs.dirs`), the folder it
 /// starts a session in (`code.create`), the folder a peer imports a session into (`code.import`), and the
 /// file an agent shares (`confined_share_path`).
+/// A move or take-over into the other OS's path form (the dialog pre-fills the old host's folder)
+/// is refused on the target before the host is asked for anything: "no such session" would mean
+/// the check came too late.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_folder_in_the_other_os_form_is_refused_before_the_host_is_asked() {
+    let n = node("os-path");
+    let foreign = if cfg!(windows) { "/Users/me/WorkTimeAnalysis" } else { r"C:\Users\me\WorkTimeAnalysis" };
+    for cwd in [foreign, "relative/folder"] {
+        let e = import_local(&n.state, "no-such-session", cwd).await.unwrap_err().to_string();
+        assert!(e.contains("isn't a full path on this computer"), "code.import {cwd}: {e}");
+        let e = take_over_local(&n.state, "no-such-session", cwd).await.unwrap_err().to_string();
+        assert!(e.contains("isn't a full path on this computer"), "code.take_over {cwd}: {e}");
+    }
+}
+
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn peer_and_agent_named_paths_on_a_share_are_refused_before_they_are_touched() {
@@ -526,9 +552,13 @@ async fn remote_session_commands_and_terminal() {
     let note = a.state.db.get_setting(&format!("mesh.handoff.{}", s.id)).unwrap().unwrap();
     assert!(note.contains("taking over") && note.contains("User: hi"), "{note}");
 
-    // B only views the session: its partial transcript must not replace the host's cache.
-    save_code_transcript(&b.state, s.id.clone(), r#"{"v":1,"entries":[],"toolCalls":{}}"#.into()).await.unwrap();
-    assert_eq!(b.state.db.code_transcript(&s.id).unwrap(), None);
+    // B only views the session: its save goes to the host, the only writer of the cache. The cell is
+    // synced back, so B's copy is whatever the host holds once replication lands, not something B
+    // wrote (pb-20261121-05: asserting `None` raced that replication).
+    let partial = r#"{"v":1,"entries":[],"toolCalls":{}}"#;
+    save_code_transcript(&b.state, s.id.clone(), partial.into()).await.unwrap();
+    assert_eq!(a.state.db.code_transcript(&s.id).unwrap().as_deref(), Some(partial), "the save landed on the host");
+    until("the host's cache reaches B", 20, || b.state.db.code_transcript(&s.id).unwrap() == a.state.db.code_transcript(&s.id).unwrap()).await;
     save_code_transcript(&a.state, s.id.clone(), r#"{"v":1,"entries":[{"kind":"user","text":"host"}],"toolCalls":{}}"#.into())
         .await
         .unwrap();
@@ -918,7 +948,7 @@ async fn phone_chat_runs_on_the_picked_computer() {
         base_url: "http://127.0.0.1:9/v1".into(),
         has_key: true,
             auth_mode: Default::default(),
-            claude_config_dir: None, grok_home: None,
+            claude_config_dir: None, grok_home: None, gemini_home: None,
         };
     db.upsert_provider(&prov, Some("k")).unwrap();
     let model = db::Model {
@@ -992,7 +1022,7 @@ async fn manual_phone_gateway() {
         base_url: std::env::var("PATCHBAY_MOCK_URL").unwrap_or_else(|_| "http://127.0.0.1:8765/v1".into()),
         has_key: true,
             auth_mode: Default::default(),
-            claude_config_dir: None, grok_home: None,
+            claude_config_dir: None, grok_home: None, gemini_home: None,
         };
     db.upsert_provider(&p, Some("mock-key")).unwrap();
     for (id, model) in [("m-echo", "mock-echo"), ("m-agent", "mock-agent")] {
@@ -1417,7 +1447,7 @@ async fn usage_limit_stops_claude_turns() {
         has_key: false,
         auth_mode: db::AuthMode::ClaudeLogin,
         claude_config_dir: Some("/tmp/pb-other-claude".into()),
-        grok_home: None,
+        grok_home: None, gemini_home: None,
     };
     a.state.db.upsert_provider(&teams, None).unwrap();
     let model = db::Model {
@@ -1533,7 +1563,7 @@ async fn a_session_is_gated_only_by_its_own_accounts_report() {
                     has_key: false,
                     auth_mode: db::AuthMode::ClaudeLogin,
                     claude_config_dir: Some(dir.to_string_lossy().into_owned()),
-                    grok_home: None,
+                    grok_home: None, gemini_home: None,
                 },
                 None,
             )
@@ -1621,6 +1651,7 @@ async fn a_grok_seat_gates_its_own_sessions() {
                     auth_mode: mode,
                     claude_config_dir: None,
                     grok_home,
+                    gemini_home: None,
                 },
                 None,
             )
@@ -2872,7 +2903,12 @@ async fn an_agent_created_session_is_never_looser_than_its_creator() {
         take_agent_message(&mut rx).await
     };
     let (r, _) = tokio::join!(create, child_side);
-    assert_eq!(r.unwrap()["permissionMode"], "default");
+    let created = r.unwrap();
+    assert_eq!(created["permissionMode"], "default");
+    let _ = std::fs::remove_file(a.state.data_dir.join("teams.db")); // Simulate loss after the first launch.
+    let child_id = created["sessionId"].as_str().unwrap();
+    let err = code_start_local(&a.state, child_id.to_owned()).await.unwrap_err();
+    assert!(err.to_string().contains("team history is unavailable"), "{err}");
 }
 
 /// A session whose agent fails to start is removed, so it doesn't use up the creator's cap.
@@ -3207,7 +3243,7 @@ async fn resume_apply_unchecked_clears_the_flag_without_any_prompt() {
         has_key: true,
         auth_mode: Default::default(),
         claude_config_dir: None,
-        grok_home: None,
+        grok_home: None, gemini_home: None,
     };
     a.state.db.upsert_provider(&prov, Some("mock-key")).unwrap();
     a.state
@@ -3266,7 +3302,7 @@ async fn resume_guards_skip_live_sessions_and_send_each_checked_once() {
         has_key: true,
         auth_mode: Default::default(),
         claude_config_dir: None,
-        grok_home: None,
+        grok_home: None, gemini_home: None,
     };
     a.state.db.upsert_provider(&prov, Some("mock-key")).unwrap();
     a.state
@@ -3366,7 +3402,7 @@ async fn resume_apply_checked_sends_exactly_one_fixed_continue_prompt() {
         has_key: true,
         auth_mode: Default::default(),
         claude_config_dir: None,
-        grok_home: None,
+        grok_home: None, gemini_home: None,
     };
     a.state.db.upsert_provider(&prov, Some("mock-key")).unwrap();
     a.state
@@ -3427,7 +3463,7 @@ async fn dropped_peer_messages_notify_each_sender_with_id_and_reason() {
         has_key: true,
         auth_mode: Default::default(),
         claude_config_dir: None,
-        grok_home: None,
+        grok_home: None, gemini_home: None,
     };
     n.state.db.upsert_provider(&prov, Some("mock-key")).unwrap();
     n.state
@@ -3504,7 +3540,7 @@ fn seed_mock_model(n: &Node) {
         has_key: true,
         auth_mode: Default::default(),
         claude_config_dir: None,
-        grok_home: None,
+        grok_home: None, gemini_home: None,
     };
     n.state.db.upsert_provider(&prov, Some("mock-key")).unwrap();
     n.state
@@ -3574,7 +3610,7 @@ async fn quit_notices_leave_no_orphan_agents() {
 /// where the mesh lives (their sink is a collector with no mesh behind it).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dropped_queue_tells_its_senders() {
-    let n = node("alpha-queue-dropped");
+    let (n, log) = logging_node("alpha-queue-dropped");
     seed_mock_model(&n);
     let proj = n.dir.join("proj");
     repo(&proj);
@@ -3589,6 +3625,7 @@ async fn a_dropped_queue_tells_its_senders() {
         preview: "queued words".into(),
         origin: format!("agent:{}:{}", n.state.mesh.node_id(), sender.id),
     }];
+    let t0 = std::time::Instant::now();
     crate::on_code_event(
         &n.state,
         code::acp::Envelope {
@@ -3613,11 +3650,47 @@ async fn a_dropped_queue_tells_its_senders() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+    // Cloned first: the guard must not be held (and poisoned) while the assertion panics.
+    let seen = n.events.lock().unwrap().clone();
+    // How long each event took, so a failure says late or never, and a pass says how close it ran.
+    let at: Vec<u128> = n.stamps.lock().unwrap().iter().map(|t| t.saturating_duration_since(t0).as_millis()).collect();
+    let timeline: Vec<String> = seen
+        .iter()
+        .zip(&at)
+        .map(|((_, p), ms)| {
+            let who: String = p["codeSessionId"].as_str().unwrap_or("?").chars().take(8).collect();
+            format!("{ms}ms {who}:{}", p["event"]["type"].as_str().unwrap_or("?"))
+        })
+        .collect();
     assert!(
         woke,
-        "the sender was told its queued message was dropped: {:?}",
-        n.events.lock().unwrap()
+        "the sender was told its queued message was dropped. Timeline since the drop: {timeline:?}. Notices that failed to deliver: {:?}. Events: {seen:?}",
+        lines_with(&log, "msg_notice_failed")
     );
+    eprintln!("a_dropped_queue_tells_its_senders: notice seen after {}ms", t0.elapsed().as_millis());
+}
+
+/// pb-20261117-22: a notice to a sender that cannot be delivered leaves a line in the delivery log
+/// (and a warning) instead of vanishing: the two session ids and a fixed `kind`, never the message
+/// or the error's text. A sender session that does not exist is the plainest refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_notice_that_cannot_be_delivered_is_logged_with_its_kind() {
+    let (n, log) = logging_node("alpha-notice-failed");
+    seed_mock_model(&n);
+    let proj = n.dir.join("proj");
+    repo(&proj);
+    let target = n.state.db.create_code_session(&proj.to_string_lossy(), None, "patchbay", "default").unwrap();
+    let entries = vec![code::acp::QueuedAgentMessage {
+        message_id: "m-lost-1".into(),
+        preview: "SECRET-BODY".into(),
+        origin: format!("agent:{}:no-such-session", n.state.mesh.node_id()),
+    }];
+    crate::tell_senders_of_dropped(&n.state, &target.id, entries, "the agent crashed").await;
+    let lines = lines_with(&log, "msg_notice_failed");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("kind=not_found"), "{}", lines[0]);
+    assert!(lines[0].contains("sender=no-such-session") && lines[0].contains(&format!("target={}", target.id)), "{}", lines[0]);
+    assert!(!log_text(&log).contains("SECRET-BODY") && !lines[0].contains("crashed"), "no message text in the log");
 }
 
 /// pb-20261107-30 (advisor condition 2, NO LOOP): once the quit guard is set, deliveries to
@@ -4596,36 +4669,12 @@ async fn the_coordinator_fills_a_pool_and_releases_workers() {
     let _ = s2;
 }
 
-async fn confirm_worker_restarts_for_test<F, T>(state: &AppState, future: F) -> T
-where
-    F: std::future::Future<Output = T>,
-{
-    tokio::pin!(future);
-    loop {
-        tokio::select! {
-            result = &mut future => return result,
-            _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {
-                let confirmations: Vec<_> = state.code.pending.lock().unwrap().iter()
-                    .filter(|(_, pending)| pending.local_human_only)
-                    .map(|(id, pending)| (id.clone(), pending.session_id.clone()))
-                    .collect();
-                for (id, session_id) in confirmations {
-                    state.code.respond_permission(&id, Some("confirm_restart".into()), Some(&session_id)).unwrap();
-                }
-            }
-        }
-    }
-}
-
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn codex_project_config_gate_runs_on_restart_and_redispatch_routes() {
     let a = node("codex-project-config-gate");
     // Route coverage exercises the gate independently of whether npm can resolve codex-acp in
     // this test environment. The ACP slow-start/stop path has its own real child-process test.
-    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
-    *a.state.code.test_started.lock().unwrap() = Some(started_tx);
-    let mut held_test_agents = Vec::new();
     let p = a.dir.join("proj");
     repo(&p);
     let cwd = p.to_string_lossy().into_owned();
@@ -4666,175 +4715,35 @@ async fn codex_project_config_gate_runs_on_restart_and_redispatch_routes() {
     assert!(legacy_err.contains("unsupported agent"), "legacy worker kind: {legacy_err}");
     tdb.execute("UPDATE templates SET seats_json=?1 WHERE id=?2", rusqlite::params![allowed_seats, template.id]).unwrap();
     drop(tdb);
-    let dispatch = |state: AppState, coordinator: String, item: String| async move {
-        teams::call_tool(&state, &coordinator, "dispatch_item", &json!({"itemId": item, "agent": "codex"})).await
-    };
     let first = teams::call_tool(&a.state, &coord.id, "dispatch_item", &json!({"itemId":item_id,"agent":"codex"})).await.unwrap();
     let worker = first["sessionId"].as_str().unwrap().to_owned();
     let worktree = PathBuf::from(first["worktree"].as_str().unwrap());
 
-    // A known worker fails closed if the Teams DB disappears before a start/relaunch.
-    let scan_probe = std::sync::Arc::new(teams::process_sweep::TestProcessSource::empty());
-    a.state.code.set_process_source_for_test(scan_probe.clone());
-    let teams_db = a.dir.join("teams.db");
-    let teams_db_saved = a.dir.join("teams.db.saved");
-    std::fs::rename(&teams_db, &teams_db_saved).unwrap();
-    let start = tokio::time::timeout(
-        std::time::Duration::from_millis(500),
-        code_start_local(&a.state, worker.clone()),
-    ).await;
-    if start.is_err() {
-        a.state.code.stop(&worker);
-    }
-    let err = start.expect("missing teams.db must refuse before waiting for confirmation").unwrap_err().to_string();
-    assert!(err.contains("teams.db is missing for a known worker"), "{err}");
-    assert_eq!(scan_probe.scan_count.load(std::sync::atomic::Ordering::SeqCst), 0, "missing teams.db must refuse before the process sweep");
-    assert!(!a.state.code.pending.lock().unwrap().values().any(|p| p.local_human_only), "missing teams.db must refuse before requesting confirmation");
-    std::fs::rename(&teams_db_saved, &teams_db).unwrap();
+    // A missing assignment must refuse the Codex spawn gate even when the old item path exists.
+    let t = rusqlite::Connection::open(a.state.data_dir.join("teams.db")).unwrap();
+    t.execute("UPDATE dispatches SET worktree_path=NULL WHERE session_id=?1", [&worker]).unwrap();
+    let session = a.state.db.get_code_session(&worker).unwrap().unwrap();
+    let err = teams::gate_session_start(&a.state.db, &a.state.data_dir, &a.state.code, &session).unwrap_err();
+    assert!(format!("{err:#}").contains("assigned worktree"));
+    t.execute("UPDATE dispatches SET worktree_path=?2 WHERE session_id=?1", rusqlite::params![worker, worktree.canonicalize().unwrap().to_string_lossy()]).unwrap();
+    drop(t);
 
-    // A second live session rooted within the assigned worktree prevents a restart.
-    let nested = worktree.join("nested");
-    std::fs::create_dir_all(&nested).unwrap();
-    let other = a.state.db.create_code_session(&nested.to_string_lossy(), None, "opencode", "default").unwrap();
-    let _other_rx = a.state.code.attach_test_agent(&other.id);
-    let err = confirm_worker_restarts_for_test(&a.state, teams::team_restart_member(&a.state, team.id.clone(), worker.clone())).await.unwrap_err().0;
-    assert!(err.contains("live session root"), "overlapping live session: {err}");
-    a.state.code.stop(&other.id);
-
-    // Coordinator attach and start routes refuse a root in the worker worktree.
+    // An existing worker cannot start again in the same worktree.
+    let err = code_start_local(&a.state, worker.clone()).await.unwrap_err().to_string();
+    assert!(err.contains("worker cannot restart in the same worktree"), "{err}");
+    // The project-config gate remains effective on the assigned worktree.
+    std::fs::create_dir_all(p.join(".codex")).unwrap();
+    let err = teams::gate_session_start(&a.state.db, &a.state.data_dir, &a.state.code, &session).unwrap_err().to_string();
+    assert!(err.contains(".codex"), "{err}");
+    std::fs::remove_dir_all(p.join(".codex")).unwrap();
+    std::fs::create_dir_all(worktree.join(".agents")).unwrap();
+    let err = teams::gate_session_start(&a.state.db, &a.state.data_dir, &a.state.code, &session).unwrap_err().to_string();
+    assert!(err.contains(".agents"), "{err}");
+    std::fs::remove_dir_all(worktree.join(".agents")).unwrap();
+    // A coordinator may not attach inside a worker worktree.
     let intruder = a.state.db.create_code_session(&worktree.to_string_lossy(), None, "opencode", "default").unwrap();
     let err = teams::team_attach(&a.state, team.id.clone(), intruder.id.clone(), "coordinator".into()).await.unwrap_err().0;
-    assert!(err.contains("inside worker worktree"), "coordinator attach: {err}");
-    let err = code_start_local(&a.state, intruder.id.clone()).await.unwrap_err().to_string();
-    assert!(err.contains("inside worker worktree"), "coordinator start: {err}");
-
-    // The recorded project root is also gated; presence refuses regardless of base tracking.
-    std::fs::create_dir_all(p.join(".codex")).unwrap();
-    let err = confirm_worker_restarts_for_test(&a.state, teams::team_restart_member(&a.state, team.id.clone(), worker.clone())).await.unwrap_err().0;
-    assert!(err.contains(".codex exists in the team's project root"), "root checkout config: {err}");
-    std::fs::remove_dir_all(p.join(".codex")).unwrap();
-
-    std::fs::create_dir_all(worktree.join(".agents/skills/x")).unwrap();
-    std::fs::write(worktree.join(".agents/skills/x/run.sh"), "echo marker\n").unwrap();
-    let err = confirm_worker_restarts_for_test(&a.state, teams::team_restart_member(&a.state, team.id.clone(), worker.clone())).await.unwrap_err().0;
-    assert!(err.contains(".agents"), "worker skill restart: {err}");
-    std::fs::remove_dir_all(worktree.join(".agents")).unwrap();
-
-    // Red 1: a worker-planted Codex project MCP config refuses restart at the real route.
-    std::fs::create_dir_all(worktree.join(".codex")).unwrap();
-    std::fs::write(worktree.join(".codex/config.toml"), "[mcp_servers.planted]\ncommand = \"marker\"\n").unwrap();
-    let err = confirm_worker_restarts_for_test(&a.state, teams::team_restart_member(&a.state, team.id.clone(), worker.clone())).await.unwrap_err().0;
-    assert!(err.contains(".codex"), "{err}");
-    assert!(worktree.join(".codex/config.toml").exists(), "Patchbay must not clean worker files");
-
-    // Release, reopen the item, and route a redispatch into the existing worktree.
-    teams::call_tool(&a.state, &coord.id, "item_set", &json!({"itemId":item_id,"status":"awaiting-review"})).await.unwrap();
-    teams::call_tool(&a.state, &coord.id, "member_release", &json!({"sessionId":worker})).await.unwrap();
-    a.state.code.stop(&worker);
-    teams::call_tool(&a.state, &coord.id, "item_set", &json!({"itemId":item_id,"status":"triaged"})).await.unwrap();
-    let err = confirm_worker_restarts_for_test(&a.state, dispatch(a.state.clone(), coord.id.clone(), item_id.clone())).await.unwrap_err().to_string();
-    assert!(err.contains(".codex"), "redispatch route: {err}");
-
-    // Red 2: even an empty, untracked config root has to refuse a real redispatch.
-    std::fs::remove_file(worktree.join(".codex/config.toml")).unwrap();
-    let err = confirm_worker_restarts_for_test(&a.state, dispatch(a.state.clone(), coord.id.clone(), item_id.clone())).await.unwrap_err().to_string();
-    assert!(err.contains(".codex"), "empty config directory redispatch: {err}");
-    assert!(worktree.exists(), "refusal must preserve the worktree");
-    std::fs::remove_dir_all(worktree.join(".codex")).unwrap();
-
-    // A root checkout config also refuses a fresh redispatch into an existing worktree.
-    std::fs::create_dir_all(p.join(".codex")).unwrap();
-    let err = confirm_worker_restarts_for_test(&a.state, dispatch(a.state.clone(), coord.id.clone(), item_id.clone())).await.unwrap_err().to_string();
-    assert!(err.contains(".codex"), "root config redispatch: {err}");
-    std::fs::remove_dir_all(p.join(".codex")).unwrap();
-    let clean = teams::call_tool(&a.state, &coord.id, "dispatch_item", &json!({"itemId": item_id, "agent": "patchbay"})).await.unwrap();
-    let worker2 = clean["sessionId"].as_str().unwrap().to_owned();
-    let worktree2 = PathBuf::from(clean["worktree"].as_str().unwrap());
-    assert_eq!(a.state.db.get_code_session(&worker2).unwrap().unwrap().agent, "patchbay");
-    let swap_err = code_set_agent_local(&a.state, &worker2, "cursor", None).await.unwrap_err().to_string();
-    assert!(swap_err.contains("one of this seat's") || swap_err.contains("only Codex and Patchbay"), "worker seat swap allowlist: {swap_err}");
-    code_set_agent_local(&a.state, &worker2, "codex", None).await.unwrap();
-    let config_path = worktree2.join(".codex");
-    *a.state.code.before_second_gate.lock().unwrap() = Some(Box::new(move || {
-        std::fs::create_dir_all(&config_path).unwrap();
-    }));
-    let second_gate_err = code_start_local(&a.state, worker2.clone()).await.unwrap_err().to_string();
-    assert!(second_gate_err.contains(".codex"), "second pre-launch gate: {second_gate_err}");
-    std::fs::remove_dir_all(worktree2.join(".codex")).unwrap();
-    code_start_local(&a.state, worker2.clone()).await.unwrap();
-    held_test_agents.push(started_rx.recv().await.expect("seat swap start uses its stand-in agent").1);
-
-    // Root-level Codex config and a worktree-root symlink are refused after a native-to-Codex seat swap.
-    std::fs::write(worktree2.join("config.toml"), "notify = \"marker\"\n").unwrap();
-    let err = confirm_worker_restarts_for_test(&a.state, teams::team_restart_member(&a.state, team.id.clone(), worker2.clone())).await.unwrap_err().0;
-    assert!(err.contains("config.toml"), "root config restart: {err}");
-    std::fs::remove_file(worktree2.join("config.toml")).unwrap();
-    // A symlink named .codex is detected with lstat, without following its target.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::symlink;
-        symlink(p.join("outside"), worktree2.join(".codex")).unwrap();
-        let err = confirm_worker_restarts_for_test(&a.state, teams::team_restart_member(&a.state, team.id.clone(), worker2.clone())).await.unwrap_err().0;
-        assert!(err.contains(".codex"), "config-root symlink restart: {err}");
-        assert!(worktree2.join(".codex").symlink_metadata().unwrap().file_type().is_symlink());
-    }
-}
-
-#[cfg(windows)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn codex_project_config_gate_runs_on_restart_and_redispatch_routes() {
-    let a = node("windows-worker-restart-refusal");
-    let p = a.dir.join("proj");
-    repo(&p);
-    let cwd = p.to_string_lossy().into_owned();
-    let coord = a.state.db.create_code_session(&cwd, None, "opencode", "default").unwrap();
-    let builtin = teams::list_team_templates(&a.state).await.unwrap().into_iter().find(|t| t.id == "builtin-triage-desk").unwrap();
-    let mut value = serde_json::to_value(&builtin).unwrap();
-    for seat in value["seats"].as_array_mut().unwrap() {
-        if seat["seat"] == "workers" {
-            seat["agent"] = json!("patchbay");
-            seat["model"] = Value::Null;
-            seat["choices"] = json!([{ "agent": "patchbay", "model": null }]);
-            seat["count"] = json!(1);
-            seat["allowUnasked"] = json!(true);
-        }
-    }
-    value["id"] = Value::Null;
-    value["name"] = json!("windows-worker-restart-refusal");
-    let template = teams::save_template(&a.state, serde_json::from_value(value).unwrap()).await.unwrap();
-    let team = teams::create_team(&a.state, serde_json::from_value(json!({
-        "templateId": template.id, "slug": "winreuse", "cwd": cwd,
-        "worktreeRoot": p.join("trees").to_string_lossy(),
-        "exportDir": a.dir.join("out").to_string_lossy(),
-    })).unwrap()).await.unwrap();
-    teams::team_attach(&a.state, team.id.clone(), coord.id.clone(), "coordinator".into()).await.unwrap();
-    let item = teams::call_tool(&a.state, &coord.id, "item_add", &json!({"title":"used worktree","plan":""})).await.unwrap();
-    let item_id = item["id"].as_str().unwrap().to_owned();
-    let first = teams::call_tool(&a.state, &coord.id, "dispatch_item", &json!({"itemId":item_id,"agent":"patchbay"})).await.unwrap();
-    let worker = first["sessionId"].as_str().unwrap().to_owned();
-    let worktree = PathBuf::from(first["worktree"].as_str().unwrap());
-    assert!(a.state.code.is_running(&worker), "fresh dispatch starts the initial worker");
-    let tdb = rusqlite::Connection::open(a.state.data_dir.join("teams.db")).unwrap();
-    tdb.execute(
-        "INSERT INTO session_process_facts(session_id, launched_as_worker) VALUES (?1, 1)",
-        [&worker],
-    ).unwrap();
-    drop(tdb);
-
-    // The product refuses Windows in-place reuse before confirmation or launch.
-    std::fs::create_dir_all(worktree.join(".codex")).unwrap();
-    let err = teams::team_restart_member(&a.state, team.id.clone(), worker.clone()).await.unwrap_err().0;
-    assert!(err.contains("cannot restart or redispatch this worker in place on Windows because process sweeping is unsupported; create a fresh worker worktree"), "Windows restart refusal: {err}");
-    assert!(!a.state.code.pending.lock().unwrap().values().any(|p| p.local_human_only), "Windows refusal must not request confirmation");
-    assert!(!a.state.code.is_running(&worker), "Windows refusal must not launch a replacement agent");
-    assert!(a.state.db.get_code_session(&worker).unwrap().is_some(), "the previous worker session must be retained");
-    let tdb = rusqlite::Connection::open(a.state.data_dir.join("teams.db")).unwrap();
-    let active_old_member: bool = tdb.query_row(
-        "SELECT EXISTS(SELECT 1 FROM members WHERE team_id=?1 AND session_id=?2 AND left_at IS NULL)",
-        rusqlite::params![team.id, worker], |r| r.get(0),
-    ).unwrap();
-    drop(tdb);
-    assert!(active_old_member, "a refused restart must retain the old member");
+    assert!(err.contains("inside worker worktree"), "{err}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4875,198 +4784,158 @@ async fn codex_project_root_config_gate_blocks_fresh_dispatch() {
     assert!(a.state.db.list_code_sessions().unwrap().iter().all(|s| !Path::new(&s.cwd).starts_with(&worktree_root)), "root config refusal must happen before an agent launches");
 }
 
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn coordinator_redispatch_into_a_used_worktree_waits_for_local_confirmation() {
-    let a = node("worker-reuse-confirm");
-    let scan_probe = std::sync::Arc::new(teams::process_sweep::TestProcessSource::empty());
-    a.state.code.set_process_source_for_test(scan_probe.clone());
+async fn coordinator_redispatch_creates_a_fresh_worktree() {
+    let a = node("fresh-redispatch");
     let p = a.dir.join("proj");
     repo(&p);
-    let cwd = p.to_string_lossy().into_owned();
-    let coord = a.state.db.create_code_session(&cwd, None, "opencode", "default").unwrap();
+    let coord = a.state.db.create_code_session(&p.to_string_lossy(), None, "opencode", "default").unwrap();
     let builtin = teams::list_team_templates(&a.state).await.unwrap().into_iter().find(|t| t.id == "builtin-triage-desk").unwrap();
     let mut value = serde_json::to_value(&builtin).unwrap();
     for seat in value["seats"].as_array_mut().unwrap() {
-        if seat["seat"] == "workers" {
-            seat["agent"] = json!("patchbay");
-            seat["model"] = Value::Null;
-            seat["choices"] = json!([{ "agent": "patchbay", "model": null }]);
-            seat["count"] = json!(1);
-            seat["allowUnasked"] = json!(true);
-        }
+        if seat["seat"] == "workers" { seat["agent"] = json!("patchbay"); seat["choices"] = json!([{ "agent": "patchbay", "model": null }]); seat["count"] = json!(1); seat["allowUnasked"] = json!(true); }
     }
     value["id"] = Value::Null;
-    value["name"] = json!("worker-reuse-confirm");
+    value["name"] = json!("fresh redispatch");
     let template = teams::save_template(&a.state, serde_json::from_value(value).unwrap()).await.unwrap();
-    let team = teams::create_team(&a.state, serde_json::from_value(json!({
-        "templateId": template.id, "slug": "reuse", "cwd": cwd,
-        "worktreeRoot": p.join("trees").to_string_lossy(),
-        "exportDir": a.dir.join("out").to_string_lossy(),
-    })).unwrap()).await.unwrap();
-    teams::team_attach(&a.state, team.id.clone(), coord.id.clone(), "coordinator".into()).await.unwrap();
-    let item = teams::call_tool(&a.state, &coord.id, "item_add", &json!({"title":"reuse","plan":""})).await.unwrap();
-    let item_id = item["id"].as_str().unwrap().to_owned();
-    teams::HOLD_REUSED_WORKER_CONFIRMATIONS.lock().unwrap().insert(a.state.data_dir.clone());
-    let state = a.state.clone();
-    let coordinator = coord.id.clone();
-    let initial_item = item_id.clone();
-    let mut first_dispatch = tokio::spawn(async move {
-        teams::call_tool(&state, &coordinator, "dispatch_item", &json!({"itemId":initial_item,"agent":"patchbay"})).await
-    });
-    let first_result = tokio::time::timeout(std::time::Duration::from_secs(5), &mut first_dispatch).await;
-    if first_result.is_err() {
-        let pending_confirmation = {
-            a.state.code.pending.lock().unwrap().iter()
-                .find(|(_, entry)| entry.local_human_only)
-                .map(|(id, entry)| (id.clone(), entry.session_id.clone()))
-        };
-        if let Some((id, owner)) = pending_confirmation {
-            let _ = a.state.code.respond_permission(&id, Some("cancel_restart".into()), Some(&owner));
-        }
-        let _ = first_dispatch.await;
-        teams::HOLD_REUSED_WORKER_CONFIRMATIONS.lock().unwrap().remove(&a.state.data_dir);
-        panic!("first dispatch into a fresh worktree must not request restart confirmation");
-    }
-    teams::HOLD_REUSED_WORKER_CONFIRMATIONS.lock().unwrap().remove(&a.state.data_dir);
-    let first = first_result.unwrap().unwrap().unwrap();
-    let first_worker = first["sessionId"].as_str().unwrap().to_owned();
-    let worktree = first["worktree"].as_str().unwrap().to_owned();
-    assert!(
-        !a.state.code.pending.lock().unwrap().values().any(|p| p.local_human_only),
-        "first dispatch into a fresh worktree must not ask for reuse confirmation"
-    );
-
-    let teams_db = rusqlite::Connection::open(a.state.data_dir.join("teams.db")).unwrap();
-    teams_db.execute(
-        "INSERT INTO session_process_facts(session_id, launched_as_worker) VALUES (?1, 1)",
-        [&first_worker],
-    ).unwrap();
-
-    // Restart must hold before spawning. Cancel returns the member to its old seat with no
-    // replacement agent started.
-    teams::HOLD_REUSED_WORKER_CONFIRMATIONS.lock().unwrap().insert(a.state.data_dir.clone());
-    let state = a.state.clone();
-    let restart_team = team.id.clone();
-    let restart_worker = first_worker.clone();
-    let restart = tokio::spawn(async move {
-        teams::team_restart_member(&state, restart_team, restart_worker).await
-    });
-    let (restart_request, restart_owner) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if let Some((id, owner)) = a.state.code.pending.lock().unwrap().iter()
-                .find(|(_, entry)| entry.local_human_only)
-                .map(|(id, entry)| (id.clone(), entry.session_id.clone()))
-            {
-                break (id, owner);
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    }).await.expect("restart must wait at the local-human confirmation");
-    assert!(!a.state.code.is_running(&first_worker), "old process must be stopped before the prompt");
-    a.state.code.respond_permission(&restart_request, Some("cancel_restart".into()), Some(&restart_owner)).unwrap();
-    assert!(restart.await.unwrap().unwrap_err().0.contains("cancelled"));
-    let active_old_member: bool = teams_db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM members WHERE team_id=?1 AND session_id=?2 AND left_at IS NULL)",
-        rusqlite::params![team.id, first_worker], |r| r.get(0),
-    ).unwrap();
-    assert!(active_old_member, "cancel must restore the old member seat");
-
+    let team = teams::create_team(&a.state, serde_json::from_value(json!({"templateId":template.id,"slug":"fresh","cwd":p.to_string_lossy(),"worktreeRoot":p.join("trees").to_string_lossy(),"exportDir":a.dir.join("out").to_string_lossy()})).unwrap()).await.unwrap();
+    teams::team_attach(&a.state, team.id, coord.id.clone(), "coordinator".into()).await.unwrap();
+    let item = teams::call_tool(&a.state, &coord.id, "item_add", &json!({"title":"fresh","plan":""})).await.unwrap();
+    let item_id = item["id"].as_str().unwrap();
+    let first = teams::call_tool(&a.state, &coord.id, "dispatch_item", &json!({"itemId":item_id})).await.unwrap();
+    let old = PathBuf::from(first["worktree"].as_str().unwrap());
+    std::fs::write(old.join("uncommitted.txt"), "keep").unwrap();
     teams::call_tool(&a.state, &coord.id, "item_set", &json!({"itemId":item_id,"status":"awaiting-review"})).await.unwrap();
-    teams::call_tool(&a.state, &coord.id, "member_release", &json!({"sessionId":first_worker})).await.unwrap();
+    teams::call_tool(&a.state, &coord.id, "member_release", &json!({"sessionId":first["sessionId"]})).await.unwrap();
     teams::call_tool(&a.state, &coord.id, "item_set", &json!({"itemId":item_id,"status":"triaged"})).await.unwrap();
-
-    let state = a.state.clone();
-    let coordinator = coord.id.clone();
-    let dispatch_item = item_id.clone();
-    let dispatch = tokio::spawn(async move {
-        teams::call_tool(&state, &coordinator, "dispatch_item", &json!({"itemId":dispatch_item,"agent":"patchbay"})).await
-    });
-    let (request_id, owner) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if let Some((id, owner)) = a.state.code.pending.lock().unwrap().iter()
-                .find(|(_, entry)| entry.local_human_only)
-                .map(|(id, entry)| (id.clone(), entry.session_id.clone()))
-            {
-                break (id, owner);
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    }).await.expect("coordinator redispatch must remain pending at the local-human confirmation");
-    assert!(a.state.code.respond_permission(&request_id, Some("confirm_restart".into()), None).is_err(), "sessionless agent/mesh answer must be refused");
-    {
-        let pending = a.state.code.pending.lock().unwrap();
-        let entry = pending.get(&request_id).unwrap();
-        assert_eq!(entry.offered, ["confirm_restart", "cancel_restart"]);
-        assert!(entry.local_human_only);
-    }
-    a.state.code.respond_permission(&request_id, Some("cancel_restart".into()), Some(&owner)).unwrap();
-    let result = dispatch.await.unwrap();
-    assert!(result.unwrap_err().to_string().contains("cancelled"));
-    teams::HOLD_REUSED_WORKER_CONFIRMATIONS.lock().unwrap().remove(&a.state.data_dir);
-    assert!(
-        !a.state.db.list_code_sessions().unwrap().iter().any(|s| s.cwd == worktree && a.state.code.is_running(&s.id)),
-        "cancelled redispatch must not start a worker"
-    );
+    let second = teams::call_tool(&a.state, &coord.id, "dispatch_item", &json!({"itemId":item_id})).await.unwrap();
+    let fresh = PathBuf::from(second["worktree"].as_str().unwrap());
+    assert_ne!(old, fresh);
+    assert!(old.join("uncommitted.txt").exists());
+    assert!(!fresh.join("uncommitted.txt").exists());
+    assert!(second["note"].as_str().unwrap().contains(old.to_str().unwrap()), "old worktree path must be visible");
+    assert!(!a.state.code.pending.lock().unwrap().values().any(|p| p.local_human_only));
 }
 
-#[cfg(windows)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn coordinator_redispatch_into_a_used_worktree_waits_for_local_confirmation() {
-    let a = node("windows-worker-redispatch-refusal");
-    let p = a.dir.join("proj");
-    repo(&p);
-    let cwd = p.to_string_lossy().into_owned();
-    let coord = a.state.db.create_code_session(&cwd, None, "opencode", "default").unwrap();
-    let builtin = teams::list_team_templates(&a.state).await.unwrap().into_iter().find(|t| t.id == "builtin-triage-desk").unwrap();
-    let mut value = serde_json::to_value(&builtin).unwrap();
-    for seat in value["seats"].as_array_mut().unwrap() {
-        if seat["seat"] == "workers" {
-            seat["agent"] = json!("patchbay");
-            seat["model"] = Value::Null;
-            seat["choices"] = json!([{ "agent": "patchbay", "model": null }]);
-            seat["count"] = json!(1);
-            seat["allowUnasked"] = json!(true);
-        }
-    }
-    value["id"] = Value::Null;
-    value["name"] = json!("windows-worker-redispatch-refusal");
-    let template = teams::save_template(&a.state, serde_json::from_value(value).unwrap()).await.unwrap();
-    let team = teams::create_team(&a.state, serde_json::from_value(json!({
-        "templateId": template.id, "slug": "winredispatch", "cwd": cwd,
-        "worktreeRoot": p.join("trees").to_string_lossy(),
-        "exportDir": a.dir.join("out").to_string_lossy(),
-    })).unwrap()).await.unwrap();
-    teams::team_attach(&a.state, team.id.clone(), coord.id.clone(), "coordinator".into()).await.unwrap();
-    let item = teams::call_tool(&a.state, &coord.id, "item_add", &json!({"title":"used worktree","plan":""})).await.unwrap();
-    let item_id = item["id"].as_str().unwrap().to_owned();
-    let first = teams::call_tool(&a.state, &coord.id, "dispatch_item", &json!({"itemId":item_id,"agent":"patchbay"})).await.unwrap();
-    let first_worker = first["sessionId"].as_str().unwrap().to_owned();
-    let worktree = first["worktree"].as_str().unwrap().to_owned();
-    assert!(a.state.code.is_running(&first_worker), "fresh dispatch starts the initial worker");
-    let teams_db = rusqlite::Connection::open(a.state.data_dir.join("teams.db")).unwrap();
-    teams_db.execute(
-        "INSERT INTO session_process_facts(session_id, launched_as_worker) VALUES (?1, 1)",
-        [&first_worker],
-    ).unwrap();
-    drop(teams_db);
+fn start_guard_fixture(name: &str) -> (Node, crate::db::CodeSession) {
+    let a = node(name);
+    let session = a.state.db.create_code_session(&a.dir.to_string_lossy(), None, "patchbay", "default").unwrap();
+    (a, session)
+}
 
-    teams::call_tool(&a.state, &coord.id, "item_set", &json!({"itemId":item_id,"status":"awaiting-review"})).await.unwrap();
-    teams::call_tool(&a.state, &coord.id, "member_release", &json!({"sessionId":first_worker})).await.unwrap();
-    teams::call_tool(&a.state, &coord.id, "item_set", &json!({"itemId":item_id,"status":"triaged"})).await.unwrap();
-    let sessions_before = a.state.db.list_code_sessions().unwrap().len();
-    let err = teams::call_tool(&a.state, &coord.id, "dispatch_item", &json!({"itemId":item_id,"agent":"patchbay"})).await.unwrap_err().to_string();
-    assert!(err.contains("cannot restart or redispatch this worker in place on Windows because process sweeping is unsupported; create a fresh worker worktree"), "Windows redispatch refusal: {err}");
-    assert!(!a.state.code.pending.lock().unwrap().values().any(|p| p.local_human_only), "Windows refusal must not request confirmation");
-    assert_eq!(a.state.db.list_code_sessions().unwrap().len(), sessions_before, "failed redispatch must not leave a new session");
-    assert!(a.state.db.list_code_sessions().unwrap().iter().all(|s| !(s.cwd == worktree && a.state.code.is_running(&s.id))), "failed redispatch must not launch a replacement agent");
-    let teams_db = rusqlite::Connection::open(a.state.data_dir.join("teams.db")).unwrap();
-    let old_member: bool = teams_db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM members WHERE team_id=?1 AND session_id=?2)",
-        rusqlite::params![team.id, first_worker], |r| r.get(0),
-    ).unwrap();
-    drop(teams_db);
-    assert!(old_member, "the historical worker member must be retained");
+#[tokio::test]
+async fn worker_move_refused_before_stopping_or_packaging() {
+    let (a, session) = start_guard_fixture("worker-move-refusal");
+    let b = node("worker-move-target");
+    link(&a, &b).await;
+    a.state.db.record_worker_provenance(&session.id).unwrap();
+    let mut rx = a.state.code.attach_test_worker(&session.id);
+    let events_before = a.events.lock().unwrap().len();
+    let err = tokio::time::timeout(Duration::from_secs(3), b.state.mesh.rpc_long(a.state.mesh.node_id(), "code.package", json!({"id":session.id,"kind":"handoff","have":[]}))).await.expect("move refusal must not wait on queue drain").unwrap_err();
+    assert!(err.to_string().contains("redispatch"), "{err:#}");
+    assert!(a.state.code.is_running(&session.id), "refusal happens before stop");
+    assert!(!a.state.code.is_moving(&session.id), "refusal must not mark the session moving");
+    assert!(rx.try_recv().is_err(), "refusal must not request a queue drain or shutdown");
+    assert!(!a.events.lock().unwrap()[events_before..].iter().any(|(_, value)| value.to_string().contains("queueDropped")), "refusal must not drop queued prompts");
+}
+
+#[test]
+fn worker_provenance_refuses_when_teams_db_is_missing() {
+    let (a, session) = start_guard_fixture("worker-provenance-no-teams");
+    a.state.db.record_worker_provenance(&session.id).unwrap();
+    let err = teams::claim_fresh_worker_start(&a.state.data_dir, &a.state.db, &a.state.code, &session, false).unwrap_err();
+    assert!(err.to_string().contains("fresh"));
+}
+
+#[test]
+fn fresh_agent_created_child_claims_first_start_only_without_team_history() {
+    let (a, session) = start_guard_fixture("fresh-child-no-teams");
+    assert!(!a.state.data_dir.join("teams.db").exists());
+    a.state.db.set_code_session_created_by(&session.id, "creator").unwrap();
+    a.state.db.record_pending_first_launch(&session.id).unwrap();
+    let child = a.state.db.get_code_session(&session.id).unwrap().unwrap();
+    assert!(teams::claim_fresh_worker_start(&a.state.data_dir, &a.state.db, &a.state.code, &child, false).is_ok());
+    assert!(teams::claim_fresh_worker_start(&a.state.data_dir, &a.state.db, &a.state.code, &child, false).is_err());
+}
+
+#[test]
+fn agent_created_session_refuses_when_teams_db_is_missing() {
+    let (a, session) = start_guard_fixture("creator-no-teams");
+    a.state.db.set_code_session_created_by(&session.id, "creator").unwrap();
+    let session = a.state.db.get_code_session(&session.id).unwrap().unwrap();
+    assert!(teams::claim_fresh_worker_start(&a.state.data_dir, &a.state.db, &a.state.code, &session, false).is_err());
+}
+
+#[test]
+fn user_created_session_is_allowed_when_teams_db_is_missing() {
+    let (a, session) = start_guard_fixture("user-no-teams");
+    assert!(teams::claim_fresh_worker_start(&a.state.data_dir, &a.state.db, &a.state.code, &session, false).is_ok());
+}
+
+#[test]
+fn ordinary_session_is_allowed_with_teams_db_present() {
+    let (a, session) = start_guard_fixture("user-with-teams");
+    teams::TeamsDb::open(&a.state.data_dir).unwrap();
+    assert!(teams::claim_fresh_worker_start(&a.state.data_dir, &a.state.db, &a.state.code, &session, false).is_ok());
+}
+
+#[test]
+fn daemon_known_worker_refuses_when_teams_db_is_missing() {
+    let (a, session) = start_guard_fixture("known-worker-no-teams");
+    teams::remember_worker_session(&session.id);
+    assert!(teams::claim_fresh_worker_start(&a.state.data_dir, &a.state.db, &a.state.code, &session, false).is_err());
+    teams::forget_worker_session(&session.id);
+}
+
+#[test]
+fn process_known_worker_refuses_when_teams_db_is_missing() {
+    let (a, session) = start_guard_fixture("process-worker-no-teams");
+    let _rx = a.state.code.attach_test_worker(&session.id);
+    assert!(teams::claim_fresh_worker_start(&a.state.data_dir, &a.state.db, &a.state.code, &session, false).is_err());
+}
+
+#[tokio::test]
+async fn process_known_worker_stays_refused_after_stop_removes_handle() {
+    let (a, session) = start_guard_fixture("process-worker-pre-stop");
+    let _rx = a.state.code.attach_test_worker(&session.id);
+    let err = code_start_local(&a.state, session.id.clone()).await.unwrap_err();
+    assert!(err.to_string().contains("fresh"), "{err:#}");
+    assert!(!a.state.code.is_running(&session.id));
+}
+
+fn guard_team_fixture(name: &str) -> (Node, crate::db::CodeSession, teams::Team) {
+    let (a, session) = start_guard_fixture(name);
+    let t = teams::TeamsDb::open(&a.state.data_dir).unwrap();
+    let team = t.create_team(teams::NewTeam {
+        template_id: "builtin-triage-desk".into(), slug: "guard".into(),
+        cwd: a.dir.to_string_lossy().into_owned(), id_prefix: Some("G".into()),
+        pr_base: None, worktree_root: None, project_rules: None, export_dir: None,
+    }).unwrap();
+    (a, session, team)
+}
+
+#[test]
+fn manually_attached_worker_refuses_in_place_start() {
+    let (a, session, team) = guard_team_fixture("manual-worker");
+    teams::TeamsDb::open(&a.state.data_dir).unwrap().attach(&team.id, &session.id, "workers").unwrap();
+    assert!(teams::claim_fresh_worker_start(&a.state.data_dir, &a.state.db, &a.state.code, &session, false).unwrap_err().to_string().contains("fresh"));
+}
+
+#[test]
+fn legacy_dispatched_worker_refuses_without_provenance() {
+    let (a, session, team) = guard_team_fixture("legacy-worker");
+    let db = rusqlite::Connection::open(a.dir.join("teams.db")).unwrap();
+    db.execute("INSERT INTO dispatches(team_id,item_id,seat,desk_session,session_id,at) VALUES (?1,'item','workers','desk',?2,0)", rusqlite::params![team.id, session.id]).unwrap();
+    assert!(teams::claim_fresh_worker_start(&a.state.data_dir, &a.state.db, &a.state.code, &session, false).is_err());
+}
+
+#[test]
+fn agent_created_session_refuses_unreadable_team_history() {
+    let (a, session) = start_guard_fixture("creator-corrupt-teams");
+    a.state.db.set_code_session_created_by(&session.id, "creator").unwrap();
+    let session = a.state.db.get_code_session(&session.id).unwrap().unwrap();
+    std::fs::write(a.dir.join("teams.db"), "not a database").unwrap();
+    assert!(teams::claim_fresh_worker_start(&a.state.data_dir, &a.state.db, &a.state.code, &session, false).is_err());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -5122,12 +4991,33 @@ async fn worker_refresh_moves_item_worktree_branch_and_leaves_dispatched_by_unch
     assert!(err.0.contains("mid-turn"), "{err:?}");
     a.state.code.set_busy(&s1, false);
 
-    // Restart worker:
+    let old_path = PathBuf::from(&worktree_str);
+    // A trust-sensitive commit must refuse refresh before any replacement agent starts.
+    std::fs::write(old_path.join(".mcp.json"), "{}").unwrap();
+    git(&old_path, &["add", "--", ".mcp.json"]);
+    git(&old_path, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "sensitive"]);
+    let before = a.state.db.list_code_sessions().unwrap().len();
+    let error = teams::team_restart_member(&a.state, team.id.clone(), s1.clone()).await.unwrap_err();
+    assert!(error.0.contains(".mcp.json"), "{error:?}");
+    assert_eq!(a.state.db.list_code_sessions().unwrap().len(), before);
+    assert!(a.state.db.get_code_session(&s1).unwrap().unwrap().archived_at.is_none());
+    // Remove the planted sensitive commit in this isolated test repository; preserve a benign commit.
+    git(&old_path, &["reset", "--hard", "HEAD^"]);
+    std::fs::write(old_path.join("committed.txt"), "committed").unwrap();
+    git(&old_path, &["add", "--", "committed.txt"]);
+    git(&old_path, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "work"]);
+    let committed = git(&old_path, &["rev-parse", "HEAD"]);
+    std::fs::write(old_path.join("uncommitted.txt"), "preserve").unwrap();
+    // Restart worker in a new worktree:
     let member = teams::team_restart_member(&a.state, team.id.clone(), s1.clone()).await.unwrap();
     let s2 = member.session_id.clone();
     assert_ne!(s1, s2);
     assert_eq!(member.item_id.as_deref(), Some(item_id.as_str()));
     assert_eq!(member.seat, "workers");
+    // The new worker's prompt says its tree is fresh, but never where the old tree is.
+    let seen = teams::REFRESH_PROMPTS.lock().unwrap().iter().find(|(id, _)| *id == s2).map(|(_, p)| p.clone()).expect("refresh prompt recorded");
+    assert!(seen.contains("fresh worktree at the previous worker"), "{seen}");
+    assert!(!seen.contains(&worktree_str) && !seen.contains(old_path.canonicalize().unwrap().to_str().unwrap()), "the old worktree path must not reach the new worker: {seen}");
 
     // Old session is archived
     let old_sess = a.state.db.get_code_session(&s1).unwrap().unwrap();
@@ -5135,7 +5025,14 @@ async fn worker_refresh_moves_item_worktree_branch_and_leaves_dispatched_by_unch
 
     // New session has worktree folder, coordinator as created_by, and worktree remains on disk
     let new_sess = a.state.db.get_code_session(&s2).unwrap().unwrap();
-    assert_eq!(new_sess.cwd, worktree_str);
+    assert_ne!(new_sess.cwd, worktree_str);
+    assert!(Path::new(&worktree_str).join("uncommitted.txt").exists());
+    assert!(!Path::new(&new_sess.cwd).join("uncommitted.txt").exists());
+    assert_eq!(git(Path::new(&new_sess.cwd), &["rev-parse", "HEAD"]), committed);
+    assert!(Path::new(&new_sess.cwd).join("committed.txt").exists());
+    let t = rusqlite::Connection::open(a.state.data_dir.join("teams.db")).unwrap();
+    let recorded: String = t.query_row("SELECT worktree_path FROM dispatches WHERE session_id=?1", [&s2], |r| r.get(0)).unwrap();
+    assert_eq!(PathBuf::from(recorded), PathBuf::from(&new_sess.cwd).canonicalize().unwrap());
     assert_eq!(new_sess.created_by.as_deref(), Some(coord.id.as_str()));
     assert!(Path::new(&worktree_str).exists());
 
@@ -5148,6 +5045,85 @@ async fn worker_refresh_moves_item_worktree_branch_and_leaves_dispatched_by_unch
     let d_sessions = tdb.dispatched_sessions(&coord.id).unwrap();
     assert!(d_sessions.contains(&s1));
     assert!(d_sessions.contains(&s2));
+}
+
+/// A team with a coordinator and two dispatched workers on separate items.
+async fn two_worker_fixture(name: &str) -> (Node, String, String, [(String, PathBuf); 2]) {
+    let a = node(name);
+    let p = a.dir.join("proj");
+    repo(&p);
+    let cwd = p.to_string_lossy().into_owned();
+    let coord = a.state.db.create_code_session(&cwd, None, "grok", "default").unwrap();
+    let raw = teams::list_team_templates(&a.state).await.unwrap().into_iter().find(|t| t.id == "builtin-triage-desk").unwrap();
+    let mut value = serde_json::to_value(&raw).unwrap();
+    for s in value["seats"].as_array_mut().unwrap() {
+        if s["seat"] == "workers" {
+            s["count"] = json!(2);
+            s["agent"] = json!("patchbay");
+            s["choices"] = json!([{ "agent": "codex", "model": null }]);
+            s["allowUnasked"] = json!(true);
+        }
+    }
+    value["id"] = json!(null);
+    value["name"] = json!("two-workers");
+    let tpl = teams::save_template(&a.state, serde_json::from_value(value).unwrap()).await.unwrap();
+    let team = teams::create_team(&a.state, serde_json::from_value(json!({
+        "templateId": tpl.id, "slug": "tw", "idPrefix": "TW", "cwd": cwd, "worktreeRoot": p.join("trees").to_string_lossy(),
+        "exportDir": a.dir.join("out").to_string_lossy(),
+    })).unwrap()).await.unwrap();
+    teams::team_attach(&a.state, team.id.clone(), coord.id.clone(), "coordinator".into()).await.unwrap();
+    let mut workers = Vec::new();
+    for title in ["one", "two"] {
+        let it = teams::call_tool(&a.state, &coord.id, "item_add", &json!({"title": title, "plan": "p"})).await.unwrap();
+        let w = teams::call_tool(&a.state, &coord.id, "dispatch_item", &json!({"itemId": it["id"]})).await.unwrap();
+        workers.push((w["sessionId"].as_str().unwrap().to_owned(), PathBuf::from(w["worktree"].as_str().unwrap())));
+    }
+    let [w1, w2]: [(String, PathBuf); 2] = workers.try_into().unwrap();
+    (a, team.id, coord.id, [w1, w2])
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refresh_refuses_an_old_worktree_swapped_for_a_symlink() {
+    let (a, team, _coord, [(s1, old), (_s2, other)]) = two_worker_fixture("refresh-symlink-swap").await;
+    let trees = a.dir.join("proj/trees");
+    let outside = a.dir.join("outside");
+    repo(&outside);
+    let moved = a.dir.join("old-moved");
+    std::fs::rename(&old, &moved).unwrap();
+    // (a) a link to a repository outside the root, (b) a link at another worker's registered tree.
+    for target in [outside.clone(), other.clone()] {
+        std::os::unix::fs::symlink(&target, &old).unwrap();
+        let (sessions, entries) = (a.state.db.list_code_sessions().unwrap().len(), std::fs::read_dir(&trees).unwrap().count());
+        let err = teams::team_restart_member(&a.state, team.clone(), s1.clone()).await.unwrap_err().0;
+        assert!(err.contains("assigned worktree"), "{target:?}: {err}");
+        assert_eq!(a.state.db.list_code_sessions().unwrap().len(), sessions, "no new session");
+        assert_eq!(std::fs::read_dir(&trees).unwrap().count(), entries, "no new worktree");
+        assert!(a.state.db.get_code_session(&s1).unwrap().unwrap().archived_at.is_none());
+        std::fs::remove_file(&old).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_ordinary_session_inside_a_fresh_workers_tree_is_refused_by_code_start() {
+    let (a, _team, _coord, [(_s1, tree), _]) = two_worker_fixture("seat-swap-overlap").await;
+    let intruder = a.state.db.create_code_session(&tree.to_string_lossy(), None, "patchbay", "default").unwrap();
+    let err = code_start_local(&a.state, intruder.id).await.unwrap_err().to_string();
+    assert!(err.contains("inside worker worktree"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_concurrent_first_starts_of_a_fresh_worker_launch_once() {
+    let (a, _team, _coord, [(s1, _), _]) = two_worker_fixture("concurrent-claim").await;
+    // Dispatch already consumed the one start; put the scratch DB back to "never launched".
+    let raw = rusqlite::Connection::open(a.dir.join("db.sqlite")).unwrap();
+    assert_eq!(raw.execute("UPDATE worker_spawn_provenance SET claimed=0 WHERE session_id=?1", [&s1]).unwrap(), 1);
+    let session = a.state.db.get_code_session(&s1).unwrap().unwrap();
+    let results: Vec<bool> = std::thread::scope(|sc| {
+        let handles: Vec<_> = (0..4).map(|_| sc.spawn(|| teams::claim_fresh_worker_start(&a.state.data_dir, &a.state.db, &a.state.code, &session, false).is_ok())).collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert_eq!(results.iter().filter(|ok| **ok).count(), 1, "{results:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -5441,4 +5417,182 @@ async fn worker_in_own_worktree_attaches_beside_a_live_coordinator() {
     git(&p, &["worktree", "add", "-q", "-b", "w1", "--", &tree.to_string_lossy(), "HEAD"]);
     let worker = a.state.db.create_code_session(&tree.to_string_lossy(), None, "patchbay", "default").unwrap();
     teams::team_attach(&a.state, team, worker.id, "workers".into()).await.unwrap();
+}
+
+// pb-20261117-08: Opening/attaching to a stopped session must NOT start the agent process.
+// A prompt sent to a stopped session starts the agent process on demand.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stopped_session_does_not_spawn_on_attach_but_spawns_on_prompt() {
+    let a = node("no-autostart");
+    let proj = a.dir.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None, "patchbay", "default").unwrap();
+
+    let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
+    *a.state.code.test_started.lock().unwrap() = Some(started_tx);
+
+    // 1. Session is initially stopped.
+    assert!(!a.state.code.is_running(&s.id), "session agent is initially not running");
+
+    // 2. Open / attach: code_attach_local does not start the agent.
+    let attach = code_attach_local(&a.state, &s.id);
+    assert_eq!(attach["running"], false);
+    assert!(!a.state.code.is_running(&s.id), "attaching does not start the agent");
+    assert!(started.try_recv().is_err(), "no process was spawned on attach");
+
+    // 3. Prompting a stopped session:
+    // With on-demand spawn in code_prompt_local: starts the agent and delivers the prompt.
+    // Planted red: without on-demand spawn, code_prompt_local returns Err("agent is not running").
+    let session_id = s.id.clone();
+    let agent_task = tokio::spawn(async move {
+        let (id, mut rx) = tokio::time::timeout(std::time::Duration::from_secs(5), started.recv())
+            .await
+            .expect("timeout waiting for agent to start")
+            .expect("started channel open");
+        assert_eq!(id, session_id);
+        let cmd = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timeout waiting for prompt command")
+            .expect("prompt command received");
+        match cmd {
+            AgentCmd::Prompt { msg, reply, .. } => {
+                assert_eq!(msg.text, "start on prompt");
+                if let Some(reply) = reply {
+                    let _ = reply.send(Ok(code::acp::Delivery::Sent));
+                }
+            }
+            other => panic!("expected AgentCmd::Prompt"),
+        }
+        rx
+    });
+
+    let delivery = code_prompt_local(
+        &a.state,
+        s.id.clone(),
+        "start on prompt".into(),
+        Vec::new(),
+        Vec::new(),
+        "user".into(),
+        None,
+        false,
+    )
+    .await;
+    let _rx = agent_task.await.unwrap();
+    assert!(delivery.is_ok(), "prompt succeeds after on-demand start: {:?}", delivery.err());
+    assert!(a.state.code.is_running(&s.id), "agent is now running");
+}
+
+// pb-20261117-08, condition 3: a window on another computer that opened a STOPPED session (attach
+// started nothing) sees the new process's events after its first send. Events travel to every
+// member by session id, not by a subscription made at attach, so the later start is followed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_remote_view_of_a_stopped_session_follows_the_process_its_first_send_starts() {
+    let (a, b) = (node("alpha-rebind"), node("bravo-rebind"));
+    link(&a, &b).await;
+    let proj = a.dir.join("proj");
+    repo(&proj);
+    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None, "grok", "default").unwrap();
+    until("session reaches B", 10, || b.state.db.get_code_session(&s.id).unwrap().is_some()).await;
+    let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
+    *a.state.code.test_started.lock().unwrap() = Some(started_tx);
+
+    // Opening it from B starts nothing on A.
+    let attach = code_attach(&b.state, s.id.clone(), None, None).await.unwrap();
+    assert_eq!(attach["running"], false, "{attach}");
+    assert!(!a.state.code.is_running(&s.id) && started.try_recv().is_err(), "attach started a process");
+
+    // B's first send starts it on A and delivers the text.
+    let agent = tokio::spawn(async move {
+        let (_, mut rx) = tokio::time::timeout(Duration::from_secs(5), started.recv()).await.expect("no process started").unwrap();
+        match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("no prompt").unwrap() {
+            AgentCmd::Prompt { msg, reply, .. } => {
+                assert_eq!(msg.text, "first send");
+                if let Some(reply) = reply {
+                    let _ = reply.send(Ok(code::acp::Delivery::Sent));
+                }
+            }
+            _ => panic!("expected AgentCmd::Prompt"),
+        }
+        rx
+    });
+    code_prompt(&b.state, s.id.clone(), "first send".into(), vec![], None, None, None).await.unwrap();
+    let _rx = agent.await.unwrap();
+
+    // The new process's output reaches B's window for that session.
+    emit(&a, &s.id, chunk("from the new process"));
+    until("B sees the new process's events", 10, || {
+        b.events.lock().unwrap().iter().any(|(n, p)| {
+            n == code::acp::EVENT && p["codeSessionId"] == s.id.as_str() && p["event"]["update"]["content"]["text"] == "from the new process"
+        })
+    })
+    .await;
+}
+
+/// pb-20261121-01: a permission answer that cannot reach the node hosting the session must fail
+/// loudly and leave the card open. It must never answer `None`, which the agent reports as the
+/// user rejecting the tool call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mesh_rpc_failure_never_answers_a_card() {
+    let a = node("alpha");
+    let proj = a.dir.join("proj");
+    repo(&proj);
+    let s = a.state.db.create_code_session(&proj.to_string_lossy(), None, "claude-code", "default").unwrap();
+    a.state.db.set_code_session_host(&s.id, "ghost-node-not-in-the-mesh", &proj.to_string_lossy(), None).unwrap();
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    a.state.code.pending.lock().unwrap().insert(
+        "card".into(),
+        code::acp::PendingPermission { session_id: s.id.clone(), target_session_id: None, local_human_only: false, offered: vec![], tx },
+    );
+    let res = code_permission_respond(&a.state, "card".into(), None, Some(s.id.clone())).await;
+    assert!(res.is_err(), "the answer did not reach the host, so it is an error");
+    assert!(rx.try_recv().is_err(), "nothing was answered: not `None`, not an option");
+    assert!(a.state.code.pending.lock().unwrap().contains_key("card"), "the card is still open");
+}
+
+/// pb-20261121-01: a turn cancelled with a card open ends with no failure, so its senders would
+/// hear nothing. The cancel's reason becomes the failure kind, once; a turn that ended any other
+/// way drops a note left for it, so a later cancel is never blamed for an older reason.
+#[test]
+fn a_cancelled_turn_tells_its_senders_the_reason_once() {
+    let a = node("alpha");
+    let ended = |outcome: &'static str| turn_failure::TurnEnded {
+        session_id: "s1".into(),
+        turn_id: "t".into(),
+        outcome,
+        messages: vec![],
+        tool_calls: 0,
+        failure: None,
+    };
+    let note = || code::cancel_note::Note::new("the 5-hour usage limit was reached (99%); it resets in 1h", "usage_limit_stop", Some(1_800_000_000));
+    a.state.code.cancel_notes.record("s1", note(), true, true);
+    let mut e = ended("cancelled");
+    assert!(cancel_reason_as_failure(&a.state, &mut e));
+    assert_eq!(e.failure, Some(turn_failure::Failure { kind: "usage_limit_stop".into(), resets_at: Some(1_800_000_000) }));
+    let mut again = ended("cancelled");
+    assert!(!cancel_reason_as_failure(&a.state, &mut again), "told once");
+    // A note left, then the turn finished normally: the note is stale and goes.
+    a.state.code.cancel_notes.record("s1", note(), true, true);
+    assert!(!cancel_reason_as_failure(&a.state, &mut ended("ok")));
+    assert!(!cancel_reason_as_failure(&a.state, &mut ended("cancelled")), "a later cancel is not blamed on the old reason");
+}
+
+// pb-20261121-01: a shutdown ends its turn "aborted" (the agent exits). Its senders are not told (a
+// stop or quit is not a failure), but the reminder for the restarted agent's first prompt survives.
+#[test]
+fn a_shutdown_end_keeps_the_prompt_note_and_tells_no_senders() {
+    let a = node("alpha-shutdown");
+    let mut e = turn_failure::TurnEnded {
+        session_id: "s1".into(),
+        turn_id: "t".into(),
+        outcome: "aborted",
+        messages: vec![],
+        tool_calls: 0,
+        failure: None,
+    };
+    a.state.code.cancel_notes.record("s1", code::cancel_note::Note::new("the session was stopped", "shutdown", None), true, true);
+    assert!(!cancel_reason_as_failure(&a.state, &mut e), "senders are not told on a shutdown");
+    assert!(e.failure.is_none());
+    assert!(a.state.code.cancel_notes.take_for_senders("s1").is_none(), "the senders note is gone");
+    let kept = a.state.code.cancel_notes.take_for_prompt("s1").expect("the restarted agent is still told");
+    assert_eq!(kept.kind, "shutdown");
 }

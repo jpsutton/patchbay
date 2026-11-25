@@ -4,6 +4,7 @@ import { memberName, memberOnline, remoteHost, useStore } from "../lib/store";
 import { input } from "../settings/ProviderPage";
 import { MonitorIcon } from "../components/icons";
 import { isRemoteApp } from "../lib/platform";
+import { fullPathOn } from "../lib/pathOf";
 import { Dot } from "../components/Dot";
 
 /** "on <computer>" next to a session hosted elsewhere in the mesh. */
@@ -50,11 +51,23 @@ export function MoveDialog({
   const [target, setTarget] = useState(() =>
     takeOver ? (mesh?.nodeId ?? "") : (targets.find((m) => m.state === "self")?.nodeId ?? targets.find((m) => m.state !== "offline")?.nodeId ?? ""),
   );
-  const [cwd, setCwd] = useState(session.cwd);
+  const osOf = (id: string) => mesh?.members.find((m) => m.nodeId === id)?.os;
+  // The old host's folder is offered only where it is a full path; a Windows folder on a Mac
+  // (or the reverse) starts blank instead. Unknown OS (older peer): offered as before.
+  const fits = (id: string) => fullPathOn(session.cwd, osOf(id)) !== false;
+  const [cwd, setCwd] = useState(() => (fits(target) ? session.cwd : ""));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const hostName = memberName(mesh, host);
   const targetName = memberName(mesh, target);
+  const targetOs = osOf(target);
+  const example = targetOs === "windows" ? String.raw`C:\Users\…\repo` : targetOs === "macos" ? "/Users/…/repo" : "/home/…/repo";
+  const wrongForm = cwd.trim() !== "" && fullPathOn(cwd, targetOs) === false;
+  const pickTarget = (id: string) => {
+    setTarget(id);
+    // Only the untouched pre-fill follows the target; a folder the user typed stays.
+    if (cwd === session.cwd || cwd === "") setCwd(fits(id) ? session.cwd : "");
+  };
 
   useEffect(() => {
     // Capture phase + preventDefault so the global Esc shortcut doesn't also stop the turn.
@@ -102,7 +115,7 @@ export function MoveDialog({
         {!takeOver && (
           <label className="flex flex-col gap-1 text-xs">
             <span className="text-muted">Computer</span>
-            <select className={input} value={target} onChange={(e) => setTarget(e.target.value)}>
+            <select className={input} value={target} onChange={(e) => pickTarget(e.target.value)}>
               {targets.map((m) => (
                 <option key={m.nodeId} value={m.nodeId} disabled={m.state === "offline"}>
                   {m.name}
@@ -114,11 +127,22 @@ export function MoveDialog({
         )}
         <label className="flex flex-col gap-1 text-xs">
           <span className="text-muted">Folder on {takeOver ? "this computer" : targetName || "that computer"}</span>
-          <input className={`${input} font-mono text-xs`} value={cwd} onChange={(e) => setCwd(e.target.value)} />
-          <span className="text-[12px] text-faint">
-            {takeOver
-              ? "The folder must already exist. Its files are used as they are."
-              : "An existing checkout of the same repository is reused; it must have no uncommitted changes. A missing folder is created."}
+          <input
+            className={`${input} font-mono text-xs`}
+            value={cwd}
+            placeholder={targetOs ? example : undefined}
+            aria-invalid={wrongForm || undefined}
+            aria-describedby="move-folder-help"
+            onChange={(e) => setCwd(e.target.value)}
+          />
+          <span id="move-folder-help" className={`text-[12px] ${wrongForm ? "text-danger" : "text-faint"}`}>
+            {wrongForm
+              ? `Not a full path on ${targetName}; use one like ${example}.`
+              : !cwd.trim() && !fits(target)
+                ? `${hostName}'s folder (${session.cwd}) isn't a path on ${targetName}. Enter where the repository is there, like ${example}.`
+                : takeOver
+                  ? "The folder must already exist. Its files are used as they are."
+                  : "An existing checkout of the same repository is reused; it must have no uncommitted changes. A missing folder is created."}
           </span>
         </label>
         {error && (
@@ -132,7 +156,7 @@ export function MoveDialog({
           </button>
           <button
             className="h-[34px] rounded-lg bg-accent px-3.5 text-xs font-semibold text-accent-fg disabled:opacity-40"
-            disabled={busy || !cwd.trim() || (!takeOver && !target)}
+            disabled={busy || !cwd.trim() || wrongForm || (!takeOver && !target)}
             onClick={go}
           >
             {busy ? (takeOver ? "Taking over…" : "Moving…") : takeOver ? "Take over here" : "Move"}

@@ -156,6 +156,28 @@ fn mcp_log_append(path: &Path, line: &str) {
     })();
 }
 
+/// Why a notice to a sender was refused, as a fixed word for the log. Matches on the refusal's
+/// leading text only, so no title, id or account detail reaches the log. `plan_limit` is the
+/// recipient's usage-limit stop (`Not sent. ...`), which a notice can hit like any prompt.
+pub(crate) fn notice_failure_kind(e: &anyhow::Error) -> &'static str {
+    let t = e.to_string();
+    if t.starts_with("Not sent.") {
+        "plan_limit"
+    } else if t.contains("agent stopped") {
+        "agent_stopped"
+    } else if t.contains("is closing") {
+        "closing"
+    } else if t.contains("not found") {
+        "not_found"
+    } else if t.contains("archived") {
+        "archived"
+    } else if t.contains("not hosted") || t.contains("no longer hosted") || t.contains("being moved") {
+        "not_hosted"
+    } else {
+        "other"
+    }
+}
+
 fn mcp_log_event(path: Option<&Path>, event: &str, fields: &[(&str, String)]) {
     let Some(path) = path else { return };
     let mut line = format!("ts={} event={event}", now_ms());
@@ -378,6 +400,34 @@ impl AgentMessagingBridge {
         let mut all = vec![("src", "delivery".to_owned())];
         all.extend(fields.iter().map(|(k, v)| (*k, safe_field(v))));
         mcp_log_event(self.mcp_log_path.as_deref(), event, &all);
+    }
+
+    /// A usage guard cancelled `session`'s turn (pb-20261121-01). `account` is hashed here so the
+    /// log never holds a login's name or id; `card_open` says whether an approval card was answered
+    /// "cancelled" by it.
+    pub(crate) fn log_guard_stop(&self, plan: &str, account: &str, percent: Option<u32>, session: &str, card_open: bool) {
+        use sha2::{Digest, Sha256};
+        let hash: String = Sha256::digest(account.as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect();
+        let mut fields = vec![
+            ("plan", plan.to_owned()),
+            ("account", hash),
+            ("session", session.to_owned()),
+            ("card_open", card_open.to_string()),
+        ];
+        if let Some(p) = percent {
+            fields.push(("percent", p.to_string()));
+        }
+        self.log_delivery_line("usage_guard_stop", &fields);
+    }
+
+    /// A notice to a sender (a dropped queue, a failed turn) that could not be handed over: the
+    /// sender and target sessions and a structured `kind` (see [`notice_failure_kind`]), never the
+    /// error's text, a title or a message body.
+    pub(crate) fn log_notice_failed(&self, sender: &str, target: &str, kind: &str) {
+        self.log_delivery_line(
+            "msg_notice_failed",
+            &[("sender", sender.to_owned()), ("target", target.to_owned()), ("kind", kind.to_owned())],
+        );
     }
 
     /// The message was handed to the target: `delivery` is `sent` (a new turn) or `steered` (into
@@ -1386,6 +1436,20 @@ impl AgentMessagingBridge {
 
 #[cfg(test)]
 mod tests {
+    /// pb-20261117-22: the recipient's usage-limit stop reads as its own kind in the delivery log,
+    /// apart from a vanished sender or a stopped agent.
+    #[test]
+    fn a_notice_refusal_is_told_apart_by_its_kind() {
+        let kind = |m: &str| notice_failure_kind(&anyhow::anyhow!("{m}"));
+        assert_eq!(kind("Not sent. Alice's plan is at 99%"), "plan_limit");
+        assert_eq!(kind("agent stopped"), "agent_stopped");
+        assert_eq!(kind("the target session is closing; send again after Patchbay reopens it"), "closing");
+        assert_eq!(kind("source Code session was not found"), "not_found");
+        assert_eq!(kind("target Code session is archived"), "archived");
+        assert_eq!(kind("target session is no longer hosted here"), "not_hosted");
+        assert_eq!(kind("something new"), "other");
+    }
+
     use super::*;
 
     // ---- supervisor-side log of the MCP children Patchbay hosts itself (pb-20261110-12) ----
@@ -2249,6 +2313,26 @@ time.sleep(3600)
         assert_eq!(text.lines().count(), 1, "{text}");
         assert!(text.contains("event=msg_queued ") && text.contains("target=invalid"), "{text}");
         assert!(!text.contains("Quarterly") && !text.contains("forged"), "{text}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// pb-20261121-01: a usage guard's stop is one line per cancelled session in the delivery log,
+    /// with the account as a short hash (never the name or id) and the percent.
+    #[test]
+    fn a_guard_stop_is_logged_with_a_hashed_account() {
+        let dir = temp("guard-stop");
+        let log = dir.join("logs").join("agent-messaging-mcp.log");
+        let (bridge, _listener) = AgentMessagingBridge::bind(Some(log.clone())).unwrap();
+        bridge.log_guard_stop("claude", "someone@example.test:org-1", Some(99), "sess-1", true);
+        bridge.log_guard_stop("cursor", "cursor", None, "sess-2", false);
+        let text = fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = text.lines().filter(|l| l.contains("event=usage_guard_stop")).collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert!(lines[0].contains("plan=claude") && lines[0].contains("percent=99") && lines[0].contains("session=sess-1") && lines[0].contains("card_open=true"), "{}", lines[0]);
+        assert!(lines[1].contains("plan=cursor") && !lines[1].contains("percent=") && lines[1].contains("card_open=false"), "{}", lines[1]);
+        assert!(!text.contains("someone") && !text.contains("example.test"), "the account name must not reach the log: {text}");
+        let account = lines[0].split(' ').find_map(|f| f.strip_prefix("account=")).unwrap();
+        assert_eq!(account.len(), 12, "a short hash: {account}");
         let _ = fs::remove_dir_all(&dir);
     }
 

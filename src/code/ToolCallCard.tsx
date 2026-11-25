@@ -448,7 +448,7 @@ export function PermissionCard({
       .codePermissionRespond(requestId, optionId, sessionId ?? undefined)
       .catch((e) => useStore.getState().setToast(errorText(e)));
   const view = permissionCardView(request, live);
-  const { workerGit, unverified, command: cmd, cwdDisplay, askReason, templateMatch, actions, workerRestartConfirm } = view;
+  const { workerGit, unverified, command: cmd, cwdDisplay, askReason, templateMatch, actions } = view;
   // Worker git (C2): never offer Patchbay's own "always allow" rule button, and never fall back to allow_always.
   const allowId = request.options.find((o) => o.kind === "allow_once")?.optionId;
   const alwaysAllow = async () => {
@@ -472,32 +472,12 @@ export function PermissionCard({
       <button
         key={o.optionId}
         className={`h-[34px] rounded-lg px-3.5 text-xs ${OPTION_STYLE[(full?.kind ?? o.kind) as keyof typeof OPTION_STYLE] ?? "border border-border bg-panel"}`}
-        autoFocus={!!workerRestartConfirm && o.kind === "reject_once"}
         onClick={() => respond(o.optionId)}
       >
         {o.name || full?.name}
       </button>
     );
   };
-  if (workerRestartConfirm) {
-    return (
-      <section
-        aria-label="Worker restart confirmation"
-        className="flex flex-col gap-3 rounded-xl border border-accent/45 bg-accent/[0.06] p-3.5"
-      >
-        <div className="flex items-center gap-2">
-          <Dot className="signal-pulse text-accent" />
-          <span className="text-xs font-medium text-accent-ink">Confirm worker restart</span>
-        </div>
-        <p className="text-sm">{workerRestartConfirm.message}</p>
-        <p className="font-mono text-xs text-muted">
-          Sweep: {workerRestartConfirm.found} found · {workerRestartConfirm.killed} killed · {workerRestartConfirm.remaining} remain · {workerRestartConfirm.unknown} unknown · {workerRestartConfirm.complete ? "complete" : "incomplete"} · {workerRestartConfirm.wallMs} ms
-        </p>
-        {workerRestartConfirm.sweepNote && <p className="text-xs text-muted">{workerRestartConfirm.sweepNote}</p>}
-        <div className="flex flex-wrap items-center justify-end gap-2">{actions.map(btn)}</div>
-      </section>
-    );
-  }
   return (
     <section
       aria-label="Permission required"

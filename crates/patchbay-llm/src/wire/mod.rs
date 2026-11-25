@@ -61,25 +61,32 @@ pub fn default_headers(cfg: &Config) -> Vec<(String, String)> {
     }
 }
 
-/// The human-readable part of an error response body.
-pub fn error_message(body: &str) -> String {
+/// The human-readable part of an error response body, along with any error code.
+pub fn error_details(body: &str) -> (Option<String>, String) {
     let body = body.trim();
     if let Ok(v) = serde_json::from_str::<Value>(body) {
         let e = v.get("error").unwrap_or(&v);
+        let code = e.get("code").and_then(Value::as_str).or_else(|| v.get("code").and_then(Value::as_str)).map(ToOwned::to_owned);
         if let Some(m) = e.get("message").and_then(Value::as_str) {
-            return m.to_owned();
+            return (code, m.to_owned());
         }
         if let Some(m) = e.as_str() {
-            return m.to_owned();
+            return (code, m.to_owned());
         }
         if let Some(m) = v.get("message").and_then(Value::as_str) {
-            return m.to_owned();
+            return (code, m.to_owned());
         }
+        return (code, body.chars().take(400).collect());
     }
     if body.is_empty() {
-        return "empty error response".into();
+        return (None, "empty error response".into());
     }
-    body.chars().take(400).collect()
+    (None, body.chars().take(400).collect())
+}
+
+/// The human-readable part of an error response body.
+pub fn error_message(body: &str) -> String {
+    error_details(body).1
 }
 
 /// An error carried inside a stream event (`{"error": {...}}`).
@@ -95,9 +102,11 @@ pub(crate) fn stream_error(v: &Value) -> Option<Error> {
         .unwrap_or("provider error")
         .to_owned();
     let kind = e.get("type").and_then(Value::as_str).unwrap_or("");
+    let code = e.get("code").and_then(Value::as_str).map(ToOwned::to_owned);
     Some(Error {
         message: msg,
         status: None,
+        code,
         retryable: matches!(kind, "overloaded_error" | "api_error" | "server_error"),
         cancelled: false,
         retry_after: None,

@@ -392,6 +392,10 @@ const CODEX_WORKER_WINDOWS_REFUSED_GAPS: &[&str] = &[
     CODEX_CONFIG_GAP,
 ];
 
+/// Steers Codex to the blocking question tool, which codex-acp turns into a question card;
+/// `request_user_input_async` questions are dropped by the adapter (codex-acp 2.2.2).
+const CODEX_ASK_RULE: &str = "When you need an answer from the user, ask with the request_user_input tool. Never use request_user_input_async: this client does not show its questions.";
+
 /// What Codex does without asking under a session's approval mode: the header's text.
 ///
 /// `cwd`: when set, a dispatched worker whose project fails the F2 git-dir / Windows gate gets the
@@ -1699,11 +1703,22 @@ pub fn prepare(db: &std::sync::Arc<Db>, data_dir: &Path, session: &CodeSession) 
                 ));
             }
             // Merged into every thread's config; `developer_instructions` joins Codex's prompt.
+            let mut config = serde_json::Map::new();
+            let mut rules = rules.clone();
+            // A dotted key sets one flag; a `features` object would replace the user's whole table.
+            // The flag only offers the blocking tool: without the line Codex still picks the async one.
+            if prefs.codex_question_forms {
+                config.insert("features.default_mode_request_user_input".into(), json!(true));
+                if !rules.is_empty() {
+                    rules.push_str("\n\n");
+                }
+                rules.push_str(CODEX_ASK_RULE);
+            }
             if !rules.is_empty() {
-                env.push((
-                    "CODEX_CONFIG".to_owned(),
-                    json!({ "developer_instructions": rules }).to_string(),
-                ));
+                config.insert("developer_instructions".into(), json!(rules));
+            }
+            if !config.is_empty() {
+                env.push(("CODEX_CONFIG".to_owned(), Value::Object(config).to_string()));
             }
         }
         AgentKind::Cursor => {
@@ -2675,7 +2690,7 @@ time.sleep(60)
             has_key: true,
             auth_mode: Default::default(),
             claude_config_dir: None,
-            grok_home: None,
+            grok_home: None, gemini_home: None,
         };
         db.upsert_provider(&p, Some("secret")).unwrap();
         let m = crate::db::Model {
@@ -2780,6 +2795,18 @@ time.sleep(60)
         let l = prepare(&db, &dir, &session).unwrap();
         let config: Value = serde_json::from_str(&env(&l, "CODEX_CONFIG").unwrap()).unwrap();
         assert_eq!(config, json!({ "developer_instructions": "be terse" }));
+
+        prefs.codex_question_forms = true;
+        crate::prefs::save(&db, &prefs).unwrap();
+        let l = prepare(&db, &dir, &session).unwrap();
+        let config: Value = serde_json::from_str(&env(&l, "CODEX_CONFIG").unwrap()).unwrap();
+        assert_eq!(
+            config,
+            json!({
+                "developer_instructions": format!("be terse\n\n{CODEX_ASK_RULE}"),
+                "features.default_mode_request_user_input": true,
+            })
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

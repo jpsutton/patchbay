@@ -230,7 +230,7 @@ mod tests {
                 base_url: "http://x/v1".into(),
                 has_key: false,
             auth_mode: Default::default(),
-            claude_config_dir: None, grok_home: None,
+            claude_config_dir: None, grok_home: None, gemini_home: None,
         },
             None,
         )
@@ -307,7 +307,7 @@ mod tests {
                 has_key: false,
                 auth_mode: crate::db::AuthMode::GrokLogin,
                 claude_config_dir: None,
-                grok_home: Some(home.to_string_lossy().into_owned()),
+                grok_home: Some(home.to_string_lossy().into_owned()), gemini_home: None,
             },
             None,
         )

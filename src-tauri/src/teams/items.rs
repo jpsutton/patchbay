@@ -273,7 +273,7 @@ impl TeamsDb {
             }
             // Done needs durable evidence: a PR URL, or a clean worktree with commits ahead of base.
             if key == "status" && new == "done" && pr_url_after.is_empty() {
-                ensure_done_is_durable(&self.team(team_id)?, id)?;
+                ensure_done_is_durable(self, &self.team(team_id)?, id)?;
             }
             let stored: Option<&str> = if matches!(column, "member_session" | "pr_url") && new.is_empty() { None } else { Some(new.as_str()) };
             self.0.execute(
@@ -470,13 +470,10 @@ impl Caller {
     }
 }
 
-/// Host-side git for durable-done checks. Mirrors dispatch's safe flags (no hooks / system config).
+/// Host-side git for durable-done checks, through dispatch's hardened wrapper.
 fn git_in(cwd: &Path, args: &[&str]) -> Result<String> {
-    let out = std::process::Command::new("git")
-        .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C"])
-        .arg(cwd)
+    let out = super::dispatch::hardened_git(cwd)
         .args(args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .context("running git")?;
     if !out.status.success() {
@@ -517,13 +514,12 @@ fn is_well_formed_https_pr_url(s: &str) -> bool {
 }
 
 /// When marking done without a PR URL, the item's worktree must be clean and ahead of `pr_base`.
-/// Missing worktree folders are skipped (no local evidence to inspect).
-fn ensure_done_is_durable(team: &Team, item_id: &str) -> Result<()> {
-    let path = team.effective_worktree_root()?.join(item_id.to_lowercase());
-    if !path.is_dir() {
-        return Ok(());
-    }
-    let status = git_in(&path, &["status", "--porcelain"])?;
+/// A missing worktree is not evidence of a clean, committed result.
+fn ensure_done_is_durable(tdb: &TeamsDb, team: &Team, item_id: &str) -> Result<()> {
+    let path = tdb.assigned_worktree(team, item_id, None).context("Cannot mark item done: assigned worktree is unavailable")?;
+    // `git status` runs a clean filter on a stat-changed file as the host, and enters nested repositories.
+    super::dispatch::refuse_unsafe_status(&path)?;
+    let status = git_in(&path, &["status", "--porcelain", "--ignore-submodules=all"])?;
     if !status.is_empty() {
         bail!("{DONE_REQUIRES_CLEAN_WORKTREE}");
     }
@@ -1029,9 +1025,15 @@ mod tests {
     }
 
     fn seed_dispatch(t: &TeamsDb, team: &Team, item_id: &str) {
+        // Record the path form production does (`bind_reserved` stores `canonicalize()`, a `\\?\` verbatim path on
+        // Windows); `assigned_worktree` requires the recorded path to equal its own canonical form, so the
+        // directory's parent is canonicalised here and the item folder joined, as `add_item_worktree` creates it.
+        let root = team.effective_worktree_root().unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let recorded = root.canonicalize().unwrap().join(item_id.to_lowercase());
         t.0.execute(
-            "INSERT INTO dispatches(team_id, item_id, seat, desk_session, at) VALUES (?1, ?2, 'workers', 'desk1', 0)",
-            params![team.id, item_id],
+            "INSERT INTO dispatches(team_id, item_id, seat, desk_session, session_id, worktree_path, at) VALUES (?1, ?2, 'workers', 'desk1', 'worker', ?3, 0)",
+            params![team.id, item_id, recorded.to_string_lossy()],
         )
         .unwrap();
     }
@@ -1077,6 +1079,153 @@ mod tests {
         );
         // Clearing is allowed.
         assert!(t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "prUrl": null, "status": "triaged" })).is_ok());
+    }
+
+    #[test]
+    fn done_refuses_missing_recorded_worktree() {
+        let (_d, t, team) = setup_with_git_worktree();
+        let item = t.add_item(&team, Some("desk1"), "20261109", "missing", "task", "normal", "").unwrap();
+        seed_dispatch(&t, &team, &item.id);
+        let err = t.set_item(&team.id, &item.id, Some("desk1"), &json!({"status": "done"})).unwrap_err();
+        assert!(format!("{err:#}").contains("assigned worktree"));
+    }
+
+    #[test]
+    fn done_refuses_a_custom_clean_filter_instead_of_running_it() {
+        let (d, t, team) = setup_with_git_worktree();
+        let i = t.add_item(&team, Some("desk1"), "20261109", "Filtered", "task", "normal", "").unwrap();
+        seed_dispatch(&t, &team, &i.id);
+        let wt = add_item_worktree(&team, &i.id);
+        let run = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&wt).args(args).output().unwrap().status.success(), "{args:?}");
+        std::fs::write(wt.join(".gitattributes"), "* filter=x\n").unwrap();
+        std::fs::write(wt.join("f.txt"), "one").unwrap();
+        run(&["add", "-A"]);
+        run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "work"]);
+        let marker = d.join("clean-ran");
+        run(&["config", "filter.x.clean", &format!("{}; cat", crate::test_support::mark_cmd(&marker))]);
+        std::fs::write(wt.join("f.txt"), "one").unwrap(); // same bytes, new stat data: status must hash it
+        let plain = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(&wt).args(["status", "--porcelain"]).output().unwrap();
+        assert!(plain.status.success() && marker.exists(), "control: plain git status runs the clean filter");
+        std::fs::remove_file(&marker).unwrap();
+        std::fs::write(wt.join("f.txt"), "one").unwrap();
+        let err = t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "status": "done" })).unwrap_err().to_string();
+        assert!(err.contains("could run code") && err.contains("filter.x.clean"), "{err}");
+        assert!(!marker.exists(), "the done check must not run the clean filter");
+    }
+
+    /// A worktree with one committed file mapped to filter driver `driver`; returns (dir, db, team, item id, worktree).
+    fn filtered_done_fixture(driver: &str) -> (std::path::PathBuf, TeamsDb, Team, String, std::path::PathBuf) {
+        let (d, t, team) = setup_with_git_worktree();
+        let i = t.add_item(&team, Some("desk1"), "20261109", "Filtered", "task", "normal", "").unwrap();
+        seed_dispatch(&t, &team, &i.id);
+        let wt = add_item_worktree(&team, &i.id);
+        std::fs::write(wt.join(".gitattributes"), format!("* filter={driver}\n")).unwrap();
+        std::fs::write(wt.join("f.txt"), "one").unwrap();
+        for args in [&["add", "-A"][..], &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "work"][..]] {
+            assert!(std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(&wt).args(args).output().unwrap().status.success());
+        }
+        (d, t, team, i.id, wt)
+    }
+
+    fn wt_git(wt: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(wt).args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// Plain git must run the planted code on a stat-changed file (so the test cannot pass vacuously).
+    fn assert_plain_status_runs_it(wt: &std::path::Path, marker: &std::path::Path) {
+        std::fs::write(wt.join("f.txt"), "one").unwrap(); // same bytes, new stat data: status must hash it
+        let _ = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(wt).args(["status", "--porcelain"]).output().unwrap();
+        assert!(marker.exists(), "control: plain git status runs the planted code");
+        std::fs::remove_file(marker).unwrap();
+        std::fs::write(wt.join("f.txt"), "one").unwrap();
+    }
+
+    #[test]
+    fn done_neutralises_the_exact_lfs_filters_instead_of_refusing() {
+        let (d, t, team, id, wt) = filtered_done_fixture("lfs");
+        let marker = d.join("lfs-ran");
+        let cmd = format!("{}; cat", crate::test_support::mark_cmd(&marker));
+        for k in ["filter.lfs.clean", "filter.lfs.smudge"] { wt_git(&wt, &["config", k, &cmd]); }
+        wt_git(&wt, &["config", "filter.lfs.process", &crate::test_support::mark_cmd(&marker)]);
+        wt_git(&wt, &["config", "filter.lfs.required", "true"]);
+        assert_plain_status_runs_it(&wt, &marker);
+        assert_eq!(t.set_item(&team.id, &id, Some("desk1"), &json!({ "status": "done" })).unwrap().status, "done");
+        assert!(!marker.exists(), "the wrapper's overrides keep the lfs filter from running");
+    }
+
+    /// Pins the behaviour as it is. The wrapper blanks the lfs clean filter, so a stat-changed file whose blob is an
+    /// LFS pointer hashes as raw content and reads as dirty, although the user's own git (with its clean filter)
+    /// calls it clean. The done check fails closed; the worker provides a PR URL. A pointer is modelled by a clean
+    /// filter that always yields the blob text, since git-lfs may not be installed. Decision pending: ship fail-closed,
+    /// or pin the lfs filter to fixed git-lfs commands (needs its own review).
+    #[test]
+    fn done_reports_an_lfs_pointer_file_dirty_because_the_wrapper_blanks_the_clean_filter() {
+        let (_d, t, team, id, wt) = filtered_done_fixture("lfs");
+        std::fs::write(wt.join(".gitattributes"), "f.txt filter=lfs\n").unwrap(); // not the attributes file itself
+        std::fs::write(wt.join("f.txt"), "pointer\n").unwrap();
+        wt_git(&wt, &["add", "-A"]);
+        wt_git(&wt, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "pointer"]);
+        wt_git(&wt, &["config", "filter.lfs.clean", "cat >/dev/null; printf 'pointer\\n'"]);
+        // Same length as the blob: git compares sizes before it runs a filter, so only an equal-size change reaches it.
+        std::fs::write(wt.join("f.txt"), "POINTER\n").unwrap();
+        // GIT_OPTIONAL_LOCKS=0: a plain `git status` otherwise refreshes (writes) the index entry with the file's new
+        // stat data, after which the done check would see a stat-clean file and never hash it.
+        let user = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_OPTIONAL_LOCKS", "0").arg("-C").arg(&wt).args(["status", "--porcelain"]).output().unwrap();
+        assert!(user.status.success() && String::from_utf8_lossy(&user.stdout).trim().is_empty(), "control: the user's own git calls the file clean: {:?}", String::from_utf8_lossy(&user.stdout));
+        std::fs::write(wt.join("f.txt"), "POINTER\n").unwrap(); // new stat data again, like the sibling tests
+        let err = t.set_item(&team.id, &id, Some("desk1"), &json!({ "status": "done" })).unwrap_err().to_string();
+        assert_eq!(err, DONE_REQUIRES_CLEAN_WORKTREE);
+    }
+
+    #[test]
+    fn done_refuses_filters_that_only_look_like_lfs() {
+        for (driver, key) in [("LFS", "filter.LFS.clean"), ("lfs.x", "filter.lfs.x.clean")] {
+            let (d, t, team, id, wt) = filtered_done_fixture(driver);
+            let marker = d.join("ran");
+            wt_git(&wt, &["config", key, &format!("{}; cat", crate::test_support::mark_cmd(&marker))]);
+            assert_plain_status_runs_it(&wt, &marker);
+            let err = t.set_item(&team.id, &id, Some("desk1"), &json!({ "status": "done" })).unwrap_err().to_string();
+            assert!(err.contains("could run code") && err.contains(key), "{key}: {err}");
+            assert!(!marker.exists(), "{key}: the done check must not run the filter");
+        }
+    }
+
+    #[test]
+    fn done_refuses_a_filter_reached_through_an_include() {
+        let (d, t, team, id, wt) = filtered_done_fixture("x");
+        let marker = d.join("ran");
+        let inc = d.join("inc.cfg");
+        std::fs::write(&inc, format!("[filter \"x\"]\n\tclean = \"{}; cat\"\n", crate::test_support::mark_cmd(&marker))).unwrap();
+        wt_git(&wt, &["config", "include.path", inc.to_str().unwrap()]);
+        assert_plain_status_runs_it(&wt, &marker);
+        let err = t.set_item(&team.id, &id, Some("desk1"), &json!({ "status": "done" })).unwrap_err().to_string();
+        assert!(err.contains("could run code") && err.contains("include.path"), "{err}");
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn done_refuses_a_nested_repository_instead_of_entering_it() {
+        let (d, t, team, id, wt) = filtered_done_fixture("none");
+        let marker = d.join("ran");
+        let sub = wt.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        wt_git(&sub, &["init", "-q", "-b", "main"]);
+        std::fs::write(sub.join(".gitattributes"), "* filter=x\n").unwrap();
+        std::fs::write(sub.join("g.txt"), "g").unwrap();
+        wt_git(&sub, &["add", "-A"]);
+        wt_git(&sub, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "n"]);
+        wt_git(&sub, &["config", "filter.x.clean", &format!("{}; cat", crate::test_support::mark_cmd(&marker))]);
+        wt_git(&wt, &["add", "-A"]);
+        wt_git(&wt, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "gitlink"]);
+        std::fs::write(sub.join("g.txt"), "g").unwrap(); // stat-changed inside the nested repository
+        let _ = std::process::Command::new("git").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").arg("-C").arg(&wt).args(["status", "--porcelain"]).output().unwrap();
+        assert!(marker.exists(), "control: a plain git status enters the nested repository and runs its filter");
+        std::fs::remove_file(&marker).unwrap();
+        std::fs::write(sub.join("g.txt"), "g").unwrap();
+        let err = t.set_item(&team.id, &id, Some("desk1"), &json!({ "status": "done" })).unwrap_err().to_string();
+        assert!(err.contains("could run code") && err.contains("gitlink"), "{err}");
+        assert!(!marker.exists(), "the done check must not enter the nested repository");
     }
 
     #[test]
@@ -1141,7 +1290,8 @@ mod tests {
         .unwrap();
         let reviewed = t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "status": "awaiting-review" })).unwrap();
         assert_eq!(reviewed.status, "awaiting-review");
-        assert_eq!(t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "status": "done" })).unwrap().status, "done");
+        assert!(t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "status": "done" })).is_err());
+        assert_eq!(t.set_item(&team.id, &i.id, Some("desk1"), &json!({ "status": "done", "prUrl": "https://example.test/pr/1" })).unwrap().status, "done");
     }
 
     #[test]

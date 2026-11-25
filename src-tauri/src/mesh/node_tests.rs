@@ -106,13 +106,13 @@ fn member_state(n: &Node, id: &str) -> String {
         .unwrap_or_default()
 }
 
-fn member_version(n: &Node, id: &str) -> Option<String> {
+fn member_field(n: &Node, id: &str, key: &str) -> Option<String> {
     n.mesh.status()["members"]
         .as_array()
         .unwrap()
         .iter()
         .find(|m| m["nodeId"] == id)
-        .and_then(|m| m["appVersion"].as_str().map(str::to_owned))
+        .and_then(|m| m[key].as_str().map(str::to_owned))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -127,7 +127,7 @@ async fn join_sync_relay_and_rpc() {
         base_url: "http://example".into(),
         has_key: false,
             auth_mode: Default::default(),
-            claude_config_dir: None, grok_home: None,
+            claude_config_dir: None, grok_home: None, gemini_home: None,
         };
     a.db.upsert_provider(&p, None).unwrap();
     a.keys.set("prov-a", "sk-alpha");
@@ -232,10 +232,12 @@ async fn members_find_each_other_through_gossip() {
     admit(&b, &c).await;
     let cid = c.mesh.node_id().to_owned();
     until("alpha connects to charlie directly", 20, || member_state(&a, &cid) == "direct").await;
-    // Versions reach every member through link reports, relayed or not.
+    // Versions and OS reach every member through link reports, relayed or not.
     let version = env!("CARGO_PKG_VERSION");
-    until("alpha learns charlie's version", 20, || member_version(&a, &cid).as_deref() == Some(version)).await;
-    assert_eq!(member_version(&a, a.mesh.node_id()).as_deref(), Some(version));
+    until("alpha learns charlie's version", 20, || member_field(&a, &cid, "appVersion").as_deref() == Some(version)).await;
+    assert_eq!(member_field(&a, a.mesh.node_id(), "appVersion").as_deref(), Some(version));
+    assert_eq!(member_field(&a, &cid, "os").as_deref(), Some(std::env::consts::OS), "same report as the version");
+    assert_eq!(member_field(&a, a.mesh.node_id(), "os").as_deref(), Some(std::env::consts::OS));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

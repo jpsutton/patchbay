@@ -1,47 +1,19 @@
-import type { AcpPermissionRequest } from "../lib/ipc.ts";
-import { permissionCardView } from "./permissionCardView.ts";
-
-function assert(cond: unknown, msg: string): asserts cond {
-  if (!cond) throw new Error(`permissionCard.workerRestart.selftest: ${msg}`);
-}
-
-const request = {
-  options: [
-    { optionId: "confirm_restart", name: "Restart worker", kind: "allow_once" },
-    { optionId: "cancel_restart", name: "Cancel", kind: "reject_once" },
-  ],
-  toolCall: {
-    toolCallId: "confirmation-fixture",
-    title: "Confirm worker restart",
-    kind: "other",
-    rawInput: {},
-    _meta: {
-      patchbay: {
-        workerRestartConfirm: {
-          message: "a previous worker ran here; 2 processes were found and 2 killed; 0 remain; 3 processes could not be checked; detached processes may still remain.",
-          found: 2,
-          killed: 2,
-          remaining: 0,
-          unknown: 3,
-          complete: false,
-          wallMs: 8,
-          sweepNote: "same-uid process sweep completed",
-        },
-      },
-    },
-  },
-} as unknown as AcpPermissionRequest;
-
-const view = permissionCardView(request);
-assert(view.workerRestartConfirm?.found === 2, "found count is shown");
-assert(view.workerRestartConfirm?.killed === 2, "killed count is shown");
-assert(view.workerRestartConfirm?.remaining === 0, "remaining count is shown");
-assert(view.workerRestartConfirm?.unknown === 3, "unknown process count is shown");
-assert(view.workerRestartConfirm?.message.includes("3 processes could not be checked"), "unchecked process count is explicit");
-assert(view.workerRestartConfirm?.complete === false, "partial sweep is marked incomplete");
-assert(view.workerRestartConfirm?.wallMs === 8, "sweep duration is shown");
-assert(view.workerRestartConfirm?.message.includes("detached processes may still remain"), "residual warning is shown");
-assert(view.actions.map((a) => a.optionId).join(",") === "confirm_restart,cancel_restart", "restart and cancel actions render in order");
-assert(!view.showAlwaysRule, "no persistent rule is offered");
-
-console.log("permissionCard.workerRestart.selftest: ok");
+/** The worker-start refusal follows the ordinary error entry path. */
+// @ts-expect-error node:fs is not part of the app tsconfig
+import { readFileSync } from "node:fs";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { CodeErrorEntry } from "./CodeErrorEntry.ts";
+function assert(ok: unknown, msg: string): asserts ok { if (!ok) throw new Error(msg); }
+const store = readFileSync(new URL("../lib/store.ts", import.meta.url), "utf8");
+const view = readFileSync(new URL("./CodeView.tsx", import.meta.url), "utf8");
+const manager = readFileSync(new URL("../../src-tauri/src/teams/dispatch.rs", import.meta.url), "utf8");
+assert(manager.includes("worker cannot restart in the same worktree"), "worker refusal must be clear");
+assert(store.includes('applyCodeEvent(id, { type: "error", message: errorText(e) })'), "start errors reach Code events");
+assert(store.includes('{ kind: "error", text: e.message }'), "error event enters the transcript");
+assert(/case "error":[\s\S]*?<CodeErrorEntry text=\{e\.text\}/.test(view), "the transcript uses the error renderer");
+const refusal = "worker cannot restart in the same worktree; use Restart with fresh context or redispatch to a fresh session";
+const html = renderToStaticMarkup(createElement(CodeErrorEntry, { text: refusal }));
+assert(html.includes(refusal), "the worker restart refusal renders in the transcript");
+assert(!view.includes("workerRestartConfirm"), "old confirmation is gone");
+console.log("worker restart refusal rendering selftest: ok");

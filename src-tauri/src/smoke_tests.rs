@@ -23,7 +23,7 @@ fn mock_resolved(kind: ProviderKind) -> Resolved {
             base_url: mock_url(),
             has_key: true,
             auth_mode: Default::default(),
-            claude_config_dir: None, grok_home: None,
+            claude_config_dir: None, grok_home: None, gemini_home: None,
         },
         model: Model {
             id: "m".into(),
@@ -37,6 +37,7 @@ fn mock_resolved(kind: ProviderKind) -> Resolved {
         key: Some("test-key".into()),
         auth: providers::Auth::Key,
         grok_user: None,
+        antigravity: None,
     }
 }
 
@@ -121,7 +122,7 @@ fn smoke_render_grok_config() {
             base_url: mock_url(),
             has_key: false,
             auth_mode: Default::default(),
-            claude_config_dir: None, grok_home: None,
+            claude_config_dir: None, grok_home: None, gemini_home: None,
         };
         db.upsert_provider(&p, Some("test-key")).unwrap();
         db.upsert_model(&Model {
@@ -182,7 +183,7 @@ fn smoke_code_agent_edit_with_permission() {
             base_url: mock_url(),
             has_key: false,
             auth_mode: Default::default(),
-            claude_config_dir: None, grok_home: None,
+            claude_config_dir: None, grok_home: None, gemini_home: None,
         },
         Some("test-key"),
     )
@@ -392,7 +393,7 @@ fn smoke_code_rewind() {
             base_url: mock_url(),
             has_key: false,
             auth_mode: Default::default(),
-            claude_config_dir: None, grok_home: None,
+            claude_config_dir: None, grok_home: None, gemini_home: None,
         },
         Some("test-key"),
     )
@@ -513,7 +514,7 @@ fn smoke_code_fork() {
             base_url: mock_url(),
             has_key: false,
             auth_mode: Default::default(),
-            claude_config_dir: None, grok_home: None,
+            claude_config_dir: None, grok_home: None, gemini_home: None,
         },
         Some("test-key"),
     )
@@ -602,7 +603,7 @@ fn smoke_code_rules_and_mcp() {
     std::fs::create_dir_all(&proj).unwrap();
     let db = Arc::new(Db::open(&data_dir.join("db.sqlite")).unwrap());
     db.upsert_provider(
-        &Provider { id: "p".into(), name: "mock".into(), kind: ProviderKind::OpenaiChat, base_url: mock_url(), has_key: false, auth_mode: Default::default(), claude_config_dir: None, grok_home: None, },
+        &Provider { id: "p".into(), name: "mock".into(), kind: ProviderKind::OpenaiChat, base_url: mock_url(), has_key: false, auth_mode: Default::default(), claude_config_dir: None, grok_home: None, gemini_home: None, },
         Some("test-key"),
     )
     .unwrap();
@@ -741,7 +742,7 @@ fn smoke_claude_config_toggle() {
         std::fs::create_dir_all(&proj).unwrap();
         let db = Arc::new(Db::open(&data_dir.join("db.sqlite")).unwrap());
         db.upsert_provider(
-            &Provider { id: "p".into(), name: "mock".into(), kind: ProviderKind::OpenaiChat, base_url: mock_url(), has_key: false, auth_mode: Default::default(), claude_config_dir: None, grok_home: None, },
+            &Provider { id: "p".into(), name: "mock".into(), kind: ProviderKind::OpenaiChat, base_url: mock_url(), has_key: false, auth_mode: Default::default(), claude_config_dir: None, grok_home: None, gemini_home: None, },
             Some("test-key"),
         )
         .unwrap();
@@ -842,7 +843,7 @@ fn live_claude_login() {
         base_url: "https://api.anthropic.com/v1".into(),
         has_key: false,
         auth_mode: AuthMode::ClaudeLogin,
-        claude_config_dir: None, grok_home: None,
+        claude_config_dir: None, grok_home: None, gemini_home: None,
     };
     db.upsert_provider(&provider, None).unwrap();
     if std::env::var("PATCHBAY_LIVE_MINIFY").is_ok() {
@@ -981,7 +982,7 @@ async fn smoke_chat_web_search_fallback() {
             base_url: mock_url(),
             has_key: false,
             auth_mode: Default::default(),
-            claude_config_dir: None, grok_home: None,
+            claude_config_dir: None, grok_home: None, gemini_home: None,
         },
         Some("test-key"),
     )

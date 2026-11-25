@@ -51,6 +51,7 @@ import { isForegroundUpdate } from "./codeWorking";
 import { chunkChars, phaseOf, type Phase } from "./workingStatus";
 import { trackStall } from "./stall";
 import { adoptEarlier } from "./earlierHistory";
+import { slimTranscript } from "./transcriptSlim";
 import { appendText } from "./streamText";
 import { readSteers } from "./readSteers";
 import { appendUserChunk, withoutNote } from "./harness";
@@ -262,6 +263,7 @@ const AGENT_PREF_KEYS: (keyof Preferences)[] = [
   "claudeConfig",
   "agentPaths",
   "agentProviders",
+  "codexQuestionForms",
 ];
 
 /** Saved preferences with defaults filled in for anything an older backend leaves out. */
@@ -287,27 +289,30 @@ function setPrefs(next: Preferences) {
 }
 
 
+/** Sessions whose refused save already showed its notice, so it appears once. */
+const saveFailureShown = new Set<string>();
+
+/** A save that didn't land: logged, and shown once in the session (the cache stops updating). */
+function saveFailed(id: string, why: unknown) {
+  console.error(`saving the transcript of ${id} failed:`, why);
+  if (saveFailureShown.has(id)) return;
+  saveFailureShown.add(id);
+  const note: Entry = { kind: "info", text: "The saved transcript could not be updated, so other devices and a reload may show older history." };
+  // Deferred: a save from inside the reducer would be overwritten by the batch's own store update.
+  queueMicrotask(() =>
+    useStore.setState((st) => {
+      const s = st.code[id];
+      return s ? { code: { ...st.code, [id]: { ...s, entries: [...s.entries, note] } } } : st;
+    }),
+  );
+}
+
 /** Persist what the transcript shows, so the session renders before the agent replays it. */
 function saveTranscript(id: string, s: CodeState) {
   if (s.entries.length === 0 || s.partial || s.windowed) return;
-  const earlier = s.earlier ?? undefined;
-  let json = JSON.stringify({ v: 1, earlier, entries: s.entries, toolCalls: s.toolCalls });
-  if (json.length > 3_500_000) {
-    // Too big: keep the conversation, drop tool payloads (diffs, outputs, images) and images.
-    const slim = (calls: Record<string, AcpToolCall>) =>
-      Object.fromEntries(
-        Object.entries(calls).map(([k, tc]) => [k, { ...tc, content: null, rawInput: null, rawOutput: null }]),
-      );
-    const noImages = (entries: Entry[]): Entry[] =>
-      entries.map((e) => (e.kind === "image" ? { kind: "info", text: "Image not kept: the saved transcript was too large." } : e));
-    json = JSON.stringify({
-      v: 1,
-      earlier: earlier && { entries: noImages(earlier.entries), toolCalls: slim(earlier.toolCalls) },
-      entries: noImages(s.entries),
-      toolCalls: slim(s.toolCalls),
-    });
-  }
-  api.saveCodeTranscript(id, json).catch(() => {});
+  const { json, tooBig } = slimTranscript(s.entries, s.toolCalls, s.earlier ?? undefined);
+  if (tooBig) return saveFailed(id, "transcript still over the size limit after dropping every payload");
+  api.saveCodeTranscript(id, json).catch((e) => saveFailed(id, e));
 }
 
 /** The saved transcript: the current agent's part (`history`) and earlier agents' (`earlier`). */
@@ -1681,7 +1686,21 @@ export const useStore = create<Store>((set, get) => ({
         set((st) => ({ code: { ...st.code, [id]: { ...emptyCode(), history, earlier, status: "exited" } } }));
         return;
       }
-      await get().startAgent(id);
+      // Browsing is read-only but not empty: the saved conversation shows as entries, as it does once
+      // an agent is running, and no process is started (pb-20261117-08).
+      set((st) => ({
+        code: {
+          ...st.code,
+          [id]: {
+            ...emptyCode(),
+            history: null,
+            entries: history?.entries ?? [],
+            toolCalls: history ? endBackground(history.toolCalls) : {},
+            earlier,
+            status: "idle",
+          },
+        },
+      }));
       return;
     }
     const rev = get().agentConfigRev;

@@ -255,6 +255,11 @@ impl Hit {
         )
     }
 
+    /// What the agent and the senders of its messages are told the stop was for (pb-20261121-01).
+    pub fn reason(&self, now: i64) -> String {
+        format!("the Cursor plan's usage is used up; it resets in {}", fmt_wait(self.resets_at - now))
+    }
+
     /// The refusal an agent's message gets when the RECIPIENT's Cursor plan is used up.
     pub fn recipient_message(&self, now: i64, target: &str) -> String {
         format!(
