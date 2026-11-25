@@ -737,6 +737,7 @@ cmd_test() {
         # shellcheck disable=SC2086
         # In a subshell: `die` exits, and that must not skip stopping what `up` already started.
         ( cmd_up --fresh --headless $build_flag ) || { cmd_down --emulator; die "the stack did not come up; no scenario ran"; }
+        MOCK_PORT=${PATCHBAY_E2E_MOCK_PORT:-$(cat "$E2E_DIR/mock.port" 2>/dev/null || echo 8766)} # up may have picked another port in the subshell
     fi
     use_env
     use_serial
