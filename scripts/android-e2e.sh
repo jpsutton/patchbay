@@ -30,7 +30,8 @@
 # Versions come from remote/docker/Dockerfile (command-line tools, SDK platforms, build tools, NDK), so
 # this and the Docker build cannot drift. State lives in $PATCHBAY_E2E_DIR (default ~/.cache/patchbay-android-e2e).
 # Environment: PATCHBAY_E2E_AVD (patchbay-e2e), PATCHBAY_E2E_WEB_PORT (4431), PATCHBAY_E2E_MESH_PORT (41895),
-# PATCHBAY_E2E_MOCK_PORT (8766), PATCHBAY_E2E_PYTHON (an interpreter to use instead of pipenv),
+# PATCHBAY_E2E_MOCK_PORT (8766; unset and taken by something else = a free port, remembered in $PATCHBAY_E2E_DIR/mock.port),
+# PATCHBAY_E2E_LOCK_WAIT (seconds to queue for the run lock; 0 = fail fast, the default, 1800 from a git hook), PATCHBAY_E2E_PYTHON (an interpreter to use instead of pipenv),
 # PATCHBAY_E2E_EMULATOR_CORES (emulator -cores; unset = emulator default),
 # PATCHBAY_E2E_GRADLE_WORKERS (org.gradle.workers.max via GRADLE_OPTS -D; unset = gradle default),
 # PATCHBAY_E2E_GRADLE_JVM_PROCESSORS (-XX:ActiveProcessorCount for gradle/kotlin JVMs via
@@ -40,6 +41,7 @@
 set -euo pipefail
 # Run from a git hook (the local CI gate runs this at pre-push), git exports GIT_DIR and friends. Left
 # set, the git commands below that make the sample project would act on the hook's repository instead.
+from_hook=${GIT_DIR:+1} # the gate runs us from a git hook: queue for the lock instead of failing fast
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_PREFIX GIT_ALTERNATE_OBJECT_DIRECTORIES
 
 cd "$(dirname "$0")/.."
@@ -50,7 +52,7 @@ E2E_DIR=${PATCHBAY_E2E_DIR:-$HOME/.cache/patchbay-android-e2e}
 AVD=${PATCHBAY_E2E_AVD:-patchbay-e2e}
 WEB_PORT=${PATCHBAY_E2E_WEB_PORT:-4431}
 MESH_PORT=${PATCHBAY_E2E_MESH_PORT:-41895}
-MOCK_PORT=${PATCHBAY_E2E_MOCK_PORT:-8766}
+MOCK_PORT=${PATCHBAY_E2E_MOCK_PORT:-$(cat "$E2E_DIR/mock.port" 2>/dev/null || echo 8766)}
 EMULATOR_CORES=${PATCHBAY_E2E_EMULATOR_CORES:-}
 GRADLE_WORKERS=${PATCHBAY_E2E_GRADLE_WORKERS:-}
 GRADLE_JVM_PROCESSORS=${PATCHBAY_E2E_GRADLE_JVM_PROCESSORS:-}
@@ -430,10 +432,19 @@ detach() { # logfile command [args...]
     perl -MPOSIX -e 'POSIX::setsid(); open(STDIN, "<", "/dev/null"); open(STDOUT, ">", shift @ARGV); open(STDERR, ">&", \*STDOUT); exec @ARGV or die "exec $ARGV[0]: $!\n"' "$@" &
 }
 
+is_mock() { ps -p "$1" -o command= 2>/dev/null | grep -q -- mock-llm.py; } # pid
 mock_start() {
-    if [ -n "$(listening_pid "$MOCK_PORT")" ]; then say "the mock model already answers on $MOCK_PORT"; return; fi
+    local pid
+    pid=$(listening_pid "$MOCK_PORT")
+    if [ -n "$pid" ]; then
+        if is_mock "$pid"; then say "the mock model already answers on $MOCK_PORT"; return; fi
+        [ -z "${PATCHBAY_E2E_MOCK_PORT:-}" ] || die "port $MOCK_PORT (PATCHBAY_E2E_MOCK_PORT) is held by pid $pid, not the mock model: $(ps -p "$pid" -o command= 2>/dev/null)"
+        MOCK_PORT=$(perl -MIO::Socket::INET -e 'print IO::Socket::INET->new(Listen => 1, LocalAddr => "127.0.0.1", LocalPort => 0)->sockport') || die "no free port for the mock model"
+        say "the old mock port is held by pid $pid; using $MOCK_PORT instead"
+    fi
     py_ready || die "pipenv is needed for scripts/mock-llm.py (or set PATCHBAY_E2E_PYTHON)"
     ensure_state
+    printf '%s\n' "$MOCK_PORT" >"$E2E_DIR/mock.port"
     if [ -z "${PATCHBAY_E2E_PYTHON:-}" ]; then
         [ -f "$E2E_DIR/Pipfile" ] || printf '[[source]]\nurl = "https://pypi.org/simple"\nverify_ssl = true\nname = "pypi"\n\n[packages]\n\n[dev-packages]\n' >"$E2E_DIR/Pipfile"
         export PIPENV_PIPFILE=$E2E_DIR/Pipfile PIPENV_VERBOSITY=-1 PIPENV_IGNORE_VIRTUALENVS=1
@@ -444,7 +455,7 @@ mock_start() {
     say "starting the mock model on $MOCK_PORT"
     wait_port "$MOCK_PORT" 120 || { tail -n 20 "$E2E_DIR/logs/mock.log" >&2; die "the mock model did not start"; }
 }
-mock_stop() { stop_pid "$(listening_pid "$MOCK_PORT")" mock-llm.py; }
+mock_stop() { stop_pid "$(listening_pid "$MOCK_PORT")" mock-llm.py; rm -f "$E2E_DIR/mock.port"; }
 
 node_running() {
     local pid
@@ -613,7 +624,7 @@ cmd_install() {
     use_serial
     apk=$(find_apk) || die "no debug APK; run: scripts/android-e2e.sh build apk"
     say "installing $apk (built from $(stamp_get apk id))"
-    adb install -r -g "$apk" >/dev/null || die "install failed; if the signature differs from a build made elsewhere, run: adb uninstall $APP_ID"
+    adb install -r -d -g "$apk" >/dev/null || die "install failed; if the signature differs from a build made elsewhere, run: adb uninstall $APP_ID"
     adb shell am force-stop "$APP_ID"
     if [ "$fresh" = --fresh ]; then adb shell pm clear "$APP_ID" >/dev/null; fi
 }
@@ -726,6 +737,7 @@ cmd_test() {
         # shellcheck disable=SC2086
         # In a subshell: `die` exits, and that must not skip stopping what `up` already started.
         ( cmd_up --fresh --headless $build_flag ) || { cmd_down --emulator; die "the stack did not come up; no scenario ran"; }
+        MOCK_PORT=${PATCHBAY_E2E_MOCK_PORT:-$(cat "$E2E_DIR/mock.port" 2>/dev/null || echo 8766)} # up may have picked another port in the subshell
     fi
     use_env
     use_serial
@@ -755,7 +767,7 @@ cmd_status() {
     else
         printf 'Node         stopped\n'
     fi
-    if [ -n "$(listening_pid "$MOCK_PORT")" ]; then printf 'Mock model   running on %s\n' "$MOCK_PORT"; else printf 'Mock model   stopped\n'; fi
+    if is_mock "$(listening_pid "$MOCK_PORT")"; then printf 'Mock model   running on %s\n' "$MOCK_PORT"; else printf 'Mock model   stopped\n'; fi
     if have adb || [ -x "$sdk/platform-tools/adb" ]; then
         PATH="$sdk/platform-tools:$PATH"
         if serial=$(emulator_serial 2>/dev/null); then
@@ -784,16 +796,34 @@ cmd=${1:-help}
 
 # One run at a time: every command that touches $E2E_DIR state or the emulator takes this lock, because two
 # runs wipe each other's seed.json (pb-20261107-24) and the e2e is load-sensitive anyway. mkdir is atomic and
-# portable (macOS has no flock); a lock whose pid is dead is stale and taken over. Fail fast: a pre-push gate
-# that queued behind a ten-minute run would look hung, so the refused side says who holds it and what to do.
+# portable (macOS has no flock). Interactive runs fail fast; from the pre-push gate (a git hook) or with
+# PATCHBAY_E2E_LOCK_WAIT=<seconds> the run queues, naming the holder once and then every 60s, and dies at the deadline.
+# A lock whose pid is dead is stale: it is renamed away (one contender wins the rename) before the retry.
 E2E_LOCK=$E2E_DIR/lock # script-level so the EXIT trap can still see it
 take_lock() {
-    local holder lock=$E2E_LOCK
+    local holder lock=$E2E_LOCK wait=${PATCHBAY_E2E_LOCK_WAIT:-${from_hook:+1800}} deadline next=0 stale
+    wait=${wait:-0}
+    [[ $wait =~ ^[0-9]+$ ]] || die "PATCHBAY_E2E_LOCK_WAIT must be whole seconds, got: $wait"
+    deadline=$((SECONDS + wait))
     mkdir -p "$E2E_DIR"
     until mkdir "$lock" 2>/dev/null; do
         holder=$(cat "$lock/pid" 2>/dev/null || true)
-        if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then rm -rf "$lock"; continue; fi
-        die "another android-e2e run holds $lock (pid ${holder:-unknown}, $(cat "$lock/cmd" 2>/dev/null || echo '?')); two runs wipe each other's seed. Wait for it to finish, or stop it (kill ${holder:-<pid>}), then retry."
+        if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+            stale=$lock.stale.$$
+            if mv "$lock" "$stale" 2>/dev/null; then
+                # shortcut: if a live run re-took the lock between our read and the rename we put it back; a third mkdir in that gap wins, upgrade to flock if this bites
+                if [ "$(cat "$stale/pid" 2>/dev/null || true)" = "$holder" ]; then rm -rf "$stale"; else mv "$stale" "$lock" 2>/dev/null || rm -rf "$stale"; fi
+            fi
+            continue
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            die "another android-e2e run holds $lock (pid ${holder:-unknown}, $(cat "$lock/cmd" 2>/dev/null || echo '?'))$([ "$wait" -gt 0 ] && echo "; waited ${wait}s"); two runs wipe each other's seed. Wait for it to finish, or stop it (kill ${holder:-<pid>}), then retry."
+        fi
+        if [ "$SECONDS" -ge "$next" ]; then
+            say "waiting for the android-e2e run holding $lock (pid ${holder:-unknown}, $(cat "$lock/cmd" 2>/dev/null || echo '?')); up to $((deadline - SECONDS))s left"
+            next=$((SECONDS + 60))
+        fi
+        sleep 1
     done
     printf '%s\n' "$$" >"$lock/pid"
     printf '%s\n' "$cmd $* (from $top)" >"$lock/cmd"
