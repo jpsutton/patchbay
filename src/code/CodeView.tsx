@@ -30,6 +30,7 @@ import { CodeErrorEntry } from "./CodeErrorEntry";
 import { Composer, seedDraft } from "../components/Composer";
 import { loadWidth, ResizeHandle, saveWidth } from "../components/ResizeHandle";
 import { MessageTime } from "../components/MessageTime";
+import { fmtDateTime, fmtTime } from "../lib/format";
 import { Markdown } from "../components/Markdown";
 import { FileLinkContext } from "../components/FileLink";
 import { EditMessage } from "../components/EditMessage";
@@ -582,9 +583,19 @@ function UserEntry({
           </button>
         )}
         {e.text && <CopyButton text={e.text} icon={<CopyIcon size={14} />} />}
-        {isRemoteApp() && e.at != null && <MessageTime at={e.at} />}
+        {e.at != null && <EntryTime at={e.at} />}
       </div>
     </div>
+  );
+}
+
+/** Time of a transcript entry: "12 minutes ago" on the phone, the clock time on desktop. */
+function EntryTime({ at }: { at: number }) {
+  if (isRemoteApp()) return <MessageTime at={at} />;
+  return (
+    <span className="meta ml-1 shrink-0 text-faint" title={fmtDateTime(at)}>
+      {fmtTime(at)}
+    </span>
   );
 }
 
@@ -613,7 +624,7 @@ function AgentEntry({
         >
           <ReadAloudButton id={speechId} text={text} />
           <CopyButton text={text} label="Copy Markdown" icon={<CopyIcon size={14} />} />
-          {isRemoteApp() && at != null && <MessageTime at={at} />}
+          {at != null && <EntryTime at={at} />}
         </div>
       )}
     </div>
