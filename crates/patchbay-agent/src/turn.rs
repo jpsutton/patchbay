@@ -540,9 +540,9 @@ async fn run_turn_inner(session: &Arc<Session>, prompt_blocks: &Value, cancel: C
             if let Some(plan) = &response.plan {
                 update["_meta"]["_claude/rateLimit"] = plan_meta(plan);
             }
-            if let Some(cache) = session.cache.lock().unwrap().meta() {
-                update["_meta"]["cache"] = cache;
-            }
+            // No clock (a model with no known cache lifetime): say so with null, so the host drops
+            // a clock it kept from an earlier process or model.
+            update["_meta"]["cache"] = session.cache.lock().unwrap().meta().unwrap_or(Value::Null);
             session.update(update);
         }
         let cut = response.stop == StopReason::MaxTokens;
